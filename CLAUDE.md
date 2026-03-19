@@ -1,5 +1,15 @@
 # Project Instructions
 
+## Elixir Compilation Rules - CRITICAL
+
+**ALL Elixir compilation MUST use `--warnings-as-errors`.** Zero tolerance for warnings.
+
+- Always run `mix compile --warnings-as-errors` after editing Elixir files
+- If a warning appears in ANY tool output, fix it immediately before doing anything else
+- This includes: unused variables, unused aliases, missing specs, deprecated functions
+- The PostToolUse hook `elixir-compile-check.sh` will block you if warnings are detected
+- Do not proceed past a warning. Fix it first.
+
 <!-- deciduous:start -->
 ## Decision Graph Workflow
 
