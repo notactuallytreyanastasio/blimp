@@ -1,0 +1,312 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #fafafa;
+  color: #222;
+  font-family: 'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.7;
+  padding: 2rem 2rem 6rem 2rem;
+  max-width: 72ch;
+  margin: 0 auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Navigation */
+.nav {
+  font-size: 0.85rem;
+  color: #999;
+  margin-bottom: 3rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.nav a {
+  color: #888;
+  text-decoration: none;
+}
+
+.nav a:hover {
+  color: #0066cc;
+}
+
+/* Post header */
+h1 {
+  color: #000;
+  font-size: 1.4rem;
+  font-weight: 600;
+  line-height: 1.3;
+  margin-bottom: 0.5rem;
+  letter-spacing: -0.02em;
+}
+
+.post-date {
+  color: #999;
+  font-size: 0.85rem;
+  margin-bottom: 3rem;
+}
+
+/* Body text */
+p {
+  margin-bottom: 1.2rem;
+}
+
+strong {
+  color: #000;
+  font-weight: 600;
+}
+
+em {
+  color: #555;
+  font-style: italic;
+}
+
+/* Headers */
+h2 {
+  color: #000;
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 3rem;
+  margin-bottom: 1rem;
+  letter-spacing: -0.01em;
+}
+
+h3 {
+  color: #333;
+  font-size: 1rem;
+  font-weight: 500;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+}
+
+/* Code -- inline */
+code {
+  font-family: inherit;
+  color: #c7254e;
+  background: #f0f0f0;
+  padding: 0.15em 0.35em;
+  border-radius: 2px;
+  font-size: 0.95em;
+}
+
+/* Code -- blocks */
+pre {
+  background: #1a1a2e;
+  border: 1px solid #2a2a3e;
+  padding: 1.25rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  line-height: 1.5;
+  font-size: 13px;
+  border-radius: 3px;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  color: #d4d4d4;
+}
+
+/* Syntax highlighting -- minimal */
+.kw { color: #f92672; }  /* keywords: actor, do, end, on, become */
+.fn { color: #a6e22e; }  /* functions */
+.st { color: #e6db74; }  /* strings, atoms */
+.cm { color: #666; }     /* comments */
+.op { color: #f92672; }  /* operators: |>, <- */
+.nr { color: #ae81ff; }  /* numbers */
+
+/* Links */
+a {
+  color: #0066cc;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Lists */
+ul, ol {
+  margin: 1rem 0 1.2rem 1.5rem;
+}
+
+li {
+  margin-bottom: 0.4rem;
+}
+
+/* Blockquotes */
+blockquote {
+  border-left: 2px solid #ccc;
+  padding-left: 1rem;
+  color: #666;
+  margin: 1.5rem 0;
+}
+
+/* Horizontal rules */
+hr {
+  border: none;
+  border-top: 1px solid #e0e0e0;
+  margin: 3rem 0;
+}
+
+/* REPL/terminal mockups -- stay dark, they're terminals */
+.repl {
+  background: #1a1a2e;
+  border: 1px solid #2a2a3e;
+  padding: 1.25rem;
+  margin: 1.5rem 0;
+  line-height: 1.5;
+  font-size: 13px;
+  white-space: pre;
+  overflow-x: auto;
+  border-radius: 3px;
+}
+
+.repl .prompt { color: #a6e22e; }
+.repl .output { color: #888; }
+.repl .agent  { color: #6cb6ff; }
+
+/* --- Split sections -----------------------------------------------
+
+   A split section contains multiple paired rows of prose
+   (left) and figures (right), connected by dotted leader
+   lines so you always know which code/image goes with
+   which paragraph.
+
+   Usage:
+
+   <div class="split">
+
+     <div class="split-pair">
+       <div class="split-prose">
+         <p>Prose that explains the code on the right...</p>
+       </div>
+       <div class="split-leader"></div>
+       <div class="split-side">
+         <pre><code>code here</code></pre>
+       </div>
+     </div>
+
+   </div>
+
+   Each split-pair is one row: prose | leader | figure.
+   The leader is a dotted line connecting them visually.
+
+   ----------------------------------------------------------------- */
+
+.split {
+  /* break out of the 72ch body constraint */
+  width: 100vw;
+  position: relative;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 4rem;
+  margin: 3rem 0;
+}
+
+/* Use a split-pair with no right side for headings,
+   so they align with the prose column */
+.split > h2 {
+  display: none; /* use split-pair for headings instead */
+}
+
+.split-pair {
+  display: grid;
+  grid-template-columns: 1fr 3rem 1fr;
+  align-items: center;
+  margin-bottom: 2.5rem;
+}
+
+.split-prose {
+  max-width: 72ch;
+  justify-self: end;
+  padding-right: 0.5rem;
+}
+
+.split-prose h2 {
+  margin-top: 0;
+}
+
+.split-prose p:last-child {
+  margin-bottom: 0;
+}
+
+/* The dotted leader line connecting prose to figure */
+.split-leader {
+  border-top: 1px dotted #bbb;
+  height: 0;
+  align-self: center;
+}
+
+.split-side {
+  max-width: 72ch;
+  padding-left: 0.5rem;
+}
+
+/* Code blocks inside split-side */
+.split-side pre {
+  margin: 0;
+}
+
+/* Images inside split-side */
+.split-side img {
+  max-width: 100%;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+}
+
+/* Diff styling inside split-side */
+.split-side .diff-add {
+  color: #22863a;
+}
+
+.split-side .diff-remove {
+  color: #cb2431;
+}
+
+.split-side .diff-context {
+  color: #999;
+}
+
+/* Blockquotes inside split-side */
+.split-side blockquote {
+  border-left-color: #ccc;
+  color: #666;
+  margin: 0;
+}
+
+/* On narrow screens, stack vertically */
+@media (max-width: 900px) {
+  .split {
+    padding: 0 2rem;
+  }
+
+  .split-pair {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .split-prose {
+    justify-self: start;
+    padding-right: 0;
+  }
+
+  .split-leader {
+    display: none;
+  }
+
+  .split-side {
+    padding-left: 0;
+  }
+}
+
+/* Selection */
+::selection {
+  background: #b3d4fc;
+  color: #000;
+}
