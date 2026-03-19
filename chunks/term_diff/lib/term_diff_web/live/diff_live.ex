@@ -100,6 +100,24 @@ defmodule TermDiffWeb.DiffLive do
   end
 
   @impl true
+  def handle_event("select_file", %{"index" => idx_str}, socket) do
+    idx = String.to_integer(idx_str)
+    nav = %{socket.assigns.nav | file_index: idx, focus: :diff_view}
+
+    selected_file = select_file_for_nav(socket.assigns.repo_state.files, nav)
+    selected_diff = if selected_file, do: Map.get(socket.assigns.repo_state.diffs, selected_file)
+    hunk_count = if selected_diff, do: length(selected_diff.hunks), else: 0
+    nav = %{nav | selected_file: selected_file, hunk_count: hunk_count, hunk_index: 0}
+
+    socket =
+      socket
+      |> assign(:nav, nav)
+      |> assign(:selected_diff, selected_diff)
+
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_event("set_repo_path", %{"path" => path}, socket) do
     path = String.trim(path)
 
@@ -269,10 +287,10 @@ defmodule TermDiffWeb.DiffLive do
 
   defp diff_layout(assigns) do
     ~H"""
-    <div class={"w-80 border-r border-neutral-200 overflow-y-auto p-2 shrink-0 #{if @nav.focus == :file_list, do: "ring-1 ring-blue-400 ring-inset", else: ""}"}>
+    <div class={"w-80 border-r border-neutral-200 overflow-y-auto p-2 shrink-0 #{pane_glow(@nav.focus == :file_list)}"}>
       <.file_list files={@repo_state.files} nav={@nav} diffs={@repo_state.diffs} />
     </div>
-    <div class="flex-1 overflow-y-auto p-2" id="diff-pane" phx-hook="AutoScroll">
+    <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :diff_view)}"} id="diff-pane" phx-hook="AutoScroll">
       <.diff_pane diff={@selected_diff} nav={@nav} />
     </div>
     """
@@ -281,19 +299,22 @@ defmodule TermDiffWeb.DiffLive do
   defp log_layout(assigns) do
     ~H"""
     <%= if @nav.focus == :log_view do %>
-      <div class="flex-1 overflow-y-auto p-2">
+      <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(true)}"}>
         <.log_list entries={@log_entries} nav={@nav} />
       </div>
     <% else %>
-      <div class="w-1/2 border-r border-neutral-200 overflow-y-auto p-2">
+      <div class={"w-1/2 border-r border-neutral-200 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"}>
         <.commit_message detail={@commit_detail} />
       </div>
-      <div class="flex-1 overflow-y-auto p-2" id="diff-pane" phx-hook="AutoScroll">
+      <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"} id="diff-pane" phx-hook="AutoScroll">
         <.diff_pane diff={@commit_diff} nav={@nav} />
       </div>
     <% end %>
     """
   end
+
+  defp pane_glow(true), do: "ring-2 ring-green-400/60 ring-inset shadow-[inset_0_0_8px_rgba(74,222,128,0.2)]"
+  defp pane_glow(false), do: ""
 
   # ── UI Components ──
 
@@ -332,7 +353,9 @@ defmodule TermDiffWeb.DiffLive do
     <div :if={@files == []} class="text-neutral-400 p-2">No changes</div>
     <div
       :for={{file, idx} <- Enum.with_index(@files)}
-      class={"flex items-center gap-2 px-1 py-0.5 cursor-default #{if idx == @nav.file_index && @nav.focus == :file_list, do: "bg-blue-50 text-blue-900", else: ""}"}
+      phx-click="select_file"
+      phx-value-index={idx}
+      class={"flex items-center gap-2 px-1 py-0.5 cursor-pointer hover:bg-neutral-50 #{if idx == @nav.file_index && @nav.focus in [:file_list, :diff_view], do: "bg-blue-50 text-blue-900", else: ""}"}
     >
       <span class={"w-4 text-center font-semibold #{status_color(file.unstaged_status || file.staged_status)}"}><%= status_char(file.unstaged_status || file.staged_status) %></span>
       <span class="truncate"><%= file.path %></span>
