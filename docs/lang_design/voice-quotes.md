@@ -64,3 +64,5 @@ Raw quotes from design sessions, captured verbatim. Used to maintain authentic v
 - Self-deprecating about credentials, confident about taste
 - References real experiences and real people
 - Agents are "the scout", "the explorer", "the tracer", not just "Scout" or "scout". They're roles on the team, not proper names.
+
+"its more of a diff follower than a diff viewer"
