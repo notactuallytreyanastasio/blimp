@@ -372,5 +372,31 @@ blimp&gt; Parser @ t1 &lt;- :parse("match x {
 
 </div>
 
+<script>
+(function() {
+  var mq = window.matchMedia('(max-width: 900px)');
+  function setup(e) {
+    var sides = document.querySelectorAll('.split-side');
+    // clean up any existing toggles
+    document.querySelectorAll('.code-toggle').forEach(function(t) { t.remove(); });
+    sides.forEach(function(side) {
+      side.classList.remove('is-open');
+    });
+    if (!e.matches) return;
+    sides.forEach(function(side) {
+      var toggle = document.createElement('div');
+      toggle.className = 'code-toggle';
+      toggle.innerHTML = '<span class="chevron">&#9654;</span> <span class="code-icon">&lt;/&gt;</span> code';
+      toggle.addEventListener('click', function() {
+        var open = side.classList.toggle('is-open');
+        toggle.classList.toggle('is-open', open);
+      });
+      side.parentNode.insertBefore(toggle, side);
+    });
+  }
+  mq.addEventListener('change', setup);
+  setup(mq);
+})();
+</script>
 </body>
 </html>

@@ -15,6 +15,8 @@ body {
   margin: 0 auto;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 /* Navigation */
@@ -280,15 +282,71 @@ hr {
   margin: 0;
 }
 
-/* On narrow screens, stack vertically */
+/* Code toggle: hidden by default, shown on mobile */
+.code-toggle {
+  display: none;
+}
+
+/* On narrow screens: denser layout, code behind tap toggle */
 @media (max-width: 900px) {
+  body {
+    font-size: 13px;
+    line-height: 1.6;
+    padding: 1rem 1rem 4rem 1rem;
+    max-width: 100%;
+  }
+
+  body.tldr-mode {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  h1 { font-size: 1.2rem; margin-bottom: 0.3rem; }
+  h2 { margin-top: 2rem; }
+  .post-date { margin-bottom: 2rem; }
+  .nav { margin-bottom: 2rem; }
+
+  p { margin-bottom: 0.9rem; }
+
+  .section-header {
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 2rem;
+  }
+
+  .tldr-bubble {
+    max-width: 100%;
+    margin-left: 0;
+    font-size: 0.8rem;
+  }
+
+  .tldr-bubble::before {
+    display: none;
+  }
+
+  pre {
+    font-size: 11px;
+    padding: 0.75rem;
+    margin: 1rem 0;
+  }
+
+  .repl {
+    font-size: 11px;
+    padding: 0.75rem;
+  }
+
   .split {
-    padding: 0 2rem;
+    width: 100%;
+    left: 0;
+    transform: none;
+    padding: 0;
+    margin: 2rem 0;
   }
 
   .split-pair {
     grid-template-columns: 1fr;
-    gap: 1rem;
+    gap: 0;
+    margin-bottom: 1.5rem;
   }
 
   .split-prose {
@@ -302,6 +360,56 @@ hr {
 
   .split-side {
     padding-left: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.35s ease;
+  }
+
+  .split-side.is-open {
+    max-height: 600px;
+  }
+
+  .split-side pre {
+    margin-top: 0;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+
+  /* Tap toggle for code */
+  .code-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.75rem;
+    font-family: inherit;
+    color: #999;
+    background: #1a1a2e;
+    border: 1px solid #2a2a3e;
+    border-bottom: none;
+    border-radius: 3px 3px 0 0;
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    margin-top: 0.5rem;
+  }
+
+  .code-toggle:active {
+    background: #252540;
+  }
+
+  .code-toggle .chevron {
+    display: inline-block;
+    transition: transform 0.25s ease;
+    font-size: 0.6rem;
+  }
+
+  .code-toggle.is-open .chevron {
+    transform: rotate(90deg);
+  }
+
+  .code-toggle .code-icon {
+    color: #a6e22e;
   }
 }
 
