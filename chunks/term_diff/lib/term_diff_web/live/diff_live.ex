@@ -355,6 +355,7 @@ defmodule TermDiffWeb.DiffLive do
       :for={{file, idx} <- Enum.with_index(@files)}
       phx-click="select_file"
       phx-value-index={idx}
+      data-selected={if idx == @nav.file_index && @nav.focus == :file_list, do: "true"}
       class={"flex items-center gap-2 px-1 py-0.5 cursor-pointer hover:bg-neutral-50 #{if idx == @nav.file_index && @nav.focus in [:file_list, :diff_view], do: "bg-blue-50 text-blue-900", else: ""}"}
     >
       <span class={"w-4 text-center font-semibold #{status_color(file.unstaged_status || file.staged_status)}"}><%= status_char(file.unstaged_status || file.staged_status) %></span>
@@ -372,6 +373,7 @@ defmodule TermDiffWeb.DiffLive do
     <div :if={@entries == []} class="text-neutral-400 p-2">No commits</div>
     <div
       :for={{entry, idx} <- Enum.with_index(@entries)}
+      data-selected={if idx == @nav.log_index && @nav.focus == :log_view, do: "true"}
       class={"flex items-center gap-2 px-1 py-0.5 cursor-default #{if idx == @nav.log_index, do: "bg-purple-50 text-purple-900", else: ""}"}
     >
       <span class="text-amber-600 font-semibold w-16 shrink-0"><%= entry.hash %></span>
@@ -404,7 +406,10 @@ defmodule TermDiffWeb.DiffLive do
       <div class="text-neutral-500 text-xs mb-2 px-1"><%= @diff.path %></div>
       <div :if={@diff.binary} class="text-neutral-400 px-1">Binary file</div>
       <div :for={{hunk, idx} <- Enum.with_index(@diff.hunks)} class="mb-4">
-        <div class={"px-2 py-1 text-xs bg-blue-50 text-blue-700 border-y border-neutral-200 #{if @nav.focus == :diff_view && idx == @nav.hunk_index, do: "ring-1 ring-blue-400", else: ""} #{if @nav.focus == :log_detail && idx == @nav.hunk_index, do: "ring-1 ring-purple-400", else: ""}"}>
+        <div
+          data-selected={if @nav.focus in [:diff_view, :log_detail] && idx == @nav.hunk_index, do: "true"}
+          class={"px-2 py-1 text-xs bg-blue-50 text-blue-700 border-y border-neutral-200 #{if @nav.focus == :diff_view && idx == @nav.hunk_index, do: "ring-1 ring-blue-400", else: ""} #{if @nav.focus == :log_detail && idx == @nav.hunk_index, do: "ring-1 ring-purple-400", else: ""}"}
+        >
           <%= hunk.header %>
         </div>
         <div :for={line <- hunk.lines} class={"flex #{line_class(line, hunk)}"}>

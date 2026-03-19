@@ -46,6 +46,14 @@ Hooks.KeyNav = {
         this.pushEvent("keydown", {key: e.key})
       }
     })
+  },
+  updated() {
+    requestAnimationFrame(() => {
+      let selected = this.el.querySelector("[data-selected]")
+      if (selected) {
+        selected.scrollIntoView({ block: "nearest", behavior: "smooth" })
+      }
+    })
   }
 }
 
