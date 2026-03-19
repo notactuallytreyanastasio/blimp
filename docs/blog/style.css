@@ -360,13 +360,25 @@ hr {
 
   .split-side {
     padding-left: 0;
-    max-height: 0;
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.35s ease;
+  }
+
+  .split-side > * {
     overflow: hidden;
-    transition: max-height 0.35s ease;
   }
 
   .split-side.is-open {
-    max-height: 600px;
+    grid-template-rows: 1fr;
+  }
+
+  .split-side.is-open > * {
+    overflow: visible;
+  }
+
+  .split-side.is-open pre {
+    overflow-x: auto;
   }
 
   .split-side pre {
