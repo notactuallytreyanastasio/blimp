@@ -4,14 +4,14 @@ defmodule TermDiff.Commentary.ServerTest do
   alias TermDiff.Commentary.{Server, Store}
 
   setup do
-    # Each test gets its own Store with unique name
     store_name = :"store_#{System.unique_integer([:positive])}"
     start_supervised!({Store, name: store_name})
 
-    # PubSub should be running from the app, but ensure it
     unless Process.whereis(TermDiff.PubSub) do
       start_supervised!({Phoenix.PubSub, name: TermDiff.PubSub})
     end
+
+    Phoenix.PubSub.subscribe(TermDiff.PubSub, "commentary:updates")
 
     task_sup_name = :"task_sup_#{System.unique_integer([:positive])}"
     start_supervised!({Task.Supervisor, name: task_sup_name})
@@ -21,7 +21,19 @@ defmodule TermDiff.Commentary.ServerTest do
 
   defp start_server(ctx, opts \\ []) do
     default_caller = fn _prompt, _repo_path, _opts ->
-      {:ok, ~s|{"summary": "test summary", "annotations": [{"file": "lib/foo.ex", "start_line": 1, "end_line": 3, "comment": "looks good", "severity": "info"}]}|}
+      {:ok,
+       Jason.encode!(%{
+         "summary" => "test summary",
+         "annotations" => [
+           %{
+             "file" => "lib/foo.ex",
+             "start_line" => 1,
+             "end_line" => 3,
+             "comment" => "looks good",
+             "severity" => "info"
+           }
+         ]
+       })}
     end
 
     caller = Keyword.get(opts, :caller, default_caller)
@@ -44,14 +56,13 @@ defmodule TermDiff.Commentary.ServerTest do
       server = start_server(ctx)
       Server.request_review("diff content", "/tmp/fake_repo", server)
 
-      Process.sleep(200)
+      assert_receive :commentary_ready, 2000
 
       assert Store.get_summary(ctx.store) == "test summary"
       assert Store.get_file_commentary("lib/foo.ex", ctx.store) != nil
     end
 
     test "broadcasts commentary_ready on PubSub", ctx do
-      Phoenix.PubSub.subscribe(TermDiff.PubSub, "commentary:updates")
       server = start_server(ctx)
       Server.request_review("diff content", "/tmp/fake_repo", server)
 
@@ -63,16 +74,16 @@ defmodule TermDiff.Commentary.ServerTest do
 
       caller = fn _prompt, _repo_path, _opts ->
         :counters.add(call_count, 1, 1)
-        {:ok, ~s|{"summary": "s", "annotations": []}|}
+        {:ok, Jason.encode!(%{"summary" => "s", "annotations" => []})}
       end
 
       server = start_server(ctx, caller: caller)
 
       Server.request_review("same diff", "/tmp/fake_repo", server)
-      Process.sleep(200)
+      assert_receive :commentary_ready, 2000
 
       Server.request_review("same diff", "/tmp/fake_repo", server)
-      Process.sleep(200)
+      assert_receive :commentary_ready, 2000
 
       assert :counters.get(call_count, 1) == 1
     end
@@ -82,16 +93,16 @@ defmodule TermDiff.Commentary.ServerTest do
 
       caller = fn _prompt, _repo_path, _opts ->
         :counters.add(call_count, 1, 1)
-        {:ok, ~s|{"summary": "s", "annotations": []}|}
+        {:ok, Jason.encode!(%{"summary" => "s", "annotations" => []})}
       end
 
       server = start_server(ctx, caller: caller)
 
       Server.request_review("diff v1", "/tmp/fake_repo", server)
-      Process.sleep(200)
+      assert_receive :commentary_ready, 2000
 
       Server.request_review("diff v2", "/tmp/fake_repo", server)
-      Process.sleep(200)
+      assert_receive :commentary_ready, 2000
 
       assert :counters.get(call_count, 1) == 2
     end
@@ -99,8 +110,6 @@ defmodule TermDiff.Commentary.ServerTest do
 
   describe "error handling" do
     test "handles caller errors gracefully", ctx do
-      Phoenix.PubSub.subscribe(TermDiff.PubSub, "commentary:updates")
-
       caller = fn _prompt, _repo_path, _opts ->
         {:error, "connection failed"}
       end
