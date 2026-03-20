@@ -1,5 +1,5 @@
 defmodule TermDiff.Diff.Navigation do
-  @moduledoc "Pure state machine for keyboard-driven diff navigation."
+  @moduledoc "Pure state machine for keyboard-driven diff navigation. No side effects."
 
   @type focus :: :file_list | :diff_view | :log_view | :log_detail
 
@@ -162,6 +162,31 @@ defmodule TermDiff.Diff.Navigation do
 
   @spec clear_stage_action(t()) :: t()
   def clear_stage_action(nav), do: %{nav | stage_file: nil, unstage_file: nil}
+
+  @spec sync_to_files(t(), [String.t()]) :: t()
+  def sync_to_files(nav, file_paths) do
+    count = length(file_paths)
+
+    case count do
+      0 ->
+        %{nav | file_index: 0, file_count: 0, selected_file: nil}
+
+      _ ->
+        idx = find_file_index(file_paths, nav.selected_file, nav.file_index)
+        %{nav | file_index: idx, file_count: count, selected_file: Enum.at(file_paths, idx)}
+    end
+  end
+
+  defp find_file_index(file_paths, nil, current_index) do
+    min(current_index, length(file_paths) - 1) |> max(0)
+  end
+
+  defp find_file_index(file_paths, selected_file, current_index) do
+    case Enum.find_index(file_paths, &(&1 == selected_file)) do
+      nil -> min(current_index, length(file_paths) - 1) |> max(0)
+      idx -> idx
+    end
+  end
 
   @spec follow_to_latest(t(), String.t() | nil, non_neg_integer()) :: t()
   def follow_to_latest(%{following: false} = nav, _file, _hunk_count), do: nav
