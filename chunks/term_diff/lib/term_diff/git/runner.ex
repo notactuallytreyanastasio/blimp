@@ -1,5 +1,7 @@
 defmodule TermDiff.Git.Runner do
-  @moduledoc "Execute git commands via System.cmd. Imperative shell."
+  @moduledoc "Execute git commands via Erlang Port. Imperative shell."
+
+  @git_timeout 10_000
 
   @spec status(String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def status(repo_path) do
@@ -48,16 +50,7 @@ defmodule TermDiff.Git.Runner do
 
   @spec diff_untracked(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def diff_untracked(repo_path, file_path) do
-    # Use relative path so git produces "diff --git a/path b/path" format
-    case System.cmd("git", ["diff", "--no-index", "/dev/null", file_path],
-           cd: repo_path,
-           stderr_to_stdout: true
-         ) do
-      # exit code 1 means "differences found" which is expected
-      {output, 1} -> {:ok, String.trim(output)}
-      {output, 0} -> {:ok, String.trim(output)}
-      {error, _code} -> {:error, String.trim(error)}
-    end
+    run(repo_path, ["diff", "--no-index", "/dev/null", file_path], expected_exits: [0, 1])
   end
 
   @spec commit(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
@@ -87,11 +80,45 @@ defmodule TermDiff.Git.Runner do
     :ok
   end
 
-  @spec run(String.t(), [String.t()]) :: {:ok, String.t()} | {:error, String.t()}
-  defp run(repo_path, args) do
-    case System.cmd("git", args, cd: repo_path, stderr_to_stdout: true) do
-      {output, 0} -> {:ok, String.trim(output)}
-      {error, _code} -> {:error, String.trim(error)}
+  # ── Port-based execution ──
+
+  @spec run(String.t(), [String.t()], keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  defp run(repo_path, args, opts \\ []) do
+    expected_exits = Keyword.get(opts, :expected_exits, [0])
+    git = System.find_executable("git")
+
+    port =
+      Port.open({:spawn_executable, git}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: args,
+        cd: repo_path
+      ])
+
+    collect_output(port, [], expected_exits)
+  rescue
+    ErlangError ->
+      {:error, "failed to execute git"}
+  end
+
+  defp collect_output(port, acc, expected_exits) do
+    receive do
+      {^port, {:data, data}} ->
+        collect_output(port, [data | acc], expected_exits)
+
+      {^port, {:exit_status, code}} ->
+        output = acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.trim()
+
+        if code in expected_exits do
+          {:ok, output}
+        else
+          {:error, output}
+        end
+    after
+      @git_timeout ->
+        Port.close(port)
+        {:error, "git command timed out"}
     end
   end
 end
