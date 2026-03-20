@@ -48,6 +48,19 @@ defmodule TermDiff.AI.ClaudeTest do
       refute "--model" in args
     end
 
+    test "includes json-schema when provided" do
+      schema = ~s|{"type":"object"}|
+      args = Claude.build_args("hi", "/tmp/repo", json_schema: schema)
+      idx = Enum.find_index(args, &(&1 == "--json-schema"))
+      assert idx != nil
+      assert Enum.at(args, idx + 1) == schema
+    end
+
+    test "omits json-schema when not provided" do
+      args = Claude.build_args("hi", "/tmp/repo")
+      refute "--json-schema" in args
+    end
+
     test "includes output format json" do
       args = Claude.build_args("hi", "/tmp/repo")
       assert "--output-format" in args

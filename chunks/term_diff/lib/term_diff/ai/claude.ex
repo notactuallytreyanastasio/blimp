@@ -25,6 +25,7 @@ defmodule TermDiff.AI.Claude do
     allowed_tools = Keyword.get(opts, :allowed_tools, @default_allowed_tools)
     system_prompt = Keyword.get(opts, :system_prompt)
     model = Keyword.get(opts, :model)
+    json_schema = Keyword.get(opts, :json_schema)
 
     args = [
       "-p", prompt,
@@ -34,6 +35,7 @@ defmodule TermDiff.AI.Claude do
 
     args = if system_prompt, do: args ++ ["--system-prompt", system_prompt], else: args
     args = if model, do: args ++ ["--model", model], else: args
+    args = if json_schema, do: args ++ ["--json-schema", json_schema], else: args
 
     args
   end

@@ -1,11 +1,32 @@
 defmodule TermDiff.Commentary.Prompt do
   @moduledoc """
-  Build the prompt sent to Claude for diff review.
-
-  This is a placeholder -- the real prompt will be written by hand.
-  The key contract: it must instruct Claude to return JSON with
-  "summary" and "annotations" keys.
+  Build the prompt and JSON schema sent to Claude for diff review.
   """
+
+  @review_schema Jason.encode!(%{
+    "type" => "object",
+    "required" => ["summary", "annotations"],
+    "properties" => %{
+      "summary" => %{"type" => "string"},
+      "annotations" => %{
+        "type" => "array",
+        "items" => %{
+          "type" => "object",
+          "required" => ["file", "start_line", "end_line", "comment", "severity"],
+          "properties" => %{
+            "file" => %{"type" => "string"},
+            "start_line" => %{"type" => "integer"},
+            "end_line" => %{"type" => "integer"},
+            "comment" => %{"type" => "string"},
+            "severity" => %{"type" => "string", "enum" => ["info", "warning", "issue"]}
+          }
+        }
+      }
+    }
+  })
+
+  @spec json_schema() :: String.t()
+  def json_schema, do: @review_schema
 
   @spec build(String.t()) :: String.t()
   def build(raw_diff) do
