@@ -263,7 +263,9 @@ defmodule TermDiffWeb.DiffLive do
         socket
 
       nav.unstage_file ->
-        Runner.unstage(socket.assigns.repo_path, nav.unstage_file)
+        file_entry = Enum.find(socket.assigns.repo_state.files, &(&1.path == nav.unstage_file))
+        staged_status = if file_entry, do: file_entry.staged_status
+        Runner.unstage(socket.assigns.repo_path, nav.unstage_file, staged_status: staged_status)
         nav = Navigation.clear_stage_action(nav)
         socket = assign(socket, :nav, nav)
         send(self(), :refresh)

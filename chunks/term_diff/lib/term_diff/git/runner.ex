@@ -43,9 +43,15 @@ defmodule TermDiff.Git.Runner do
     run(repo_path, ["add", file_path])
   end
 
-  @spec unstage(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def unstage(repo_path, file_path) do
-    run(repo_path, ["reset", "HEAD", file_path])
+  @spec unstage(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def unstage(repo_path, file_path, opts \\ []) do
+    staged_status = Keyword.get(opts, :staged_status)
+
+    if staged_status == :added do
+      run(repo_path, ["rm", "--cached", file_path])
+    else
+      run(repo_path, ["restore", "--staged", file_path])
+    end
   end
 
   @spec diff_untracked(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
