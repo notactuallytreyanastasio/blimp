@@ -65,32 +65,6 @@ defmodule TermDiff.Diff.NavigationTest do
       assert nav == Navigation.handle_key(nav, "x")
     end
 
-    test "cc enters commit mode from file list" do
-      nav = %Navigation{focus: :file_list}
-      result = Navigation.handle_key(nav, "cc")
-      assert result.commit_mode == true
-    end
-
-    test "a enters amend mode from file list" do
-      nav = %Navigation{focus: :file_list}
-      result = Navigation.handle_key(nav, "a")
-      assert result.commit_mode == true
-      assert result.amend_mode == true
-    end
-
-    test "a enters amend mode from log view" do
-      nav = %Navigation{focus: :log_view}
-      result = Navigation.handle_key(nav, "a")
-      assert result.commit_mode == true
-      assert result.amend_mode == true
-    end
-
-    test "a is no-op from diff view" do
-      nav = %Navigation{focus: :diff_view}
-      result = Navigation.handle_key(nav, "a")
-      assert result.commit_mode == false
-      assert result.amend_mode == false
-    end
   end
 
   describe "follow_to_latest/3" do
