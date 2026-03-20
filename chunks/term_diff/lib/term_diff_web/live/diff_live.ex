@@ -1,9 +1,9 @@
 defmodule TermDiffWeb.DiffLive do
   use TermDiffWeb, :live_view
 
-  alias TermDiff.Git.{Runner, Status, Diff, Log, Watcher}
+  alias TermDiff.Diff.{CommitState, Navigation}
+  alias TermDiff.Git.{Diff, Log, Runner, Status, Watcher}
   alias TermDiff.Git.Types.RepoState
-  alias TermDiff.Diff.{Navigation, CommitState}
   alias TermDiff.Commentary.Store, as: CommentaryStore
 
   @impl true
@@ -41,25 +41,21 @@ defmodule TermDiffWeb.DiffLive do
       <.keybinding_bar nav={@nav} />
 
       <div class="flex flex-1 overflow-hidden">
-        <%= if CommitState.active?(@commit) do %>
-          <.commit_layout commit={@commit} repo_state={@repo_state} />
-        <% else %>
-          <%= if @nav.focus in [:log_view, :log_detail] do %>
-            <.log_layout
-              nav={@nav}
-              log_entries={@log_entries}
-              commit_detail={@commit_detail}
-              commit_diff={@commit_diff}
-            />
-          <% else %>
-            <.diff_layout
-              nav={@nav}
-              repo_state={@repo_state}
-              selected_diff={@selected_diff}
-              expanded_comments={@expanded_comments}
-            />
-          <% end %>
-        <% end %>
+        <.commit_layout :if={CommitState.active?(@commit)} commit={@commit} repo_state={@repo_state} />
+        <.log_layout
+          :if={!CommitState.active?(@commit) && @nav.focus in [:log_view, :log_detail]}
+          nav={@nav}
+          log_entries={@log_entries}
+          commit_detail={@commit_detail}
+          commit_diff={@commit_diff}
+        />
+        <.diff_layout
+          :if={!CommitState.active?(@commit) && @nav.focus not in [:log_view, :log_detail]}
+          nav={@nav}
+          repo_state={@repo_state}
+          selected_diff={@selected_diff}
+          expanded_comments={@expanded_comments}
+        />
       </div>
     </div>
     """
@@ -186,28 +182,7 @@ defmodule TermDiffWeb.DiffLive do
       |> CommitState.update_message(message)
       |> CommitState.submit()
 
-    case commit.phase do
-      :submitting ->
-        result =
-          if commit.mode == :amend,
-            do: Runner.commit_amend(socket.assigns.repo_path, String.trim(message)),
-            else: Runner.commit(socket.assigns.repo_path, String.trim(message))
-
-        case result do
-          {:ok, _output} ->
-            send(self(), :refresh)
-            {:noreply, assign(socket, :commit, CommitState.complete(commit))}
-
-          {:error, error} ->
-            {:noreply, assign(socket, :commit, CommitState.fail(commit, error))}
-        end
-
-      :error ->
-        {:noreply, assign(socket, :commit, commit)}
-
-      _ ->
-        {:noreply, socket}
-    end
+    {:noreply, execute_commit(socket, commit)}
   end
 
   @impl true
@@ -241,6 +216,31 @@ defmodule TermDiffWeb.DiffLive do
     else
       {:noreply, put_flash(socket, :error, "Not a valid directory: #{path}")}
     end
+  end
+
+  defp execute_commit(socket, %{phase: :submitting} = commit) do
+    commit
+    |> run_git_commit(socket.assigns.repo_path)
+    |> handle_commit_result(socket, commit)
+  end
+
+  defp execute_commit(socket, commit), do: assign(socket, :commit, commit)
+
+  defp run_git_commit(%{mode: :amend, message: message}, repo_path) do
+    Runner.commit_amend(repo_path, String.trim(message))
+  end
+
+  defp run_git_commit(%{message: message}, repo_path) do
+    Runner.commit(repo_path, String.trim(message))
+  end
+
+  defp handle_commit_result({:ok, _output}, socket, commit) do
+    send(self(), :refresh)
+    assign(socket, :commit, CommitState.complete(commit))
+  end
+
+  defp handle_commit_result({:error, error}, socket, commit) do
+    assign(socket, :commit, CommitState.fail(commit, error))
   end
 
   defp handle_open_file(socket, nav) do
@@ -476,7 +476,7 @@ defmodule TermDiffWeb.DiffLive do
     ~H"""
     <div class="flex flex-1 items-center justify-center">
       <div class="bg-red-50 border border-red-200 rounded p-4 max-w-md text-center">
-        <div class="text-red-700 text-sm font-semibold mb-2"><%= @commit.error %></div>
+        <div class="text-red-700 text-sm font-semibold mb-2">{@commit.error}</div>
         <div class="text-neutral-500 text-xs">Press any key or Esc to dismiss</div>
       </div>
     </div>
@@ -488,7 +488,7 @@ defmodule TermDiffWeb.DiffLive do
     <div class="flex flex-1 overflow-hidden">
       <div class="w-1/2 border-r border-neutral-200 flex flex-col p-4">
         <div class="text-xs text-neutral-500 mb-2 font-semibold">
-          <%= if @commit.mode == :amend, do: "AMEND COMMIT", else: "COMMIT MESSAGE" %>
+          {if @commit.mode == :amend, do: "AMEND COMMIT", else: "COMMIT MESSAGE"}
         </div>
         <form phx-submit="submit_commit" phx-change="update_commit_message" class="flex flex-col flex-1">
           <textarea
@@ -500,14 +500,14 @@ defmodule TermDiffWeb.DiffLive do
           ></textarea>
           <div class="flex items-center justify-between mt-3">
             <div class="text-[11px] text-neutral-400">
-              <span><%= length(@repo_state.files) %> files</span>
+              <span>{length(@repo_state.files)} files</span>
             </div>
             <div class="flex gap-2">
               <button type="button" phx-click="cancel_commit" class="px-3 py-1 text-xs border border-neutral-300 rounded hover:bg-neutral-100">
                 Cancel (Esc)
               </button>
               <button type="submit" class="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">
-                <%= if @commit.mode == :amend, do: "Amend", else: "Commit" %>
+                {if @commit.mode == :amend, do: "Amend", else: "Commit"}
               </button>
             </div>
           </div>
@@ -516,8 +516,8 @@ defmodule TermDiffWeb.DiffLive do
       <div class="w-1/2 flex flex-col p-4 overflow-y-auto">
         <div class="text-xs text-neutral-500 mb-2 font-semibold">STAGED CHANGES</div>
         <div :for={file <- @repo_state.files} class="text-[12px] py-0.5">
-          <span :if={file.staged_status && file.staged_status != :untracked} class={"font-semibold #{status_color(file.staged_status)}"}><%= status_char(file.staged_status) %></span>
-          <span :if={file.staged_status && file.staged_status != :untracked} class="ml-2"><%= file.path %></span>
+          <span :if={file.staged_status && file.staged_status != :untracked} class={"font-semibold #{status_color(file.staged_status)}"}>{status_char(file.staged_status)}</span>
+          <span :if={file.staged_status && file.staged_status != :untracked} class="ml-2">{file.path}</span>
         </div>
       </div>
     </div>
@@ -537,18 +537,15 @@ defmodule TermDiffWeb.DiffLive do
 
   defp log_layout(assigns) do
     ~H"""
-    <%= if @nav.focus == :log_view do %>
-      <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(true)}"}>
-        <.log_list entries={@log_entries} nav={@nav} />
-      </div>
-    <% else %>
-      <div class={"w-1/2 border-r border-neutral-200 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"}>
-        <.commit_message detail={@commit_detail} />
-      </div>
-      <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"} id="diff-pane" phx-hook="AutoScroll">
-        <.diff_pane diff={@commit_diff} nav={@nav} />
-      </div>
-    <% end %>
+    <div :if={@nav.focus == :log_view} class={"flex-1 overflow-y-auto p-2 #{pane_glow(true)}"}>
+      <.log_list entries={@log_entries} nav={@nav} />
+    </div>
+    <div :if={@nav.focus != :log_view} class={"w-1/2 border-r border-neutral-200 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"}>
+      <.commit_message detail={@commit_detail} />
+    </div>
+    <div :if={@nav.focus != :log_view} class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"} id="diff-pane" phx-hook="AutoScroll">
+      <.diff_pane diff={@commit_diff} nav={@nav} />
+    </div>
     """
   end
 
@@ -561,9 +558,9 @@ defmodule TermDiffWeb.DiffLive do
     ~H"""
     <div class="flex items-center justify-between px-3 py-1 border-b border-neutral-200 text-neutral-500 text-xs">
       <div class="flex items-center gap-3">
-        <span class="text-neutral-900 font-semibold"><%= @repo_state.branch || "no branch" %></span>
-        <span><%= length(@repo_state.files) %> files</span>
-        <span class="text-neutral-300 truncate max-w-xs"><%= @repo_path %></span>
+        <span class="text-neutral-900 font-semibold">{@repo_state.branch || "no branch"}</span>
+        <span>{length(@repo_state.files)} files</span>
+        <span class="text-neutral-300 truncate max-w-xs">{@repo_path}</span>
       </div>
       <div class="flex gap-4">
         <span :if={@commentary_status == :reviewing} class="text-amber-600 font-semibold animate-pulse">REVIEWING</span>
@@ -604,13 +601,13 @@ defmodule TermDiffWeb.DiffLive do
       data-selected={if idx == @nav.file_index && @nav.focus == :file_list, do: "true"}
       class={"flex items-center gap-2 px-1 py-0.5 cursor-pointer hover:bg-neutral-50 relative #{file_row_class(idx, @nav)}"}
     >
-      <span class={"w-4 text-center font-semibold #{status_color(file.unstaged_status || file.staged_status)}"}><%= status_char(file.unstaged_status || file.staged_status) %></span>
+      <span class={"w-4 text-center font-semibold #{status_color(file.unstaged_status || file.staged_status)}"}>{status_char(file.unstaged_status || file.staged_status)}</span>
       <span :if={file.staged_status && file.staged_status != :untracked} class="text-green-600 text-[10px] font-semibold w-3">S</span>
       <span :if={!file.staged_status || file.staged_status == :untracked} class="w-3"></span>
-      <span class="truncate" title={file.path}><%= file.path %></span>
+      <span class="truncate" title={file.path}>{file.path}</span>
       <span :if={diff = @diffs[file.path]} class="ml-auto text-xs text-neutral-400">
-        <span :if={diff.additions > 0} class="text-green-600">+<%= diff.additions %></span>
-        <span :if={diff.deletions > 0} class="text-red-600 ml-1">-<%= diff.deletions %></span>
+        <span :if={diff.additions > 0} class="text-green-600">+{diff.additions}</span>
+        <span :if={diff.deletions > 0} class="text-red-600 ml-1">-{diff.deletions}</span>
       </span>
     </div>
     """
@@ -624,8 +621,8 @@ defmodule TermDiffWeb.DiffLive do
       data-selected={if idx == @nav.log_index && @nav.focus == :log_view, do: "true"}
       class={"flex items-center gap-2 px-1 py-0.5 cursor-default #{log_row_class(idx, @nav)}"}
     >
-      <span class="text-amber-600 font-semibold w-16 shrink-0"><%= entry.hash %></span>
-      <span class="truncate"><%= entry.message %></span>
+      <span class="text-amber-600 font-semibold w-16 shrink-0">{entry.hash}</span>
+      <span class="truncate">{entry.message}</span>
     </div>
     """
   end
@@ -638,7 +635,7 @@ defmodule TermDiffWeb.DiffLive do
 
   defp commit_message(assigns) do
     ~H"""
-    <pre class="whitespace-pre-wrap text-[12px] leading-relaxed p-2"><%= @detail %></pre>
+    <pre class="whitespace-pre-wrap text-[12px] leading-relaxed p-2">{@detail}</pre>
     """
   end
 
@@ -651,38 +648,37 @@ defmodule TermDiffWeb.DiffLive do
   defp diff_pane(assigns) do
     ~H"""
     <div>
-      <div class="text-neutral-500 text-xs mb-2 px-1"><%= @diff.path %></div>
+      <div class="text-neutral-500 text-xs mb-2 px-1">{@diff.path}</div>
       <div :if={@diff.binary} class="text-neutral-400 px-1">Binary file</div>
       <div :for={{hunk, idx} <- Enum.with_index(@diff.hunks)} class="mb-4">
         <div
           data-selected={if @nav.focus in [:diff_view, :log_detail] && idx == @nav.hunk_index, do: "true"}
           class={"px-2 py-1 text-xs border-y border-neutral-200 #{if (@nav.focus == :diff_view || @nav.focus == :log_detail) && idx == @nav.hunk_index, do: "bg-blue-400/5 ring-1 ring-blue-400/40 text-blue-700", else: "bg-blue-50 text-blue-700"}"}
         >
-          <%= hunk.header %>
+          {hunk.header}
         </div>
-        <%= for line <- hunk.lines do %>
+        <div :for={line <- hunk.lines}>
           <% line_annotations = if line.new_line_number, do: annotations_for_line(@diff.path, line.new_line_number), else: [] %>
           <div class={"flex #{line_class(line, hunk)}"}>
-            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0"><%= line.old_line_number || "" %></span>
-            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0"><%= line.new_line_number || "" %></span>
-            <%= if line_annotations != [] do %>
-              <span
-                phx-click="toggle_comment"
-                phx-value-id={hd(line_annotations).id}
-                class={"w-4 text-center cursor-pointer shrink-0 #{severity_color_dot(hd(line_annotations).severity)}"}
-                title={hd(line_annotations).comment}
-              ><%= severity_icon(hd(line_annotations).severity) %></span>
-            <% else %>
-              <span class="w-4 shrink-0"></span>
-            <% end %>
-            <span class="px-1 whitespace-pre flex-1"><%= line_prefix(line.type) %><%= line.content %></span>
+            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">{line.old_line_number || ""}</span>
+            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">{line.new_line_number || ""}</span>
+            <span
+              :if={line_annotations != []}
+              phx-click="toggle_comment"
+              phx-value-id={hd(line_annotations).id}
+              class={"w-4 text-center cursor-pointer shrink-0 #{severity_color_dot(hd(line_annotations).severity)}"}
+              title={hd(line_annotations).comment}
+            >{severity_icon(hd(line_annotations).severity)}</span>
+            <span :if={line_annotations == []} class="w-4 shrink-0"></span>
+            <span class="px-1 whitespace-pre flex-1">{line_prefix(line.type)}{line.content}</span>
           </div>
-          <%= for ann <- line_annotations, MapSet.member?(@expanded_comments, ann.id) do %>
-            <div class="ml-24 p-2 mb-1 bg-amber-50 border-l-2 border-amber-400 text-xs text-neutral-700">
-              <%= ann.comment %>
-            </div>
-          <% end %>
-        <% end %>
+          <div
+            :for={ann <- Enum.filter(line_annotations, &MapSet.member?(@expanded_comments, &1.id))}
+            class="ml-24 p-2 mb-1 bg-amber-50 border-l-2 border-amber-400 text-xs text-neutral-700"
+          >
+            {ann.comment}
+          </div>
+        </div>
       </div>
     </div>
     """
