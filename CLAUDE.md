@@ -32,6 +32,31 @@ Rules:
 - The PostToolUse hook `elixir-compile-check.sh` will block you if warnings are detected
 - Do not proceed past a warning. Fix it first.
 
+### Elixir Style Rules - CRITICAL
+
+**HEEx templates:**
+- NEVER use `<%= if ... do %>` / `<%= for ... do %>` -- use `:if={condition}` and `:for={item <- list}` attributes instead
+- NEVER use `<%= expression %>` for simple interpolation -- use `{expression}` curly brace syntax
+- The `<%= %>` tag is only for rare cases where attribute syntax genuinely can't work
+
+**Code structure:**
+- NEVER nest `if` inside `case` or vice versa -- break into separate multi-clause functions instead
+- NEVER use `Process.sleep` in tests -- use `assert_receive` with message passing for async coordination
+- One struct/type per file -- no `defmodule Foo do defmodule Bar` nesting for data types
+- Keep `alias` groups alphabetically sorted within each group
+- Group all `def handle_event` (or any same-name function) clauses together -- don't interleave private helpers between them
+
+**Data modeling:**
+- Use embedded Ecto schemas for state machines and typed structs (gives you Ecto.Enum, changesets)
+- Use tagged tuples for signals/actions (e.g. `{:stage_file, path}`) not separate boolean/string fields
+
+**Supervision:**
+- Don't use `Task.Supervisor.async_nolink` for fire-and-forget work -- use `start_child` with explicit `send` back to the caller and `Process.monitor` for crash detection
+- Capture `self()` in a variable BEFORE passing to closures -- `self()` inside `fn -> ... end` evaluates to the spawned process, not the caller
+
+**JSON in tests:**
+- Use `Jason.encode!(%{...})` with formatted Elixir maps for test fixtures, not raw `~s|{...}|` strings
+
 ### Quality Checklist (run before considering anything "done")
 
 ```bash
