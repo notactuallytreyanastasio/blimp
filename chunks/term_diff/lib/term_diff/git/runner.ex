@@ -54,6 +54,12 @@ defmodule TermDiff.Git.Runner do
     end
   end
 
+  @spec exec_file_command(String.t(), TermDiff.Diff.FileState.command()) :: {:ok, String.t()} | {:error, String.t()} | :noop
+  def exec_file_command(_repo_path, :noop), do: :noop
+  def exec_file_command(repo_path, {:add, path}), do: run(repo_path, ["add", path])
+  def exec_file_command(repo_path, {:rm_cached, path}), do: run(repo_path, ["rm", "--cached", path])
+  def exec_file_command(repo_path, {:restore_staged, path}), do: run(repo_path, ["restore", "--staged", path])
+
   @spec diff_untracked(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def diff_untracked(repo_path, file_path) do
     run(repo_path, ["diff", "--no-index", "/dev/null", file_path], expected_exits: [0, 1])
