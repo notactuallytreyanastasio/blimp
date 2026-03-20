@@ -67,6 +67,64 @@ defmodule TermDiff.Diff.NavigationTest do
 
   end
 
+  describe "sync_to_files/2" do
+    test "resolves file_index from selected_file path" do
+      files = ["a.ex", "b.ex", "c.ex"]
+      nav = %Navigation{selected_file: "b.ex", file_index: 0, file_count: 0}
+      result = Navigation.sync_to_files(nav, files)
+
+      assert result.file_index == 1
+      assert result.file_count == 3
+      assert result.selected_file == "b.ex"
+    end
+
+    test "keeps cursor at 0 when selected_file is first" do
+      files = ["a.ex", "b.ex"]
+      nav = %Navigation{selected_file: "a.ex", file_index: 5}
+      result = Navigation.sync_to_files(nav, files)
+
+      assert result.file_index == 0
+    end
+
+    test "clamps to last file when selected_file is gone" do
+      files = ["a.ex", "b.ex"]
+      nav = %Navigation{selected_file: "deleted.ex", file_index: 5}
+      result = Navigation.sync_to_files(nav, files)
+
+      assert result.file_index == 1
+      assert result.selected_file == "b.ex"
+      assert result.file_count == 2
+    end
+
+    test "handles empty file list" do
+      nav = %Navigation{selected_file: "a.ex", file_index: 3}
+      result = Navigation.sync_to_files(nav, [])
+
+      assert result.file_index == 0
+      assert result.file_count == 0
+      assert result.selected_file == nil
+    end
+
+    test "preserves index position when selected_file is nil" do
+      files = ["a.ex", "b.ex", "c.ex"]
+      nav = %Navigation{selected_file: nil, file_index: 1}
+      result = Navigation.sync_to_files(nav, files)
+
+      assert result.file_index == 1
+      assert result.selected_file == "b.ex"
+      assert result.file_count == 3
+    end
+
+    test "clamps index when list shrinks and selected_file is nil" do
+      files = ["a.ex"]
+      nav = %Navigation{selected_file: nil, file_index: 5}
+      result = Navigation.sync_to_files(nav, files)
+
+      assert result.file_index == 0
+      assert result.selected_file == "a.ex"
+    end
+  end
+
   describe "follow_to_latest/3" do
     test "jumps to latest file and last hunk when following" do
       nav = %Navigation{following: true, focus: :file_list, file_index: 0}

@@ -85,21 +85,19 @@ defmodule TermDiffWeb.DiffLive do
   @impl true
   def handle_info(:refresh, socket) do
     repo_state = fetch_repo_state(socket.assigns.repo_path)
-    nav = %{socket.assigns.nav | file_count: length(repo_state.files)}
-
-    selected_file = select_file_for_nav(repo_state.files, nav)
-    selected_diff = if selected_file, do: Map.get(repo_state.diffs, selected_file)
+    file_paths = Enum.map(repo_state.files, & &1.path)
 
     nav =
-      if nav.following do
+      if socket.assigns.nav.following do
         latest = find_latest_modified(repo_state.files)
         hunk_count = hunk_count_for(repo_state.diffs, latest)
-        Navigation.follow_to_latest(nav, latest, hunk_count)
+        Navigation.follow_to_latest(socket.assigns.nav, latest, hunk_count)
       else
-        %{nav | selected_file: selected_file}
+        Navigation.sync_to_files(socket.assigns.nav, file_paths)
       end
 
-    # Kick off async commentary review if there are diffs
+    selected_diff = if nav.selected_file, do: Map.get(repo_state.diffs, nav.selected_file)
+
     maybe_request_review(repo_state, socket.assigns.repo_path)
 
     socket =
@@ -135,11 +133,7 @@ defmodule TermDiffWeb.DiffLive do
         socket
       end
 
-    current_nav = socket.assigns.nav
-    current_file = select_file_for_nav(socket.assigns.repo_state.files, current_nav)
-    current_nav = %{current_nav | selected_file: current_file}
-
-    nav = Navigation.handle_key(current_nav, key)
+    nav = Navigation.handle_key(socket.assigns.nav, key)
 
     socket =
       socket
@@ -560,8 +554,8 @@ defmodule TermDiffWeb.DiffLive do
     ~H"""
     <div class="flex items-center justify-between px-3 py-1 border-b border-neutral-200 text-neutral-500 text-xs">
       <div class="flex items-center gap-3">
-        <span class="text-neutral-900 font-semibold">{@repo_state.branch || "no branch"}</span>
-        <span>{length(@repo_state.files)} files</span>
+        <span class="text-neutral-900 font-semibold">{@repo_state.branch || "detached"}</span>
+        <span>{length(@repo_state.files)} changed</span>
         <span class="text-neutral-300 truncate max-w-xs">{@repo_path}</span>
       </div>
       <div class="flex gap-4">
