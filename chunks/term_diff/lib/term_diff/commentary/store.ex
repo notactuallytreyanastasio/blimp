@@ -11,7 +11,7 @@ defmodule TermDiff.Commentary.Store do
 
   use GenServer
 
-  alias TermDiff.Commentary.Types.{FileCommentary, ReviewResult}
+  alias TermDiff.Commentary.{FileCommentary, ReviewResult}
 
   # ── Client API ──
 

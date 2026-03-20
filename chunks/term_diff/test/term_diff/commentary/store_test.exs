@@ -2,7 +2,7 @@ defmodule TermDiff.Commentary.StoreTest do
   use ExUnit.Case, async: true
 
   alias TermDiff.Commentary.Store
-  alias TermDiff.Commentary.Types.{Annotation, ReviewResult, FileCommentary}
+  alias TermDiff.Commentary.{Annotation, FileCommentary, ReviewResult}
 
   setup do
     name = :"store_#{System.unique_integer([:positive])}"

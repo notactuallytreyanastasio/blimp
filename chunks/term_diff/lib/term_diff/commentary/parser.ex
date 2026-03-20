@@ -1,7 +1,7 @@
 defmodule TermDiff.Commentary.Parser do
   @moduledoc "Parse Claude's JSON response into ReviewResult structs."
 
-  alias TermDiff.Commentary.Types.{Annotation, ReviewResult}
+  alias TermDiff.Commentary.{Annotation, ReviewResult}
 
   @spec parse_response(String.t()) :: {:ok, ReviewResult.t()} | {:error, String.t()}
   def parse_response(raw_text) do
