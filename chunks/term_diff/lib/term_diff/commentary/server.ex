@@ -57,29 +57,37 @@ defmodule TermDiff.Commentary.Server do
       Store.mark_reviewing(state.store)
       broadcast(:commentary_reviewing)
 
-      task =
-        Task.Supervisor.async_nolink(
+      server = self()
+
+      {:ok, pid} =
+        Task.Supervisor.start_child(
           state.task_supervisor,
-          fn -> run_review(raw_diff, repo_path, diff_hash, state.caller) end
+          fn -> run_and_send(server, raw_diff, repo_path, diff_hash, state.caller) end
         )
 
-      {:noreply, %{state | current_task_ref: task.ref, current_task_pid: task.pid, last_diff_hash: diff_hash}}
+      ref = Process.monitor(pid)
+      {:noreply, %{state | current_task_ref: ref, current_task_pid: pid, last_diff_hash: diff_hash}}
     end
   end
 
   @impl true
-  def handle_info({ref, {:ok, review_result}}, %{current_task_ref: ref} = state) do
-    Process.demonitor(ref, [:flush])
+  def handle_info({:review_complete, {:ok, review_result}}, state) do
+    Process.demonitor(state.current_task_ref, [:flush])
     Store.put_review(review_result, state.store)
     broadcast(:commentary_ready)
     {:noreply, %{state | current_task_ref: nil, current_task_pid: nil}}
   end
 
   @impl true
-  def handle_info({ref, {:error, reason}}, %{current_task_ref: ref} = state) do
-    Process.demonitor(ref, [:flush])
+  def handle_info({:review_complete, {:error, reason}}, state) do
+    Process.demonitor(state.current_task_ref, [:flush])
     Logger.warning("Commentary review failed: #{inspect(reason)}")
     broadcast(:commentary_error)
+    {:noreply, %{state | current_task_ref: nil, current_task_pid: nil}}
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, :normal}, %{current_task_ref: ref} = state) do
     {:noreply, %{state | current_task_ref: nil, current_task_pid: nil}}
   end
 
@@ -96,6 +104,11 @@ defmodule TermDiff.Commentary.Server do
   end
 
   # ── Private ──
+
+  defp run_and_send(server, raw_diff, repo_path, diff_hash, caller) do
+    result = run_review(raw_diff, repo_path, diff_hash, caller)
+    send(server, {:review_complete, result})
+  end
 
   defp run_review(raw_diff, repo_path, diff_hash, caller) do
     prompt = Prompt.build(raw_diff)
