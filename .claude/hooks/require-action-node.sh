@@ -1,50 +1,45 @@
 #!/bin/bash
 # require-action-node.sh
-# Blocks Edit/Write tools if no recent action/goal node exists in deciduous
+# Blocks Edit/Write tools if no recent deciduous node exists
 # Exit code 2 = block the tool and show error to Claude
 
 # Check if deciduous is initialized
 if [ ! -d ".deciduous" ]; then
-    # No deciduous in this project, allow all edits
     exit 0
 fi
 
-# Check for any action or goal node created in the last 15 minutes
-# We check both because starting new work creates a goal first
-recent_node=$(deciduous nodes 2>/dev/null | grep -E '\[(goal|action)\]' | tail -5)
+DB_FILE=".deciduous/deciduous.db"
 
-if [ -z "$recent_node" ]; then
-    # No nodes at all - this is a fresh project, allow edits
+# No database = fresh project, allow
+if [ ! -f "$DB_FILE" ]; then
     exit 0
 fi
 
-# Check if any node was created recently (within last 15 min)
-# Parse the timestamps from nodes output
+# Check if any nodes exist at all
+node_count=$(deciduous nodes 2>/dev/null | grep -cE '^\d+' || echo "0")
+if [ "$node_count" -eq 0 ] 2>/dev/null; then
+    exit 0
+fi
+
+# Check modification time of the database file
+# If it was modified in the last 15 minutes, a node was recently added
 now=$(date +%s)
 fifteen_min_ago=$((now - 900))
 
-# Get the most recent node's timestamp
-# deciduous nodes format: ID [type] Title [confidence%] [timestamp]
-latest_timestamp=$(deciduous nodes 2>/dev/null | tail -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' | tail -1)
-
-if [ -n "$latest_timestamp" ]; then
-    # Convert to epoch
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        node_epoch=$(date -j -f "%Y-%m-%d %H:%M:%S" "$latest_timestamp" +%s 2>/dev/null || echo "0")
-    else
-        node_epoch=$(date -d "$latest_timestamp" +%s 2>/dev/null || echo "0")
-    fi
-
-    if [ "$node_epoch" -gt "$fifteen_min_ago" ]; then
-        # Recent node exists, allow the edit
-        exit 0
-    fi
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    db_mtime=$(stat -f %m "$DB_FILE" 2>/dev/null || echo "0")
+else
+    db_mtime=$(stat -c %Y "$DB_FILE" 2>/dev/null || echo "0")
 fi
 
-# No recent node - block and provide guidance
+if [ "$db_mtime" -gt "$fifteen_min_ago" ]; then
+    exit 0
+fi
+
+# DB is stale - block and provide guidance
 cat >&2 << 'EOF'
 +===================================================================+
-|  DECIDUOUS: No recent action/goal node found                      |
+|  DECIDUOUS: No recent action/goal node found (>15 min stale)      |
 +===================================================================+
 |  Before editing files, log what you're about to do:               |
 |                                                                   |
