@@ -114,7 +114,7 @@ defmodule TermDiff.Git.Runner do
         collect_output(port, [data | acc], expected_exits)
 
       {^port, {:exit_status, code}} ->
-        output = acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.trim()
+        output = acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.trim_trailing()
 
         if code in expected_exits do
           {:ok, output}
