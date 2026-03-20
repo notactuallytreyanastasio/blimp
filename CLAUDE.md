@@ -1,8 +1,30 @@
 # Project Instructions
 
-## Elixir Compilation Rules - CRITICAL
+## Elixir Development Rules - CRITICAL
 
-**ALL Elixir compilation MUST use `--warnings-as-errors`.** Zero tolerance for warnings.
+### TDD: Red-Green-Refactor is Mandatory
+
+**ALWAYS write tests FIRST.** This is not optional.
+
+The loop:
+1. **Red** - Write a failing test that describes the behavior you want
+2. **Green** - Write the minimum code to make the test pass
+3. **Refactor** - Clean up, extract, simplify. Tests still pass.
+4. Repeat.
+
+Rules:
+- NEVER write implementation code without a test that exercises it
+- Write the test BEFORE the implementation, not after
+- Run `mix test` after every change. If tests fail, fix them before writing more code.
+- If you are about to write a new function: write the test first
+- If you are about to fix a bug: write a test that reproduces the bug first
+- If you are about to refactor: make sure tests pass before AND after
+- Test the pure functional core thoroughly (parsers, state machines, transformations)
+- LiveView tests are integration tests, write them after the unit tests pass
+
+### Compilation: Zero Tolerance for Warnings
+
+**ALL Elixir compilation MUST use `--warnings-as-errors`.**
 
 - Always run `mix compile --warnings-as-errors` after editing Elixir files
 - If a warning appears in ANY tool output, fix it immediately before doing anything else
@@ -10,10 +32,74 @@
 - The PostToolUse hook `elixir-compile-check.sh` will block you if warnings are detected
 - Do not proceed past a warning. Fix it first.
 
+### Quality Checklist (run before considering anything "done")
+
+```bash
+mix compile --warnings-as-errors  # zero warnings
+mix test                          # all green
+mix credo --strict                # no issues
+mix format --check-formatted      # properly formatted
+```
+
 <!-- deciduous:start -->
 ## Decision Graph Workflow
 
 **THIS IS MANDATORY. Log decisions IN REAL-TIME, not retroactively.**
+
+## Git Branching Rules - CRITICAL
+
+**One branch per major concept.** Always work on a feature branch, never directly on main.
+
+### Branch naming convention
+
+```
+<chunk>/<feature-slug>
+```
+
+Examples:
+- `term-diff/stage-unstage-tdd` - staging feature in the diff follower
+- `term-diff/follow-mode-highlights` - follow mode hot highlights
+- `blimp-core/parser-basics` - first parser for the language
+- `blimp-core/actor-runtime` - actor runtime implementation
+- `blog/second-post` - second blog entry
+- `infra/deploy-ci` - CI/deployment work
+
+### Workflow
+
+1. Create a branch BEFORE starting work: `git checkout -b <chunk>/<slug>`
+2. Commit in small logical chunks on the branch
+3. When the feature is complete, push and open a PR: `git push -u origin <branch> && gh pr create`
+4. PR into main after review
+5. Delete the branch after merge
+
+### Rules
+
+- NEVER commit directly to main during active development
+- Each branch should represent ONE coherent feature or fix
+- If work spans multiple chunks (e.g. blog post about a term_diff feature), pick the primary chunk for the branch name
+- Deciduous nodes are auto-tagged with the current branch
+
+### FAILURE MODE: Batch Backfilling
+
+If you ever find yourself needing to "catch up" on deciduous logging, you have ALREADY FAILED. The graph is useless if it's written after the fact because it captures what you *remember* doing, not what you *actually* did. The whole point is real-time capture.
+
+**How this failure happens:**
+- You get excited about implementation and start writing code without logging
+- You tell yourself "I'll log it after this one thing" and then forget
+- You batch 10 actions into one big logging session
+
+**How to prevent it:**
+- BEFORE every Edit/Write: have you logged an action node? The hook will block you if not.
+- BEFORE every new feature: have you logged a goal node? Do it FIRST.
+- AFTER every outcome (test pass, compile success, deploy): log it IMMEDIATELY, don't do the next thing first.
+- If you are about to write MORE than 3 lines of code: STOP. Log the action. Then write.
+- If the user asks for a new feature: log the goal BEFORE you even think about implementation.
+- When you create a node: link it to its parent IN THE SAME COMMAND SEQUENCE. Not later.
+
+**Self-check every 5 tool calls:**
+- When was my last deciduous node? If more than 5 tool calls ago, something is wrong.
+- Am I in the middle of implementation with no action node? Stop and log.
+- Did something just succeed or fail? Log the outcome NOW.
 
 ### Available Slash Commands
 
