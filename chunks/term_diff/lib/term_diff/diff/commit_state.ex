@@ -13,25 +13,27 @@ defmodule TermDiff.Diff.CommitState do
     :amend  -> git commit --amend
   """
 
-  @type phase :: :idle | :editing | :submitting | :error
-  @type mode :: :commit | :amend | nil
+  use Ecto.Schema
+
+  @primary_key false
+  embedded_schema do
+    field :phase, Ecto.Enum, values: [:idle, :editing, :submitting, :error], default: :idle
+    field :mode, Ecto.Enum, values: [:commit, :amend]
+    field :message, :string, default: ""
+    field :error, :string
+  end
 
   @type t :: %__MODULE__{
-          phase: phase(),
-          mode: mode(),
+          phase: :idle | :editing | :submitting | :error,
+          mode: :commit | :amend | nil,
           message: String.t(),
           error: String.t() | nil
         }
 
-  defstruct phase: :idle,
-            mode: nil,
-            message: "",
-            error: nil
-
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
-  @spec enter(mode(), keyword()) :: t()
+  @spec enter(:commit | :amend, keyword()) :: t()
   def enter(:commit, opts) do
     staged_count = Keyword.get(opts, :staged_count, 0)
 
@@ -71,10 +73,7 @@ defmodule TermDiff.Diff.CommitState do
   def submit(state), do: state
 
   @spec complete(t()) :: t()
-  def complete(%{phase: :submitting}) do
-    %__MODULE__{}
-  end
-
+  def complete(%{phase: :submitting}), do: %__MODULE__{}
   def complete(state), do: state
 
   @spec fail(t(), String.t()) :: t()
