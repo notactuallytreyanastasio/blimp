@@ -17,9 +17,7 @@ defmodule TermDiff.Diff.Navigation do
           following: boolean(),
           open_file: String.t() | nil,
           stage_file: String.t() | nil,
-          unstage_file: String.t() | nil,
-          commit_mode: boolean(),
-          amend_mode: boolean()
+          unstage_file: String.t() | nil
         }
 
   defstruct focus: :file_list,
@@ -35,9 +33,7 @@ defmodule TermDiff.Diff.Navigation do
             following: false,
             open_file: nil,
             stage_file: nil,
-            unstage_file: nil,
-            commit_mode: false,
-            amend_mode: false
+            unstage_file: nil
 
   @spec handle_key(t(), String.t()) :: t()
   def handle_key(nav, "j"), do: move_down(nav)
@@ -50,8 +46,6 @@ defmodule TermDiff.Diff.Navigation do
   def handle_key(nav, "o"), do: open_selected(nav)
   def handle_key(nav, "s"), do: stage_selected(nav)
   def handle_key(nav, "u"), do: unstage_selected(nav)
-  def handle_key(nav, "cc"), do: enter_commit_mode(nav)
-  def handle_key(nav, "a"), do: enter_amend_mode(nav)
   def handle_key(nav, _), do: nav
 
   @spec move_down(t()) :: t()
@@ -165,20 +159,6 @@ defmodule TermDiff.Diff.Navigation do
 
   @spec clear_open_file(t()) :: t()
   def clear_open_file(nav), do: %{nav | open_file: nil}
-
-  @spec enter_commit_mode(t()) :: t()
-  defp enter_commit_mode(%{focus: :file_list} = nav), do: %{nav | commit_mode: true}
-  defp enter_commit_mode(nav), do: nav
-
-  @spec enter_amend_mode(t()) :: t()
-  defp enter_amend_mode(%{focus: focus} = nav) when focus in [:file_list, :log_view, :log_detail] do
-    %{nav | commit_mode: true, amend_mode: true}
-  end
-
-  defp enter_amend_mode(nav), do: nav
-
-  @spec exit_commit_mode(t()) :: t()
-  def exit_commit_mode(nav), do: %{nav | commit_mode: false, amend_mode: false}
 
   @spec clear_stage_action(t()) :: t()
   def clear_stage_action(nav), do: %{nav | stage_file: nil, unstage_file: nil}

@@ -3,7 +3,7 @@ defmodule TermDiffWeb.DiffLive do
 
   alias TermDiff.Git.{Runner, Status, Diff, Log, Watcher}
   alias TermDiff.Git.Types.RepoState
-  alias TermDiff.Diff.Navigation
+  alias TermDiff.Diff.{Navigation, CommitState}
   alias TermDiff.Commentary.Store, as: CommentaryStore
 
   @impl true
@@ -28,7 +28,7 @@ defmodule TermDiffWeb.DiffLive do
       |> assign(:commit_diff, nil)
       |> assign(:commentary_status, :idle)
       |> assign(:expanded_comments, MapSet.new())
-      |> assign(:commit_message, "")
+      |> assign(:commit, CommitState.new())
 
     {:ok, socket}
   end
@@ -41,8 +41,8 @@ defmodule TermDiffWeb.DiffLive do
       <.keybinding_bar nav={@nav} />
 
       <div class="flex flex-1 overflow-hidden">
-        <%= if @nav.commit_mode do %>
-          <.commit_layout commit_message={@commit_message} repo_state={@repo_state} amend={@nav.amend_mode} />
+        <%= if CommitState.active?(@commit) do %>
+          <.commit_layout commit={@commit} repo_state={@repo_state} />
         <% else %>
           <%= if @nav.focus in [:log_view, :log_detail] do %>
             <.log_layout
@@ -116,39 +116,41 @@ defmodule TermDiffWeb.DiffLive do
   end
 
   @impl true
-  def handle_event("keydown", %{"key" => "Escape"}, %{assigns: %{nav: %{commit_mode: true}}} = socket) do
-    nav = Navigation.exit_commit_mode(socket.assigns.nav)
-
-    socket =
-      socket
-      |> assign(:nav, nav)
-      |> assign(:commit_message, "")
-
-    {:noreply, socket}
+  def handle_event("keydown", %{"key" => "Escape"}, socket) do
+    if CommitState.active?(socket.assigns.commit) do
+      {:noreply, assign(socket, :commit, CommitState.cancel(socket.assigns.commit))}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
-  def handle_event("keydown", _params, %{assigns: %{nav: %{commit_mode: true}}} = socket) do
+  def handle_event("keydown", _params, socket) when socket.assigns.commit.phase in [:editing, :submitting] do
     {:noreply, socket}
   end
 
   @impl true
   def handle_event("keydown", %{"key" => key}, socket) do
-    # Ensure selected_file is set before handling the key
+    # Dismiss commit error on any key
+    socket =
+      if socket.assigns.commit.phase == :error do
+        assign(socket, :commit, CommitState.cancel(socket.assigns.commit))
+      else
+        socket
+      end
+
     current_nav = socket.assigns.nav
     current_file = select_file_for_nav(socket.assigns.repo_state.files, current_nav)
     current_nav = %{current_nav | selected_file: current_file}
 
     nav = Navigation.handle_key(current_nav, key)
 
-    old_nav = socket.assigns.nav
-
     socket =
       socket
       |> handle_open_file(nav)
       |> handle_stage_actions(nav)
       |> handle_nav_change(nav)
-      |> handle_commit_enter(old_nav, nav)
+      |> handle_commit_enter(key)
 
     {:noreply, socket}
   end
@@ -173,52 +175,44 @@ defmodule TermDiffWeb.DiffLive do
 
   @impl true
   def handle_event("update_commit_message", %{"message" => message}, socket) do
-    {:noreply, assign(socket, :commit_message, message)}
+    commit = CommitState.update_message(socket.assigns.commit, message)
+    {:noreply, assign(socket, :commit, commit)}
   end
 
   @impl true
   def handle_event("submit_commit", %{"message" => message}, socket) do
-    message = String.trim(message)
-    amend? = socket.assigns.nav.amend_mode
+    commit =
+      socket.assigns.commit
+      |> CommitState.update_message(message)
+      |> CommitState.submit()
 
-    if message == "" do
-      {:noreply, put_flash(socket, :error, "Commit message cannot be empty")}
-    else
-      result =
-        if amend?,
-          do: Runner.commit_amend(socket.assigns.repo_path, message),
-          else: Runner.commit(socket.assigns.repo_path, message)
+    case commit.phase do
+      :submitting ->
+        result =
+          if commit.mode == :amend,
+            do: Runner.commit_amend(socket.assigns.repo_path, String.trim(message)),
+            else: Runner.commit(socket.assigns.repo_path, String.trim(message))
 
-      case result do
-        {:ok, _output} ->
-          nav = Navigation.exit_commit_mode(socket.assigns.nav)
-          send(self(), :refresh)
-          flash_msg = if amend?, do: "Amended successfully", else: "Committed successfully"
+        case result do
+          {:ok, _output} ->
+            send(self(), :refresh)
+            {:noreply, assign(socket, :commit, CommitState.complete(commit))}
 
-          socket =
-            socket
-            |> assign(:nav, nav)
-            |> assign(:commit_message, "")
-            |> put_flash(:info, flash_msg)
+          {:error, error} ->
+            {:noreply, assign(socket, :commit, CommitState.fail(commit, error))}
+        end
 
-          {:noreply, socket}
+      :error ->
+        {:noreply, assign(socket, :commit, commit)}
 
-        {:error, error} ->
-          {:noreply, put_flash(socket, :error, "Commit failed: #{error}")}
-      end
+      _ ->
+        {:noreply, socket}
     end
   end
 
   @impl true
   def handle_event("cancel_commit", _params, socket) do
-    nav = Navigation.exit_commit_mode(socket.assigns.nav)
-
-    socket =
-      socket
-      |> assign(:nav, nav)
-      |> assign(:commit_message, "")
-
-    {:noreply, socket}
+    {:noreply, assign(socket, :commit, CommitState.cancel(socket.assigns.commit))}
   end
 
   @impl true
@@ -434,20 +428,27 @@ defmodule TermDiffWeb.DiffLive do
     end
   end
 
-  defp handle_commit_enter(socket, old_nav, new_nav) do
-    entering_commit = not old_nav.commit_mode and new_nav.commit_mode
+  defp handle_commit_enter(socket, "cc") do
+    staged_count = count_staged(socket.assigns.repo_state.files)
+    commit = CommitState.enter(:commit, staged_count: staged_count)
+    assign(socket, :commit, commit)
+  end
 
-    if entering_commit and new_nav.amend_mode do
-      message =
-        case Runner.last_commit_message(socket.assigns.repo_path) do
-          {:ok, msg} -> String.trim(msg)
-          _ -> ""
-        end
+  defp handle_commit_enter(socket, "a") do
+    last_message =
+      case Runner.last_commit_message(socket.assigns.repo_path) do
+        {:ok, msg} -> msg
+        _ -> nil
+      end
 
-      assign(socket, :commit_message, message)
-    else
-      socket
-    end
+    commit = CommitState.enter(:amend, last_message: last_message)
+    assign(socket, :commit, commit)
+  end
+
+  defp handle_commit_enter(socket, _key), do: socket
+
+  defp count_staged(files) do
+    Enum.count(files, fn f -> f.staged_status && f.staged_status != :untracked end)
   end
 
   defp maybe_request_review(_repo_state, repo_path) do
@@ -471,17 +472,28 @@ defmodule TermDiffWeb.DiffLive do
 
   # ── Layout Components ──
 
+  defp commit_layout(%{commit: %{phase: :error}} = assigns) do
+    ~H"""
+    <div class="flex flex-1 items-center justify-center">
+      <div class="bg-red-50 border border-red-200 rounded p-4 max-w-md text-center">
+        <div class="text-red-700 text-sm font-semibold mb-2"><%= @commit.error %></div>
+        <div class="text-neutral-500 text-xs">Press any key or Esc to dismiss</div>
+      </div>
+    </div>
+    """
+  end
+
   defp commit_layout(assigns) do
     ~H"""
     <div class="flex flex-1 overflow-hidden">
       <div class="w-1/2 border-r border-neutral-200 flex flex-col p-4">
         <div class="text-xs text-neutral-500 mb-2 font-semibold">
-          <%= if @amend, do: "AMEND COMMIT", else: "COMMIT MESSAGE" %>
+          <%= if @commit.mode == :amend, do: "AMEND COMMIT", else: "COMMIT MESSAGE" %>
         </div>
         <form phx-submit="submit_commit" phx-change="update_commit_message" class="flex flex-col flex-1">
           <textarea
             name="message"
-            value={@commit_message}
+            value={@commit.message}
             placeholder="First line: concise summary&#10;&#10;Body: explain WHY, not just WHAT changed."
             class="flex-1 w-full p-3 bg-neutral-50 border border-neutral-200 rounded text-[13px] font-mono leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-green-400/60 focus:border-transparent"
             autofocus
@@ -495,7 +507,7 @@ defmodule TermDiffWeb.DiffLive do
                 Cancel (Esc)
               </button>
               <button type="submit" class="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">
-                <%= if @amend, do: "Amend", else: "Commit" %>
+                <%= if @commit.mode == :amend, do: "Amend", else: "Commit" %>
               </button>
             </div>
           </div>
