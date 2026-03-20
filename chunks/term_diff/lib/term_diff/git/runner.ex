@@ -36,6 +36,45 @@ defmodule TermDiff.Git.Runner do
     run(repo_path, ["show", commit_hash, "--format="])
   end
 
+  @spec stage(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def stage(repo_path, file_path) do
+    run(repo_path, ["add", file_path])
+  end
+
+  @spec unstage(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def unstage(repo_path, file_path) do
+    run(repo_path, ["reset", "HEAD", file_path])
+  end
+
+  @spec diff_untracked(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def diff_untracked(repo_path, file_path) do
+    # Use relative path so git produces "diff --git a/path b/path" format
+    case System.cmd("git", ["diff", "--no-index", "/dev/null", file_path],
+           cd: repo_path,
+           stderr_to_stdout: true
+         ) do
+      # exit code 1 means "differences found" which is expected
+      {output, 1} -> {:ok, String.trim(output)}
+      {output, 0} -> {:ok, String.trim(output)}
+      {error, _code} -> {:error, String.trim(error)}
+    end
+  end
+
+  @spec commit(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def commit(repo_path, message) do
+    run(repo_path, ["commit", "-m", message])
+  end
+
+  @spec commit_amend(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def commit_amend(repo_path, message) do
+    run(repo_path, ["commit", "--amend", "-m", message])
+  end
+
+  @spec last_commit_message(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def last_commit_message(repo_path) do
+    run(repo_path, ["log", "-1", "--format=%B"])
+  end
+
   @spec open_editor(String.t(), String.t()) :: :ok | {:error, String.t()}
   def open_editor(repo_path, file_path) do
     editor = System.get_env("EDITOR", "vim")

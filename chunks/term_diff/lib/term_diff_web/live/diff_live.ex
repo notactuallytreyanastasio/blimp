@@ -4,6 +4,7 @@ defmodule TermDiffWeb.DiffLive do
   alias TermDiff.Git.{Runner, Status, Diff, Log, Watcher}
   alias TermDiff.Git.Types.RepoState
   alias TermDiff.Diff.Navigation
+  alias TermDiff.Commentary.Store, as: CommentaryStore
 
   @impl true
   def mount(params, _session, socket) do
@@ -12,6 +13,7 @@ defmodule TermDiffWeb.DiffLive do
 
     if connected?(socket) do
       Watcher.subscribe()
+      Phoenix.PubSub.subscribe(TermDiff.PubSub, "commentary:updates")
       send(self(), :refresh)
     end
 
@@ -24,6 +26,9 @@ defmodule TermDiffWeb.DiffLive do
       |> assign(:log_entries, [])
       |> assign(:commit_detail, nil)
       |> assign(:commit_diff, nil)
+      |> assign(:commentary_status, :idle)
+      |> assign(:expanded_comments, MapSet.new())
+      |> assign(:commit_message, "")
 
     {:ok, socket}
   end
@@ -32,23 +37,28 @@ defmodule TermDiffWeb.DiffLive do
   def render(assigns) do
     ~H"""
     <div id="term-diff" phx-hook="KeyNav" class="h-screen flex flex-col font-mono text-[13px] leading-snug bg-white text-neutral-900">
-      <.status_bar repo_state={@repo_state} nav={@nav} repo_path={@repo_path} />
+      <.status_bar repo_state={@repo_state} nav={@nav} repo_path={@repo_path} commentary_status={@commentary_status} />
       <.keybinding_bar nav={@nav} />
 
       <div class="flex flex-1 overflow-hidden">
-        <%= if @nav.focus in [:log_view, :log_detail] do %>
-          <.log_layout
-            nav={@nav}
-            log_entries={@log_entries}
-            commit_detail={@commit_detail}
-            commit_diff={@commit_diff}
-          />
+        <%= if @nav.commit_mode do %>
+          <.commit_layout commit_message={@commit_message} repo_state={@repo_state} amend={@nav.amend_mode} />
         <% else %>
-          <.diff_layout
-            nav={@nav}
-            repo_state={@repo_state}
-            selected_diff={@selected_diff}
-          />
+          <%= if @nav.focus in [:log_view, :log_detail] do %>
+            <.log_layout
+              nav={@nav}
+              log_entries={@log_entries}
+              commit_detail={@commit_detail}
+              commit_diff={@commit_diff}
+            />
+          <% else %>
+            <.diff_layout
+              nav={@nav}
+              repo_state={@repo_state}
+              selected_diff={@selected_diff}
+              expanded_comments={@expanded_comments}
+            />
+          <% end %>
         <% end %>
       </div>
     </div>
@@ -59,6 +69,21 @@ defmodule TermDiffWeb.DiffLive do
   def handle_info(:repo_changed, socket) do
     send(self(), :refresh)
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info(:commentary_reviewing, socket) do
+    {:noreply, assign(socket, :commentary_status, :reviewing)}
+  end
+
+  @impl true
+  def handle_info(:commentary_ready, socket) do
+    {:noreply, assign(socket, :commentary_status, :ready)}
+  end
+
+  @impl true
+  def handle_info(:commentary_error, socket) do
+    {:noreply, assign(socket, :commentary_status, :error)}
   end
 
   @impl true
@@ -78,6 +103,9 @@ defmodule TermDiffWeb.DiffLive do
         %{nav | selected_file: selected_file}
       end
 
+    # Kick off async commentary review if there are diffs
+    maybe_request_review(repo_state, socket.assigns.repo_path)
+
     socket =
       socket
       |> assign(:repo_state, repo_state)
@@ -88,13 +116,39 @@ defmodule TermDiffWeb.DiffLive do
   end
 
   @impl true
+  def handle_event("keydown", %{"key" => "Escape"}, %{assigns: %{nav: %{commit_mode: true}}} = socket) do
+    nav = Navigation.exit_commit_mode(socket.assigns.nav)
+
+    socket =
+      socket
+      |> assign(:nav, nav)
+      |> assign(:commit_message, "")
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("keydown", _params, %{assigns: %{nav: %{commit_mode: true}}} = socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_event("keydown", %{"key" => key}, socket) do
-    nav = Navigation.handle_key(socket.assigns.nav, key)
+    # Ensure selected_file is set before handling the key
+    current_nav = socket.assigns.nav
+    current_file = select_file_for_nav(socket.assigns.repo_state.files, current_nav)
+    current_nav = %{current_nav | selected_file: current_file}
+
+    nav = Navigation.handle_key(current_nav, key)
+
+    old_nav = socket.assigns.nav
 
     socket =
       socket
       |> handle_open_file(nav)
+      |> handle_stage_actions(nav)
       |> handle_nav_change(nav)
+      |> handle_commit_enter(old_nav, nav)
 
     {:noreply, socket}
   end
@@ -115,6 +169,68 @@ defmodule TermDiffWeb.DiffLive do
       |> assign(:selected_diff, selected_diff)
 
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("update_commit_message", %{"message" => message}, socket) do
+    {:noreply, assign(socket, :commit_message, message)}
+  end
+
+  @impl true
+  def handle_event("submit_commit", %{"message" => message}, socket) do
+    message = String.trim(message)
+    amend? = socket.assigns.nav.amend_mode
+
+    if message == "" do
+      {:noreply, put_flash(socket, :error, "Commit message cannot be empty")}
+    else
+      result =
+        if amend?,
+          do: Runner.commit_amend(socket.assigns.repo_path, message),
+          else: Runner.commit(socket.assigns.repo_path, message)
+
+      case result do
+        {:ok, _output} ->
+          nav = Navigation.exit_commit_mode(socket.assigns.nav)
+          send(self(), :refresh)
+          flash_msg = if amend?, do: "Amended successfully", else: "Committed successfully"
+
+          socket =
+            socket
+            |> assign(:nav, nav)
+            |> assign(:commit_message, "")
+            |> put_flash(:info, flash_msg)
+
+          {:noreply, socket}
+
+        {:error, error} ->
+          {:noreply, put_flash(socket, :error, "Commit failed: #{error}")}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("cancel_commit", _params, socket) do
+    nav = Navigation.exit_commit_mode(socket.assigns.nav)
+
+    socket =
+      socket
+      |> assign(:nav, nav)
+      |> assign(:commit_message, "")
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("toggle_comment", %{"id" => annotation_id}, socket) do
+    expanded = socket.assigns.expanded_comments
+
+    expanded =
+      if MapSet.member?(expanded, annotation_id),
+        do: MapSet.delete(expanded, annotation_id),
+        else: MapSet.put(expanded, annotation_id)
+
+    {:noreply, assign(socket, :expanded_comments, expanded)}
   end
 
   @impl true
@@ -140,6 +256,27 @@ defmodule TermDiffWeb.DiffLive do
       assign(socket, :nav, nav)
     else
       socket
+    end
+  end
+
+  defp handle_stage_actions(socket, nav) do
+    cond do
+      nav.stage_file ->
+        Runner.stage(socket.assigns.repo_path, nav.stage_file)
+        nav = Navigation.clear_stage_action(nav)
+        socket = assign(socket, :nav, nav)
+        send(self(), :refresh)
+        socket
+
+      nav.unstage_file ->
+        Runner.unstage(socket.assigns.repo_path, nav.unstage_file)
+        nav = Navigation.clear_stage_action(nav)
+        socket = assign(socket, :nav, nav)
+        send(self(), :refresh)
+        socket
+
+      true ->
+        socket
     end
   end
 
@@ -214,11 +351,25 @@ defmodule TermDiffWeb.DiffLive do
       unstaged_diffs = Diff.parse(diff_unstaged)
       staged_diffs = Diff.parse(diff_staged)
 
+      untracked_files =
+        files
+        |> Enum.filter(fn f -> f.unstaged_status == :untracked end)
+        |> Enum.map(& &1.path)
+
+      untracked_diffs =
+        Enum.flat_map(untracked_files, fn path ->
+          case Runner.diff_untracked(repo_path, path) do
+            {:ok, raw} -> Diff.parse(raw)
+            _ -> []
+          end
+        end)
+
       diff_map =
         Map.merge(
           Map.new(staged_diffs, fn d -> {d.path, d} end),
           Map.new(unstaged_diffs, fn d -> {d.path, d} end)
         )
+        |> Map.merge(Map.new(untracked_diffs, fn d -> {d.path, d} end))
 
       %RepoState{
         files: files,
@@ -283,7 +434,83 @@ defmodule TermDiffWeb.DiffLive do
     end
   end
 
+  defp handle_commit_enter(socket, old_nav, new_nav) do
+    entering_commit = not old_nav.commit_mode and new_nav.commit_mode
+
+    if entering_commit and new_nav.amend_mode do
+      message =
+        case Runner.last_commit_message(socket.assigns.repo_path) do
+          {:ok, msg} -> String.trim(msg)
+          _ -> ""
+        end
+
+      assign(socket, :commit_message, message)
+    else
+      socket
+    end
+  end
+
+  defp maybe_request_review(_repo_state, repo_path) do
+    raw_diff = build_raw_diff(repo_path)
+
+    if raw_diff != "" do
+      TermDiff.Commentary.Server.request_review(raw_diff, repo_path)
+    end
+  end
+
+  defp build_raw_diff(repo_path) do
+    case Runner.diff(repo_path) do
+      {:ok, diff} -> diff
+      _ -> ""
+    end
+  end
+
+  defp annotations_for_line(file_path, line_number) do
+    CommentaryStore.get_annotations_for_line(file_path, line_number)
+  end
+
   # ── Layout Components ──
+
+  defp commit_layout(assigns) do
+    ~H"""
+    <div class="flex flex-1 overflow-hidden">
+      <div class="w-1/2 border-r border-neutral-200 flex flex-col p-4">
+        <div class="text-xs text-neutral-500 mb-2 font-semibold">
+          <%= if @amend, do: "AMEND COMMIT", else: "COMMIT MESSAGE" %>
+        </div>
+        <form phx-submit="submit_commit" phx-change="update_commit_message" class="flex flex-col flex-1">
+          <textarea
+            name="message"
+            value={@commit_message}
+            placeholder="First line: concise summary&#10;&#10;Body: explain WHY, not just WHAT changed."
+            class="flex-1 w-full p-3 bg-neutral-50 border border-neutral-200 rounded text-[13px] font-mono leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-green-400/60 focus:border-transparent"
+            autofocus
+          ></textarea>
+          <div class="flex items-center justify-between mt-3">
+            <div class="text-[11px] text-neutral-400">
+              <span><%= length(@repo_state.files) %> files</span>
+            </div>
+            <div class="flex gap-2">
+              <button type="button" phx-click="cancel_commit" class="px-3 py-1 text-xs border border-neutral-300 rounded hover:bg-neutral-100">
+                Cancel (Esc)
+              </button>
+              <button type="submit" class="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">
+                <%= if @amend, do: "Amend", else: "Commit" %>
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="w-1/2 flex flex-col p-4 overflow-y-auto">
+        <div class="text-xs text-neutral-500 mb-2 font-semibold">STAGED CHANGES</div>
+        <div :for={file <- @repo_state.files} class="text-[12px] py-0.5">
+          <span :if={file.staged_status && file.staged_status != :untracked} class={"font-semibold #{status_color(file.staged_status)}"}><%= status_char(file.staged_status) %></span>
+          <span :if={file.staged_status && file.staged_status != :untracked} class="ml-2"><%= file.path %></span>
+        </div>
+      </div>
+    </div>
+    """
+  end
 
   defp diff_layout(assigns) do
     ~H"""
@@ -291,7 +518,7 @@ defmodule TermDiffWeb.DiffLive do
       <.file_list files={@repo_state.files} nav={@nav} diffs={@repo_state.diffs} />
     </div>
     <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :diff_view)}"} id="diff-pane" phx-hook="AutoScroll">
-      <.diff_pane diff={@selected_diff} nav={@nav} />
+      <.diff_pane diff={@selected_diff} nav={@nav} expanded_comments={@expanded_comments} />
     </div>
     """
   end
@@ -327,6 +554,9 @@ defmodule TermDiffWeb.DiffLive do
         <span class="text-neutral-300 truncate max-w-xs"><%= @repo_path %></span>
       </div>
       <div class="flex gap-4">
+        <span :if={@commentary_status == :reviewing} class="text-amber-600 font-semibold animate-pulse">REVIEWING</span>
+        <span :if={@commentary_status == :ready} class="text-blue-600 font-semibold">AI</span>
+        <span :if={@commentary_status == :error} class="text-red-500 font-semibold">AI ERR</span>
         <span :if={@nav.following} class="text-blue-600 font-semibold">FOLLOWING</span>
         <span :if={@nav.focus in [:log_view, :log_detail]} class="text-purple-600 font-semibold">LOG</span>
       </div>
@@ -342,6 +572,10 @@ defmodule TermDiffWeb.DiffLive do
       <span><kbd class="text-neutral-600">q</kbd> back</span>
       <span><kbd class="text-neutral-600">l</kbd> log</span>
       <span><kbd class="text-neutral-600">o</kbd> open in $EDITOR</span>
+      <span><kbd class="text-neutral-600">s</kbd> stage</span>
+      <span><kbd class="text-neutral-600">u</kbd> unstage</span>
+      <span><kbd class="text-neutral-600">cc</kbd> commit</span>
+      <span><kbd class="text-neutral-600">a</kbd> amend</span>
       <span><kbd class="text-neutral-600">F</kbd> follow</span>
       <span><kbd class="text-neutral-600">Tab</kbd> switch pane</span>
     </div>
@@ -356,10 +590,12 @@ defmodule TermDiffWeb.DiffLive do
       phx-click="select_file"
       phx-value-index={idx}
       data-selected={if idx == @nav.file_index && @nav.focus == :file_list, do: "true"}
-      class={"flex items-center gap-2 px-1 py-0.5 cursor-pointer hover:bg-neutral-50 #{if idx == @nav.file_index && @nav.focus == :file_list, do: "bg-blue-400/5 ring-1 ring-blue-400/40 text-blue-900", else: if idx == @nav.file_index && @nav.focus == :diff_view, do: "bg-blue-50 text-blue-900", else: ""}"}
+      class={"flex items-center gap-2 px-1 py-0.5 cursor-pointer hover:bg-neutral-50 relative #{file_row_class(idx, @nav)}"}
     >
       <span class={"w-4 text-center font-semibold #{status_color(file.unstaged_status || file.staged_status)}"}><%= status_char(file.unstaged_status || file.staged_status) %></span>
-      <span class="truncate"><%= file.path %></span>
+      <span :if={file.staged_status && file.staged_status != :untracked} class="text-green-600 text-[10px] font-semibold w-3">S</span>
+      <span :if={!file.staged_status || file.staged_status == :untracked} class="w-3"></span>
+      <span class="truncate" title={file.path}><%= file.path %></span>
       <span :if={diff = @diffs[file.path]} class="ml-auto text-xs text-neutral-400">
         <span :if={diff.additions > 0} class="text-green-600">+<%= diff.additions %></span>
         <span :if={diff.deletions > 0} class="text-red-600 ml-1">-<%= diff.deletions %></span>
@@ -374,7 +610,7 @@ defmodule TermDiffWeb.DiffLive do
     <div
       :for={{entry, idx} <- Enum.with_index(@entries)}
       data-selected={if idx == @nav.log_index && @nav.focus == :log_view, do: "true"}
-      class={"flex items-center gap-2 px-1 py-0.5 cursor-default #{if idx == @nav.log_index && @nav.focus == :log_view, do: "bg-blue-400/5 ring-1 ring-blue-400/40 text-purple-900", else: if idx == @nav.log_index, do: "bg-purple-50 text-purple-900", else: ""}"}
+      class={"flex items-center gap-2 px-1 py-0.5 cursor-default #{log_row_class(idx, @nav)}"}
     >
       <span class="text-amber-600 font-semibold w-16 shrink-0"><%= entry.hash %></span>
       <span class="truncate"><%= entry.message %></span>
@@ -412,14 +648,58 @@ defmodule TermDiffWeb.DiffLive do
         >
           <%= hunk.header %>
         </div>
-        <div :for={line <- hunk.lines} class={"flex #{line_class(line, hunk)}"}>
-          <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0"><%= line.old_line_number || "" %></span>
-          <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0"><%= line.new_line_number || "" %></span>
-          <span class="px-1 whitespace-pre flex-1"><%= line_prefix(line.type) %><%= line.content %></span>
-        </div>
+        <%= for line <- hunk.lines do %>
+          <% line_annotations = if line.new_line_number, do: annotations_for_line(@diff.path, line.new_line_number), else: [] %>
+          <div class={"flex #{line_class(line, hunk)}"}>
+            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0"><%= line.old_line_number || "" %></span>
+            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0"><%= line.new_line_number || "" %></span>
+            <%= if line_annotations != [] do %>
+              <span
+                phx-click="toggle_comment"
+                phx-value-id={hd(line_annotations).id}
+                class={"w-4 text-center cursor-pointer shrink-0 #{severity_color_dot(hd(line_annotations).severity)}"}
+                title={hd(line_annotations).comment}
+              ><%= severity_icon(hd(line_annotations).severity) %></span>
+            <% else %>
+              <span class="w-4 shrink-0"></span>
+            <% end %>
+            <span class="px-1 whitespace-pre flex-1"><%= line_prefix(line.type) %><%= line.content %></span>
+          </div>
+          <%= for ann <- line_annotations, MapSet.member?(@expanded_comments, ann.id) do %>
+            <div class="ml-24 p-2 mb-1 bg-amber-50 border-l-2 border-amber-400 text-xs text-neutral-700">
+              <%= ann.comment %>
+            </div>
+          <% end %>
+        <% end %>
       </div>
     </div>
     """
+  end
+
+  defp file_row_class(idx, nav) do
+    cond do
+      idx == nav.file_index && nav.focus == :file_list ->
+        "bg-blue-400/5 ring-1 ring-blue-400/40 text-blue-900"
+
+      idx == nav.file_index && nav.focus == :diff_view ->
+        "bg-blue-50 text-blue-900"
+
+      true ->
+        ""
+    end
+  end
+
+  defp log_row_class(idx, nav) do
+    cond do
+      idx == nav.log_index && nav.focus == :log_view ->
+        "bg-blue-400/5 ring-1 ring-blue-400/40 text-purple-900"
+
+      idx == nav.log_index ->
+        "bg-purple-50 text-purple-900"
+
+      true ->
+        ""
+    end
   end
 
   defp status_char(:modified), do: "M"
@@ -450,4 +730,12 @@ defmodule TermDiffWeb.DiffLive do
   defp line_prefix(:addition), do: "+"
   defp line_prefix(:deletion), do: "-"
   defp line_prefix(:context), do: " "
+
+  defp severity_icon(:issue), do: "!"
+  defp severity_icon(:warning), do: "~"
+  defp severity_icon(_), do: "."
+
+  defp severity_color_dot(:issue), do: "text-red-500"
+  defp severity_color_dot(:warning), do: "text-amber-500"
+  defp severity_color_dot(_), do: "text-blue-500"
 end
