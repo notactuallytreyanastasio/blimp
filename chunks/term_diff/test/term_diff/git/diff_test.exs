@@ -2,7 +2,7 @@ defmodule TermDiff.Git.DiffTest do
   use ExUnit.Case, async: true
 
   alias TermDiff.Git.Diff
-  alias TermDiff.Git.Types.{FileDiff, Hunk, DiffLine}
+  alias TermDiff.Git.Types.{FileDiff, Hunk}
 
   @sample_diff """
   diff --git a/lib/app.ex b/lib/app.ex

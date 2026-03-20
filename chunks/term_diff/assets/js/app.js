@@ -38,11 +38,35 @@ Hooks.AutoScroll = {
 
 Hooks.KeyNav = {
   mounted() {
-    const navKeys = new Set(["j", "k", "Enter", "q", "Tab", "F", "l", "o"])
+    const navKeys = new Set(["j", "k", "Enter", "q", "Tab", "F", "l", "o", "s", "u", "a", "Escape"])
+    let lastKey = null
+    let lastKeyTime = 0
+
     window.addEventListener("keydown", (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return
+
+      const now = Date.now()
+
+      // cc chord: commit mode
+      if (e.key === "c" && lastKey === "c" && (now - lastKeyTime) < 400) {
+        e.preventDefault()
+        lastKey = null
+        lastKeyTime = 0
+        this.pushEvent("keydown", {key: "cc"})
+        return
+      }
+
+      if (e.key === "c") {
+        e.preventDefault()
+        lastKey = "c"
+        lastKeyTime = now
+        return
+      }
+
       if (navKeys.has(e.key)) {
         e.preventDefault()
+        lastKey = null
+        lastKeyTime = 0
         this.pushEvent("keydown", {key: e.key})
       }
     })
@@ -94,20 +118,8 @@ if (process.env.NODE_ENV === "development") {
     //
     //   * click with "c" key pressed to open at caller location
     //   * click with "d" key pressed to open at function component definition location
-    let keyDown
-    window.addEventListener("keydown", e => keyDown = e.key)
-    window.addEventListener("keyup", _e => keyDown = null)
-    window.addEventListener("click", e => {
-      if(keyDown === "c"){
-        e.preventDefault()
-        e.stopImmediatePropagation()
-        reloader.openEditorAtCaller(e.target)
-      } else if(keyDown === "d"){
-        e.preventDefault()
-        e.stopImmediatePropagation()
-        reloader.openEditorAtDef(e.target)
-      }
-    }, true)
+    // Disabled c/d click shortcuts to avoid conflict with KeyNav
+    // Use reloader.openEditorAtCaller(el) and reloader.openEditorAtDef(el) manually if needed
 
     window.liveReloader = reloader
   })

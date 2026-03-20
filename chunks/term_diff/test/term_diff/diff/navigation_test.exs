@@ -25,8 +25,13 @@ defmodule TermDiff.Diff.NavigationTest do
     end
 
     test "Enter switches to diff view" do
-      nav = %Navigation{focus: :file_list, file_index: 1}
+      nav = %Navigation{focus: :file_list, file_index: 1, file_count: 3}
       assert %{focus: :diff_view, hunk_index: 0} = Navigation.handle_key(nav, "Enter")
+    end
+
+    test "Enter does nothing when file list is empty" do
+      nav = %Navigation{focus: :file_list, file_index: 0, file_count: 0}
+      assert %{focus: :file_list} = Navigation.handle_key(nav, "Enter")
     end
 
     test "q returns to file list from diff view" do
@@ -58,6 +63,33 @@ defmodule TermDiff.Diff.NavigationTest do
     test "unknown keys are ignored" do
       nav = %Navigation{}
       assert nav == Navigation.handle_key(nav, "x")
+    end
+
+    test "cc enters commit mode from file list" do
+      nav = %Navigation{focus: :file_list}
+      result = Navigation.handle_key(nav, "cc")
+      assert result.commit_mode == true
+    end
+
+    test "a enters amend mode from file list" do
+      nav = %Navigation{focus: :file_list}
+      result = Navigation.handle_key(nav, "a")
+      assert result.commit_mode == true
+      assert result.amend_mode == true
+    end
+
+    test "a enters amend mode from log view" do
+      nav = %Navigation{focus: :log_view}
+      result = Navigation.handle_key(nav, "a")
+      assert result.commit_mode == true
+      assert result.amend_mode == true
+    end
+
+    test "a is no-op from diff view" do
+      nav = %Navigation{focus: :diff_view}
+      result = Navigation.handle_key(nav, "a")
+      assert result.commit_mode == false
+      assert result.amend_mode == false
     end
   end
 
