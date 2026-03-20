@@ -141,6 +141,7 @@ defmodule TermDiff.Commentary.Server do
   end
 
   defp default_caller(prompt, repo_path, opts) do
+    opts = Keyword.put_new(opts, :json_schema, Prompt.json_schema())
     TermDiff.AI.Claude.ask(prompt, repo_path, opts)
   end
 end
