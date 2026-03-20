@@ -58,6 +58,50 @@ defmodule TermDiff.Git.RunnerTest do
       {:ok, status} = Runner.status(repo)
       assert status =~ "?? b.txt"
     end
+
+    test "unstages a newly added file in a fresh repo with no commits", %{repo: repo} do
+      File.write!(Path.join(repo, "NEW.md"), "brand new")
+      System.cmd("git", ["add", "NEW.md"], cd: repo)
+
+      {:ok, status_before} = Runner.status(repo)
+      assert status_before =~ "A  NEW.md"
+
+      assert {:ok, _} = Runner.unstage(repo, "NEW.md", staged_status: :added)
+
+      {:ok, status_after} = Runner.status(repo)
+      assert status_after =~ "?? NEW.md"
+    end
+
+    test "unstages a newly added file in a repo with existing commits", %{repo: repo} do
+      File.write!(Path.join(repo, "init.txt"), "init")
+      System.cmd("git", ["add", "init.txt"], cd: repo)
+      System.cmd("git", ["commit", "-m", "init"], cd: repo)
+
+      File.write!(Path.join(repo, "MAGIT.md"), "new file content")
+      System.cmd("git", ["add", "MAGIT.md"], cd: repo)
+
+      {:ok, status_before} = Runner.status(repo)
+      assert status_before =~ "A  MAGIT.md"
+
+      assert {:ok, _} = Runner.unstage(repo, "MAGIT.md", staged_status: :added)
+
+      {:ok, status_after} = Runner.status(repo)
+      assert status_after =~ "?? MAGIT.md"
+    end
+
+    test "unstages a modified file with restore --staged", %{repo: repo} do
+      File.write!(Path.join(repo, "init.txt"), "init")
+      System.cmd("git", ["add", "init.txt"], cd: repo)
+      System.cmd("git", ["commit", "-m", "init"], cd: repo)
+
+      File.write!(Path.join(repo, "init.txt"), "changed")
+      System.cmd("git", ["add", "init.txt"], cd: repo)
+
+      assert {:ok, _} = Runner.unstage(repo, "init.txt", staged_status: :modified)
+
+      {:ok, status_after} = Runner.status(repo)
+      assert status_after =~ "M init.txt"
+    end
   end
 
   describe "commit/2" do
