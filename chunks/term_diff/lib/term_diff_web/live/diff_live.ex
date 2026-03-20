@@ -1,7 +1,9 @@
 defmodule TermDiffWeb.DiffLive do
   use TermDiffWeb, :live_view
 
-  alias TermDiff.Diff.{CommitState, Navigation}
+  require Logger
+
+  alias TermDiff.Diff.{CommitState, FileState, Navigation}
   alias TermDiff.Git.{Diff, Log, Runner, Status, Watcher}
   alias TermDiff.Git.Types.RepoState
   alias TermDiff.Commentary.Store, as: CommentaryStore
@@ -248,24 +250,55 @@ defmodule TermDiffWeb.DiffLive do
   end
 
   defp handle_stage_actions(socket, nav) do
-    cond do
-      nav.stage_file ->
-        Runner.stage(socket.assigns.repo_path, nav.stage_file)
-        nav = Navigation.clear_stage_action(nav)
-        socket = assign(socket, :nav, nav)
+    file_state = find_file_state(socket.assigns.repo_state, nav)
+
+    command =
+      cond do
+        nav.stage_file && file_state -> FileState.stage_command(file_state)
+        nav.unstage_file && file_state -> FileState.unstage_command(file_state)
+        true -> :noop
+      end
+
+    nav = Navigation.clear_stage_action(nav)
+    socket = assign(socket, :nav, nav)
+    exec_and_refresh(socket, command)
+  end
+
+  defp find_file_state(repo_state, nav) do
+    file_path = nav.stage_file || nav.unstage_file
+
+    case Enum.find(repo_state.files, &(&1.path == file_path)) do
+      nil -> nil
+      entry -> file_state_from_entry(entry)
+    end
+  end
+
+  defp file_state_from_entry(entry) do
+    staged = status_to_char(entry.staged_status)
+    unstaged = status_to_char(entry.unstaged_status)
+    FileState.from_status(<<staged, unstaged>>, entry.path)
+  end
+
+  defp status_to_char(:modified), do: ?M
+  defp status_to_char(:added), do: ?A
+  defp status_to_char(:deleted), do: ?D
+  defp status_to_char(:renamed), do: ?R
+  defp status_to_char(:untracked), do: ??
+  defp status_to_char(nil), do: ?\s
+
+  defp exec_and_refresh(socket, :noop), do: socket
+
+  defp exec_and_refresh(socket, command) do
+    case Runner.exec_file_command(socket.assigns.repo_path, command) do
+      {:ok, _} ->
         send(self(), :refresh)
         socket
 
-      nav.unstage_file ->
-        file_entry = Enum.find(socket.assigns.repo_state.files, &(&1.path == nav.unstage_file))
-        staged_status = if file_entry, do: file_entry.staged_status
-        Runner.unstage(socket.assigns.repo_path, nav.unstage_file, staged_status: staged_status)
-        nav = Navigation.clear_stage_action(nav)
-        socket = assign(socket, :nav, nav)
-        send(self(), :refresh)
-        socket
+      {:error, error} ->
+        Logger.error("Git command failed: #{inspect(command)} - #{error}")
+        put_flash(socket, :error, "Git failed: #{error}")
 
-      true ->
+      :noop ->
         socket
     end
   end
@@ -368,7 +401,13 @@ defmodule TermDiffWeb.DiffLive do
         last_updated: DateTime.utc_now()
       }
     else
-      _ -> %RepoState{}
+      {:error, reason} ->
+        Logger.error("Failed to fetch repo state: #{reason}")
+        %RepoState{}
+
+      error ->
+        Logger.error("Failed to fetch repo state: #{inspect(error)}")
+        %RepoState{}
     end
   end
 
