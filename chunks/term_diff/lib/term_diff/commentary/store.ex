@@ -1,6 +1,6 @@
 defmodule TermDiff.Commentary.Store do
   @moduledoc """
-  ETS-backed store for AI commentary on diffs.
+  ETS-backed store for AI commentary on diffs. Keyed by file path.
 
   Owns a public ETS table so reads can bypass the GenServer for speed.
   Writes go through the GenServer to ensure consistency.
