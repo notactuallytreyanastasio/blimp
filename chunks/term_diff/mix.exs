@@ -10,6 +10,7 @@ defmodule TermDiff.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      releases: releases(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -22,6 +23,19 @@ defmodule TermDiff.MixProject do
     [
       mod: {TermDiff.Application, []},
       extra_applications: [:logger, :runtime_tools]
+    ]
+  end
+
+  def releases do
+    [
+      term_diff: [
+        steps: [:assemble, &Burrito.wrap/1],
+        burrito: [
+          targets: [
+            macos_silicon: [os: :darwin, cpu: :aarch64]
+          ]
+        ]
+      ]
     ]
   end
 
@@ -67,6 +81,7 @@ defmodule TermDiff.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
 
+      {:burrito, "~> 1.0"},
       {:file_system, "~> 1.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

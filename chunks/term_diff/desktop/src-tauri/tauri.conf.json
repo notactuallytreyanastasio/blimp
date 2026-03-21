@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegui-community/tauri-demo/main/src-tauri/schemas/desktop-schema.json",
+  "productName": "term_diff",
+  "version": "0.1.0",
+  "identifier": "com.blimp.term-diff",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:4123"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "term_diff",
+        "width": 1200,
+        "height": 800,
+        "url": "http://localhost:4123",
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ],
+    "externalBin": [
+      "binaries/term_diff"
+    ]
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

@@ -24,47 +24,35 @@ config :term_diff, TermDiffWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
+  # Desktop mode: sensible defaults so it works without env vars.
+  # Still overridable via env for server deployments.
   database_url =
     System.get_env("DATABASE_URL") ||
-      raise """
-      environment variable DATABASE_URL is missing.
-      For example: ecto://USER:PASS@HOST/DATABASE
-      """
+      "ecto://postgres:postgres@localhost/term_diff_prod"
 
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
   config :term_diff, TermDiff.Repo,
-    # ssl: true,
     url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    # For machines with several cores, consider starting multiple pools of `pool_size`
-    # pool_count: 4,
+    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "5"),
     socket_options: maybe_ipv6
 
-  # The secret key base is used to sign/encrypt cookies and other secrets.
-  # A default value is used in config/dev.exs and config/test.exs but you
-  # want to use a different value for prod and you most likely don't want
-  # to check this value into version control, so we use an environment
-  # variable instead.
+  # For desktop, use a built-in secret. Override via SECRET_KEY_BASE for server deploys.
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
-      raise """
-      environment variable SECRET_KEY_BASE is missing.
-      You can generate one by calling: mix phx.gen.secret
-      """
+      "Xt8bFZKj7WJq3mR5vN2pL9yHcA4dEgUi6sTnO0wDxPhQkVlYfIaM1uCoBrS7zXj"
 
-  host = System.get_env("PHX_HOST") || "example.com"
+  host = System.get_env("PHX_HOST") || "localhost"
 
   config :term_diff, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # Desktop mode: always start the server, bind to localhost only, fixed port
   config :term_diff, TermDiffWeb.Endpoint,
-    url: [host: host, port: 443, scheme: "https"],
+    server: true,
+    url: [host: host, port: 4123, scheme: "http"],
     http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://hexdocs.pm/bandit/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
+      port: String.to_integer(System.get_env("PORT", "4123")),
+      ip: {127, 0, 0, 1}
     ],
     secret_key_base: secret_key_base
 
