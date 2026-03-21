@@ -7,12 +7,14 @@
 **ALWAYS write tests FIRST.** This is not optional.
 
 The loop:
+
 1. **Red** - Write a failing test that describes the behavior you want
 2. **Green** - Write the minimum code to make the test pass
 3. **Refactor** - Clean up, extract, simplify. Tests still pass.
 4. Repeat.
 
 Rules:
+
 - NEVER write implementation code without a test that exercises it
 - Write the test BEFORE the implementation, not after
 - Run `mix test` after every change. If tests fail, fix them before writing more code.
@@ -21,6 +23,7 @@ Rules:
 - If you are about to refactor: make sure tests pass before AND after
 - Test the pure functional core thoroughly (parsers, state machines, transformations)
 - LiveView tests are integration tests, write them after the unit tests pass
+- This is a diff viewer, DO NOT COMMIT OR STAGE, suggest commit messages at most, and allow us to USE THE TOOL (term_diff) to do git operations and dogfood
 
 ### Compilation: Zero Tolerance for Warnings
 
@@ -35,11 +38,13 @@ Rules:
 ### Elixir Style Rules - CRITICAL
 
 **HEEx templates:**
+
 - NEVER use `<%= if ... do %>` / `<%= for ... do %>` -- use `:if={condition}` and `:for={item <- list}` attributes instead
 - NEVER use `<%= expression %>` for simple interpolation -- use `{expression}` curly brace syntax
 - The `<%= %>` tag is only for rare cases where attribute syntax genuinely can't work
 
 **Code structure:**
+
 - NEVER nest `if` inside `case` or vice versa -- break into separate multi-clause functions instead
 - NEVER use `Process.sleep` in tests -- use `assert_receive` with message passing for async coordination
 - One struct/type per file -- no `defmodule Foo do defmodule Bar` nesting for data types
@@ -47,14 +52,17 @@ Rules:
 - Group all `def handle_event` (or any same-name function) clauses together -- don't interleave private helpers between them
 
 **Data modeling:**
+
 - Use embedded Ecto schemas for state machines and typed structs (gives you Ecto.Enum, changesets)
 - Use tagged tuples for signals/actions (e.g. `{:stage_file, path}`) not separate boolean/string fields
 
 **Supervision:**
+
 - Don't use `Task.Supervisor.async_nolink` for fire-and-forget work -- use `start_child` with explicit `send` back to the caller and `Process.monitor` for crash detection
 - Capture `self()` in a variable BEFORE passing to closures -- `self()` inside `fn -> ... end` evaluates to the spawned process, not the caller
 
 **JSON in tests:**
+
 - Use `Jason.encode!(%{...})` with formatted Elixir maps for test fixtures, not raw `~s|{...}|` strings
 
 ### Quality Checklist (run before considering anything "done")
@@ -67,6 +75,7 @@ mix format --check-formatted      # properly formatted
 ```
 
 <!-- deciduous:start -->
+
 ## Decision Graph Workflow
 
 **THIS IS MANDATORY. Log decisions IN REAL-TIME, not retroactively.**
@@ -82,6 +91,7 @@ mix format --check-formatted      # properly formatted
 ```
 
 Examples:
+
 - `term-diff/stage-unstage-tdd` - staging feature in the diff follower
 - `term-diff/follow-mode-highlights` - follow mode hot highlights
 - `blimp-core/parser-basics` - first parser for the language
@@ -106,14 +116,16 @@ Examples:
 
 ### FAILURE MODE: Batch Backfilling
 
-If you ever find yourself needing to "catch up" on deciduous logging, you have ALREADY FAILED. The graph is useless if it's written after the fact because it captures what you *remember* doing, not what you *actually* did. The whole point is real-time capture.
+If you ever find yourself needing to "catch up" on deciduous logging, you have ALREADY FAILED. The graph is useless if it's written after the fact because it captures what you _remember_ doing, not what you _actually_ did. The whole point is real-time capture.
 
 **How this failure happens:**
+
 - You get excited about implementation and start writing code without logging
 - You tell yourself "I'll log it after this one thing" and then forget
 - You batch 10 actions into one big logging session
 
 **How to prevent it:**
+
 - BEFORE every Edit/Write: have you logged an action node? The hook will block you if not.
 - BEFORE every new feature: have you logged a goal node? Do it FIRST.
 - AFTER every outcome (test pass, compile success, deploy): log it IMMEDIATELY, don't do the next thing first.
@@ -122,31 +134,32 @@ If you ever find yourself needing to "catch up" on deciduous logging, you have A
 - When you create a node: link it to its parent IN THE SAME COMMAND SEQUENCE. Not later.
 
 **Self-check every 5 tool calls:**
+
 - When was my last deciduous node? If more than 5 tool calls ago, something is wrong.
 - Am I in the middle of implementation with no action node? Stop and log.
 - Did something just succeed or fail? Log the outcome NOW.
 
 ### Available Slash Commands
 
-| Command | Purpose |
-|---------|---------|
-| `/decision` | Manage decision graph - add nodes, link edges, sync |
-| `/recover` | Recover context from decision graph on session start |
-| `/work` | Start a work transaction - creates goal node before implementation |
-| `/document` | Generate comprehensive documentation for a file or directory |
-| `/build-test` | Build the project and run the test suite |
-| `/serve-ui` | Start the decision graph web viewer |
-| `/sync-graph` | Export decision graph to GitHub Pages |
-| `/decision-graph` | Build a decision graph from commit history |
-| `/sync` | Multi-user sync - pull events, rebuild, push |
+| Command           | Purpose                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `/decision`       | Manage decision graph - add nodes, link edges, sync                |
+| `/recover`        | Recover context from decision graph on session start               |
+| `/work`           | Start a work transaction - creates goal node before implementation |
+| `/document`       | Generate comprehensive documentation for a file or directory       |
+| `/build-test`     | Build the project and run the test suite                           |
+| `/serve-ui`       | Start the decision graph web viewer                                |
+| `/sync-graph`     | Export decision graph to GitHub Pages                              |
+| `/decision-graph` | Build a decision graph from commit history                         |
+| `/sync`           | Multi-user sync - pull events, rebuild, push                       |
 
 ### Available Skills
 
-| Skill | Purpose |
-|-------|---------|
-| `/pulse` | Map current design as decisions (Now mode) |
-| `/narratives` | Understand how the system evolved (History mode) |
-| `/archaeology` | Transform narratives into queryable graph |
+| Skill          | Purpose                                          |
+| -------------- | ------------------------------------------------ |
+| `/pulse`       | Map current design as decisions (Now mode)       |
+| `/narratives`  | Understand how the system evolved (History mode) |
+| `/archaeology` | Transform narratives into queryable graph        |
 
 ### The Node Flow Rule - CRITICAL
 
@@ -176,14 +189,14 @@ AUDIT regularly -> Check for missing connections
 
 ### Behavioral Triggers - MUST LOG WHEN:
 
-| Trigger | Log Type | Example |
-|---------|----------|---------|
-| User asks for a new feature | `goal` **with -p** | "Add dark mode" |
-| Exploring possible approaches | `option` | "Use Redux for state" |
-| Choosing between approaches | `decision` | "Choose state management" |
-| About to write/edit code | `action` | "Implementing Redux store" |
-| Something worked or failed | `outcome` | "Redux integration successful" |
-| Notice something interesting | `observation` | "Existing code uses hooks" |
+| Trigger                       | Log Type           | Example                        |
+| ----------------------------- | ------------------ | ------------------------------ |
+| User asks for a new feature   | `goal` **with -p** | "Add dark mode"                |
+| Exploring possible approaches | `option`           | "Use Redux for state"          |
+| Choosing between approaches   | `decision`         | "Choose state management"      |
+| About to write/edit code      | `action`           | "Implementing Redux store"     |
+| Something worked or failed    | `outcome`          | "Redux integration successful" |
+| Notice something interesting  | `observation`      | "Existing code uses hooks"     |
 
 ### Document Attachments
 
@@ -210,12 +223,12 @@ deciduous doc gc                # Remove orphaned files from disk
 
 **When to suggest document attachment:**
 
-| Situation | Action |
-|-----------|--------|
-| User shares an image or screenshot | Ask: "Want me to attach this to the current goal/action node?" |
-| User references an external document | Ask: "Should I attach a copy to the decision graph?" |
-| Architecture diagram is discussed | Suggest attaching it to the relevant goal node |
-| Files not in the project are dropped in | Attach to the most relevant active node |
+| Situation                               | Action                                                         |
+| --------------------------------------- | -------------------------------------------------------------- |
+| User shares an image or screenshot      | Ask: "Want me to attach this to the current goal/action node?" |
+| User references an external document    | Ask: "Should I attach a copy to the decision graph?"           |
+| Architecture diagram is discussed       | Suggest attaching it to the relevant goal node                 |
+| Files not in the project are dropped in | Attach to the most relevant active node                        |
 
 **Do NOT aggressively prompt for documents.** Only suggest when files are directly relevant to a decision node. Files are stored in `.deciduous/documents/` with content-hash naming for deduplication.
 
@@ -224,12 +237,14 @@ deciduous doc gc                # Remove orphaned files from disk
 **Prompts must be the EXACT user message, not a summary.** When a user request triggers new work, capture their full message word-for-word.
 
 **BAD - summaries are useless for context recovery:**
+
 ```bash
 # DON'T DO THIS - this is a summary, not a prompt
 deciduous add goal "Add auth" -p "User asked: add login to the app"
 ```
 
 **GOOD - verbatim prompts enable full context recovery:**
+
 ```bash
 # Use --prompt-stdin for multi-line prompts
 deciduous add goal "Add auth" -c 90 --prompt-stdin << 'EOF'
@@ -245,11 +260,13 @@ EOF
 ```
 
 **When to capture prompts:**
+
 - Root `goal` nodes: YES - the FULL original request
 - Major direction changes: YES - when user redirects the work
 - Routine downstream nodes: NO - they inherit context via edges
 
 **Updating prompts on existing nodes:**
+
 ```bash
 deciduous prompt <node_id> "full verbatim prompt here"
 cat prompt.txt | deciduous prompt <node_id>  # Multi-line from stdin
@@ -261,14 +278,14 @@ Prompts are viewable in the web viewer.
 
 **The graph's value is in its CONNECTIONS, not just nodes.**
 
-| When you create... | IMMEDIATELY link to... |
-|-------------------|------------------------|
-| `outcome` | The action that produced it |
-| `action` | The decision that spawned it |
-| `decision` | The option(s) it chose between |
-| `option` | Its parent goal |
-| `observation` | Related goal/action |
-| `revisit` | The decision/outcome being reconsidered |
+| When you create... | IMMEDIATELY link to...                  |
+| ------------------ | --------------------------------------- |
+| `outcome`          | The action that produced it             |
+| `action`           | The decision that spawned it            |
+| `decision`         | The option(s) it chose between          |
+| `option`           | Its parent goal                         |
+| `observation`      | Related goal/action                     |
+| `revisit`          | The decision/outcome being reconsidered |
 
 **Root `goal` nodes are the ONLY valid orphans.**
 
@@ -318,6 +335,7 @@ deciduous sync
 ```
 
 To deploy to GitHub Pages:
+
 1. `deciduous sync` to export
 2. Push to GitHub
 3. Settings > Pages > Deploy from branch > /docs folder
@@ -327,6 +345,7 @@ Your graph will be live at `https://<user>.github.io/<repo>/`
 ### Branch-Based Grouping
 
 Nodes are auto-tagged with the current git branch. Configure in `.deciduous/config.toml`:
+
 ```toml
 [branch]
 main_branches = ["main", "master"]
@@ -342,17 +361,20 @@ auto_detect = true
 ### Git Staging Rules - CRITICAL
 
 **NEVER use broad git add commands that stage everything:**
+
 - ❌ `git add -A` - stages ALL changes including untracked files
 - ❌ `git add .` - stages everything in current directory
 - ❌ `git add -a` or `git commit -am` - auto-stages all tracked changes
 - ❌ `git add *` - glob patterns can catch unintended files
 
 **ALWAYS stage files explicitly by name:**
+
 - ✅ `git add src/main.rs src/lib.rs`
 - ✅ `git add Cargo.toml Cargo.lock`
 - ✅ `git add .claude/commands/decision.md`
 
 **Why this matters:**
+
 - Prevents accidentally committing sensitive files (.env, credentials)
 - Prevents committing large binaries or build artifacts
 - Forces you to review exactly what you're committing
@@ -385,4 +407,5 @@ deciduous events checkpoint --clear-events
 ```
 
 Events auto-emit on add/link/status commands. Git merges event files automatically.
+
 <!-- deciduous:end -->
