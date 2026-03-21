@@ -1,11 +1,77 @@
 defmodule TermDiff.Git.Runner do
   @moduledoc "Execute git commands via Erlang Port. Imperative shell."
 
-  @git_timeout 10_000
+  @git_timeout 15_000
 
   @spec status(String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def status(repo_path) do
     run(repo_path, ["status", "--porcelain=v1", "-u"])
+  end
+
+  @spec plumbing_status(String.t()) :: {:ok, [TermDiff.Diff.FileState.t()]} | {:error, String.t()}
+  def plumbing_status(repo_path) do
+    with {:ok, staged_raw} <- run(repo_path, ["diff-index", "--cached", "--name-status", "HEAD"]),
+         {:ok, unstaged_raw} <- run(repo_path, ["diff-files", "--name-status"]),
+         {:ok, untracked_raw} <- run(repo_path, ["ls-files", "--others", "--exclude-standard"]) do
+      staged = parse_name_status(staged_raw)
+      unstaged = parse_name_status(unstaged_raw)
+      untracked = parse_untracked(untracked_raw)
+
+      files = merge_file_states(staged, unstaged, untracked)
+      {:ok, files}
+    end
+  end
+
+  defp parse_name_status(""), do: %{}
+
+  defp parse_name_status(raw) do
+    raw
+    |> String.split("\n", trim: true)
+    |> Map.new(fn line ->
+      case String.split(line, "\t", parts: 2) do
+        [status, path] -> {path, status_letter(status)}
+        _ -> {line, :unknown}
+      end
+    end)
+  end
+
+  defp parse_untracked(""), do: []
+  defp parse_untracked(raw), do: String.split(raw, "\n", trim: true)
+
+  defp status_letter("M"), do: :modified
+  defp status_letter("A"), do: :added
+  defp status_letter("D"), do: :deleted
+  defp status_letter("R" <> _), do: :renamed
+  defp status_letter(_), do: :modified
+
+  defp merge_file_states(staged, unstaged, untracked) do
+    all_paths =
+      (Map.keys(staged) ++ Map.keys(unstaged) ++ untracked)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    Enum.map(all_paths, fn path ->
+      s = Map.get(staged, path)
+      u = Map.get(unstaged, path)
+      is_untracked = path in untracked
+
+      status =
+        cond do
+          is_untracked -> :untracked
+          s == :added && u == :modified -> :partial_modified
+          s == :added -> :staged_new
+          s == :modified && u == :modified -> :partial_modified
+          s == :modified -> :staged_modified
+          s == :deleted -> :staged_deleted
+          s == :renamed && u == :modified -> :partial_modified
+          s == :renamed -> :staged_renamed
+          u == :modified -> :unstaged_modified
+          u == :deleted -> :unstaged_deleted
+          true -> :untracked
+        end
+
+      %TermDiff.Diff.FileState{path: path, status: status}
+    end)
   end
 
   @spec diff(String.t()) :: {:ok, String.t()} | {:error, String.t()}

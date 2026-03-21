@@ -1,6 +1,6 @@
 defmodule TermDiff.Diff.CommitState do
   @moduledoc """
-  Pure state machine for commit operations.
+  Pure state machine for commit operations. Embedded Ecto schema.
 
   Phases:
     :idle       -> not in commit flow
