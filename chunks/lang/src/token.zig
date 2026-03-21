@@ -31,6 +31,7 @@ pub const Token = struct {
         kw_when,
         kw_def,
         kw_situation,
+        kw_orelse,
 
         // Operators
         plus,
@@ -85,6 +86,7 @@ pub const Token = struct {
             .{ "when", .kw_when },
             .{ "def", .kw_def },
             .{ "situation", .kw_situation },
+            .{ "orelse", .kw_orelse },
             .{ "true", .true_lit },
             .{ "false", .false_lit },
             .{ "nil", .nil_lit },

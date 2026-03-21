@@ -194,6 +194,21 @@ fn printInline(writer: *std.io.Writer, node: ast.Node) void {
         },
         .hole => writer.print(" _", .{}) catch {},
         .situation => writer.print(" (situation ...)", .{}) catch {},
+        .message_send => |ms| {
+            writer.print(" (<-", .{}) catch {};
+            printInline(writer, ms.target.*);
+            writer.print(" :{s}", .{ms.message}) catch {};
+            for (ms.args) |arg| {
+                printInline(writer, arg);
+            }
+            writer.print(")", .{}) catch {};
+        },
+        .orelse_expr => |oe| {
+            writer.print(" (orelse", .{}) catch {};
+            printInline(writer, oe.try_expr.*);
+            printInline(writer, oe.fallback.*);
+            writer.print(")", .{}) catch {};
+        },
         else => writer.print(" ???", .{}) catch {},
     }
 }

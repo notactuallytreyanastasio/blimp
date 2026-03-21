@@ -7,6 +7,7 @@
 "become" @keyword
 "reply" @keyword
 "situation" @keyword
+"orelse" @keyword
 
 ; Literals
 (integer) @number
@@ -59,6 +60,7 @@
 "|" @operator
 "|>" @operator
 "->" @operator
+"<-" @operator
 "." @punctuation.delimiter
 
 ; Delimiters

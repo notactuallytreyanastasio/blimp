@@ -40,6 +40,8 @@ pub const Node = struct {
         dot_access: DotAccess,
         hole: Hole,
         situation: Situation,
+        message_send: MessageSend,
+        orelse_expr: OrElseExpr,
     };
 
     pub const ActorDef = struct {
@@ -166,6 +168,17 @@ pub const Node = struct {
     pub const Branch = struct {
         pattern: ?*const Node,
         body: []const Node,
+    };
+
+    pub const MessageSend = struct {
+        target: *const Node,
+        message: []const u8, // atom name without :
+        args: []const Node,
+    };
+
+    pub const OrElseExpr = struct {
+        try_expr: *const Node,
+        fallback: *const Node,
     };
 
     /// Key-value pair for state, become, and map literals.

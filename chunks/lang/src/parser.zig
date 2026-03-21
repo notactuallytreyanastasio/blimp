@@ -263,16 +263,38 @@ pub const Parser = struct {
     // ============================================================
 
     fn parseExpression(self: *Parser) ParseError!Node {
-        return self.parsePipe();
+        return self.parseOrElse();
+    }
+
+    /// Parse: expr orelse fallback_expr
+    /// Lowest precedence infix operator.
+    fn parseOrElse(self: *Parser) ParseError!Node {
+        var left = try self.parsePipe();
+        if (self.current.kind == .kw_orelse) {
+            self.advance();
+            const right = try self.parsePipe();
+            const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            left_ptr.* = left;
+            const right_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            right_ptr.* = right;
+            left = Node{
+                .kind = .{ .orelse_expr = .{
+                    .try_expr = left_ptr,
+                    .fallback = right_ptr,
+                } },
+                .loc = left.loc,
+            };
+        }
+        return left;
     }
 
     /// Parse pipe expressions: left-associative, lowest precedence among binary ops.
     /// a |> b(_, x) |> c(_) parses as (a |> b(_, x)) |> c(_)
     fn parsePipe(self: *Parser) ParseError!Node {
-        var left = try self.parseBinaryOr();
+        var left = try self.parseSendExpr();
         while (self.current.kind == .pipe_arrow) {
             self.advance();
-            const right = try self.parseBinaryOr();
+            const right = try self.parseSendExpr();
             const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
             left_ptr.* = left;
             const right_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
@@ -281,6 +303,44 @@ pub const Parser = struct {
                 .kind = .{ .pipe_expr = .{
                     .left = left_ptr,
                     .right = right_ptr,
+                } },
+                .loc = left.loc,
+            };
+        }
+        return left;
+    }
+
+    /// Parse: expr <- :message(args)
+    /// Second-lowest precedence. Left side is a normal expression, right side is atom + optional args.
+    fn parseSendExpr(self: *Parser) ParseError!Node {
+        var left = try self.parseBinaryOr();
+        if (self.current.kind == .send_arrow) {
+            self.advance();
+            // Expect atom for message name
+            if (self.current.kind != .atom) return error.UnexpectedToken;
+            const raw_name = self.current.lexeme;
+            const name = if (raw_name.len > 0 and raw_name[0] == ':') raw_name[1..] else raw_name;
+            self.advance();
+
+            // Optional argument list
+            var args: std.ArrayList(Node) = .empty;
+            if (self.current.kind == .lparen) {
+                self.advance();
+                while (self.current.kind != .rparen and self.current.kind != .eof) {
+                    const arg = try self.parseExpression();
+                    args.append(self.allocator, arg) catch return error.OutOfMemory;
+                    if (self.current.kind == .comma) self.advance();
+                }
+                try self.expect(.rparen);
+            }
+
+            const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            left_ptr.* = left;
+            left = Node{
+                .kind = .{ .message_send = .{
+                    .target = left_ptr,
+                    .message = name,
+                    .args = args.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
                 } },
                 .loc = left.loc,
             };
@@ -1048,4 +1108,86 @@ test "parse situation with hole branch" {
     try std.testing.expect(b1.pattern == null);
     try std.testing.expectEqual(@as(usize, 1), b1.body.len);
     try std.testing.expectEqual(@as(i64, 0), b1.body[0].kind.reply_stmt.value.kind.integer_lit.value);
+}
+
+test "parse message send" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  checkout <- :add(item)
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const body = nodes[0].kind.actor_def.body;
+    try std.testing.expectEqual(@as(usize, 1), body.len);
+
+    const send = body[0].kind.message_send;
+    try std.testing.expectEqualStrings("checkout", send.target.kind.identifier.name);
+    try std.testing.expectEqualStrings("add", send.message);
+    try std.testing.expectEqual(@as(usize, 1), send.args.len);
+    try std.testing.expectEqualStrings("item", send.args[0].kind.identifier.name);
+}
+
+test "parse message send no args" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  counter <- :increment
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const body = nodes[0].kind.actor_def.body;
+    try std.testing.expectEqual(@as(usize, 1), body.len);
+
+    const send = body[0].kind.message_send;
+    try std.testing.expectEqualStrings("counter", send.target.kind.identifier.name);
+    try std.testing.expectEqualStrings("increment", send.message);
+    try std.testing.expectEqual(@as(usize, 0), send.args.len);
+}
+
+test "parse message send with orelse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  result = checkout <- :charge(payment) orelse :error
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const body = nodes[0].kind.actor_def.body;
+    try std.testing.expectEqual(@as(usize, 1), body.len);
+
+    // result = (orelse (send checkout :charge(payment)) :error)
+    const assign = body[0].kind.assign_stmt;
+    try std.testing.expectEqualStrings("result", assign.name);
+
+    const orelse_node = assign.value.kind.orelse_expr;
+    const send = orelse_node.try_expr.kind.message_send;
+    try std.testing.expectEqualStrings("checkout", send.target.kind.identifier.name);
+    try std.testing.expectEqualStrings("charge", send.message);
+    try std.testing.expectEqual(@as(usize, 1), send.args.len);
+
+    try std.testing.expectEqualStrings("error", orelse_node.fallback.kind.atom_lit.name);
+}
+
+test "parse orelse with expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  reply x orelse 0
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const orelse_node = reply.value.kind.orelse_expr;
+
+    try std.testing.expectEqualStrings("x", orelse_node.try_expr.kind.identifier.name);
+    try std.testing.expectEqual(@as(i64, 0), orelse_node.fallback.kind.integer_lit.value);
 }
