@@ -1,5 +1,5 @@
 defmodule TermDiff.Commentary.Annotation do
-  @moduledoc "A single comment attached to a line range in a file."
+  @moduledoc "A single AI-generated comment attached to a line range in a file."
 
   @type severity :: :info | :warning | :issue
 

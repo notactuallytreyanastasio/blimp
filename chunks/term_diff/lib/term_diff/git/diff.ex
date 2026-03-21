@@ -101,16 +101,17 @@ defmodule TermDiff.Git.Diff do
   defp parse_hunk_header(header) do
     case Regex.run(~r/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/, header) do
       [_, old_s, old_c, new_s, new_c] ->
-        {String.to_integer(old_s), String.to_integer(old_c),
-         String.to_integer(new_s), String.to_integer(new_c)}
-
-      [_, old_s, "", new_s] ->
-        {String.to_integer(old_s), 1, String.to_integer(new_s), 1}
+        {to_int(old_s), to_int(old_c, 1), to_int(new_s), to_int(new_c, 1)}
 
       _ ->
         {0, 0, 0, 0}
     end
   end
+
+  defp to_int(str, default \\ 0)
+  defp to_int(nil, default), do: default
+  defp to_int("", default), do: default
+  defp to_int(str, _default), do: String.to_integer(str)
 
   @spec parse_diff_line(String.t(), non_neg_integer(), non_neg_integer()) ::
           {DiffLine.t(), non_neg_integer(), non_neg_integer()}
