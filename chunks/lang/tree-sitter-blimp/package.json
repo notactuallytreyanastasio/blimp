@@ -1,0 +1,26 @@
+{
+  "name": "tree-sitter-blimp",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Blimp programming language",
+  "main": "bindings/node",
+  "keywords": ["parser", "tree-sitter", "blimp"],
+  "dependencies": {
+    "node-addon-api": "^8.0.0",
+    "node-gyp-build": "^4.8.0"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.24.0"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.blimp",
+      "file-types": ["blimp"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

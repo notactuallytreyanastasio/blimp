@@ -1,0 +1,44 @@
+# A bank account demonstrating become as immutable state transitions
+# Every become is a snapshot -- time travel debugging shows the full ledger
+actor BankAccount do
+  state balance: 0, owner: "unknown", ledger: [], frozen: false
+
+  on :deposit(amount) do
+    entry = %{type: :deposit, amount: amount, balance: balance + amount}
+    become balance: balance + amount,
+           ledger: [entry | ledger]
+    reply {:ok, balance + amount}
+  end
+
+  on :withdraw(amount) do
+    entry = %{type: :withdrawal, amount: amount, balance: balance - amount}
+    become balance: balance - amount,
+           ledger: [entry | ledger]
+    reply {:ok, balance - amount}
+  end
+
+  on :transfer(to_account, amount) do
+    entry = %{type: :transfer, to: to_account, amount: amount, balance: balance - amount}
+    become balance: balance - amount,
+           ledger: [entry | ledger]
+    reply {:transferred, amount}
+  end
+
+  on :balance do
+    reply balance
+  end
+
+  on :statement do
+    reply ledger
+  end
+
+  on :freeze do
+    become frozen: true
+    reply :frozen
+  end
+
+  on :unfreeze do
+    become frozen: false
+    reply :unfrozen
+  end
+end

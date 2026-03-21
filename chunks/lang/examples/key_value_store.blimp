@@ -1,0 +1,32 @@
+# A key-value store with get, put, delete, and bulk operations
+actor KVStore do
+  state data: %{}, version: 0
+
+  on :get(key) do
+    reply lookup(data, key)
+  end
+
+  on :put(key, value) do
+    become data: insert(data, key, value),
+           version: version + 1
+    reply {:ok, version + 1}
+  end
+
+  on :delete(key) do
+    become data: remove(data, key),
+           version: version + 1
+    reply :ok
+  end
+
+  on :keys do
+    reply keys(data)
+  end
+
+  on :size do
+    reply length(keys(data))
+  end
+
+  on :version do
+    reply version
+  end
+end

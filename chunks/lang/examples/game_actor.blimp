@@ -1,0 +1,46 @@
+# A simple game character with health, inventory, and combat
+actor Character do
+  state name: "hero", hp: 100, max_hp: 100, inventory: [], gold: 0
+
+  on :take_damage(amount) do
+    new_hp = hp - amount
+    become hp: max(new_hp, 0)
+    reply {:hp, max(new_hp, 0)}
+  end
+
+  on :heal(amount) do
+    new_hp = min(hp + amount, max_hp)
+    become hp: new_hp
+    reply {:healed, new_hp}
+  end
+
+  on :pickup(item) do
+    become inventory: [item | inventory]
+    reply {:ok, item}
+  end
+
+  on :drop(item) do
+    become inventory: remove(inventory, item)
+    reply :ok
+  end
+
+  on :buy(item, cost) do
+    become gold: gold - cost,
+           inventory: [item | inventory]
+    reply {:bought, item}
+  end
+
+  on :sell(item, price) do
+    become gold: gold + price,
+           inventory: remove(inventory, item)
+    reply {:sold, price}
+  end
+
+  on :status do
+    reply %{name: name, hp: hp, gold: gold, items: length(inventory)}
+  end
+
+  on :alive? do
+    reply hp > 0
+  end
+end
