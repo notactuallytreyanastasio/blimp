@@ -146,9 +146,13 @@ pub const Node = struct {
         field: []const u8,
     };
 
-    /// Shared key-value pair for state, become, and map literals.
+    /// Key-value pair for state, become, and map literals.
+    /// For state declarations: key, optional type_name, optional default_value.
+    /// For become/maps: key, value (type_name is null, default_value is null).
     pub const KeyValue = struct {
         key: []const u8,
+        type_name: ?[]const u8 = null,
         value: Node,
+        default_value: ?*const Node = null,
     };
 };

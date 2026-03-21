@@ -60,6 +60,7 @@ pub const Token = struct {
         rbracket,
         comma,
         colon,
+        colon_colon, // :: (type-default separator)
         percent, // % (for map literals %{})
 
         // Special

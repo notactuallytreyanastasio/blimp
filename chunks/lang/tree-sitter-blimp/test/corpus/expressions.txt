@@ -1,0 +1,168 @@
+================
+Integer literal
+================
+
+actor A do
+  reply 42
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (integer))))
+
+================
+Float literal
+================
+
+actor A do
+  reply 3.14
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (float))))
+
+================
+String literal
+================
+
+actor A do
+  reply "hello"
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (string))))
+
+================
+Atom literal
+================
+
+actor A do
+  reply :ok
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (atom))))
+
+================
+Boolean literals
+================
+
+actor A do
+  reply true
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (boolean))))
+
+================
+Nil literal
+================
+
+actor A do
+  reply nil
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (nil))))
+
+================
+Binary expression with precedence
+================
+
+actor A do
+  reply 1 + 2 * 3
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (binary_expression
+        (integer)
+        (binary_expression
+          (integer)
+          (integer))))))
+
+================
+Function call
+================
+
+actor A do
+  reply calculate_tax(100, :us)
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (function_call
+        (identifier)
+        (integer)
+        (atom)))))
+
+================
+Dot access
+================
+
+actor A do
+  reply item.price
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (dot_access
+        (identifier)
+        (identifier)))))
+
+================
+Predicate atom
+================
+
+actor A do
+  reply :alive?
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (atom))))

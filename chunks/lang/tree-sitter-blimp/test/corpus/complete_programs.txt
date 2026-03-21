@@ -1,0 +1,144 @@
+================
+Counter actor
+================
+
+actor Counter do
+  state count: 0
+
+  on :increment do
+    become count: count + 1
+    reply :ok
+  end
+
+  on :decrement do
+    become count: count - 1
+    reply :ok
+  end
+
+  on :get do
+    reply count
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (integer))))
+    (message_handler
+      (atom)
+      (become_statement
+        (key_value_list
+          (key_value_pair
+            (identifier)
+            (binary_expression
+              (identifier)
+              (integer)))))
+      (reply_statement
+        (atom)))
+    (message_handler
+      (atom)
+      (become_statement
+        (key_value_list
+          (key_value_pair
+            (identifier)
+            (binary_expression
+              (identifier)
+              (integer)))))
+      (reply_statement
+        (atom)))
+    (message_handler
+      (atom)
+      (reply_statement
+        (identifier)))))
+
+================
+Checkout with cons and dot access
+================
+
+actor Checkout do
+  state items: [], total: 0
+
+  on :add(item) do
+    become items: [item | items],
+           total: total + item.price
+    reply :ok
+  end
+
+  on :summary do
+    reply {items, total}
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (list))
+        (typed_field
+          (identifier)
+          (integer))))
+    (message_handler
+      (atom)
+      (parameter_list
+        (identifier))
+      (become_statement
+        (key_value_list
+          (key_value_pair
+            (identifier)
+            (list
+              (identifier)
+              (identifier)))
+          (key_value_pair
+            (identifier)
+            (binary_expression
+              (identifier)
+              (dot_access
+                (identifier)
+                (identifier))))))
+      (reply_statement
+        (atom)))
+    (message_handler
+      (atom)
+      (reply_statement
+        (tuple
+          (identifier)
+          (identifier))))))
+
+================
+Actor with map return and nested function call
+================
+
+actor Stats do
+  on :report do
+    reply %{count: length(items), total: total}
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (reply_statement
+        (map
+          (key_value_pair
+            (identifier)
+            (function_call
+              (identifier)
+              (identifier)))
+          (key_value_pair
+            (identifier)
+            (identifier)))))))

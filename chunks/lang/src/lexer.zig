@@ -46,7 +46,14 @@ pub const Lexer = struct {
         // Numbers
         if (isDigit(c)) return self.lexNumber();
 
-        // Atoms (:name)
+        // :: (colon_colon) or :atom or bare :
+        if (c == ':' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == ':') {
+            const start = self.pos;
+            const start_col = self.col;
+            self.advance();
+            self.advance();
+            return .{ .kind = .colon_colon, .lexeme = self.source[start .. start + 2], .line = self.line, .col = start_col };
+        }
         if (c == ':' and self.pos + 1 < self.source.len and isAlpha(self.source[self.pos + 1])) {
             return self.lexAtom();
         }

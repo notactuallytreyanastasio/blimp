@@ -1,0 +1,22 @@
+# Actor with typed state declarations
+actor BankAccount do
+  state balance: Int :: 0
+  state owner: String :: "unknown"
+  state ledger: [Transaction] :: []
+  state frozen: Bool :: false
+
+  on :deposit(amount) do
+    become balance: balance + amount
+    reply balance + amount
+  end
+
+  on :withdraw(amount) do
+    become balance: balance - amount
+    reply balance - amount
+  end
+
+  on :freeze do
+    become frozen: true
+    reply :frozen
+  end
+end
