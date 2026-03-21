@@ -1,0 +1,5 @@
+# Tauri build output
+src-tauri/target/
+
+# Sidecar binaries (built via Burrito, not checked in)
+src-tauri/binaries/
