@@ -79,6 +79,13 @@ fn printNode(writer: *std.io.Writer, node: ast.Node, indent: u32) void {
                 }
                 writer.print(")", .{}) catch {};
             }
+            if (h.guard) |guard| {
+                writer.print(" when", .{}) catch {};
+                printInline(writer, guard.*);
+            }
+            if (h.bubble_strategy) |bs| {
+                writer.print(" bubbles({s})", .{bs}) catch {};
+            }
             writer.print("\n", .{}) catch {};
             printNodes(writer, h.body, indent + 1);
             writer.print("{s})\n", .{prefix}) catch {};

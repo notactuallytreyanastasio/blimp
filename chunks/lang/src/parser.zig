@@ -48,11 +48,29 @@ pub const Parser = struct {
     }
 
     /// Parse: actor Name do ... end
+    /// Also supports dot-notation: actor Shop.Checkout do ... end
     fn parseActorDef(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
         try self.expect(.kw_actor);
-        const name = self.current.lexeme;
+        const first_name = self.current.lexeme;
         try self.expect(.upper_identifier);
+
+        // Check for dot-notation: Shop.Checkout, App.Shop.Checkout, etc.
+        var name = first_name;
+        if (self.current.kind == .dot) {
+            // Build the full dotted name by computing start/end pointers
+            // Since the source is contiguous, we can slice from first_name start
+            // to the end of the last upper_identifier lexeme
+            var end_ptr = first_name.ptr + first_name.len;
+            while (self.current.kind == .dot) {
+                self.advance(); // skip .
+                if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
+                end_ptr = self.current.lexeme.ptr + self.current.lexeme.len;
+                self.advance();
+            }
+            const len = @intFromPtr(end_ptr) - @intFromPtr(first_name.ptr);
+            name = first_name.ptr[0..len];
+        }
         try self.expect(.kw_do);
         self.skipNewlines();
 
@@ -122,6 +140,27 @@ pub const Parser = struct {
             try self.expect(.rparen);
         }
 
+        // Optional guard: when <expression>
+        var guard: ?*const Node = null;
+        if (self.current.kind == .kw_when) {
+            self.advance();
+            const guard_expr = try self.parseExpression();
+            const guard_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            guard_ptr.* = guard_expr;
+            guard = guard_ptr;
+        }
+
+        // Optional bubbles annotation: bubbles(ActorName)
+        var bubble_strategy: ?[]const u8 = null;
+        if (self.current.kind == .kw_bubbles) {
+            self.advance();
+            try self.expect(.lparen);
+            if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
+            bubble_strategy = self.current.lexeme;
+            self.advance();
+            try self.expect(.rparen);
+        }
+
         try self.expect(.kw_do);
         self.skipNewlines();
 
@@ -138,6 +177,8 @@ pub const Parser = struct {
             .kind = .{ .message_handler = .{
                 .name = name,
                 .params = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .guard = guard,
+                .bubble_strategy = bubble_strategy,
                 .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
             .loc = loc,
@@ -1190,4 +1231,103 @@ test "parse orelse with expression" {
 
     try std.testing.expectEqualStrings("x", orelse_node.try_expr.kind.identifier.name);
     try std.testing.expectEqual(@as(i64, 0), orelse_node.fallback.kind.integer_lit.value);
+}
+
+test "parse handler with guard" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor Account do
+        \\  on :withdraw(amount) when amount > 0 do
+        \\    reply :ok
+        \\  end
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    try std.testing.expectEqualStrings("withdraw", handler.name);
+    try std.testing.expectEqual(@as(usize, 1), handler.params.len);
+    try std.testing.expectEqualStrings("amount", handler.params[0]);
+
+    // Guard should be: amount > 0
+    try std.testing.expect(handler.guard != null);
+    const guard = handler.guard.?;
+    const bin_op = guard.kind.binary_op;
+    try std.testing.expectEqual(Node.BinaryOp.Op.gt, bin_op.op);
+    try std.testing.expectEqualStrings("amount", bin_op.left.kind.identifier.name);
+    try std.testing.expectEqual(@as(i64, 0), bin_op.right.kind.integer_lit.value);
+
+    // No bubbles
+    try std.testing.expect(handler.bubble_strategy == null);
+}
+
+test "parse handler with bubbles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor Payment do
+        \\  on :charge(payment) bubbles(CascadeBubble) do
+        \\    reply :ok
+        \\  end
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    try std.testing.expectEqualStrings("charge", handler.name);
+    try std.testing.expectEqual(@as(usize, 1), handler.params.len);
+
+    // No guard
+    try std.testing.expect(handler.guard == null);
+
+    // Bubbles should be present
+    try std.testing.expect(handler.bubble_strategy != null);
+    try std.testing.expectEqualStrings("CascadeBubble", handler.bubble_strategy.?);
+}
+
+test "parse handler with guard and bubbles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor Payment do
+        \\  on :charge(payment) when valid?(payment) bubbles(CascadeBubble) do
+        \\    reply :ok
+        \\  end
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    try std.testing.expectEqualStrings("charge", handler.name);
+
+    // Guard should be: valid?(payment)
+    try std.testing.expect(handler.guard != null);
+    const guard = handler.guard.?;
+    const call = guard.kind.func_call;
+    try std.testing.expectEqualStrings("valid?", call.name);
+    try std.testing.expectEqual(@as(usize, 1), call.args.len);
+
+    // Bubbles should be present
+    try std.testing.expect(handler.bubble_strategy != null);
+    try std.testing.expectEqualStrings("CascadeBubble", handler.bubble_strategy.?);
+}
+
+test "parse dot-notation actor name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor Shop.Checkout do
+        \\  state total: 0
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const actor = nodes[0].kind.actor_def;
+    try std.testing.expectEqualStrings("Shop.Checkout", actor.name);
+    try std.testing.expectEqual(@as(usize, 1), actor.body.len);
 }
