@@ -65,6 +65,42 @@ defmodule TermDiff.Diff.NavigationTest do
       assert nav == Navigation.handle_key(nav, "x")
     end
 
+    test "s sets stage_file from file_list" do
+      nav = %Navigation{focus: :file_list, selected_file: "foo.ex"}
+      result = Navigation.handle_key(nav, "s")
+      assert result.stage_file == "foo.ex"
+    end
+
+    test "u sets unstage_file from file_list" do
+      nav = %Navigation{focus: :file_list, selected_file: "foo.ex"}
+      result = Navigation.handle_key(nav, "u")
+      assert result.unstage_file == "foo.ex"
+    end
+
+    test "s works from diff_view too" do
+      nav = %Navigation{focus: :diff_view, selected_file: "bar.ex"}
+      result = Navigation.handle_key(nav, "s")
+      assert result.stage_file == "bar.ex"
+    end
+
+    test "u works from diff_view too" do
+      nav = %Navigation{focus: :diff_view, selected_file: "bar.ex"}
+      result = Navigation.handle_key(nav, "u")
+      assert result.unstage_file == "bar.ex"
+    end
+
+    test "s is noop with nil selected_file" do
+      nav = %Navigation{focus: :file_list, selected_file: nil}
+      result = Navigation.handle_key(nav, "s")
+      assert result.stage_file == nil
+    end
+
+    test "u is noop from log_view" do
+      nav = %Navigation{focus: :log_view, selected_file: "foo.ex"}
+      result = Navigation.handle_key(nav, "u")
+      assert result.unstage_file == nil
+    end
+
   end
 
   describe "sync_to_files/2" do

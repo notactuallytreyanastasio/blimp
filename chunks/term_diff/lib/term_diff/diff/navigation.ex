@@ -144,17 +144,17 @@ defmodule TermDiff.Diff.Navigation do
   defp open_selected(nav), do: nav
 
   @spec stage_selected(t()) :: t()
-  defp stage_selected(%{focus: :file_list} = nav) do
+  defp stage_selected(%{selected_file: nil} = nav), do: nav
+  defp stage_selected(%{focus: focus} = nav) when focus in [:file_list, :diff_view] do
     %{nav | stage_file: nav.selected_file}
   end
-
   defp stage_selected(nav), do: nav
 
   @spec unstage_selected(t()) :: t()
-  defp unstage_selected(%{focus: :file_list} = nav) do
+  defp unstage_selected(%{selected_file: nil} = nav), do: nav
+  defp unstage_selected(%{focus: focus} = nav) when focus in [:file_list, :diff_view] do
     %{nav | unstage_file: nav.selected_file}
   end
-
   defp unstage_selected(nav), do: nav
 
   @spec clear_open_file(t()) :: t()
