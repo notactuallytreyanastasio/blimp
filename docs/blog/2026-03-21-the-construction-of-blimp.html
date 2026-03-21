@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Construction of Blimp</title>
+
+<meta name="description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, Holes, situations, bubbles, and jazz computers.">
+<meta name="author" content="Bobby Grayson">
+
+<meta property="og:type" content="article">
+<meta property="og:title" content="The Construction of Blimp">
+<meta property="og:description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, Holes, situations, bubbles, and jazz computers.">
+<meta property="og:url" content="https://blimp.bobbby.online/blog/2026-03-21-the-construction-of-blimp.html">
+<meta property="og:site_name" content="Blimp Design Journal">
+
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="The Construction of Blimp">
+<meta name="twitter:description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, Holes, situations, bubbles, and jazz computers.">
+
+<link rel="stylesheet" href="style.css">
+<style>
+/* tl;dr toggle */
+.tldr-toggle {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: #0066cc;
+  cursor: pointer;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  margin-bottom: 2rem;
+  user-select: none;
+}
+
+.tldr-toggle:hover {
+  background: #f0f0f0;
+}
+
+.tldr-toggle.active {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0066cc;
+}
+
+/* section headers: h2 on the left, bubble to the right */
+.section-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 2rem;
+  margin-top: 3rem;
+  margin-bottom: 1rem;
+}
+
+.section-header h2 {
+  margin: 0;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* speech bubbles - iMessage style, right of the title */
+.tldr-bubble {
+  display: none;
+  position: relative;
+  background: #e9e9eb;
+  color: #000;
+  padding: 0.75rem 1rem;
+  border-radius: 18px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  max-width: 55ch;
+  flex-shrink: 1;
+  margin-left: 0.5rem;
+}
+
+/* triangle tail pointing left toward the title, at the top */
+.tldr-bubble::before {
+  content: '';
+  position: absolute;
+  left: -30px;
+  top: 0.85rem;
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-right: 30px solid #e9e9eb;
+}
+
+/* section content folding animation */
+.section-content {
+  overflow: hidden;
+  max-height: 5000px;
+  transition: max-height 0.5s ease, opacity 0.4s ease;
+  opacity: 1;
+}
+
+body.tldr-mode .section-content {
+  max-height: 0;
+  opacity: 0;
+}
+
+body.tldr-mode {
+  max-width: 100%;
+  padding-left: 4rem;
+  padding-right: 4rem;
+}
+
+body.tldr-mode .tldr-bubble {
+  display: block;
+  animation: bubbleFadeIn 0.4s ease 0.3s both;
+}
+
+@keyframes bubbleFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="index.html">blimp / design journal</a></div>
+
+<h1>The Construction of Blimp</h1>
+<div class="post-date">March 21, 2026</div>
+
+<div class="tldr-toggle" onclick="document.body.classList.toggle('tldr-mode'); this.classList.toggle('active');">tl;dr</div>
+
+<div class="section-header">
+<h2>Feeling the Grammar</h2>
+<div class="tldr-bubble">We built a parser in Zig with a tree-sitter grammar. The syntax is no longer hypothetical. This post walks through every construct as it exists right now, writing real programs to see how the language feels. Actors, typed state, Holes, situations, bubbles. Some of this will change. We're nailing the good parts early.</div>
+</div>
+<div class="section-content">
+
+<p>Building Blimp, the first piece I wanted to really feel out was the grammar. As someone who has spent 20 years in or adjacent to Ruby, it feels natural to start there and really suss things out in order to ensure that it feels natural to write. Even if its just AIs who will be cranking this out, I want a human to feel good editing and writing it from scratch. There will be riffing, there will be notes to the robot and sketches done, there will be some real action involving the lang.</p>
+
+<p>So, we want it to feel good.</p>
+
+<p>To begin with, we built a parser. It is written in Zig with a tree-sitter grammar that mirrors it and it can parse real Blimp code into an AST right now.</p>
+
+<p>The syntax is not hypothetical at this point, so we have to make some pretty explicit choices.</p>
+
+<p>As it sits, we want this to really stick, so I am writing out a bunch of programs right now as it is to just see how it feels for the exercise of this post. A good bit of this obviously will change, but we are going to try to nail "the good parts" early.</p>
+
+</div>
+
+<div class="section-header">
+<h2>Actors</h2>
+<div class="tldr-bubble">Actors hold state and reply to messages. PascalCase names, do/end blocks. They are the most important primitive we have. Everything is an actor.</div>
+</div>
+<div class="section-content">
+
+<p>So with that, let's begin with Actors. They are the most important primitive we have.</p>
+
+<pre><code><span class="kw">actor</span> <span class="fn">Counter</span> <span class="kw">do</span>
+  <span class="kw">state</span> count: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:increment</span> <span class="kw">do</span>
+    <span class="kw">become</span> count: count + <span class="nr">1</span>
+    <span class="kw">reply</span> <span class="st">:ok</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+
+<p>Actors hold state and reply to messages. You define them with <code>actor</code> and they come in PascalCase. The <code>do</code>/<code>end</code> blocks denote the wrapping up of that behavior.</p>
+
+<p>Lowercase names are always variables. This distinction just keeps things simple and clear.</p>
+
+<p>And here's the thing: everything is an actor. There's no separate concept of "pure functions" or "helper modules." Some actors hold state and handle many messages. Some are tiny and do one thing. A helper function is just an actor with one handler that replies immediately. <code>System</code> is the root actor that provides the primitives, math, IO, strings. You're always inside System.</p>
+
+</div>
+
+<div class="section-header">
+<h2>Typed State</h2>
+<div class="tldr-bubble">State fields require types. <code>state name: Type :: default</code>. The <code>::</code> separates type from default value. Types are rigid. The compiler catches mistakes, not the runtime. Since types are enforced, you don't need {:ok, value} tuples. If the handler ran, the types matched.</div>
+</div>
+<div class="section-content">
+
+<p>State fields have required types. The syntax is <code>state name: Type :: default_value</code>.</p>
+
+<pre><code><span class="kw">actor</span> <span class="fn">BankAccount</span> <span class="kw">do</span>
+  <span class="kw">state</span> balance: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+  <span class="kw">state</span> owner: <span class="fn">String</span> <span class="op">::</span> <span class="st">"unknown"</span>
+  <span class="kw">state</span> ledger: [<span class="fn">Transaction</span>] <span class="op">::</span> []
+  <span class="kw">state</span> frozen: <span class="fn">Bool</span> <span class="op">::</span> <span class="nr">false</span>
+
+  <span class="kw">on</span> <span class="st">:deposit</span>(amount: <span class="fn">Int</span>) <span class="kw">do</span>
+    <span class="kw">become</span> balance: balance + amount
+    <span class="kw">reply</span> balance + amount
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+
+<p>The <code>:</code> separates the field name from its type. <code>::</code> separates the type from the default value. <code>[Item]</code> for lists, <code>%{Atom => Float}</code> for maps.</p>
+
+<p>Types are rigid. We want them everywhere we can get them. The compiler catches mistakes, not the runtime.</p>
+
+<p>And because of that type safety, notice there's no <code>{:ok, value}</code> tuple on the reply. If the handler ran at all, the types matched. If someone sends a <code>:deposit</code> with a <code>String</code>, the message just doesn't match, it never enters the <code>do</code> block. So <code>reply balance + amount</code> is enough. No wrapping needed.</p>
+
+</div>
+
+<div class="section-header">
+<h2>Holes</h2>
+<div class="tldr-bubble">The <code>_</code> operator creates a Hole. A Hole is not a wildcard. It's a typed gap in your program that an agent fills. It acts as identity until filled so your program keeps running. The comment after a Hole is a directive to the agent, not a note to yourself. Inside pipes, <code>_</code> is filled by the piped value. Elsewhere it's an agent Hole. Context resolves the ambiguity.</div>
+</div>
+<div class="section-content">
+
+<p><code>_</code> creates a Hole. And a Hole is not a wildcard. It is not a discard. It's not what you're used to from Elixir or Haskell.</p>
+
+<p>A Hole is a typed gap in your program. The compiler knows about it. The agent knows about it. The canvas renders it as unfinished space. And until the agent fills it, it acts as identity, so your program keeps running.</p>
+
+<pre><code><span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>) <span class="kw">bubbles</span>(<span class="fn">CascadeBubble</span>) <span class="kw">do</span>
+  <span class="kw">situation</span> validate(payment) <span class="kw">do</span>
+    <span class="st">:valid</span> <span class="op">-></span>
+      receipt = finalize(items, total, payment)
+      <span class="kw">become</span> items: [], total: <span class="nr">0.0</span>
+      <span class="kw">reply</span> receipt
+    _ <span class="cm"># Hole: handle invalid payment, begin by researching documentation on transaction failure</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+
+<p>That comment after the Hole is not a note to yourself. It is a directive to the agent. The agent reads it, goes and does the research, and comes back with suggestions to fill the Hole. The comment IS the prompt.</p>
+
+<p>An agent is always pairing with you in this runtime. The Hole is how you talk to it without leaving your code. You don't switch to a chat window. You don't write a prompt in some sidebar. You write <code>_</code> and a comment, and the agent sees it in the tree-sitter AST and gets to work.</p>
+
+<p>Inside a pipe, <code>_</code> means something different:</p>
+
+<pre><code><span class="cm"># Holes filled by the pipe</span>
+items
+  <span class="op">|></span> calculate_tax(_, region)
+  <span class="op">|></span> apply_discount(_, code)
+  <span class="op">|></span> charge(payment)
+
+<span class="cm"># Hole for the agent</span>
+<span class="kw">situation</span> payment <span class="kw">do</span>
+  <span class="st">:valid</span> <span class="op">-></span> charge(payment)
+  _ <span class="cm"># Hole: the agent sees this</span>
+<span class="kw">end</span></code></pre>
+
+<p>Same syntax, different meaning, zero ambiguity. A Hole in a pipe has a value flowing into it. A Hole in a situation doesn't. Context does the work.</p>
+
+</div>
+
+<div class="section-header">
+<h2>Situations</h2>
+<div class="tldr-bubble"><code>situation</code> is like <code>case</code> but allows Holes. A <code>case</code> must be exhaustive. A <code>situation</code> can have gaps that the agent helps fill. It's branching where ambiguity is explicitly allowed and the robot participates in resolving it.</div>
+</div>
+<div class="section-content">
+
+<p><code>situation</code> is how you branch when you're not sure of everything yet.</p>
+
+<p>It looks like <code>case</code>. But a <code>case</code> is a finished thought, every branch accounted for. A <code>situation</code> can have Holes. That's the whole point. You write the branches you know and the agent helps you figure out the rest.</p>
+
+<pre><code><span class="kw">on</span> <span class="st">:withdraw</span>(amount: <span class="fn">Int</span>) <span class="kw">do</span>
+  <span class="kw">situation</span> balance - amount <span class="kw">do</span>
+    n <span class="kw">when</span> n >= <span class="nr">0</span> <span class="op">-></span>
+      <span class="kw">become</span> balance: n
+      <span class="kw">reply</span> n
+    _ <span class="cm"># Hole: handle insufficient funds</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+
+<p>The agent sees the <code>situation</code>, sees the Hole, looks at the type of <code>balance - amount</code>, and suggests what should happen when the result is negative. Maybe it suggests bubbling. Maybe it suggests a retry. Maybe it looks at your <code>BankAccount</code> actor and notices you have a <code>frozen</code> state field you haven't used yet and asks if that's relevant.</p>
+
+<p>When you eventually fill every Hole in a <code>situation</code>, you can promote it to a <code>case</code>. That's a signal to the compiler: "this is done, enforce exhaustiveness from now on."</p>
+
+</div>
+
+<div class="section-header">
+<h2>Bubbles</h2>
+<div class="tldr-bubble">Bubbles are failure actors. When something goes wrong, a Bubble actor spawns and walks up the supervision tree deciding who dies. Different Bubble actors have different blast radii: just me, me and my children, me and my siblings, or everything. Inspired by Temper's bubble model but adapted for actor supervision. <code>orelse</code> catches bubbles on the caller side.</div>
+</div>
+<div class="section-content">
+
+<p>Failure in Blimp is handled by bubbles. And bubbles are actors.</p>
+
+<p>When something goes wrong, you call <code>bubble</code> and a Bubble actor spawns. That actor walks up the supervision tree and decides who dies. Different Bubble actors have different blast radii:</p>
+
+<pre><code><span class="kw">actor</span> <span class="fn">SelfBubble</span> <span class="kw">do</span>
+  <span class="cm"># I die, my supervisor restarts me. Siblings untouched.</span>
+  <span class="kw">on</span> <span class="st">:propagate</span>(supervisor: <span class="fn">Actor</span>) <span class="kw">do</span>
+    supervisor <span class="op"><-</span> <span class="st">:restart</span>(origin)
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+<span class="kw">actor</span> <span class="fn">CascadeBubble</span> <span class="kw">do</span>
+  <span class="cm"># I die and take my siblings with me. One-for-all.</span>
+  <span class="kw">on</span> <span class="st">:propagate</span>(supervisor: <span class="fn">Actor</span>) <span class="kw">do</span>
+    supervisor <span class="op"><-</span> <span class="st">:restart_all</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+
+<p>You declare the bubble strategy per handler, not per actor, because different messages can have different failure semantics. A <code>:charge</code> failure is catastrophic, cascade everything. An <code>:add_item</code> failure is just me, restart and retry.</p>
+
+<pre><code><span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>) <span class="kw">bubbles</span>(<span class="fn">CascadeBubble</span>) <span class="kw">do</span>
+  <span class="kw">situation</span> process_payment(payment) <span class="kw">do</span>
+    receipt <span class="kw">when</span> valid?(receipt) <span class="op">-></span>
+      <span class="kw">become</span> items: [], total: <span class="nr">0.0</span>
+      <span class="kw">reply</span> receipt
+    _ <span class="op">-></span> <span class="kw">bubble</span> reason: <span class="st">"payment failed"</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+
+<p>On the caller side, <code>orelse</code> catches bubbles:</p>
+
+<pre><code>receipt = checkout <span class="op"><-</span> <span class="st">:charge</span>(my_payment) <span class="kw">orelse</span> <span class="kw">bubble</span></code></pre>
+
+<p>This collapses Erlang's <code>one_for_one</code>, <code>one_for_all</code>, <code>rest_for_one</code> into syntax that lives right where the failure happens instead of in some separate supervisor config. And because Bubbles are actors, you can write custom ones that log before dying, notify an external system, or attempt recovery before giving up.</p>
+
+<p>The inspiration here comes from <a href="https://nickelmattera.com/temper/">Temper</a>, which has a beautiful error model where <code>bubble()</code> signals failure with no payload, <code>orelse</code> recovers, and the type system tracks it all. We took that and made the bubbles themselves actors, because in Blimp everything is an actor.</p>
+
+</div>
+
+<div class="section-header">
+<h2>No Shared Memory</h2>
+<div class="tldr-bubble">Actors don't share memory. Communication is message-passing only. This is a ballsy move without the Erlang VM but it means no locks, no mutexes, no data races. Each actor gets its own memory arena. When it dies, free everything. Messages are copied across boundaries. We keep the spirit of the BEAM.</div>
+</div>
+<div class="section-content">
+
+<p>Actors don't share memory. Each actor owns its state, period. Communication is only through messages.</p>
+
+<p>This is a ballsy move without the Erlang VM. The BEAM gives you preemptive scheduling of millions of lightweight processes for free and we're compiling to WASM. So we need a green thread scheduler in userland, something that multiplexes many actors onto few real threads, with mailboxes and message passing.</p>
+
+<p>But Perceus RC actually helps here. Because actors don't share memory, each actor's heap is independent. When an actor dies, you free its entire arena. No cross-actor GC coordination. Messages between actors are the only thing that crosses boundaries, and those are copied.</p>
+
+<p>The spirit of the BEAM without the BEAM:</p>
+
+<ul>
+<li>Process isolation (no shared memory)</li>
+<li>Lightweight actors (green threads, not OS threads)</li>
+<li>Let it crash (bubbles handle the supervision)</li>
+<li>Location transparency (actors address by name, not by pointer)</li>
+</ul>
+
+<p>That's the <code>become</code> keyword paying off again. Because state transitions are immutable snapshots and nobody else is reading your state while you're transitioning it, there is simply nothing to lock.</p>
+
+</div>
+
+<div class="section-header">
+<h2>Putting It Together</h2>
+<div class="tldr-bubble">A complete actor with typed state, a situation with Holes the agent fills, bubbles that are themselves actors, pipe chains, and message sends. The whole thing. Then: the open questions, the canvas, jazz computers, jazz cigarettes.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>Here's a complete example showing how namespacing IS the supervision tree. <code>Shop.Checkout</code> means Checkout is supervised by Shop. Each actor is defined at the top level with dot notation:</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Shop</span> <span class="kw">do</span>
+  <span class="kw">state</span> region: <span class="fn">Atom</span> <span class="op">::</span> <span class="st">:us</span>
+<span class="kw">end</span>
+
+<span class="kw">actor</span> <span class="fn">Shop.Checkout</span> <span class="kw">do</span>
+  <span class="kw">state</span> items: [<span class="fn">Item</span>] <span class="op">::</span> []
+  <span class="kw">state</span> total: <span class="fn">Float</span> <span class="op">::</span> <span class="nr">0.0</span>
+
+  <span class="kw">on</span> <span class="st">:add</span>(item: <span class="fn">Item</span>) <span class="kw">do</span>
+    <span class="kw">become</span> items: [item | items],
+           total: total + item.price
+    <span class="kw">reply</span> length(items)
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>)
+      <span class="kw">bubbles</span>(<span class="fn">CascadeBubble</span>) <span class="kw">do</span>
+    <span class="kw">situation</span> validate(payment) <span class="kw">do</span>
+      <span class="st">:valid</span> <span class="op">-></span>
+        receipt = items
+          <span class="op">|></span> calculate_tax(_, region)
+          <span class="op">|></span> finalize(_, payment)
+        <span class="kw">become</span> items: [], total: <span class="nr">0.0</span>
+        <span class="kw">reply</span> receipt
+      _ <span class="cm"># Hole: handle invalid payment,
+        # begin by researching documentation
+        # on transaction failure</span>
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+<span class="kw">actor</span> <span class="fn">Shop.Inventory</span> <span class="kw">do</span>
+  <span class="kw">state</span> stock: %{<span class="fn">String</span> => <span class="fn">Int</span>} <span class="op">::</span> %{}
+
+  <span class="kw">on</span> <span class="st">:check</span>(item_name: <span class="fn">String</span>) <span class="kw">do</span>
+    <span class="kw">reply</span> lookup(stock, item_name)
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+</div>
+</div>
+
+<div class="split-pair">
+<div class="split-prose">
+<p>If you want, you can also nest them inline. Same tree, same behavior, just a different way to organize the source:</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Shop</span> <span class="kw">do</span>
+  <span class="kw">state</span> region: <span class="fn">Atom</span> <span class="op">::</span> <span class="st">:us</span>
+<span class="kw">end</span>
+
+<span class="kw">actor</span> <span class="fn">Shop.Checkout</span> <span class="kw">do</span>
+  <span class="kw">state</span> items: [<span class="fn">Item</span>] <span class="op">::</span> []
+  <span class="kw">state</span> total: <span class="fn">Float</span> <span class="op">::</span> <span class="nr">0.0</span>
+
+  <span class="kw">on</span> <span class="st">:add</span>(item: <span class="fn">Item</span>) <span class="kw">do</span>
+    <span class="kw">become</span> items: [item | items],
+           total: total + item.price
+    <span class="kw">reply</span> length(items)
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>)
+      <span class="kw">bubbles</span>(<span class="fn">CascadeBubble</span>) <span class="kw">do</span>
+    <span class="kw">situation</span> validate(payment) <span class="kw">do</span>
+      <span class="st">:valid</span> <span class="op">-></span>
+        receipt = items
+          <span class="op">|></span> calculate_tax(_, region)
+          <span class="op">|></span> finalize(_, payment)
+        <span class="kw">become</span> items: [], total: <span class="nr">0.0</span>
+        <span class="kw">reply</span> receipt
+      _ <span class="cm"># Hole: handle invalid payment,
+        # begin by researching documentation
+        # on transaction failure</span>
+    <span class="kw">end</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+<span class="kw">actor</span> <span class="fn">Shop.Inventory</span> <span class="kw">do</span>
+  <span class="kw">state</span> stock: %{<span class="fn">String</span> => <span class="fn">Int</span>} <span class="op">::</span> %{}
+
+  <span class="kw">on</span> <span class="st">:check</span>(item_name: <span class="fn">String</span>) <span class="kw">do</span>
+    <span class="kw">reply</span> lookup(stock, item_name)
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+</div>
+</div>
+
+<div class="split-pair">
+<div class="split-prose">
+<p><code>Shop.Checkout</code> and <code>Shop.Inventory</code> are siblings. Shop supervises both. If Checkout's <code>:charge</code> handler bubbles with <code>CascadeBubble</code>, Inventory goes down too because they're siblings under the same supervisor. The namespace IS the blast radius.</p>
+<p>Either way, the tree is the same. Top-level with dots is the preferred style. It's explicit, each actor gets its own space, and you can see the supervision hierarchy right in the name. Nesting is there if you want it.</p>
+<p>And talking to it:</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="cm"># Siblings address each other by name</span>
+Shop.Checkout <span class="op"><-</span> <span class="st">:add</span>(%{name: <span class="st">"shirt"</span>, price: <span class="nr">29.99</span>})
+Shop.Checkout <span class="op"><-</span> <span class="st">:add</span>(%{name: <span class="st">"hat"</span>, price: <span class="nr">15.00</span>})
+
+<span class="cm"># Check stock before charging</span>
+count = Shop.Inventory <span class="op"><-</span> <span class="st">:check</span>(<span class="st">"shirt"</span>)
+
+receipt = Shop.Checkout <span class="op"><-</span> <span class="st">:charge</span>(my_payment) <span class="kw">orelse</span> <span class="kw">bubble</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<div class="section-content">
+
+<h3>What We Haven't Figured Out Yet</h3>
+
+<p>This is still wet concrete. Here's what's open:</p>
+
+<p>Pattern matching in handlers. Right now <code>on :add(item: Item)</code> just binds <code>item</code>. We want destructuring like <code>on :add(%{price: price, name: name}: Item)</code> but haven't nailed the syntax for how patterns and types coexist.</p>
+
+<p>The scheduler. No shared memory means we need green threads in WASM. The BEAM does preemptive scheduling with reduction counting. We'll probably start with cooperative yields at message receive points and see how far that gets us.</p>
+
+<p>And the canvas: what even is a canvas painting a program? Well we have a flow-down diagram to start, and there are messages flying, that gives you lines to draw. Its abstract but can be definitively geometric. Where there is a Hole, we can allow randomness, or fractals, or noise, or whatever else, and some means to click around and explore all this and see the system in its "living" state. Why not man? Its cool to look at weird abstract shit when you're just hanging out with a machine riffing like this doing jazz computers while you smoke some jazz cigarettes.</p>
+
+<p>Next time we'll get into actual typing. I am only reaching for set theoretic and Perceus RC because I am adjacent to thinking about those two a lot lately. The process here surely will yield me some interesting results that probably will make me seriously consider other directions. We will see! Its a journey, baby.</p>
+
+</div>
+
+<script>
+(function() {
+  var mq = window.matchMedia('(max-width: 900px)');
+  function setup(e) {
+    var sides = document.querySelectorAll('.split-side');
+    document.querySelectorAll('.code-toggle').forEach(function(t) { t.remove(); });
+    sides.forEach(function(side) {
+      side.classList.remove('is-open');
+    });
+    if (!e.matches) return;
+    sides.forEach(function(side) {
+      var toggle = document.createElement('div');
+      toggle.className = 'code-toggle';
+      toggle.innerHTML = '<span class="chevron">&#9654;</span> <span class="code-icon">&lt;/&gt;</span> code';
+      toggle.addEventListener('click', function() {
+        var open = side.classList.toggle('is-open');
+        toggle.classList.toggle('is-open', open);
+      });
+      side.parentNode.insertBefore(toggle, side);
+    });
+  }
+  mq.addEventListener('change', setup);
+  setup(mq);
+})();
+</script>
+</body>
+</html>
