@@ -1,0 +1,114 @@
+================
+Message send with args
+================
+
+actor A do
+  on :buy do
+    checkout <- :add(item)
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (message_send
+        (identifier)
+        (atom)
+        (identifier)))))
+
+================
+Message send no args
+================
+
+actor A do
+  on :tick do
+    counter <- :increment
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (message_send
+        (identifier)
+        (atom)))))
+
+================
+Message send with orelse
+================
+
+actor A do
+  on :pay do
+    result = checkout <- :charge(payment) orelse :error
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (assignment
+        (identifier)
+        (orelse_expression
+          (message_send
+            (identifier)
+            (atom)
+            (identifier))
+          (atom))))))
+
+================
+Orelse with expression
+================
+
+actor A do
+  on :get do
+    reply x orelse 0
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (reply_statement
+        (orelse_expression
+          (identifier)
+          (integer))))))
+
+================
+Message send multiple args
+================
+
+actor A do
+  on :order do
+    shop <- :purchase(item, 42, :express)
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (message_send
+        (identifier)
+        (atom)
+        (identifier)
+        (integer)
+        (atom)))))

@@ -95,10 +95,37 @@ module.exports = grammar({
     // Expressions
     // ============================================================
 
-    _expression: ($) => choice($.pipe_expression, $.binary_expression, $._unary_expression),
+    _expression: ($) =>
+      choice(
+        $.orelse_expression,
+        $.pipe_expression,
+        $.message_send,
+        $.binary_expression,
+        $._unary_expression,
+      ),
+
+    orelse_expression: ($) =>
+      prec.right(0, seq($._expression, "orelse", $._expression)),
 
     pipe_expression: ($) =>
       prec.left(0, seq($._expression, "|>", $._expression)),
+
+    message_send: ($) =>
+      choice(
+        prec.left(1, seq(
+          $._expression,
+          token(prec(10, "<-")),
+          $.atom,
+          "(",
+          commaSep($._expression),
+          ")",
+        )),
+        prec.left(0, seq(
+          $._expression,
+          token(prec(10, "<-")),
+          $.atom,
+        )),
+      ),
 
     binary_expression: ($) =>
       choice(

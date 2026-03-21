@@ -1,0 +1,20 @@
+# Message send and orelse examples
+actor Shop do
+  state checkout: nil, inventory: nil
+
+  on :purchase(item, payment) do
+    checkout <- :add(item)
+    result = checkout <- :charge(payment) orelse :error
+    reply result
+  end
+
+  on :restock(item) do
+    inventory <- :add(item)
+    reply :ok
+  end
+
+  on :ping do
+    checkout <- :heartbeat
+    reply :ok
+  end
+end
