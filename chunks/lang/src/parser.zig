@@ -80,6 +80,7 @@ pub const Parser = struct {
             .kw_on => self.parseMessageHandler(),
             .kw_become => self.parseBecomeStmt(),
             .kw_reply => self.parseReplyStmt(),
+            .kw_situation => self.parseSituation(),
             else => self.parseExpressionStatement(),
         };
     }
@@ -164,6 +165,74 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .reply_stmt = .{ .value = value_ptr } },
             .loc = loc,
+        };
+    }
+
+    /// Parse: situation expr do pattern -> body ... _ -> body ... end
+    fn parseSituation(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_situation);
+        const subject = try self.parseExpression();
+        const subject_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+        subject_ptr.* = subject;
+        try self.expect(.kw_do);
+        self.skipNewlines();
+
+        var branches: std.ArrayList(Node.Branch) = .empty;
+        while (self.current.kind != .kw_end and self.current.kind != .eof) {
+            const branch = try self.parseBranch();
+            branches.append(self.allocator, branch) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+        try self.expect(.kw_end);
+
+        return Node{
+            .kind = .{ .situation = .{
+                .subject = subject_ptr,
+                .branches = branches.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            } },
+            .loc = loc,
+        };
+    }
+
+    /// Parse a single branch: pattern -> body or _ -> body
+    fn parseBranch(self: *Parser) ParseError!Node.Branch {
+        var pattern: ?*Node = null;
+
+        if (self.current.kind == .hole) {
+            // Hole branch (default/wildcard) -- pattern stays null
+            self.advance();
+        } else {
+            // Pattern expression
+            const pat = try self.parseExpression();
+            const pat_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            pat_ptr.* = pat;
+            pattern = pat_ptr;
+        }
+
+        // Expect -> arrow
+        try self.expect(.arrow);
+
+        // Parse body statements until next branch or end
+        var body: std.ArrayList(Node) = .empty;
+        while (self.current.kind != .kw_end and
+            self.current.kind != .eof and
+            self.current.kind != .hole and
+            self.current.kind != .atom)
+        {
+            // If we see a newline, skip it and check if the next token starts a new branch
+            if (self.current.kind == .newline) {
+                self.skipNewlines();
+                continue;
+            }
+            const stmt = try self.parseActorBody();
+            body.append(self.allocator, stmt) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+
+        return .{
+            .pattern = pattern,
+            .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
         };
     }
 
@@ -373,6 +442,10 @@ pub const Parser = struct {
                 const name = self.current.lexeme;
                 self.advance();
                 return Node{ .kind = .{ .identifier = .{ .name = name } }, .loc = loc };
+            },
+            .hole => {
+                self.advance();
+                return Node{ .kind = .{ .hole = .{ .directive = null } }, .loc = loc };
             },
             .lbracket => return self.parseListLit(),
             .lbrace => return self.parseTupleLit(),
@@ -894,4 +967,85 @@ test "parse pipe into no-arg function" {
     try std.testing.expectEqualStrings("items", pipe.left.kind.identifier.name);
     // Right side is just the identifier "sort" (no parens)
     try std.testing.expectEqualStrings("sort", pipe.right.kind.identifier.name);
+}
+
+test "parse hole as expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), "actor A do\n  reply _\nend");
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    // The hole should be parsed as a hole node
+    const h = reply.value.kind.hole;
+    try std.testing.expect(h.directive == null);
+}
+
+test "parse situation with branches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :msg do
+        \\    situation x do
+        \\      :a -> reply 1
+        \\      :b -> reply 2
+        \\    end
+        \\  end
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const sit = handler.body[0].kind.situation;
+
+    // Subject should be identifier "x"
+    try std.testing.expectEqualStrings("x", sit.subject.kind.identifier.name);
+
+    // Two branches
+    try std.testing.expectEqual(@as(usize, 2), sit.branches.len);
+
+    // First branch: pattern is :a, body is reply 1
+    const b0 = sit.branches[0];
+    try std.testing.expectEqualStrings("a", b0.pattern.?.kind.atom_lit.name);
+    try std.testing.expectEqual(@as(usize, 1), b0.body.len);
+    try std.testing.expectEqual(@as(i64, 1), b0.body[0].kind.reply_stmt.value.kind.integer_lit.value);
+
+    // Second branch: pattern is :b, body is reply 2
+    const b1 = sit.branches[1];
+    try std.testing.expectEqualStrings("b", b1.pattern.?.kind.atom_lit.name);
+    try std.testing.expectEqual(@as(usize, 1), b1.body.len);
+    try std.testing.expectEqual(@as(i64, 2), b1.body[0].kind.reply_stmt.value.kind.integer_lit.value);
+}
+
+test "parse situation with hole branch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :msg do
+        \\    situation x do
+        \\      :a -> reply 1
+        \\      _ -> reply 0
+        \\    end
+        \\  end
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const sit = handler.body[0].kind.situation;
+
+    try std.testing.expectEqual(@as(usize, 2), sit.branches.len);
+
+    // First branch: :a -> reply 1
+    const b0 = sit.branches[0];
+    try std.testing.expect(b0.pattern != null);
+    try std.testing.expectEqualStrings("a", b0.pattern.?.kind.atom_lit.name);
+
+    // Second branch: _ -> reply 0 (hole/default branch, pattern is null)
+    const b1 = sit.branches[1];
+    try std.testing.expect(b1.pattern == null);
+    try std.testing.expectEqual(@as(usize, 1), b1.body.len);
+    try std.testing.expectEqual(@as(i64, 0), b1.body[0].kind.reply_stmt.value.kind.integer_lit.value);
 }

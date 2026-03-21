@@ -101,6 +101,23 @@ fn printNode(writer: *std.io.Writer, node: ast.Node, indent: u32) void {
             printInline(writer, a.value.*);
             writer.print(")\n", .{}) catch {};
         },
+        .situation => |s| {
+            writer.print("{s}(situation", .{prefix}) catch {};
+            printInline(writer, s.subject.*);
+            writer.print("\n", .{}) catch {};
+            for (s.branches) |branch| {
+                if (branch.pattern) |pat| {
+                    writer.print("{s}  (branch", .{prefix}) catch {};
+                    printInline(writer, pat.*);
+                    writer.print("\n", .{}) catch {};
+                } else {
+                    writer.print("{s}  (branch _\n", .{prefix}) catch {};
+                }
+                printNodes(writer, branch.body, indent + 2);
+                writer.print("{s}  )\n", .{prefix}) catch {};
+            }
+            writer.print("{s})\n", .{prefix}) catch {};
+        },
         else => {
             writer.print("{s}", .{prefix}) catch {};
             printInline(writer, node);
@@ -175,6 +192,8 @@ fn printInline(writer: *std.io.Writer, node: ast.Node) void {
             printInline(writer, d.object.*);
             writer.print(".{s}", .{d.field}) catch {};
         },
+        .hole => writer.print(" _", .{}) catch {},
+        .situation => writer.print(" (situation ...)", .{}) catch {},
         else => writer.print(" ???", .{}) catch {},
     }
 }

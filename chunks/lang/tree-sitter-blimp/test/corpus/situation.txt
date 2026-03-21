@@ -1,0 +1,114 @@
+================
+Hole as expression
+================
+
+actor A do
+  reply _
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (hole))))
+
+================
+Situation with atom branches
+================
+
+actor A do
+  on :msg do
+    situation x do
+      :a -> reply 1
+      :b -> reply 2
+    end
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (situation_expression
+        (identifier)
+        (situation_branch
+          (atom)
+          (reply_statement
+            (integer)))
+        (situation_branch
+          (atom)
+          (reply_statement
+            (integer)))))))
+
+================
+Situation with hole branch
+================
+
+actor A do
+  on :msg do
+    situation x do
+      :a -> reply 1
+      _ -> reply 0
+    end
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (situation_expression
+        (identifier)
+        (situation_branch
+          (atom)
+          (reply_statement
+            (integer)))
+        (situation_branch
+          (hole)
+          (reply_statement
+            (integer)))))))
+
+================
+Situation with multiple statements in branch
+================
+
+actor A do
+  on :msg do
+    situation status do
+      :active -> become count: 1
+        reply :ok
+      _ -> reply :error
+    end
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (situation_expression
+        (identifier)
+        (situation_branch
+          (atom)
+          (become_statement
+            (key_value_list
+              (key_value_pair
+                (identifier)
+                (integer))))
+          (reply_statement
+            (atom)))
+        (situation_branch
+          (hole)
+          (reply_statement
+            (atom)))))))

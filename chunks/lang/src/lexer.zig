@@ -156,6 +156,11 @@ pub const Lexer = struct {
         }
         const lexeme = self.source[start..self.pos];
 
+        // Standalone _ is a hole token
+        if (std.mem.eql(u8, lexeme, "_")) {
+            return .{ .kind = .hole, .lexeme = lexeme, .line = self.line, .col = start_col };
+        }
+
         // Check for keywords
         if (Token.keyword(lexeme)) |kw_kind| {
             return .{ .kind = kw_kind, .lexeme = lexeme, .line = self.line, .col = start_col };
@@ -182,6 +187,7 @@ pub const Lexer = struct {
                 '=' => if (next_c == '=') Token.Kind.eq_eq else null,
                 '!' => if (next_c == '=') Token.Kind.bang_eq else null,
                 '&' => if (next_c == '&') Token.Kind.amp_amp else null,
+                '-' => if (next_c == '>') Token.Kind.arrow else null,
                 else => null,
             };
             if (two_char) |kind| {
@@ -407,6 +413,52 @@ test "lex complete actor definition" {
     try std.testing.expectEqual(Token.Kind.newline, lexer.next().kind);
 
     // end
+    try std.testing.expectEqual(Token.Kind.kw_end, lexer.next().kind);
+    try std.testing.expectEqual(Token.Kind.eof, lexer.next().kind);
+}
+
+test "lex standalone underscore as hole" {
+    var lexer = Lexer.init("_ _foo _");
+    // First _ is standalone -> hole
+    const t1 = lexer.next();
+    try std.testing.expectEqual(Token.Kind.hole, t1.kind);
+    try std.testing.expectEqualStrings("_", t1.lexeme);
+
+    // _foo is an identifier (starts with _ but has more chars)
+    const t2 = lexer.next();
+    try std.testing.expectEqual(Token.Kind.identifier, t2.kind);
+    try std.testing.expectEqualStrings("_foo", t2.lexeme);
+
+    // Last _ is standalone -> hole
+    const t3 = lexer.next();
+    try std.testing.expectEqual(Token.Kind.hole, t3.kind);
+    try std.testing.expectEqualStrings("_", t3.lexeme);
+
+    try std.testing.expectEqual(Token.Kind.eof, lexer.next().kind);
+}
+
+test "lex arrow operator" {
+    var lexer = Lexer.init("-> <- -");
+    const t1 = lexer.next();
+    try std.testing.expectEqual(Token.Kind.arrow, t1.kind);
+    try std.testing.expectEqualStrings("->", t1.lexeme);
+
+    const t2 = lexer.next();
+    try std.testing.expectEqual(Token.Kind.send_arrow, t2.kind);
+    try std.testing.expectEqualStrings("<-", t2.lexeme);
+
+    const t3 = lexer.next();
+    try std.testing.expectEqual(Token.Kind.minus, t3.kind);
+    try std.testing.expectEqualStrings("-", t3.lexeme);
+
+    try std.testing.expectEqual(Token.Kind.eof, lexer.next().kind);
+}
+
+test "lex situation keyword" {
+    var lexer = Lexer.init("situation x do end");
+    try std.testing.expectEqual(Token.Kind.kw_situation, lexer.next().kind);
+    try std.testing.expectEqual(Token.Kind.identifier, lexer.next().kind);
+    try std.testing.expectEqual(Token.Kind.kw_do, lexer.next().kind);
     try std.testing.expectEqual(Token.Kind.kw_end, lexer.next().kind);
     try std.testing.expectEqual(Token.Kind.eof, lexer.next().kind);
 }

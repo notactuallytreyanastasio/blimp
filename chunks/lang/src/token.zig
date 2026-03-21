@@ -30,6 +30,7 @@ pub const Token = struct {
         kw_reply,
         kw_when,
         kw_def,
+        kw_situation,
 
         // Operators
         plus,
@@ -46,6 +47,7 @@ pub const Token = struct {
         gt_eq,
         pipe_arrow, // |>
         send_arrow, // <-
+        arrow, // ->
         pipe_pipe, // ||
         amp_amp, // &&
         pipe, // | (for cons in lists)
@@ -64,6 +66,7 @@ pub const Token = struct {
         percent, // % (for map literals %{})
 
         // Special
+        hole, // _ (standalone underscore)
         newline,
         eof,
         invalid,
@@ -81,6 +84,7 @@ pub const Token = struct {
             .{ "reply", .kw_reply },
             .{ "when", .kw_when },
             .{ "def", .kw_def },
+            .{ "situation", .kw_situation },
             .{ "true", .true_lit },
             .{ "false", .false_lit },
             .{ "nil", .nil_lit },

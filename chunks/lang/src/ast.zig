@@ -38,6 +38,8 @@ pub const Node = struct {
         tuple_lit: TupleLit,
         map_lit: MapLit,
         dot_access: DotAccess,
+        hole: Hole,
+        situation: Situation,
     };
 
     pub const ActorDef = struct {
@@ -150,6 +152,20 @@ pub const Node = struct {
     pub const DotAccess = struct {
         object: *const Node,
         field: []const u8,
+    };
+
+    pub const Hole = struct {
+        directive: ?[]const u8,
+    };
+
+    pub const Situation = struct {
+        subject: *const Node,
+        branches: []const Branch,
+    };
+
+    pub const Branch = struct {
+        pattern: ?*const Node,
+        body: []const Node,
     };
 
     /// Key-value pair for state, become, and map literals.

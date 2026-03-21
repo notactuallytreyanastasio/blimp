@@ -6,6 +6,7 @@
 "on" @keyword
 "become" @keyword
 "reply" @keyword
+"situation" @keyword
 
 ; Literals
 (integer) @number
@@ -14,6 +15,7 @@
 (atom) @string.special.symbol
 (boolean) @constant.builtin
 (nil) @constant.builtin
+(hole) @variable.builtin
 
 ; Identifiers
 (upper_identifier) @type
@@ -56,6 +58,7 @@
 "!" @operator
 "|" @operator
 "|>" @operator
+"->" @operator
 "." @punctuation.delimiter
 
 ; Delimiters
