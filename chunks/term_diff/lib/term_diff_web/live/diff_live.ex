@@ -141,6 +141,12 @@ defmodule TermDiffWeb.DiffLive do
       socket
       |> handle_open_file(nav)
       |> handle_stage_actions(nav)
+
+    # After stage/unstage, nav may have been refreshed. Use the socket's current nav.
+    nav = socket.assigns.nav
+
+    socket =
+      socket
       |> handle_nav_change(nav)
       |> handle_commit_enter(key)
 
