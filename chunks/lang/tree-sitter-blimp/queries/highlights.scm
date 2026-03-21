@@ -8,6 +8,8 @@
 "reply" @keyword
 "situation" @keyword
 "orelse" @keyword
+"when" @keyword
+"bubbles" @keyword
 
 ; Literals
 (integer) @number

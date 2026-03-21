@@ -1,0 +1,60 @@
+# A shop system demonstrating dot-notation actors, guards, and bubbles
+# Dot-notation groups related actors into namespaces
+
+actor Shop.Inventory do
+  state items: [], restock_threshold: 5
+
+  on :add(item) do
+    become items: [item | items]
+    reply :ok
+  end
+
+  on :remove(item) when length(items) > 0 do
+    become items: remove(items, item)
+    reply {:ok, item}
+  end
+
+  on :count do
+    reply length(items)
+  end
+end
+
+actor Shop.Checkout do
+  state cart: [], total: 0, discount: 0
+
+  on :add_item(item) do
+    become cart: [item | cart],
+           total: total + item.price
+    reply {:added, item}
+  end
+
+  on :apply_discount(percent) when percent > 0 do
+    become discount: percent
+    reply {:discount, percent}
+  end
+
+  on :charge(payment) when payment.amount >= total bubbles(CascadeBubble) do
+    reply {:charged, total}
+  end
+
+  on :refund(payment) when valid?(payment) bubbles(CascadeBubble) do
+    reply {:refunded, payment.amount}
+  end
+
+  on :summary do
+    reply %{items: cart, total: total, discount: discount}
+  end
+end
+
+actor Shop.Analytics do
+  state events: [], total_revenue: 0
+
+  on :record(event) bubbles(CascadeBubble) do
+    become events: [event | events]
+    reply :ok
+  end
+
+  on :revenue do
+    reply total_revenue
+  end
+end

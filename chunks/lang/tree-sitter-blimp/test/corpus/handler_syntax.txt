@@ -1,0 +1,99 @@
+================
+Handler with guard
+================
+
+actor Account do
+  on :withdraw(amount) when amount > 0 do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (parameter_list
+        (identifier))
+      (when_guard
+        (binary_expression
+          (identifier)
+          (integer)))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with bubbles
+================
+
+actor Payment do
+  on :charge(payment) bubbles(CascadeBubble) do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (parameter_list
+        (identifier))
+      (bubbles_annotation
+        (upper_identifier))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with guard and bubbles
+================
+
+actor Payment do
+  on :charge(payment) when payment > 0 bubbles(CascadeBubble) do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (parameter_list
+        (identifier))
+      (when_guard
+        (binary_expression
+          (identifier)
+          (integer)))
+      (bubbles_annotation
+        (upper_identifier))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with guard only no params
+================
+
+actor Timer do
+  on :tick when active do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (when_guard
+        (identifier))
+      (reply_statement
+        (atom)))))

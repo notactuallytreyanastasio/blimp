@@ -56,6 +56,8 @@ pub const Node = struct {
     pub const MessageHandler = struct {
         name: []const u8, // atom name without colon
         params: []const []const u8,
+        guard: ?*const Node = null,
+        bubble_strategy: ?[]const u8 = null,
         body: []const Node,
     };
 

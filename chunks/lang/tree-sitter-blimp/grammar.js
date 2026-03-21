@@ -64,10 +64,16 @@ module.exports = grammar({
         "on",
         $.atom,
         optional($.parameter_list),
+        optional($.when_guard),
+        optional($.bubbles_annotation),
         "do",
         repeat($._statement),
         "end",
       ),
+
+    when_guard: ($) => seq("when", $._expression),
+
+    bubbles_annotation: ($) => seq("bubbles", "(", $.upper_identifier, ")"),
 
     parameter_list: ($) =>
       seq("(", commaSep1($.identifier), ")"),
