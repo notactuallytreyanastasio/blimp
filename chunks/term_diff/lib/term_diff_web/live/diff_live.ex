@@ -3,10 +3,11 @@ defmodule TermDiffWeb.DiffLive do
 
   require Logger
 
+  alias TermDiff.Commentary.Store, as: CommentaryStore
   alias TermDiff.Diff.{CommitState, FileState, Navigation}
   alias TermDiff.Git.{Diff, Log, Runner, Status, Watcher}
   alias TermDiff.Git.Types.RepoState
-  alias TermDiff.Commentary.Store, as: CommentaryStore
+  alias TermDiffWeb.AgentComponents
 
   @impl true
   def mount(params, _session, socket) do
@@ -40,6 +41,7 @@ defmodule TermDiffWeb.DiffLive do
   def render(assigns) do
     ~H"""
     <div id="term-diff" phx-hook="KeyNav" class="h-screen flex flex-col font-mono text-[13px] leading-snug bg-white text-neutral-900">
+      <AgentComponents.nav_bar active_page={:diffs} />
       <.status_bar repo_state={@repo_state} nav={@nav} repo_path={@repo_path} commentary_status={@commentary_status} />
       <.keybinding_bar nav={@nav} />
 

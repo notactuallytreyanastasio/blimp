@@ -24,6 +24,8 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/term_diff"
 import topbar from "../vendor/topbar"
+import PromptSubmit from "./hooks/prompt_submit"
+import AgentAutoScroll from "./hooks/agent_auto_scroll"
 
 let Hooks = {...colocatedHooks}
 
@@ -80,6 +82,9 @@ Hooks.KeyNav = {
     })
   }
 }
+
+Hooks.PromptSubmit = PromptSubmit
+Hooks.AgentAutoScroll = AgentAutoScroll
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {

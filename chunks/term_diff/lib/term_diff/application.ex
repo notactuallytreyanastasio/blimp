@@ -14,6 +14,9 @@ defmodule TermDiff.Application do
       {Phoenix.PubSub, name: TermDiff.PubSub},
       {TermDiff.Git.Watcher, repo_path: Application.get_env(:term_diff, :repo_path, File.cwd!())},
       {TermDiff.Commentary.Supervisor, repo_path: Application.get_env(:term_diff, :repo_path, File.cwd!())},
+      # Agent multiplexer
+      TermDiff.Agent.Runner.Supervisor,
+      {TermDiff.Agent.Orchestrator, []},
       TermDiffWeb.Endpoint
     ]
 
