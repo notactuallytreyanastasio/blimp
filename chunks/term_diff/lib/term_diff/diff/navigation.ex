@@ -1,5 +1,5 @@
 defmodule TermDiff.Diff.Navigation do
-  @moduledoc "Pure state machine for keyboard-driven diff navigation. No side effects."
+  @moduledoc "Pure state machine for keyboard-driven diff navigation. No side effects. No git calls."
 
   @type focus :: :file_list | :diff_view | :log_view | :log_detail
 

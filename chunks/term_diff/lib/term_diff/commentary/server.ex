@@ -2,7 +2,7 @@ defmodule TermDiff.Commentary.Server do
   @moduledoc """
   Orchestrates AI review cycles.
 
-  Spawns Tasks under a Task.Supervisor to call Claude, stores results
+  Spawns linked Tasks under a Task.Supervisor to call Claude, stores results
   in the Commentary.Store, and broadcasts updates via PubSub.
 
   Accepts injectable :caller, :store, and :task_supervisor options
