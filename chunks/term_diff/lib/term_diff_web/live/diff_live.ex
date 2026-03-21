@@ -31,6 +31,7 @@ defmodule TermDiffWeb.DiffLive do
       |> assign(:commentary_status, :idle)
       |> assign(:expanded_comments, MapSet.new())
       |> assign(:commit, CommitState.new())
+      |> assign(:amend_diff, [])
 
     {:ok, socket}
   end
@@ -43,7 +44,7 @@ defmodule TermDiffWeb.DiffLive do
       <.keybinding_bar nav={@nav} />
 
       <div class="flex flex-1 overflow-hidden">
-        <.commit_layout :if={CommitState.active?(@commit)} commit={@commit} repo_state={@repo_state} />
+        <.commit_layout :if={CommitState.active?(@commit)} commit={@commit} repo_state={@repo_state} amend_diff={@amend_diff} />
         <.log_layout
           :if={!CommitState.active?(@commit) && @nav.focus in [:log_view, :log_detail]}
           nav={@nav}
@@ -114,7 +115,12 @@ defmodule TermDiffWeb.DiffLive do
   @impl true
   def handle_event("keydown", %{"key" => "Escape"}, socket) do
     if CommitState.active?(socket.assigns.commit) do
-      {:noreply, assign(socket, :commit, CommitState.cancel(socket.assigns.commit))}
+      socket =
+        socket
+        |> assign(:commit, CommitState.cancel(socket.assigns.commit))
+        |> assign(:amend_diff, [])
+
+      {:noreply, socket}
     else
       {:noreply, socket}
     end
@@ -189,7 +195,12 @@ defmodule TermDiffWeb.DiffLive do
 
   @impl true
   def handle_event("cancel_commit", _params, socket) do
-    {:noreply, assign(socket, :commit, CommitState.cancel(socket.assigns.commit))}
+    socket =
+      socket
+      |> assign(:commit, CommitState.cancel(socket.assigns.commit))
+      |> assign(:amend_diff, [])
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -238,7 +249,10 @@ defmodule TermDiffWeb.DiffLive do
 
   defp handle_commit_result({:ok, _output}, socket, commit) do
     send(self(), :refresh)
-    assign(socket, :commit, CommitState.complete(commit))
+
+    socket
+    |> assign(:commit, CommitState.complete(commit))
+    |> assign(:amend_diff, [])
   end
 
   defp handle_commit_result({:error, error}, socket, commit) do
@@ -487,14 +501,25 @@ defmodule TermDiffWeb.DiffLive do
   end
 
   defp handle_commit_enter(socket, "a") do
+    repo_path = socket.assigns.repo_path
+
     last_message =
-      case Runner.last_commit_message(socket.assigns.repo_path) do
+      case Runner.last_commit_message(repo_path) do
         {:ok, msg} -> msg
         _ -> nil
       end
 
+    amend_diff =
+      case Runner.log_diff(repo_path, "HEAD") do
+        {:ok, raw} -> Diff.parse(raw)
+        _ -> []
+      end
+
     commit = CommitState.enter(:amend, last_message: last_message)
-    assign(socket, :commit, commit)
+
+    socket
+    |> assign(:commit, commit)
+    |> assign(:amend_diff, amend_diff)
   end
 
   defp handle_commit_enter(socket, _key), do: socket
@@ -545,11 +570,10 @@ defmodule TermDiffWeb.DiffLive do
         <form phx-submit="submit_commit" phx-change="update_commit_message" class="flex flex-col flex-1">
           <textarea
             name="message"
-            value={@commit.message}
             placeholder="First line: concise summary&#10;&#10;Body: explain WHY, not just WHAT changed."
             class="flex-1 w-full p-3 bg-neutral-50 border border-neutral-200 rounded text-[13px] font-mono leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-green-400/60 focus:border-transparent"
             autofocus
-          ></textarea>
+          >{@commit.message}</textarea>
           <div class="flex items-center justify-between mt-3">
             <div class="text-[11px] text-neutral-400">
               <span>{length(@repo_state.files)} files</span>
@@ -566,10 +590,26 @@ defmodule TermDiffWeb.DiffLive do
         </form>
       </div>
       <div class="w-1/2 flex flex-col p-4 overflow-y-auto">
-        <div class="text-xs text-neutral-500 mb-2 font-semibold">STAGED CHANGES</div>
-        <div :for={file <- @repo_state.files} class="text-[12px] py-0.5">
-          <span :if={file.staged_status && file.staged_status != :untracked} class={"font-semibold #{status_color(file.staged_status)}"}>{status_char(file.staged_status)}</span>
-          <span :if={file.staged_status && file.staged_status != :untracked} class="ml-2">{file.path}</span>
+        <div :if={@commit.mode == :amend && @amend_diff != []}>
+          <div class="text-xs text-neutral-500 mb-2 font-semibold">AMENDING COMMIT</div>
+          <div :for={file_diff <- @amend_diff} class="mb-4">
+            <div class="text-xs text-neutral-600 font-semibold mb-1">{file_diff.path}</div>
+            <div :for={hunk <- file_diff.hunks} class="mb-2">
+              <div class="px-2 py-0.5 text-xs bg-blue-50 text-blue-700 border-y border-neutral-200">{hunk.header}</div>
+              <div :for={line <- hunk.lines} class={"flex text-[12px] #{amend_line_class(line)}"}>
+                <span class="w-6 text-right pr-1 text-neutral-300 select-none shrink-0">{line.old_line_number || ""}</span>
+                <span class="w-6 text-right pr-1 text-neutral-300 select-none shrink-0">{line.new_line_number || ""}</span>
+                <span class="px-1 whitespace-pre flex-1">{line_prefix(line.type)}{line.content}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div :if={@commit.mode != :amend || @amend_diff == []}>
+          <div class="text-xs text-neutral-500 mb-2 font-semibold">STAGED CHANGES</div>
+          <div :for={file <- @repo_state.files} class="text-[12px] py-0.5">
+            <span :if={file.staged_status && file.staged_status != :untracked} class={"font-semibold #{status_color(file.staged_status)}"}>{status_char(file.staged_status)}</span>
+            <span :if={file.staged_status && file.staged_status != :untracked} class="ml-2">{file.path}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -774,6 +814,10 @@ defmodule TermDiffWeb.DiffLive do
   defp status_color(:deleted), do: "text-red-600"
   defp status_color(:untracked), do: "text-neutral-400"
   defp status_color(_), do: ""
+
+  defp amend_line_class(%{type: :addition}), do: "bg-green-50"
+  defp amend_line_class(%{type: :deletion}), do: "bg-red-50"
+  defp amend_line_class(_), do: ""
 
   defp line_class(line, hunk) do
     hot? = hunk.highlighted_at && DateTime.diff(DateTime.utc_now(), hunk.highlighted_at, :second) < 3
