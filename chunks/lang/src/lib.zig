@@ -1,0 +1,14 @@
+// Blimp Language - Core library
+//
+// This is the root module that re-exports all parser components.
+// Tests from all modules are pulled in via @import.
+
+pub const Token = @import("token.zig").Token;
+pub const Lexer = @import("lexer.zig").Lexer;
+pub const ast = @import("ast.zig");
+pub const Parser = @import("parser.zig").Parser;
+
+test {
+    // Pull in tests from all modules
+    @import("std").testing.refAllDecls(@This());
+}

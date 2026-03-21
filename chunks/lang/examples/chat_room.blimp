@@ -1,0 +1,28 @@
+# A chat room actor that manages users and message history
+actor ChatRoom do
+  state users: [], messages: [], max_history: 100
+
+  on :join(username) do
+    become users: [username | users]
+    reply {:ok, messages}
+  end
+
+  on :leave(username) do
+    become users: remove(users, username)
+    reply :ok
+  end
+
+  on :send(username, text) do
+    msg = %{from: username, text: text, ts: now()}
+    become messages: append(messages, msg)
+    reply {:ok, msg}
+  end
+
+  on :history do
+    reply messages
+  end
+
+  on :who do
+    reply users
+  end
+end
