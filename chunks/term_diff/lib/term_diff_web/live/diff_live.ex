@@ -291,8 +291,7 @@ defmodule TermDiffWeb.DiffLive do
   defp exec_and_refresh(socket, command) do
     case Runner.exec_file_command(socket.assigns.repo_path, command) do
       {:ok, _} ->
-        send(self(), :refresh)
-        socket
+        refresh_now(socket)
 
       {:error, error} ->
         Logger.error("Git command failed: #{inspect(command)} - #{error}")
@@ -301,6 +300,18 @@ defmodule TermDiffWeb.DiffLive do
       :noop ->
         socket
     end
+  end
+
+  defp refresh_now(socket) do
+    repo_state = fetch_repo_state(socket.assigns.repo_path)
+    file_paths = Enum.map(repo_state.files, & &1.path)
+    nav = Navigation.sync_to_files(socket.assigns.nav, file_paths)
+    selected_diff = if nav.selected_file, do: Map.get(repo_state.diffs, nav.selected_file)
+
+    socket
+    |> assign(:repo_state, repo_state)
+    |> assign(:nav, nav)
+    |> assign(:selected_diff, selected_diff)
   end
 
   defp handle_nav_change(socket, nav) do

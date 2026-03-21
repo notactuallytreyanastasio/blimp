@@ -1,6 +1,7 @@
 defmodule TermDiff.Commentary.Prompt do
   @moduledoc """
   Build the prompt and JSON schema sent to Claude for diff review.
+  Schema is validated server-side by claude -p via --json-schema.
   """
 
   @review_schema Jason.encode!(%{
