@@ -1,0 +1,19 @@
+# A checkout actor with state and pattern matching
+actor Checkout do
+  state items: [], total: 0
+
+  on :add(item) do
+    become items: [item | items],
+           total: total + item.price
+    reply :ok
+  end
+
+  on :summary do
+    reply {items, total}
+  end
+
+  on :clear do
+    become items: [], total: 0
+    reply :cleared
+  end
+end
