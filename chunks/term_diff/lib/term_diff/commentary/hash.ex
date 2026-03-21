@@ -1,5 +1,5 @@
 defmodule TermDiff.Commentary.Hash do
-  @moduledoc "Pure SHA256 hashing for diff content staleness tracking."
+  @moduledoc "Pure SHA256 hashing for diff content staleness tracking. Deterministic."
 
   @spec hash_diff(String.t()) :: String.t()
   def hash_diff(content) do
