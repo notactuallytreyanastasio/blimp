@@ -194,7 +194,29 @@ pub const Parser = struct {
     // ============================================================
 
     fn parseExpression(self: *Parser) ParseError!Node {
-        return self.parseBinaryOr();
+        return self.parsePipe();
+    }
+
+    /// Parse pipe expressions: left-associative, lowest precedence among binary ops.
+    /// a |> b(_, x) |> c(_) parses as (a |> b(_, x)) |> c(_)
+    fn parsePipe(self: *Parser) ParseError!Node {
+        var left = try self.parseBinaryOr();
+        while (self.current.kind == .pipe_arrow) {
+            self.advance();
+            const right = try self.parseBinaryOr();
+            const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            left_ptr.* = left;
+            const right_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            right_ptr.* = right;
+            left = Node{
+                .kind = .{ .pipe_expr = .{
+                    .left = left_ptr,
+                    .right = right_ptr,
+                } },
+                .loc = left.loc,
+            };
+        }
+        return left;
     }
 
     fn parseBinaryOr(self: *Parser) ParseError!Node {
@@ -816,4 +838,60 @@ test "parse dot access" {
 
     try std.testing.expectEqualStrings("item", dot.object.kind.identifier.name);
     try std.testing.expectEqualStrings("price", dot.field);
+}
+
+test "parse simple pipe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> length(_)\nend");
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const pipe = reply.value.kind.pipe_expr;
+
+    // Left side is the identifier "items"
+    try std.testing.expectEqualStrings("items", pipe.left.kind.identifier.name);
+    // Right side is a function call length(_)
+    const call = pipe.right.kind.func_call;
+    try std.testing.expectEqualStrings("length", call.name);
+    try std.testing.expectEqual(@as(usize, 1), call.args.len);
+    try std.testing.expectEqualStrings("_", call.args[0].kind.identifier.name);
+}
+
+test "parse chained pipes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> filter(_, :active) |> length(_)\nend");
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+
+    // Chained pipes are left-associative: (items |> filter(_, :active)) |> length(_)
+    const outer_pipe = reply.value.kind.pipe_expr;
+    // Right of outer pipe is length(_)
+    const length_call = outer_pipe.right.kind.func_call;
+    try std.testing.expectEqualStrings("length", length_call.name);
+
+    // Left of outer pipe is the inner pipe: items |> filter(_, :active)
+    const inner_pipe = outer_pipe.left.kind.pipe_expr;
+    try std.testing.expectEqualStrings("items", inner_pipe.left.kind.identifier.name);
+    const filter_call = inner_pipe.right.kind.func_call;
+    try std.testing.expectEqualStrings("filter", filter_call.name);
+    try std.testing.expectEqual(@as(usize, 2), filter_call.args.len);
+    try std.testing.expectEqualStrings("_", filter_call.args[0].kind.identifier.name);
+    try std.testing.expectEqualStrings("active", filter_call.args[1].kind.atom_lit.name);
+}
+
+test "parse pipe into no-arg function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> sort\nend");
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const pipe = reply.value.kind.pipe_expr;
+
+    try std.testing.expectEqualStrings("items", pipe.left.kind.identifier.name);
+    // Right side is just the identifier "sort" (no parens)
+    try std.testing.expectEqualStrings("sort", pipe.right.kind.identifier.name);
 }

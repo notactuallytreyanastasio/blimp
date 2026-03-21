@@ -94,7 +94,10 @@ module.exports = grammar({
     // Expressions
     // ============================================================
 
-    _expression: ($) => choice($.binary_expression, $._unary_expression),
+    _expression: ($) => choice($.pipe_expression, $.binary_expression, $._unary_expression),
+
+    pipe_expression: ($) =>
+      prec.left(0, seq($._expression, "|>", $._expression)),
 
     binary_expression: ($) =>
       choice(

@@ -136,6 +136,12 @@ fn printInline(writer: *std.io.Writer, node: ast.Node) void {
             }
             writer.print(")", .{}) catch {};
         },
+        .pipe_expr => |p| {
+            writer.print(" (|>", .{}) catch {};
+            printInline(writer, p.left.*);
+            printInline(writer, p.right.*);
+            writer.print(")", .{}) catch {};
+        },
         .list_lit => |l| {
             writer.print(" [", .{}) catch {};
             for (l.elements, 0..) |elem, i| {

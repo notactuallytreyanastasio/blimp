@@ -33,6 +33,7 @@ pub const Node = struct {
         binary_op: BinaryOp,
         unary_op: UnaryOp,
         func_call: FuncCall,
+        pipe_expr: PipeExpr,
         list_lit: ListLit,
         tuple_lit: TupleLit,
         map_lit: MapLit,
@@ -125,6 +126,11 @@ pub const Node = struct {
     pub const FuncCall = struct {
         name: []const u8,
         args: []const Node,
+    };
+
+    pub const PipeExpr = struct {
+        left: *const Node,
+        right: *const Node,
     };
 
     pub const ListLit = struct {
