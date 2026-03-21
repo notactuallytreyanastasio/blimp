@@ -1,2 +1,3 @@
 # Deciduous database (local)
 .deciduous/
+chunks/lang/.zig-cache/
