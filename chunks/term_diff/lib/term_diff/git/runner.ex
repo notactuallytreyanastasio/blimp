@@ -86,6 +86,7 @@ defmodule TermDiff.Git.Runner do
 
   @spec branch(String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def branch(repo_path) do
+    # rev-parse is already plumbing
     run(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"])
   end
 
