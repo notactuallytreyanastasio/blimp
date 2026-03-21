@@ -1,7 +1,23 @@
 # Project Instructions
 
-## Elixir Development Rules - CRITICAL
+## Git Rules - CRITICAL
 
+**NEVER stage, unstage, commit, or push.** The user handles all git operations through term_diff to dogfood the tool.
+
+You MAY:
+- Run `git status`, `git diff`, `git log` (read-only)
+- **Suggest** commit messages when asked
+- Run `deploy.sh` when explicitly asked
+
+You MUST NOT:
+- `git add` anything
+- `git commit` anything
+- `git push` anything
+- `git stash` anything
+
+If the user asks you to "ship it" or "commit this," suggest a commit message and tell them to use term_diff.
+
+## Elixir Compilation Rules - CRITICAL
 ### TDD: Red-Green-Refactor is Mandatory
 
 **ALWAYS write tests FIRST.** This is not optional.
@@ -409,3 +425,61 @@ deciduous events checkpoint --clear-events
 Events auto-emit on add/link/status commands. Git merges event files automatically.
 
 <!-- deciduous:end -->
+
+actor Shop do
+state region: Atom :: :us
+
+actor Checkout do
+state items: [Item] :: []
+state total: Float :: 0.0
+
+    on :add(item: Item) do
+      become items: [item | items],
+             total: total + item.price
+      reply length(items)
+    end
+
+    on :charge(payment: Payment)
+        bubbles(CascadeBubble) do
+      situation validate(payment) do
+        :valid ->
+          receipt = items
+            |> calculate_tax(_, region)
+            |> finalize(_, payment)
+          become items: [], total: 0.0
+          reply receipt
+        _ # Hole: handle invalid payment,
+          # begin by researching documentation
+          # on transaction failure
+      end
+    end
+
+end
+
+actor Inventory do
+state stock: %{String => Int} :: %{}
+
+    on :check(item_name: String) do
+      reply lookup(stock, item_name)
+    end
+
+end
+end
+
+actor Shop do
+
+# snip
+
+end
+
+actor Shop.Inventory do
+
+# snip
+
+end
+
+actor Shop.Checkout do
+
+# snip
+
+end
