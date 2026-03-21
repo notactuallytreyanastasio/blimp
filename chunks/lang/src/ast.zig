@@ -33,6 +33,7 @@ pub const Node = struct {
         binary_op: BinaryOp,
         unary_op: UnaryOp,
         func_call: FuncCall,
+        pipe_expr: PipeExpr,
         list_lit: ListLit,
         tuple_lit: TupleLit,
         map_lit: MapLit,
@@ -127,6 +128,11 @@ pub const Node = struct {
         args: []const Node,
     };
 
+    pub const PipeExpr = struct {
+        left: *const Node,
+        right: *const Node,
+    };
+
     pub const ListLit = struct {
         elements: []const Node,
         /// If non-null, this is a cons expression: [head | tail]
@@ -146,9 +152,13 @@ pub const Node = struct {
         field: []const u8,
     };
 
-    /// Shared key-value pair for state, become, and map literals.
+    /// Key-value pair for state, become, and map literals.
+    /// For state declarations: key, optional type_name, optional default_value.
+    /// For become/maps: key, value (type_name is null, default_value is null).
     pub const KeyValue = struct {
         key: []const u8,
+        type_name: ?[]const u8 = null,
         value: Node,
+        default_value: ?*const Node = null,
     };
 };

@@ -1,0 +1,108 @@
+================
+Empty list
+================
+
+actor A do
+  reply []
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (list))))
+
+================
+List with elements
+================
+
+actor A do
+  reply [1, 2, 3]
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (list
+        (integer)
+        (integer)
+        (integer)))))
+
+================
+Cons list
+================
+
+actor A do
+  reply [head | tail]
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (list
+        (identifier)
+        (identifier)))))
+
+================
+Tuple
+================
+
+actor A do
+  reply {:ok, 42}
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (tuple
+        (atom)
+        (integer)))))
+
+================
+Map literal
+================
+
+actor A do
+  reply %{name: "bob", age: 30}
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (map
+        (key_value_pair
+          (identifier)
+          (string))
+        (key_value_pair
+          (identifier)
+          (integer))))))
+
+================
+Empty map
+================
+
+actor A do
+  reply %{}
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (map))))

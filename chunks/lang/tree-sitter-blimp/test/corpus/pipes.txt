@@ -1,0 +1,84 @@
+================
+Simple pipe
+================
+
+actor A do
+  reply items |> length(_)
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (pipe_expression
+        (identifier)
+        (function_call
+          (identifier)
+          (identifier))))))
+
+================
+Chained pipes
+================
+
+actor A do
+  reply items |> filter(_, :active) |> length(_)
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (pipe_expression
+        (pipe_expression
+          (identifier)
+          (function_call
+            (identifier)
+            (identifier)
+            (atom)))
+        (function_call
+          (identifier)
+          (identifier))))))
+
+================
+Pipe into bare identifier
+================
+
+actor A do
+  reply items |> sort
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (pipe_expression
+        (identifier)
+        (identifier)))))
+
+================
+Pipe with arithmetic on left
+================
+
+actor A do
+  reply 1 + 2 |> to_string(_)
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (reply_statement
+      (pipe_expression
+        (binary_expression
+          (integer)
+          (integer))
+        (function_call
+          (identifier)
+          (identifier))))))

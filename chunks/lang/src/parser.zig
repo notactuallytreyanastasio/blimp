@@ -84,11 +84,12 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse: state key: value, key: value
+    /// Parse: state name: Type :: default, name: Type :: default
+    /// Also supports untyped: state name: value (for backwards compat)
     fn parseStateDef(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
         try self.expect(.kw_state);
-        const fields = try self.parseKeyValueList();
+        const fields = try self.parseTypedKeyValueList();
         return Node{
             .kind = .{ .state_def = .{ .fields = fields } },
             .loc = loc,
@@ -193,7 +194,29 @@ pub const Parser = struct {
     // ============================================================
 
     fn parseExpression(self: *Parser) ParseError!Node {
-        return self.parseBinaryOr();
+        return self.parsePipe();
+    }
+
+    /// Parse pipe expressions: left-associative, lowest precedence among binary ops.
+    /// a |> b(_, x) |> c(_) parses as (a |> b(_, x)) |> c(_)
+    fn parsePipe(self: *Parser) ParseError!Node {
+        var left = try self.parseBinaryOr();
+        while (self.current.kind == .pipe_arrow) {
+            self.advance();
+            const right = try self.parseBinaryOr();
+            const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            left_ptr.* = left;
+            const right_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            right_ptr.* = right;
+            left = Node{
+                .kind = .{ .pipe_expr = .{
+                    .left = left_ptr,
+                    .right = right_ptr,
+                } },
+                .loc = left.loc,
+            };
+        }
+        return left;
     }
 
     fn parseBinaryOr(self: *Parser) ParseError!Node {
@@ -447,7 +470,7 @@ pub const Parser = struct {
     // Helpers
     // ============================================================
 
-    /// Parse comma-separated key: value pairs (used by state, become, maps).
+    /// Parse comma-separated key: value pairs (used by become, maps).
     fn parseKeyValueList(self: *Parser) ParseError![]const Node.KeyValue {
         var fields: std.ArrayList(Node.KeyValue) = .empty;
         while (self.current.kind == .identifier) {
@@ -456,13 +479,95 @@ pub const Parser = struct {
             try self.expect(.colon);
             const value = try self.parseExpression();
             fields.append(self.allocator, .{ .key = key, .value = value }) catch return error.OutOfMemory;
-            // Skip comma (and newlines around it for multi-line state/become)
+            // Skip comma (and newlines around it for multi-line become)
             if (self.current.kind == .comma) {
                 self.advance();
                 self.skipNewlines();
             }
         }
         return fields.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+    }
+
+    /// Parse comma-separated typed key-value pairs for state declarations.
+    /// Supports: name: Type :: default, name: Type, name: value (untyped)
+    fn parseTypedKeyValueList(self: *Parser) ParseError![]const Node.KeyValue {
+        var fields: std.ArrayList(Node.KeyValue) = .empty;
+        while (self.current.kind == .identifier) {
+            const key = self.current.lexeme;
+            self.advance();
+            try self.expect(.colon);
+
+            // Determine if this is typed (Type :: default) or untyped (value)
+            // Typed if we see: UpperIdentifier, or [UpperIdentifier] (list type like [Item])
+            // We peek into the lexer's source to check if [ is followed by an uppercase letter
+            const is_list_type = blk: {
+                if (self.current.kind != .lbracket) break :blk false;
+                // Peek past [ to see if next non-space char is uppercase
+                var peek_pos = self.lexer.pos;
+                while (peek_pos < self.lexer.source.len and self.lexer.source[peek_pos] == ' ') {
+                    peek_pos += 1;
+                }
+                break :blk peek_pos < self.lexer.source.len and
+                    self.lexer.source[peek_pos] >= 'A' and self.lexer.source[peek_pos] <= 'Z';
+            };
+            if (self.current.kind == .upper_identifier or is_list_type) {
+                const type_name = try self.parseTypeName();
+
+                // Check for :: default
+                if (self.current.kind == .colon_colon) {
+                    self.advance();
+                    const default_val = try self.parseExpression();
+                    const default_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+                    default_ptr.* = default_val;
+                    fields.append(self.allocator, .{
+                        .key = key,
+                        .type_name = type_name,
+                        .value = default_val,
+                        .default_value = default_ptr,
+                    }) catch return error.OutOfMemory;
+                } else {
+                    // Typed without default -- value is a placeholder nil
+                    fields.append(self.allocator, .{
+                        .key = key,
+                        .type_name = type_name,
+                        .value = Node{ .kind = .{ .nil_lit = {} }, .loc = self.currentLoc() },
+                        .default_value = null,
+                    }) catch return error.OutOfMemory;
+                }
+            } else {
+                // Untyped: just key: expression (backwards compat)
+                const value = try self.parseExpression();
+                fields.append(self.allocator, .{ .key = key, .value = value }) catch return error.OutOfMemory;
+            }
+
+            if (self.current.kind == .comma) {
+                self.advance();
+                self.skipNewlines();
+            }
+        }
+        return fields.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+    }
+
+    /// Parse a type name: Int, String, [Item], %{K => V}
+    fn parseTypeName(self: *Parser) ParseError![]const u8 {
+        if (self.current.kind == .upper_identifier) {
+            const name = self.current.lexeme;
+            self.advance();
+            return name;
+        }
+        if (self.current.kind == .lbracket) {
+            // [Type] -- capture the whole thing as a string
+            const start = self.current.lexeme.ptr;
+            self.advance(); // skip [
+            if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
+            self.advance(); // skip Type
+            if (self.current.kind != .rbracket) return error.UnexpectedToken;
+            const end = self.current.lexeme.ptr + self.current.lexeme.len;
+            self.advance(); // skip ]
+            const len = @intFromPtr(end) - @intFromPtr(start);
+            return start[0..len];
+        }
+        return error.UnexpectedToken;
     }
 
     fn expect(self: *Parser, kind: Token.Kind) ParseError!void {
@@ -652,6 +757,76 @@ test "parse function call" {
     try std.testing.expectEqual(@as(usize, 2), call.args.len);
 }
 
+test "parse typed state with default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const state = nodes[0].kind.actor_def.body[0].kind.state_def;
+    try std.testing.expectEqual(@as(usize, 1), state.fields.len);
+    try std.testing.expectEqualStrings("count", state.fields[0].key);
+    try std.testing.expectEqualStrings("Int", state.fields[0].type_name.?);
+    try std.testing.expectEqual(@as(i64, 0), state.fields[0].value.kind.integer_lit.value);
+}
+
+test "parse typed state without default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  state name: String
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const state = nodes[0].kind.actor_def.body[0].kind.state_def;
+    try std.testing.expectEqualStrings("name", state.fields[0].key);
+    try std.testing.expectEqualStrings("String", state.fields[0].type_name.?);
+    try std.testing.expect(state.fields[0].default_value == null);
+}
+
+test "parse typed state list type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  state items: [Item] :: []
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const state = nodes[0].kind.actor_def.body[0].kind.state_def;
+    try std.testing.expectEqualStrings("items", state.fields[0].key);
+    try std.testing.expectEqualStrings("[Item]", state.fields[0].type_name.?);
+}
+
+test "parse multiple typed state fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  state balance: Int :: 0, owner: String :: "unknown"
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const state = nodes[0].kind.actor_def.body[0].kind.state_def;
+    try std.testing.expectEqual(@as(usize, 2), state.fields.len);
+    try std.testing.expectEqualStrings("balance", state.fields[0].key);
+    try std.testing.expectEqualStrings("Int", state.fields[0].type_name.?);
+    try std.testing.expectEqualStrings("owner", state.fields[1].key);
+    try std.testing.expectEqualStrings("String", state.fields[1].type_name.?);
+}
+
 test "parse dot access" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -663,4 +838,60 @@ test "parse dot access" {
 
     try std.testing.expectEqualStrings("item", dot.object.kind.identifier.name);
     try std.testing.expectEqualStrings("price", dot.field);
+}
+
+test "parse simple pipe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> length(_)\nend");
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const pipe = reply.value.kind.pipe_expr;
+
+    // Left side is the identifier "items"
+    try std.testing.expectEqualStrings("items", pipe.left.kind.identifier.name);
+    // Right side is a function call length(_)
+    const call = pipe.right.kind.func_call;
+    try std.testing.expectEqualStrings("length", call.name);
+    try std.testing.expectEqual(@as(usize, 1), call.args.len);
+    try std.testing.expectEqualStrings("_", call.args[0].kind.identifier.name);
+}
+
+test "parse chained pipes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> filter(_, :active) |> length(_)\nend");
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+
+    // Chained pipes are left-associative: (items |> filter(_, :active)) |> length(_)
+    const outer_pipe = reply.value.kind.pipe_expr;
+    // Right of outer pipe is length(_)
+    const length_call = outer_pipe.right.kind.func_call;
+    try std.testing.expectEqualStrings("length", length_call.name);
+
+    // Left of outer pipe is the inner pipe: items |> filter(_, :active)
+    const inner_pipe = outer_pipe.left.kind.pipe_expr;
+    try std.testing.expectEqualStrings("items", inner_pipe.left.kind.identifier.name);
+    const filter_call = inner_pipe.right.kind.func_call;
+    try std.testing.expectEqualStrings("filter", filter_call.name);
+    try std.testing.expectEqual(@as(usize, 2), filter_call.args.len);
+    try std.testing.expectEqualStrings("_", filter_call.args[0].kind.identifier.name);
+    try std.testing.expectEqualStrings("active", filter_call.args[1].kind.atom_lit.name);
+}
+
+test "parse pipe into no-arg function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> sort\nend");
+    const nodes = try parser.parseFile();
+    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const pipe = reply.value.kind.pipe_expr;
+
+    try std.testing.expectEqualStrings("items", pipe.left.kind.identifier.name);
+    // Right side is just the identifier "sort" (no parens)
+    try std.testing.expectEqualStrings("sort", pipe.right.kind.identifier.name);
 }

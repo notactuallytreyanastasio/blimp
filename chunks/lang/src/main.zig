@@ -56,8 +56,16 @@ fn printNode(writer: *std.io.Writer, node: ast.Node, indent: u32) void {
         .state_def => |s| {
             writer.print("{s}(state", .{prefix}) catch {};
             for (s.fields) |f| {
-                writer.print(" {s}:", .{f.key}) catch {};
-                printInline(writer, f.value);
+                if (f.type_name) |tn| {
+                    writer.print(" {s}: {s}", .{ f.key, tn }) catch {};
+                    if (f.default_value != null) {
+                        writer.print(" ::", .{}) catch {};
+                        printInline(writer, f.value);
+                    }
+                } else {
+                    writer.print(" {s}:", .{f.key}) catch {};
+                    printInline(writer, f.value);
+                }
             }
             writer.print(")\n", .{}) catch {};
         },
@@ -126,6 +134,12 @@ fn printInline(writer: *std.io.Writer, node: ast.Node) void {
             for (c.args) |arg| {
                 printInline(writer, arg);
             }
+            writer.print(")", .{}) catch {};
+        },
+        .pipe_expr => |p| {
+            writer.print(" (|>", .{}) catch {};
+            printInline(writer, p.left.*);
+            printInline(writer, p.right.*);
             writer.print(")", .{}) catch {};
         },
         .list_lit => |l| {

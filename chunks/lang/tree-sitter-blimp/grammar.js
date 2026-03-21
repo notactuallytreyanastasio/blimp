@@ -8,6 +8,8 @@ module.exports = grammar({
 
   word: ($) => $.identifier,
 
+  conflicts: () => [],
+
   rules: {
     // Top level: a source file is a sequence of definitions
     source_file: ($) => repeat($._definition),
@@ -33,7 +35,25 @@ module.exports = grammar({
     // ============================================================
 
     state_definition: ($) =>
-      seq("state", $.key_value_list),
+      seq("state", $.typed_field_list),
+
+    typed_field_list: ($) => commaSep1($.typed_field),
+
+    typed_field: ($) =>
+      choice(
+        // name: Type :: default
+        prec(2, seq($.identifier, ":", $.type_name, "::", $._expression)),
+        // name: Type (no default)
+        prec(1, seq($.identifier, ":", $.type_name)),
+        // name: value (untyped, backwards compat)
+        seq($.identifier, ":", $._expression),
+      ),
+
+    type_name: ($) =>
+      prec(10, choice(
+        $.upper_identifier,
+        seq("[", $.upper_identifier, "]"),  // [Item]
+      )),
 
     // ============================================================
     // Message handler
@@ -74,7 +94,10 @@ module.exports = grammar({
     // Expressions
     // ============================================================
 
-    _expression: ($) => choice($.binary_expression, $._unary_expression),
+    _expression: ($) => choice($.pipe_expression, $.binary_expression, $._unary_expression),
+
+    pipe_expression: ($) =>
+      prec.left(0, seq($._expression, "|>", $._expression)),
 
     binary_expression: ($) =>
       choice(
