@@ -145,6 +145,8 @@ body.tldr-mode .tldr-bubble {
 
 <p>To begin with, we built a parser. It is written in Zig with a tree-sitter grammar that mirrors it and it can parse real Blimp code into an AST right now.</p>
 
+<p>And all of this ties into the tooling. Everything is powered by a diff viewer that follows the work as a multiplexer. You can drop messages to sessions trivially, each agent sitting there in its own pane. The diffs are semantic, not line-by-line text diffs, structural diffs that know a function moved, not that 30 lines were deleted and 30 were added somewhere else. Time travel works at two levels: version control gives you the history of your source, and the debugger gives you the history of your system's state itself because every <code>become</code> is a snapshot. You can scrub through both. The language works reflexively, it can describe its own behaviors, its own flow, its own contracts and boundaries while also running them. The tools and the language are the same thing.</p>
+
 <p>The syntax is not hypothetical at this point, so we have to make some pretty explicit choices.</p>
 
 <p>As it sits, we want this to really stick, so I am writing out a bunch of programs right now as it is to just see how it feels for the exercise of this post. A good bit of this obviously will change, but we are going to try to nail "the good parts" early.</p>
