@@ -85,6 +85,89 @@ No garbage collector. Blimp will use Perceus-style reference counting (Reinking 
 
 This is a RUNTIME decision, not a parser decision, but it fundamentally shapes how the compiler will eventually transform the AST. The parser itself uses Zig's arena allocator (allocate during parse, free everything at once).
 
+### D4: State declarations with required types (2026-03-21)
+
+State fields use `state name: Type :: default_value` syntax:
+
+```
+state count: Int :: 0
+state items: [Item] :: []
+state name: String :: "unknown"
+state rates: %{Atom => Float} :: %{us: 0.08, eu: 0.21}
+```
+
+- `:` separates the field name from its type
+- `::` separates the type from the default value
+- Types are required (not optional). Set-theoretic types with inference where possible.
+- `[Item]` for list types, `%{K => V}` for map types
+
+### D5: Hole (`_`) is a first-class language construct (2026-03-21)
+
+`_` creates a Hole. A Hole is NOT a discard/wildcard like in Elixir or Haskell. It is:
+
+- **An agent-hole**: a typed gap the agent sees and suggests completions for
+- **Identity at runtime**: until filled, a Hole acts as identity so the program keeps running
+- **Tracked by the compiler**: the compiler knows where every Hole is and what type it needs
+- **Rendered on the canvas**: finished code is solid/geometric, Holes are chaotic/noisy
+- **Context-sensitive**: inside a pipe `|>`, the Hole is filled by the piped value. Elsewhere, it's an agent Hole.
+
+Comments after a Hole are **directives to the agent**, not descriptions:
+```
+_ # Hole: handle invalid payment, begin by researching documentation on transaction failure
+```
+
+The comment IS the prompt. The agent reads it, does the research, comes back with suggestions.
+
+### D6: `situation` keyword for ambiguity-aware branching (2026-03-21)
+
+`situation` is like `case` but with a key difference: a `case` must be exhaustive. A `situation` can have Holes and that's valid. The agent participates in resolving ambiguity.
+
+```
+on :process(event: Event) do
+  situation event do
+    :login -> handle_login(event)
+    :logout -> handle_logout(event)
+    _ # Hole: agent suggests :timeout, :error based on Event type
+  end
+end
+```
+
+### D7: `bubble` for supervision/failure with Bubbles as actors (2026-03-21)
+
+Failure handling uses `bubble`. Bubbles are themselves actors that propagate through the supervision tree. Different Bubble actors implement different blast radii:
+
+- `SelfBubble` -- I die, my supervisor restarts me
+- `CascadeBubble` -- I die and take my siblings with me (one-for-all)
+- `FatalBubble` -- kill the entire subtree
+
+Declared per-handler, not per-actor:
+```
+on :charge(payment: Payment) bubbles(CascadeBubble) do
+  ...
+  _ -> bubble reason: "payment failed"
+end
+```
+
+Inspired by Temper's Bubble model (bubble() signals failure, orelse recovers, type system tracks it) but adapted for actor supervision. `orelse` handles bubbles on the caller side:
+```
+receipt = checkout <- :charge(payment) orelse bubble
+```
+
+### D8: No shared memory -- actors are fully isolated (2026-03-21)
+
+Each actor owns its state exclusively. Communication is message-passing only. Messages are copied across actor boundaries. This enables:
+
+- Arena-per-actor memory (free everything when actor dies)
+- No locks, no mutexes, no data races
+- Perceus RC is local per actor, no cross-actor coordination
+- Aligns with BEAM spirit without requiring the Erlang VM
+
+### D9: Everything is an actor (2026-03-21)
+
+There is no separate concept of "pure functions" or "helper modules." Everything is an actor. Some actors hold state and handle many messages. Some are tiny and do one thing. A helper function is just an actor with one handler that replies immediately.
+
+`System` is the root actor that provides primitives (math, IO, strings). You're always inside System.
+
 ---
 
 ## Open Questions
