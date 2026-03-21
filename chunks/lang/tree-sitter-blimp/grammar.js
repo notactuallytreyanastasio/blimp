@@ -80,6 +80,7 @@ module.exports = grammar({
       choice(
         $.become_statement,
         $.reply_statement,
+        $.situation_expression,
         $.assignment,
         $._expression,
       ),
@@ -136,6 +137,7 @@ module.exports = grammar({
         $.atom,
         $.boolean,
         $.nil,
+        $.hole,
         $.identifier,
         $.upper_identifier,
         $.list,
@@ -167,6 +169,22 @@ module.exports = grammar({
     tuple: ($) => seq("{", commaSep($._expression), "}"),
 
     map: ($) => seq("%", "{", commaSep($.key_value_pair), "}"),
+
+    // ============================================================
+    // Situation expression (pattern matching)
+    // ============================================================
+
+    situation_expression: ($) =>
+      seq("situation", $._expression, "do", repeat1($.situation_branch), "end"),
+
+    situation_branch: ($) =>
+      prec(8, seq(choice($.hole, $._expression), "->", repeat1($._statement))),
+
+    // ============================================================
+    // Hole (wildcard/identity)
+    // ============================================================
+
+    hole: (_) => "_",
 
     // ============================================================
     // Key-value pairs (used by state, become, map)
