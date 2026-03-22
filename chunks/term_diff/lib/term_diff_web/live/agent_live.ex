@@ -2,9 +2,11 @@ defmodule TermDiffWeb.AgentLive do
   @moduledoc """
   Agent multiplexer dashboard LiveView.
 
-  Sidebar shows run history -- click to open a run in a pane.
-  Up to 4 panes shown in dynamic split layout. Bottom prompt bar
-  creates new agent runs.
+  All recoverable state is URL-parameterized:
+    /agents?panes=12,34,56&dark=1
+
+  Sidebar shows run history. Click to toggle panes open/closed.
+  Bottom prompt bar creates new agent runs.
   """
   use TermDiffWeb, :live_view
 
@@ -22,33 +24,47 @@ defmodule TermDiffWeb.AgentLive do
       Phoenix.PubSub.subscribe(TermDiff.PubSub, "runs")
     end
 
-    orchestrator_state = Orchestrator.get_state()
-    active_run_ids = Map.keys(orchestrator_state.active)
-    run_history = Runs.list_runs()
+    socket =
+      socket
+      |> assign(:page_title, "Agents")
+      |> assign(:pane_runs, %{})
+      |> assign(:pane_events, %{})
+      |> assign(:run_history, Runs.list_runs())
+      |> assign(:pane_order, [])
+      |> assign(:max_panes, @max_panes)
+      |> assign(:dark_mode, false)
 
-    # Auto-open any currently running agents into panes
-    pane_order = Enum.take(active_run_ids, @max_panes)
+    {:ok, socket}
+  end
 
-    # Load run data for panes
-    pane_runs = load_runs_map(pane_order)
+  @impl true
+  def handle_params(params, _uri, socket) do
+    pane_ids = parse_pane_ids(params)
+    dark_mode = params["dark"] == "1"
 
-    # Subscribe to pane runs
+    old_pane_order = socket.assigns.pane_order
+
+    # Load data for any newly opened panes
+    socket = load_new_panes(socket, pane_ids, old_pane_order)
+
+    # Manage PubSub subscriptions
     if connected?(socket) do
-      for run_id <- pane_order do
-        Phoenix.PubSub.subscribe(TermDiff.PubSub, "run:#{run_id}")
+      for id <- old_pane_order -- pane_ids do
+        Phoenix.PubSub.unsubscribe(TermDiff.PubSub, "run:#{id}")
+      end
+
+      for id <- pane_ids -- old_pane_order do
+        Phoenix.PubSub.subscribe(TermDiff.PubSub, "run:#{id}")
       end
     end
 
     socket =
       socket
-      |> assign(:page_title, "Agents")
-      |> assign(:pane_runs, pane_runs)
-      |> assign(:pane_events, %{})
-      |> assign(:run_history, run_history)
-      |> assign(:pane_order, pane_order)
-      |> assign(:max_panes, @max_panes)
+      |> assign(:pane_order, pane_ids)
+      |> assign(:dark_mode, dark_mode)
+      |> assign(:run_history, Runs.list_runs())
 
-    {:ok, socket}
+    {:noreply, socket}
   end
 
   @impl true
@@ -57,12 +73,12 @@ defmodule TermDiffWeb.AgentLive do
     assigns = assign(assigns, :panes, panes)
 
     ~H"""
-    <div class="h-screen flex flex-col font-mono text-[13px] leading-snug bg-white text-neutral-900">
-      <AgentComponents.nav_bar active_page={:agents} />
+    <div class={"h-screen flex flex-col font-mono text-[13px] leading-snug #{if @dark_mode, do: "bg-neutral-900 text-neutral-100", else: "bg-white text-neutral-900"}"}>
+      <AgentComponents.nav_bar active_page={:agents} dark_mode={@dark_mode} />
 
       <div class="flex flex-1 overflow-hidden">
         <%!-- Sidebar --%>
-        <div class="w-56 border-r border-neutral-200 overflow-y-auto bg-neutral-50 shrink-0 flex flex-col">
+        <div class={"w-56 border-r overflow-y-auto shrink-0 flex flex-col #{if @dark_mode, do: "border-neutral-700 bg-neutral-800", else: "border-neutral-200 bg-neutral-50"}"}>
           <div class="px-3 py-2 flex items-center justify-between">
             <span class="text-xs font-semibold text-neutral-500 uppercase tracking-wide">Runs</span>
             <span :if={length(@pane_order) >= @max_panes} class="text-[10px] text-neutral-400">
@@ -76,11 +92,11 @@ defmodule TermDiffWeb.AgentLive do
             :for={run <- @run_history}
             phx-click="toggle_pane"
             phx-value-id={run.id}
-            class={"flex items-center gap-2 px-3 py-2 cursor-pointer text-sm border-l-2 #{if run.id in @pane_order, do: "bg-blue-50 border-blue-500", else: "border-transparent hover:bg-neutral-100"}"}
+            class={"flex items-center gap-2 px-3 py-2 cursor-pointer text-sm border-l-2 #{sidebar_item_class(run.id in @pane_order, @dark_mode)}"}
           >
             <AgentComponents.status_dot status={run.status} />
             <div class="flex-1 min-w-0">
-              <div class="truncate text-neutral-700 text-xs">{String.slice(run.prompt || "", 0, 60)}</div>
+              <div class={"truncate text-xs #{if @dark_mode, do: "text-neutral-300", else: "text-neutral-700"}"}>{String.slice(run.prompt || "", 0, 60)}</div>
               <div class="flex items-center gap-1 text-[10px] text-neutral-400">
                 <span>{run.status}</span>
                 <span :if={run.inserted_at}>{AgentComponents.relative_time(run.inserted_at)}</span>
@@ -91,17 +107,17 @@ defmodule TermDiffWeb.AgentLive do
 
         <%!-- Main area: panes + new agent prompt --%>
         <div class="flex-1 flex flex-col min-w-0">
-          <div class="flex-1 overflow-hidden flex flex-col gap-px bg-neutral-200">
-            <.agent_layout panes={@panes} />
+          <div class={"flex-1 overflow-hidden flex flex-col gap-px #{if @dark_mode, do: "bg-neutral-700", else: "bg-neutral-200"}"}>
+            <.agent_layout panes={@panes} dark_mode={@dark_mode} />
           </div>
 
           <%!-- New agent prompt bar --%>
-          <div class="border-t border-neutral-200 bg-neutral-50 p-3">
+          <div class={"border-t p-3 #{if @dark_mode, do: "border-neutral-700 bg-neutral-800", else: "border-neutral-200 bg-neutral-50"}"}>
             <form id="prompt-form" phx-submit="new_agent" class="flex gap-2">
               <textarea
                 name="prompt"
                 placeholder="Start a new agent..."
-                class="flex-1 px-3 py-2 border border-neutral-300 rounded text-sm font-mono text-neutral-900 placeholder-neutral-400 resize-none focus:outline-none focus:ring-2 focus:ring-blue-400/60"
+                class={"flex-1 px-3 py-2 border rounded text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-400/60 #{if @dark_mode, do: "bg-neutral-900 border-neutral-600 text-neutral-100 placeholder-neutral-500", else: "border-neutral-300 text-neutral-900 placeholder-neutral-400"}"}
                 rows="1"
                 phx-hook="PromptSubmit"
                 id="prompt-textarea"
@@ -122,9 +138,11 @@ defmodule TermDiffWeb.AgentLive do
 
   # ── Layout helpers ─────────────────────────────────────────
 
-  defp agent_layout(%{panes: []} = assigns) do
+  defp agent_layout(%{panes: [], dark_mode: dark} = assigns) do
+    assigns = assign(assigns, :dark, dark)
+
     ~H"""
-    <div class="flex-1 flex items-center justify-center bg-white text-neutral-400">
+    <div class={"flex-1 flex items-center justify-center #{if @dark, do: "bg-neutral-900 text-neutral-500", else: "bg-white text-neutral-400"}"}>
       <p class="text-sm">Click a run in the sidebar or start a new agent below.</p>
     </div>
     """
@@ -135,7 +153,7 @@ defmodule TermDiffWeb.AgentLive do
 
     ~H"""
     <div class="flex-1 overflow-hidden">
-      <AgentComponents.terminal_pane pane={@p1} />
+      <AgentComponents.terminal_pane pane={@p1} dark_mode={@dark_mode} />
     </div>
     """
   end
@@ -146,10 +164,10 @@ defmodule TermDiffWeb.AgentLive do
     ~H"""
     <div class="flex-1 flex gap-px overflow-hidden">
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p1} />
+        <AgentComponents.terminal_pane pane={@p1} dark_mode={@dark_mode} />
       </div>
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p2} />
+        <AgentComponents.terminal_pane pane={@p2} dark_mode={@dark_mode} />
       </div>
     </div>
     """
@@ -160,14 +178,14 @@ defmodule TermDiffWeb.AgentLive do
 
     ~H"""
     <div class="flex-1 overflow-hidden">
-      <AgentComponents.terminal_pane pane={@p1} />
+      <AgentComponents.terminal_pane pane={@p1} dark_mode={@dark_mode} />
     </div>
     <div class="flex-1 flex gap-px overflow-hidden">
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p2} />
+        <AgentComponents.terminal_pane pane={@p2} dark_mode={@dark_mode} />
       </div>
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p3} />
+        <AgentComponents.terminal_pane pane={@p3} dark_mode={@dark_mode} />
       </div>
     </div>
     """
@@ -179,18 +197,18 @@ defmodule TermDiffWeb.AgentLive do
     ~H"""
     <div class="flex-1 flex gap-px overflow-hidden">
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p1} />
+        <AgentComponents.terminal_pane pane={@p1} dark_mode={@dark_mode} />
       </div>
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p2} />
+        <AgentComponents.terminal_pane pane={@p2} dark_mode={@dark_mode} />
       </div>
     </div>
     <div class="flex-1 flex gap-px overflow-hidden">
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p3} />
+        <AgentComponents.terminal_pane pane={@p3} dark_mode={@dark_mode} />
       </div>
       <div class="flex-1 overflow-hidden">
-        <AgentComponents.terminal_pane pane={@p4} />
+        <AgentComponents.terminal_pane pane={@p4} dark_mode={@dark_mode} />
       </div>
     </div>
     """
@@ -199,30 +217,33 @@ defmodule TermDiffWeb.AgentLive do
   # ── handle_event ─────────────────────────────────────────
 
   @impl true
+  def handle_event("toggle_dark", _params, socket) do
+    {:noreply, patch_url(socket, socket.assigns.pane_order, !socket.assigns.dark_mode)}
+  end
+
   def handle_event("toggle_pane", %{"id" => id_str}, socket) do
     run_id = String.to_integer(id_str)
     pane_order = socket.assigns.pane_order
 
-    if run_id in pane_order do
-      # Close this pane
-      {:noreply, assign(socket, :pane_order, List.delete(pane_order, run_id))}
-    else
-      if length(pane_order) >= @max_panes do
-        # At capacity -- replace the oldest pane
-        [_oldest | rest] = pane_order
-        socket = open_pane(socket, run_id)
-        {:noreply, assign(socket, :pane_order, rest ++ [run_id])}
+    new_order =
+      if run_id in pane_order do
+        List.delete(pane_order, run_id)
       else
-        # Open into a new slot
-        socket = open_pane(socket, run_id)
-        {:noreply, assign(socket, :pane_order, pane_order ++ [run_id])}
+        if length(pane_order) >= @max_panes do
+          [_oldest | rest] = pane_order
+          rest ++ [run_id]
+        else
+          pane_order ++ [run_id]
+        end
       end
-    end
+
+    {:noreply, patch_url(socket, new_order, socket.assigns.dark_mode)}
   end
 
   def handle_event("close_pane", %{"id" => id_str}, socket) do
     run_id = String.to_integer(id_str)
-    {:noreply, assign(socket, :pane_order, List.delete(socket.assigns.pane_order, run_id))}
+    new_order = List.delete(socket.assigns.pane_order, run_id)
+    {:noreply, patch_url(socket, new_order, socket.assigns.dark_mode)}
   end
 
   def handle_event("continue_pane", %{"run_id" => run_id_str, "prompt" => prompt}, socket) do
@@ -234,23 +255,11 @@ defmodule TermDiffWeb.AgentLive do
     else
       case Orchestrator.continue_run(run_id, prompt) do
         {:ok, new_run} ->
-          # Replace old run with new continuation in the same pane slot
           pane_order = socket.assigns.pane_order
           idx = Enum.find_index(pane_order, &(&1 == run_id))
+          new_order = if idx, do: List.replace_at(pane_order, idx, new_run.id), else: pane_order
 
-          pane_order =
-            if idx, do: List.replace_at(pane_order, idx, new_run.id), else: pane_order
-
-          if connected?(socket) do
-            Phoenix.PubSub.subscribe(TermDiff.PubSub, "run:#{new_run.id}")
-          end
-
-          socket =
-            socket
-            |> assign(:pane_runs, Map.put(socket.assigns.pane_runs, new_run.id, new_run))
-            |> assign(:pane_order, pane_order)
-
-          {:noreply, socket}
+          {:noreply, patch_url(socket, new_order, socket.assigns.dark_mode)}
 
         {:error, _reason} ->
           {:noreply, put_flash(socket, :error, "Failed to continue session")}
@@ -265,8 +274,15 @@ defmodule TermDiffWeb.AgentLive do
       {:noreply, socket}
     else
       case create_and_dispatch(prompt) do
-        {:ok, _run} ->
-          {:noreply, socket}
+        {:ok, run} ->
+          new_order =
+            if length(socket.assigns.pane_order) < @max_panes do
+              socket.assigns.pane_order ++ [run.id]
+            else
+              socket.assigns.pane_order
+            end
+
+          {:noreply, patch_url(socket, new_order, socket.assigns.dark_mode)}
 
         {:error, _reason} ->
           {:noreply, put_flash(socket, :error, "Failed to start agent run")}
@@ -274,9 +290,27 @@ defmodule TermDiffWeb.AgentLive do
     end
   end
 
+  def handle_event("approve_permission", %{"run-id" => run_id_str, "tool-use-id" => tool_use_id}, socket) do
+    run_id = String.to_integer(run_id_str)
+    Orchestrator.respond_to_permission(run_id, tool_use_id, "allow")
+    {:noreply, mark_permission_resolved(socket, run_id, tool_use_id, :approved)}
+  end
+
+  def handle_event("deny_permission", %{"run-id" => run_id_str, "tool-use-id" => tool_use_id}, socket) do
+    run_id = String.to_integer(run_id_str)
+    Orchestrator.respond_to_permission(run_id, tool_use_id, "deny", "Denied by user")
+    {:noreply, mark_permission_resolved(socket, run_id, tool_use_id, :denied)}
+  end
+
   # ── handle_info ──────────────────────────────────────────
 
   @impl true
+  def handle_info({:permission_request, run_id, event_data}, socket) do
+    pane_events = socket.assigns.pane_events
+    events = Map.get(pane_events, run_id, []) ++ [event_data]
+    {:noreply, assign(socket, :pane_events, Map.put(pane_events, run_id, events))}
+  end
+
   def handle_info({:agent_event, run_id, event_data}, socket) do
     pane_events = socket.assigns.pane_events
     events = Map.get(pane_events, run_id, []) ++ [event_data]
@@ -284,25 +318,10 @@ defmodule TermDiffWeb.AgentLive do
   end
 
   def handle_info({:run_created, run}, socket) do
-    pane_order = socket.assigns.pane_order
-
-    # Auto-open newly created runs into a pane
-    pane_order =
-      if run.id not in pane_order and length(pane_order) < @max_panes do
-        pane_order ++ [run.id]
-      else
-        pane_order
-      end
-
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(TermDiff.PubSub, "run:#{run.id}")
-    end
-
     socket =
       socket
       |> assign(:run_history, Runs.list_runs())
       |> assign(:pane_runs, Map.put(socket.assigns.pane_runs, run.id, run))
-      |> assign(:pane_order, pane_order)
 
     {:noreply, socket}
   end
@@ -347,23 +366,56 @@ defmodule TermDiffWeb.AgentLive do
     {:noreply, socket}
   end
 
-  # ── Private ──────────────────────────────────────────────
+  # ── Private: URL params ─────────────────────────────────
 
-  defp open_pane(socket, run_id) do
-    # Load run data and persisted events for this run
-    run = Runs.get_run(run_id)
+  defp parse_pane_ids(%{"panes" => panes_str}) when is_binary(panes_str) and panes_str != "" do
+    panes_str
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.to_integer/1)
+    |> Enum.uniq()
+    |> Enum.take(@max_panes)
+  rescue
+    ArgumentError -> []
+  end
 
-    persisted_events =
-      Events.list_events(run_id: run_id, limit: 500)
-      |> Enum.map(& &1.data)
+  defp parse_pane_ids(_params), do: []
 
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(TermDiff.PubSub, "run:#{run_id}")
+  defp build_agent_path(pane_order, dark_mode) do
+    params =
+      []
+      |> then(fn p -> if pane_order != [], do: [{"panes", Enum.join(pane_order, ",")} | p], else: p end)
+      |> then(fn p -> if dark_mode, do: [{"dark", "1"} | p], else: p end)
+
+    case URI.encode_query(params) do
+      "" -> "/agents"
+      qs -> "/agents?#{qs}"
     end
+  end
 
-    socket
-    |> assign(:pane_runs, Map.put(socket.assigns.pane_runs, run_id, run))
-    |> assign(:pane_events, Map.put(socket.assigns.pane_events, run_id, persisted_events))
+  defp patch_url(socket, pane_order, dark_mode) do
+    push_patch(socket, to: build_agent_path(pane_order, dark_mode))
+  end
+
+  # ── Private: pane data ──────────────────────────────────
+
+  defp load_new_panes(socket, new_ids, old_ids) do
+    added = new_ids -- old_ids
+
+    Enum.reduce(added, socket, fn run_id, acc ->
+      case Runs.get_run(run_id) do
+        %{} = run ->
+          persisted_events =
+            Events.list_events(run_id: run_id, limit: 500)
+            |> Enum.map(& &1.data)
+
+          acc
+          |> assign(:pane_runs, Map.put(acc.assigns.pane_runs, run_id, run))
+          |> assign(:pane_events, Map.put(acc.assigns.pane_events, run_id, persisted_events))
+
+        nil ->
+          acc
+      end
+    end)
   end
 
   defp build_panes(assigns) do
@@ -403,10 +455,24 @@ defmodule TermDiffWeb.AgentLive do
     end
   end
 
-  defp load_runs_map(run_ids) do
-    run_ids
-    |> Enum.map(&Runs.get_run/1)
-    |> Enum.reject(&is_nil/1)
-    |> Map.new(&{&1.id, &1})
+  defp mark_permission_resolved(socket, run_id, tool_use_id, resolution) do
+    pane_events = socket.assigns.pane_events
+    events = Map.get(pane_events, run_id, [])
+
+    updated_events =
+      Enum.map(events, fn
+        %{"type" => "permission_request", "tool_use_id" => ^tool_use_id} = evt ->
+          Map.put(evt, "resolved", resolution)
+
+        other ->
+          other
+      end)
+
+    assign(socket, :pane_events, Map.put(pane_events, run_id, updated_events))
   end
+
+  defp sidebar_item_class(true, true), do: "bg-blue-900/30 border-blue-400"
+  defp sidebar_item_class(true, false), do: "bg-blue-50 border-blue-500"
+  defp sidebar_item_class(false, true), do: "border-transparent hover:bg-neutral-700"
+  defp sidebar_item_class(false, false), do: "border-transparent hover:bg-neutral-100"
 end

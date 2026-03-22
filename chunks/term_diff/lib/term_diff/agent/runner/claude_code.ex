@@ -75,7 +75,7 @@ defmodule TermDiff.Agent.Runner.ClaudeCode do
   @impl GenServer
   def init(%{config: config, prompt: prompt, workspace_path: workspace_path}) do
     run_id = Map.fetch!(config, :run_id)
-    interactive = Map.get(config, :permission_mode) == "interactive"
+    interactive = Map.get(config, :permission_mode) != "plan"
     run = Runs.get_run!(run_id)
     {:ok, _} = Runs.update_run(run, %{status: "running", started_at: DateTime.utc_now()})
 
@@ -96,12 +96,8 @@ defmodule TermDiff.Agent.Runner.ClaudeCode do
           "Run #{run_id}: spawning #{path} with #{length(args)} args in #{workspace_path} (interactive=#{interactive})"
         )
 
-        port =
-          if interactive do
-            open_interactive_port(path, args, workspace_path)
-          else
-            open_port(path, args, workspace_path)
-          end
+        # Always use direct port (no PTY wrapper) so stdin works for permission responses
+        port = open_interactive_port(path, args, workspace_path)
 
         emit_started(run_id, workspace_path)
 
@@ -264,7 +260,7 @@ defmodule TermDiff.Agent.Runner.ClaudeCode do
     |> maybe_append(:disallowed_tools, Map.get(config, :disallowed_tools))
     |> maybe_append(:model, Map.get(config, :model))
     |> maybe_append(:max_budget_usd, Map.get(config, :max_budget_usd))
-    |> maybe_append(:permission_mode, Map.get(config, :permission_mode))
+    |> maybe_append(:permission_mode, Map.get(config, :permission_mode, "default"))
     |> maybe_append(:system_prompt, Map.get(config, :system_prompt))
     |> maybe_append(:append_system_prompt, Map.get(config, :append_system_prompt))
     |> maybe_append(:resume_session_id, Map.get(config, :resume_session_id))
@@ -301,20 +297,6 @@ defmodule TermDiff.Agent.Runner.ClaudeCode do
   defp maybe_append(args, :resume_session_id, value),
     do: args ++ ["--resume", value]
 
-  defp open_port(executable, args, workspace_path) do
-    sh_path = :os.find_executable(~c"sh") |> to_string()
-    cmd_string = build_shell_command(executable, args, workspace_path)
-    Logger.info("Port command: #{cmd_string}")
-
-    Port.open({:spawn_executable, sh_path}, [
-      {:args, ["-c", cmd_string]},
-      :binary,
-      :exit_status,
-      :stderr_to_stdout
-    ])
-  end
-
-  # Interactive port: no PTY wrapper (we need stdin), uses spawn_executable directly
   defp open_interactive_port(executable, args, workspace_path) do
     Logger.info("Interactive port: #{executable} #{Enum.join(args, " ")} in #{workspace_path}")
 
@@ -325,48 +307,6 @@ defmodule TermDiff.Agent.Runner.ClaudeCode do
       :exit_status,
       :stderr_to_stdout
     ])
-  end
-
-  defp build_shell_command(executable, args, workspace_path) do
-    env_overrides = %{
-      "CLAUDE_CODE_ENTRYPOINT" => "sdk-ex",
-      "CLAUDECODE" => ""
-    }
-
-    env_prefix =
-      env_overrides
-      |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{shell_escape(v)}" end)
-
-    escaped_args = Enum.map_join([executable | args], " ", &shell_escape/1)
-
-    # Wrap in `script` to allocate a PTY. Node.js fully buffers stdout when
-    # connected to a pipe; the PTY forces line-buffered output so NDJSON events
-    # stream to the Erlang Port in real time.
-    # macOS `script` execs argv directly (not via shell), so env vars must be
-    # set with `env` and the command passed as a single sh -c invocation.
-    # Linux `script -qc` passes the command string to a shell.
-    inner_cmd = "#{env_prefix} #{escaped_args}"
-
-    script_wrap =
-      case :os.type() do
-        {:unix, :darwin} ->
-          "script -q /dev/null sh -c #{shell_escape(inner_cmd)}"
-
-        _ ->
-          "script -qec #{shell_escape(inner_cmd)} /dev/null"
-      end
-
-    "cd #{shell_escape(workspace_path)} && #{script_wrap}"
-  end
-
-  defp shell_escape(""), do: "''"
-
-  defp shell_escape(str) do
-    if String.match?(str, ~r/[' "\$`\\;\n&|()]/) do
-      "'" <> String.replace(str, "'", "'\\''") <> "'"
-    else
-      str
-    end
   end
 
   defp split_lines(data) do

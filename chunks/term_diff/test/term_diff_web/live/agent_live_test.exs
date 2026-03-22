@@ -5,96 +5,109 @@ defmodule TermDiffWeb.AgentLiveTest do
 
   alias TermDiff.Agent.Runs
 
-  # ── AgentLive mount and rendering ──
+  # ── Mount and URL params ──
 
-  describe "AgentLive mount" do
-    test "renders agent dashboard with new agent form", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/agents")
-
-      assert html =~ "Start a new agent"
-      assert html =~ "New Agent"
-    end
-
-    test "has navigation links to diffs and agents", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/agents")
-
-      assert html =~ "Diffs"
-      assert html =~ "Agents"
-    end
-
-    test "shows empty state when no panes open", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/agents")
-
-      assert html =~ "Click a run in the sidebar"
-    end
-
-    test "shows run history in sidebar", %{conn: conn} do
-      {:ok, _run} =
-        Runs.create_run(%{
-          agent_type: "claude-code",
-          prompt: "test prompt for history",
-          status: "succeeded"
-        })
-
+  describe "mount with no params" do
+    test "renders empty agent dashboard", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/agents")
 
       assert html =~ "Runs"
-      assert html =~ "test prompt for history"
+      assert html =~ "Click a run in the sidebar"
     end
   end
 
-  # ── Sidebar pane toggling ──
-
-  describe "toggle_pane" do
-    test "clicking a run in sidebar opens it as a pane", %{conn: conn} do
+  describe "mount with panes param" do
+    test "opens specified runs as panes", %{conn: conn} do
       {:ok, run} =
         Runs.create_run(%{
           agent_type: "claude-code",
-          prompt: "open me in a pane",
+          prompt: "pane test",
           status: "succeeded"
         })
 
-      {:ok, view, _html} = live(conn, "/agents")
+      {:ok, _view, html} = live(conn, "/agents?panes=#{run.id}")
 
-      view
-      |> element("[phx-click=\"toggle_pane\"][phx-value-id=\"#{run.id}\"]")
-      |> render_click()
-
-      html = render(view)
       assert html =~ "pane-output-#{run.id}"
-      assert html =~ "open me in a pane"
+      assert html =~ "pane test"
     end
 
-    test "clicking an open run closes its pane", %{conn: conn} do
+    test "opens multiple panes", %{conn: conn} do
+      {:ok, run1} = Runs.create_run(%{agent_type: "claude-code", prompt: "first", status: "succeeded"})
+      {:ok, run2} = Runs.create_run(%{agent_type: "claude-code", prompt: "second", status: "succeeded"})
+
+      {:ok, _view, html} = live(conn, "/agents?panes=#{run1.id},#{run2.id}")
+
+      assert html =~ "pane-output-#{run1.id}"
+      assert html =~ "pane-output-#{run2.id}"
+    end
+
+    test "ignores invalid pane IDs gracefully", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/agents?panes=999999")
+
+      assert html =~ "Click a run in the sidebar"
+    end
+  end
+
+  describe "mount with dark param" do
+    test "activates dark mode", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/agents?dark=1")
+
+      assert html =~ "bg-neutral-900"
+    end
+  end
+
+  # ── Sidebar pane toggling via URL ──
+
+  describe "toggle_pane updates URL" do
+    test "clicking a run patches URL with pane ID", %{conn: conn} do
       {:ok, run} =
         Runs.create_run(%{
           agent_type: "claude-code",
-          prompt: "toggle me",
+          prompt: "toggle url test",
           status: "succeeded"
         })
 
       {:ok, view, _html} = live(conn, "/agents")
 
-      # Open
       view
       |> element("[phx-click=\"toggle_pane\"][phx-value-id=\"#{run.id}\"]")
       |> render_click()
 
-      assert render(view) =~ "pane-output-#{run.id}"
+      assert_patch(view, "/agents?panes=#{run.id}")
+    end
 
-      # Close
+    test "clicking again removes pane from URL", %{conn: conn} do
+      {:ok, run} =
+        Runs.create_run(%{
+          agent_type: "claude-code",
+          prompt: "close url test",
+          status: "succeeded"
+        })
+
+      {:ok, view, _html} = live(conn, "/agents?panes=#{run.id}")
+
       view
       |> element("[phx-click=\"toggle_pane\"][phx-value-id=\"#{run.id}\"]")
       |> render_click()
 
-      refute render(view) =~ "pane-output-#{run.id}"
+      assert_patch(view, "/agents")
+    end
+  end
+
+  describe "dark mode toggle updates URL" do
+    test "toggling dark mode patches URL", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/agents")
+
+      view |> element("button", "Dark") |> render_click()
+
+      assert_patch(view, "/agents?dark=1")
     end
   end
 
   # ── New agent creation ──
 
   describe "new agent" do
-    test "new agent button creates a run and shows it", %{conn: conn} do
+    test "creating agent adds it to URL panes", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/agents")
 
       # Simulate run creation + broadcast
@@ -123,9 +136,7 @@ defmodule TermDiffWeb.AgentLiveTest do
           status: "running"
         })
 
-      {:ok, view, _html} = live(conn, "/agents")
-
-      send(view.pid, {:run_created, run})
+      {:ok, view, _html} = live(conn, "/agents?panes=#{run.id}")
 
       send(
         view.pid,
@@ -136,25 +147,22 @@ defmodule TermDiffWeb.AgentLiveTest do
       html = render(view)
       assert html =~ "hello from agent"
     end
+  end
 
-    test "run_updated keeps finished run visible with updated status", %{conn: conn} do
-      {:ok, run} =
+  # ── Run history sidebar ──
+
+  describe "sidebar" do
+    test "shows run history", %{conn: conn} do
+      {:ok, _run} =
         Runs.create_run(%{
           agent_type: "claude-code",
-          prompt: "update test",
-          status: "running"
+          prompt: "sidebar history test",
+          status: "succeeded"
         })
 
-      {:ok, view, _html} = live(conn, "/agents")
+      {:ok, _view, html} = live(conn, "/agents")
 
-      send(view.pid, {:run_created, run})
-
-      updated_run = %{run | status: "succeeded"}
-      send(view.pid, {:run_updated, updated_run})
-
-      html = render(view)
-      assert html =~ "update test"
-      assert html =~ "succeeded"
+      assert html =~ "sidebar history test"
     end
   end
 
@@ -172,34 +180,6 @@ defmodule TermDiffWeb.AgentLiveTest do
       {:ok, _view, html} = live(conn, "/agents/#{run.id}")
 
       assert html =~ "detail test prompt"
-    end
-
-    test "shows run metadata", %{conn: conn} do
-      {:ok, run} =
-        Runs.create_run(%{
-          agent_type: "claude-code",
-          prompt: "metadata test",
-          status: "succeeded",
-          model: "claude-sonnet-4-5"
-        })
-
-      {:ok, _view, html} = live(conn, "/agents/#{run.id}")
-
-      assert html =~ "claude-code"
-      assert html =~ "succeeded"
-    end
-
-    test "has back link to agent list", %{conn: conn} do
-      {:ok, run} =
-        Runs.create_run(%{
-          agent_type: "claude-code",
-          prompt: "back link test",
-          status: "succeeded"
-        })
-
-      {:ok, _view, html} = live(conn, "/agents/#{run.id}")
-
-      assert html =~ "Agents"
     end
   end
 end

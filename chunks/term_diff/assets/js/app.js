@@ -86,6 +86,42 @@ Hooks.KeyNav = {
 Hooks.PromptSubmit = PromptSubmit
 Hooks.AgentAutoScroll = AgentAutoScroll
 
+Hooks.LineSelect = {
+  mounted() {
+    let dragging = false
+
+    this.el.addEventListener("mousedown", (e) => {
+      if (e.target.closest("form, input, textarea, button")) return
+      const lineEl = e.target.closest("[data-line-num]")
+      if (!lineEl) return
+
+      const file = lineEl.dataset.file
+      const line = parseInt(lineEl.dataset.lineNum)
+      if (!file || isNaN(line)) return
+
+      dragging = true
+      this.pushEvent("select_line", { file, line, shift: e.shiftKey })
+      e.preventDefault()
+    })
+
+    this.el.addEventListener("mousemove", (e) => {
+      if (!dragging) return
+      const lineEl = e.target.closest("[data-line-num]")
+      if (!lineEl) return
+
+      const file = lineEl.dataset.file
+      const line = parseInt(lineEl.dataset.lineNum)
+      if (!file || isNaN(line)) return
+
+      this.pushEvent("select_line", { file, line, shift: true })
+    })
+
+    window.addEventListener("mouseup", () => {
+      dragging = false
+    })
+  }
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,

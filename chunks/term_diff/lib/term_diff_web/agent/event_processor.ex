@@ -201,7 +201,22 @@ defmodule TermDiffWeb.Agent.EventProcessor do
   def append_event(%{"type" => "message_start"}, blocks), do: blocks
   def append_event(%{"type" => "message_stop"}, blocks), do: blocks
   def append_event(%{"type" => "rate_limit_event"}, blocks), do: blocks
-  def append_event(%{"type" => "permission_request"}, blocks), do: blocks
+  def append_event(%{"type" => "permission_request"} = event, blocks) do
+    tool_use_id = Map.get(event, "tool_use_id", "perm-#{System.unique_integer([:positive])}")
+
+    block = %{
+      type: :permission_request,
+      id: "block-perm-#{tool_use_id}",
+      tool_use_id: tool_use_id,
+      tool_name: Map.get(event, "tool_name", "unknown"),
+      input: Map.get(event, "input", %{}),
+      run_id: Map.get(event, "run_id"),
+      resolved: Map.get(event, "resolved")
+    }
+
+    blocks ++ [block]
+  end
+
   def append_event(%{"type" => "ask_user_question"}, blocks), do: blocks
 
   # --- catch-all for unknown events ---

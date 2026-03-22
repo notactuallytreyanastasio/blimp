@@ -20,6 +20,7 @@ defmodule TermDiffWeb.Router do
     live "/", DiffLive
     live "/agents", AgentLive
     live "/agents/:id", AgentRunLive
+    live "/repl", ReplLive
   end
 
   # Other scopes may use custom stacks.

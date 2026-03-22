@@ -12,22 +12,37 @@ defmodule TermDiffWeb.AgentComponents do
   # ── nav_bar ──────────────────────────────────────────────
 
   attr :active_page, :atom, required: true
+  attr :dark_mode, :boolean, default: false
 
   def nav_bar(assigns) do
     ~H"""
-    <nav class="flex items-center gap-4 px-4 py-1.5 border-b border-neutral-200 bg-neutral-50 text-sm shrink-0">
-      <a
-        href="/"
-        class={"font-medium #{if @active_page == :diffs, do: "text-blue-600 underline underline-offset-4", else: "text-neutral-500 hover:text-neutral-800"}"}
+    <nav class={"flex items-center gap-4 px-4 py-1.5 border-b text-sm shrink-0 #{if @dark_mode, do: "border-neutral-700 bg-neutral-800", else: "border-neutral-200 bg-neutral-50"}"}>
+      <.link
+        navigate="/"
+        class={"font-medium #{if @active_page == :diffs, do: (if @dark_mode, do: "text-blue-400 underline underline-offset-4", else: "text-blue-600 underline underline-offset-4"), else: (if @dark_mode, do: "text-neutral-400 hover:text-neutral-200", else: "text-neutral-500 hover:text-neutral-800")}"}
       >
         Diffs
-      </a>
-      <a
-        href="/agents"
-        class={"font-medium #{if @active_page == :agents, do: "text-blue-600 underline underline-offset-4", else: "text-neutral-500 hover:text-neutral-800"}"}
+      </.link>
+      <.link
+        navigate="/agents"
+        class={"font-medium #{if @active_page == :agents, do: (if @dark_mode, do: "text-blue-400 underline underline-offset-4", else: "text-blue-600 underline underline-offset-4"), else: (if @dark_mode, do: "text-neutral-400 hover:text-neutral-200", else: "text-neutral-500 hover:text-neutral-800")}"}
       >
         Agents
-      </a>
+      </.link>
+      <.link
+        navigate="/repl"
+        class={"font-medium #{if @active_page == :repl, do: (if @dark_mode, do: "text-blue-400 underline underline-offset-4", else: "text-blue-600 underline underline-offset-4"), else: (if @dark_mode, do: "text-neutral-400 hover:text-neutral-200", else: "text-neutral-500 hover:text-neutral-800")}"}
+      >
+        REPL
+      </.link>
+      <div class="flex-1"></div>
+      <button
+        :if={@active_page == :agents}
+        phx-click="toggle_dark"
+        class={"text-xs px-2 py-1 rounded #{if @dark_mode, do: "bg-neutral-700 text-neutral-300 hover:bg-neutral-600", else: "bg-neutral-200 text-neutral-600 hover:bg-neutral-300"}"}
+      >
+        {if @dark_mode, do: "Light", else: "Dark"}
+      </button>
     </nav>
     """
   end
@@ -35,6 +50,7 @@ defmodule TermDiffWeb.AgentComponents do
   # ── terminal_pane ──────────────────────────────────────────
 
   attr :pane, :map, required: true
+  attr :dark_mode, :boolean, default: false
 
   def terminal_pane(assigns) do
     blocks =
@@ -42,16 +58,17 @@ defmodule TermDiffWeb.AgentComponents do
       |> Enum.take(-500)
       |> EventProcessor.process_events()
 
-    assigns = assign(assigns, :blocks, blocks)
+    dark = assigns.dark_mode
+    assigns = assigns |> assign(:blocks, blocks) |> assign(:dark, dark)
 
     ~H"""
-    <div class="h-full flex flex-col bg-white overflow-hidden">
+    <div class={"h-full flex flex-col overflow-hidden #{if @dark, do: "bg-neutral-900", else: "bg-white"}"}>
       <%!-- Pane header --%>
-      <div class="flex items-center justify-between px-3 py-1.5 bg-neutral-50 border-b border-neutral-200 shrink-0">
+      <div class={"flex items-center justify-between px-3 py-1.5 border-b shrink-0 #{if @dark, do: "bg-neutral-800 border-neutral-700", else: "bg-neutral-50 border-neutral-200"}"}>
         <div class="flex items-center gap-2 min-w-0">
           <.status_dot status={@pane.run.status} />
           <span class="text-xs text-neutral-400">#{@pane.run.id}</span>
-          <span class="text-xs text-neutral-500 truncate">{prompt_preview(@pane.run.prompt)}</span>
+          <span class={"text-xs truncate #{if @dark, do: "text-neutral-400", else: "text-neutral-500"}"}>{prompt_preview(@pane.run.prompt)}</span>
         </div>
         <div class="flex items-center gap-2 shrink-0">
           <span class={"text-[10px] px-1.5 py-0.5 rounded #{status_badge_class(@pane.run.status)}"}>
@@ -74,14 +91,14 @@ defmodule TermDiffWeb.AgentComponents do
         id={"pane-output-#{@pane.run.id}"}
         phx-hook="AgentAutoScroll"
       >
-        <div :if={@blocks == []} class="text-neutral-400 text-xs italic">
+        <div :if={@blocks == []} class={"text-xs italic #{if @dark, do: "text-neutral-600", else: "text-neutral-400"}"}>
           Waiting for output...
         </div>
-        <.pane_block :for={block <- @blocks} block={block} />
+        <.pane_block :for={block <- @blocks} block={block} dark={@dark} />
       </div>
 
       <%!-- Per-pane chat input --%>
-      <div class="border-t border-neutral-200 px-2 py-1.5 bg-neutral-50 shrink-0">
+      <div class={"border-t px-2 py-1.5 shrink-0 #{if @dark, do: "border-neutral-700 bg-neutral-800", else: "border-neutral-200 bg-neutral-50"}"}>
         <form phx-submit="continue_pane" class="flex gap-1.5" id={"pane-chat-#{@pane.run.id}"}>
           <input type="hidden" name="run_id" value={@pane.run.id} />
           <input
@@ -89,7 +106,7 @@ defmodule TermDiffWeb.AgentComponents do
             name="prompt"
             placeholder={if @pane.run.status == "running", do: "Running...", else: "Continue..."}
             disabled={@pane.run.status == "running"}
-            class="flex-1 px-2 py-1 border border-neutral-200 rounded text-xs font-mono text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-blue-400/60 disabled:bg-neutral-100 disabled:text-neutral-400"
+            class={"flex-1 px-2 py-1 border rounded text-xs font-mono focus:outline-none focus:ring-1 focus:ring-blue-400/60 #{if @dark, do: "bg-neutral-900 border-neutral-600 text-neutral-100 placeholder-neutral-500 disabled:bg-neutral-800 disabled:text-neutral-500", else: "border-neutral-200 text-neutral-900 placeholder-neutral-400 disabled:bg-neutral-100 disabled:text-neutral-400"}"}
           />
           <button
             type="submit"
@@ -172,9 +189,17 @@ defmodule TermDiffWeb.AgentComponents do
 
   defp pane_block(%{block: %{type: :system}} = assigns) do
     ~H"""
-    <div class="text-[10px] text-neutral-400 flex items-center gap-1">
+    <div class="text-[10px] text-neutral-500 flex items-center gap-1">
       <span>{@block.model || "agent"}</span>
       <span :if={@block.session_id} class="font-mono">{String.slice(@block.session_id, 0, 8)}</span>
+    </div>
+    """
+  end
+
+  defp pane_block(%{block: %{type: :text}, dark: true} = assigns) do
+    ~H"""
+    <div class="text-xs text-neutral-300 whitespace-pre-wrap break-words leading-relaxed">
+      {@block.content}
     </div>
     """
   end
@@ -183,6 +208,23 @@ defmodule TermDiffWeb.AgentComponents do
     ~H"""
     <div class="text-xs text-neutral-700 whitespace-pre-wrap break-words leading-relaxed">
       {@block.content}
+    </div>
+    """
+  end
+
+  defp pane_block(%{block: %{type: :tool_use}, dark: true} = assigns) do
+    ~H"""
+    <div class="border border-neutral-700 rounded overflow-hidden my-1">
+      <div class="flex items-center gap-1.5 px-2 py-1 text-xs bg-neutral-800">
+        <span class="font-mono text-[10px] text-neutral-400 bg-neutral-700 px-1 py-0.5 rounded">{@block.tool_name}</span>
+        <span class="text-neutral-500 truncate flex-1 text-[10px] font-mono">{tool_summary(@block)}</span>
+        <span :if={@block.result == nil} class="text-amber-400 text-[10px] animate-pulse">...</span>
+        <span :if={@block.result != nil && @block.is_error} class="text-red-400 text-[10px]">err</span>
+        <span :if={@block.result != nil && !@block.is_error} class="text-green-400 text-[10px]">ok</span>
+      </div>
+      <div :if={@block.result} class="px-2 py-1 text-[10px] font-mono text-neutral-400 max-h-24 overflow-y-auto">
+        <pre class="whitespace-pre-wrap break-all">{tool_result_content(@block)}</pre>
+      </div>
     </div>
     """
   end
@@ -204,6 +246,21 @@ defmodule TermDiffWeb.AgentComponents do
     """
   end
 
+  defp pane_block(%{block: %{type: :result}, dark: true} = assigns) do
+    ~H"""
+    <div class="border-t border-neutral-700 pt-1 mt-1">
+      <div class="flex items-center gap-2 text-[10px] text-neutral-500">
+        <span>Done</span>
+        <span :if={@block.cost_usd} class="font-mono">${format_cost(@block.cost_usd)}</span>
+        <span :if={@block.duration_ms}>{format_duration(@block.duration_ms)}</span>
+        <span :if={@block.tokens} class="font-mono">
+          {format_tokens(@block.tokens.input)}in / {format_tokens(@block.tokens.output)}out
+        </span>
+      </div>
+    </div>
+    """
+  end
+
   defp pane_block(%{block: %{type: :result}} = assigns) do
     ~H"""
     <div class="border-t border-neutral-200 pt-1 mt-1">
@@ -215,6 +272,78 @@ defmodule TermDiffWeb.AgentComponents do
           {format_tokens(@block.tokens.input)}in / {format_tokens(@block.tokens.output)}out
         </span>
       </div>
+    </div>
+    """
+  end
+
+  defp pane_block(%{block: %{type: :permission_request, resolved: nil}, dark: true} = assigns) do
+    ~H"""
+    <div class="border border-amber-600/50 rounded overflow-hidden my-2 bg-amber-900/20">
+      <div class="flex items-center gap-2 px-3 py-2 text-xs">
+        <span class="text-amber-400 font-semibold">Permission</span>
+        <span class="font-mono text-[10px] text-neutral-400 bg-neutral-700 px-1 py-0.5 rounded">{@block.tool_name}</span>
+        <span class="text-neutral-500 truncate flex-1 text-[10px] font-mono">{tool_summary(@block)}</span>
+      </div>
+      <div class="flex gap-2 px-3 py-2 border-t border-amber-600/30">
+        <button
+          phx-click="approve_permission"
+          phx-value-run-id={@block.run_id}
+          phx-value-tool-use-id={@block.tool_use_id}
+          class="px-3 py-1 text-xs bg-green-600 text-white rounded font-medium hover:bg-green-700"
+        >
+          Allow
+        </button>
+        <button
+          phx-click="deny_permission"
+          phx-value-run-id={@block.run_id}
+          phx-value-tool-use-id={@block.tool_use_id}
+          class="px-3 py-1 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700"
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  defp pane_block(%{block: %{type: :permission_request, resolved: nil}} = assigns) do
+    ~H"""
+    <div class="border border-amber-300 rounded overflow-hidden my-2 bg-amber-50">
+      <div class="flex items-center gap-2 px-3 py-2 text-xs">
+        <span class="text-amber-600 font-semibold">Permission</span>
+        <span class="font-mono text-[10px] text-neutral-500 bg-neutral-200 px-1 py-0.5 rounded">{@block.tool_name}</span>
+        <span class="text-neutral-400 truncate flex-1 text-[10px] font-mono">{tool_summary(@block)}</span>
+      </div>
+      <div class="flex gap-2 px-3 py-2 border-t border-amber-200">
+        <button
+          phx-click="approve_permission"
+          phx-value-run-id={@block.run_id}
+          phx-value-tool-use-id={@block.tool_use_id}
+          class="px-3 py-1 text-xs bg-green-600 text-white rounded font-medium hover:bg-green-700"
+        >
+          Allow
+        </button>
+        <button
+          phx-click="deny_permission"
+          phx-value-run-id={@block.run_id}
+          phx-value-tool-use-id={@block.tool_use_id}
+          class="px-3 py-1 text-xs bg-red-600 text-white rounded font-medium hover:bg-red-700"
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  defp pane_block(%{block: %{type: :permission_request, resolved: resolved}} = assigns) do
+    assigns = assign(assigns, :resolved, resolved)
+
+    ~H"""
+    <div class="flex items-center gap-2 px-2 py-1 text-[10px] text-neutral-400 my-1">
+      <span class="font-mono">{@block.tool_name}</span>
+      <span :if={@resolved == :approved} class="text-green-500">approved</span>
+      <span :if={@resolved == :denied} class="text-red-500">denied</span>
     </div>
     """
   end

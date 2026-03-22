@@ -1,3 +1,4 @@
 # Deciduous database (local)
 .deciduous/
 chunks/lang/.zig-cache/
+chunks/term_diff/scripts/node_modules/
