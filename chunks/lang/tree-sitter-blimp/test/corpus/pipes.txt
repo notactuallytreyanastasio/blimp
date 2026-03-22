@@ -39,7 +39,7 @@ end
           (identifier)
           (function_call
             (identifier)
-            (identifier)
+            (hole)
             (atom)))
         (function_call
           (identifier)
