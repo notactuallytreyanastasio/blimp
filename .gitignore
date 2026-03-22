@@ -2,3 +2,4 @@
 .deciduous/
 chunks/lang/.zig-cache/
 chunks/term_diff/scripts/node_modules/
+chunks/lang/zig-out/
