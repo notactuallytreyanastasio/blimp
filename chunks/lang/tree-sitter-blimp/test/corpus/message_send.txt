@@ -12,7 +12,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (message_send
@@ -34,7 +35,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (message_send
@@ -55,7 +57,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (assignment
@@ -81,7 +84,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (reply_statement
@@ -103,7 +107,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (message_send

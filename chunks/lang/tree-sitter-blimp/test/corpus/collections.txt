@@ -10,7 +10,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (list))))
 
@@ -26,7 +27,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (list
         (integer)
@@ -45,7 +47,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (list
         (identifier)
@@ -63,7 +66,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (tuple
         (atom)
@@ -81,7 +85,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (map
         (key_value_pair
@@ -103,6 +108,7 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (map))))

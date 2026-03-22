@@ -24,7 +24,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (state_definition
       (typed_field_list
         (typed_field
@@ -79,7 +80,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (state_definition
       (typed_field_list
         (typed_field
@@ -137,7 +139,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (reply_statement

@@ -8,6 +8,10 @@
       "required": true,
       "types": [
         {
+          "type": "actor_name",
+          "named": true
+        },
+        {
           "type": "assignment",
           "named": true
         },
@@ -111,6 +115,21 @@
           "type": "unary_expression",
           "named": true
         },
+        {
+          "type": "upper_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "actor_name",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
         {
           "type": "upper_identifier",
           "named": true

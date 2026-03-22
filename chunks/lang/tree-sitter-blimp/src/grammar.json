@@ -28,7 +28,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "upper_identifier"
+          "name": "actor_name"
         },
         {
           "type": "STRING",
@@ -44,6 +44,31 @@
         {
           "type": "STRING",
           "value": "end"
+        }
+      ]
+    },
+    "actor_name": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "upper_identifier"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "."
+              },
+              {
+                "type": "SYMBOL",
+                "name": "upper_identifier"
+              }
+            ]
+          }
         }
       ]
     },

@@ -30,7 +30,7 @@
   (identifier) @function.call)
 
 ; Actor name
-(actor_definition
+(actor_name
   (upper_identifier) @type.definition)
 
 ; Message handler name

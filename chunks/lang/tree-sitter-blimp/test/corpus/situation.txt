@@ -10,7 +10,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (hole))))
 
@@ -31,7 +32,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (situation_expression
@@ -62,7 +64,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (situation_expression
@@ -94,7 +97,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (situation_expression

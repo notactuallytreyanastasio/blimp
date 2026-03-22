@@ -9,7 +9,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)))
+    (actor_name
+      (upper_identifier))))
 
 ================
 Actor with untyped state
@@ -23,7 +24,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (state_definition
       (typed_field_list
         (typed_field
@@ -42,7 +44,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (state_definition
       (typed_field_list
         (typed_field
@@ -64,7 +67,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (state_definition
       (typed_field_list
         (typed_field
@@ -85,7 +89,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (state_definition
       (typed_field_list
         (typed_field
@@ -107,7 +112,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (state_definition
       (typed_field_list
         (typed_field
@@ -130,7 +136,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (become_statement
@@ -157,7 +164,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list
@@ -182,7 +190,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list
@@ -205,7 +214,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list
@@ -234,7 +244,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (return_type
@@ -257,7 +268,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list
@@ -270,3 +282,49 @@ end
           (upper_identifier)))
       (reply_statement
         (atom)))))
+
+================
+Actor with dot-notation name
+================
+
+actor Shop.Checkout do
+  state total: Int :: 0
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier)
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (type_name
+            (upper_identifier))
+          (integer))))))
+
+================
+Actor with triple dot-notation name
+================
+
+actor Shop.Checkout.Tax do
+  on :calculate do
+    reply 0
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier)
+      (upper_identifier)
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (reply_statement
+        (integer)))))

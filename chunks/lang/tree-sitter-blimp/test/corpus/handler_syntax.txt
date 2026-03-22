@@ -12,7 +12,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list
@@ -41,7 +42,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list
@@ -68,7 +70,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list
@@ -99,7 +102,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (when_guard
@@ -121,7 +125,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (parameter_list

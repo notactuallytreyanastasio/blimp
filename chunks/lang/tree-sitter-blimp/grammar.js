@@ -21,7 +21,11 @@ module.exports = grammar({
     // ============================================================
 
     actor_definition: ($) =>
-      seq("actor", $.upper_identifier, "do", repeat($._actor_body), "end"),
+      seq("actor", $.actor_name, "do", repeat($._actor_body), "end"),
+
+    // Actor names can be dotted: Shop, Shop.Checkout, Shop.Checkout.Tax
+    actor_name: ($) =>
+      seq($.upper_identifier, repeat(seq(".", $.upper_identifier))),
 
     _actor_body: ($) =>
       choice(

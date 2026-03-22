@@ -12,7 +12,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (become_statement
@@ -37,7 +38,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (become_statement
@@ -63,7 +65,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (reply_statement
@@ -84,7 +87,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (assignment
@@ -108,7 +112,8 @@ end
 (source_file
   (comment)
   (actor_definition
-    (upper_identifier)))
+    (actor_name
+      (upper_identifier))))
 
 ================
 Multiple handlers
@@ -129,7 +134,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (message_handler
       (atom)
       (become_statement

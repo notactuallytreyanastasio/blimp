@@ -10,13 +10,14 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (pipe_expression
         (identifier)
         (function_call
           (identifier)
-          (identifier))))))
+          (hole))))))
 
 ================
 Chained pipes
@@ -30,7 +31,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (pipe_expression
         (pipe_expression
@@ -41,7 +43,7 @@ end
             (atom)))
         (function_call
           (identifier)
-          (identifier))))))
+          (hole))))))
 
 ================
 Pipe into bare identifier
@@ -55,7 +57,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (pipe_expression
         (identifier)
@@ -73,7 +76,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (pipe_expression
         (binary_expression
@@ -81,4 +85,4 @@ end
           (integer))
         (function_call
           (identifier)
-          (identifier))))))
+          (hole))))))

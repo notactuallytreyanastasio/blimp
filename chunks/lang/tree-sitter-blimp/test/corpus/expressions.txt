@@ -10,7 +10,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (integer))))
 
@@ -26,7 +27,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (float))))
 
@@ -42,7 +44,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (string))))
 
@@ -58,7 +61,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (atom))))
 
@@ -74,7 +78,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (boolean))))
 
@@ -90,7 +95,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (nil))))
 
@@ -106,7 +112,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (binary_expression
         (integer)
@@ -126,7 +133,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (function_call
         (identifier)
@@ -145,7 +153,8 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (dot_access
         (identifier)
@@ -163,6 +172,7 @@ end
 
 (source_file
   (actor_definition
-    (upper_identifier)
+    (actor_name
+      (upper_identifier))
     (reply_statement
       (atom))))
