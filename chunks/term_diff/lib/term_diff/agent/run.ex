@@ -59,6 +59,7 @@ defmodule TermDiff.Agent.Run do
     field :started_at, :utc_datetime_usec
     field :finished_at, :utc_datetime_usec
     field :archived_at, :utc_datetime_usec
+    field :deciduous_root, :integer
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -86,7 +87,8 @@ defmodule TermDiff.Agent.Run do
       :error,
       :started_at,
       :finished_at,
-      :archived_at
+      :archived_at,
+      :deciduous_root
     ])
     |> validate_required([:status, :agent_type, :prompt])
     |> validate_inclusion(:status, @valid_statuses)

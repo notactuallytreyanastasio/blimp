@@ -1,20 +1,58 @@
-# A checkout actor with state and pattern matching
-actor Checkout do
-  state items: [Item] :: []
-  state total: Int :: 0
+# A full checkout actor showing typed state, guards, pipes, bubbles, and holes
+actor Shop do
+  state region: Atom :: :us
+end
 
-  on :add(item: Item) -> Atom do
+actor Shop.Checkout do
+  state items: [Item] :: []
+  state total: Float :: 0.0
+
+  on :add(item: Item) do
     become items: [item | items],
            total: total + item.price
-    reply :ok
+    reply length(items)
+  end
+
+  on :charge(payment: Payment)
+      when valid?(payment)
+      bubbles(CascadeBubble) do
+    receipt = items
+      |> calculate_tax(_, region)
+      |> finalize(_, payment)
+    become items: [], total: 0.0
+    reply receipt
+  end
+
+  on :charge(payment: Payment)
+      bubbles(CascadeBubble) do
+    situation validate(payment) do
+      :recoverable ->
+        retry_payment(payment) orelse bubble
+      _ # Hole: handle unrecoverable payment failure,
+        # research PCI compliance for error responses
+    end
   end
 
   on :summary -> {[Item], Int} do
     reply {items, total}
   end
 
-  on :clear -> Atom do
-    become items: [], total: 0
+  on :clear do
+    become items: [], total: 0.0
     reply :cleared
+  end
+end
+
+actor Shop.Inventory do
+  state stock: %{String => Int} :: %{}
+
+  on :check(item_name: String) do
+    reply lookup(stock, item_name)
+  end
+
+  on :restock(item_name: String, quantity: Int) when quantity > 0 do
+    current = lookup(stock, item_name) orelse 0
+    become stock: put(stock, item_name, current + quantity)
+    reply :ok
   end
 end

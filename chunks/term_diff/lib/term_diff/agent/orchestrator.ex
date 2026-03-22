@@ -385,8 +385,36 @@ defmodule TermDiff.Agent.Orchestrator do
       %{run_id: run_id}
       |> Map.merge(state.runner_config)
       |> apply_run_permission_mode_from_id(run_id)
+      |> maybe_inject_deciduous_context(run_id)
 
     do_dispatch_with_config(run_id, attempt, config, state)
+  end
+
+  defp maybe_inject_deciduous_context(config, run_id) do
+    alias TermDiff.Agent.Deciduous
+
+    case Runs.get_run(run_id) do
+      %Run{prompt: prompt} = run when not is_nil(prompt) ->
+        case Deciduous.create_root_node(prompt) do
+          {:ok, root_id} ->
+            Runs.update_run(run, %{deciduous_root: root_id})
+
+            active_runs =
+              Runs.list_runs()
+              |> Enum.filter(&(&1.status == "running" and &1.id != run_id))
+
+            preamble = Deciduous.build_agent_preamble(run_id, root_id, prompt, active_runs)
+
+            existing = Map.get(config, :append_system_prompt, "")
+            Map.put(config, :append_system_prompt, existing <> "\n" <> preamble)
+
+          {:error, _reason} ->
+            config
+        end
+
+      _ ->
+        config
+    end
   end
 
   defp cancel_active_run(run_id, state) do

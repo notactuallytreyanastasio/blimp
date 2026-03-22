@@ -1,261 +1,249 @@
 defmodule TermDiffWeb.ReplLive do
+  @moduledoc """
+  Blimp REPL LiveView.
+
+  Split pane: left is terminal input/output history, right is live state
+  sidebar showing all variables and their values. Communicates with the
+  blimp binary via an Erlang Port.
+  """
   use TermDiffWeb, :live_view
 
-  alias TermDiff.Blimp
+  alias TermDiffWeb.AgentComponents
 
   @impl true
   def mount(_params, _session, socket) do
-    files = Blimp.example_files()
-    first_file = List.first(files)
-
     socket =
       socket
-      |> assign(:page_title, "Blimp REPL")
-      |> assign(:files, files)
-      |> assign(:file_path, first_file)
-      |> assign(:source, "")
-      |> assign(:actors, [])
-      |> assign(:error, nil)
-      |> assign(:selected_actor, nil)
-      |> assign(:selected_hole, nil)
-      |> assign(:hole_prompt, "")
-      |> load_file(first_file)
+      |> assign(:page_title, "REPL")
+      |> assign(:history, [])
+      |> assign(:state_vars, [])
+      |> assign(:port, nil)
+      |> assign(:buffer, "")
+
+    socket = if connected?(socket), do: start_repl(socket), else: socket
 
     {:ok, socket}
   end
 
   @impl true
-  def handle_event("select_file", %{"path" => path}, socket) do
-    {:noreply, socket |> assign(:selected_hole, nil) |> load_file(path)}
-  end
-
-  def handle_event("toggle_actor", %{"name" => name}, socket) do
-    selected =
-      if socket.assigns.selected_actor == name, do: nil, else: name
-
-    {:noreply, assign(socket, :selected_actor, selected)}
-  end
-
-  def handle_event("click_hole", %{"index" => index_str, "actor" => actor_name}, socket) do
-    index = String.to_integer(index_str)
-
-    hole =
-      socket.assigns.actors
-      |> Enum.find(&(&1["name"] == actor_name))
-      |> case do
-        nil -> nil
-        actor -> Enum.at(actor["holes"] || [], index)
-      end
-
-    case hole do
-      nil ->
-        {:noreply, socket}
-
-      hole ->
-        {:noreply,
-         socket
-         |> assign(:selected_hole, Map.put(hole, "actor", actor_name))
-         |> assign(:hole_prompt, "")}
-    end
-  end
-
-  def handle_event("close_hole", _params, socket) do
-    {:noreply, assign(socket, :selected_hole, nil)}
-  end
-
-  def handle_event("update_hole_prompt", %{"prompt" => text}, socket) do
-    {:noreply, assign(socket, :hole_prompt, text)}
-  end
-
-  def handle_event("submit_hole", _params, socket) do
-    # Future: send to AI agent for hole filling
-    {:noreply, socket}
-  end
-
-  defp load_file(socket, nil), do: socket
-
-  defp load_file(socket, path) do
-    source =
-      case Blimp.read_source(path) do
-        {:ok, content} -> content
-        {:error, _} -> ""
-      end
-
-    {actors, error} =
-      case Blimp.introspect(path) do
-        {:ok, %{"actors" => actors}} -> {actors, nil}
-        {:error, err} -> {[], err}
-      end
-
-    socket
-    |> assign(:file_path, path)
-    |> assign(:source, source)
-    |> assign(:actors, actors)
-    |> assign(:error, error)
-    |> assign(:selected_actor, get_in(actors, [Access.at(0), "name"]))
-  end
-
-  @impl true
   def render(assigns) do
     ~H"""
-    <div class="h-screen flex flex-col bg-white text-neutral-900">
-      <%!-- File picker bar --%>
-      <div class="flex items-center gap-1 px-3 py-1.5 border-b border-neutral-200 bg-neutral-50 overflow-x-auto flex-shrink-0">
-        <span class="text-neutral-400 text-xs mr-2">blimp</span>
-        <button
-          :for={file <- @files}
-          phx-click="select_file"
-          phx-value-path={file}
-          class={"px-2 py-0.5 rounded text-xs #{if file == @file_path, do: "bg-neutral-800 text-white", else: "text-neutral-600 hover:bg-neutral-200"}"}
-        >
-          {Path.basename(file)}
-        </button>
-      </div>
+    <div class="h-screen flex flex-col font-mono text-[13px] leading-snug bg-white text-neutral-900">
+      <AgentComponents.nav_bar active_page={:repl} />
 
-      <%!-- Error bar --%>
-      <div :if={@error} class="px-3 py-1.5 bg-red-50 border-b border-red-200 text-red-700 text-xs font-mono whitespace-pre-wrap">
-        {@error}
-      </div>
-
-      <%!-- Main split: source + sidebar --%>
-      <div class="flex flex-1 min-h-0">
-        <%!-- Source pane --%>
-        <div class="flex-1 overflow-auto border-r border-neutral-200">
-          <pre class="p-3"><code><span
-              :for={{line, idx} <- Enum.with_index(String.split(@source, "\n"), 1)}
-              class={"block #{hole_line_class(line)}"}
-            ><span class="inline-block w-8 text-right text-neutral-300 select-none mr-3">{idx}</span>{highlight_line(line)}</span></code></pre>
-        </div>
-
-        <%!-- Actor sidebar --%>
-        <div class="w-80 flex-shrink-0 overflow-auto bg-neutral-50">
-          <div :if={@actors == []} class="p-4 text-neutral-400 text-xs">No actors found</div>
-          <div :for={actor <- @actors} class="border-b border-neutral-100">
-            <%!-- Actor header --%>
-            <button
-              phx-click="toggle_actor"
-              phx-value-name={actor["name"]}
-              class={"w-full text-left px-3 py-1.5 text-xs font-bold flex items-center gap-1 #{if @selected_actor == actor["name"], do: "bg-blue-50 text-blue-800", else: "hover:bg-neutral-100"}"}
-            >
-              <span class={"transition-transform #{if @selected_actor == actor["name"], do: "rotate-90"}"}>&#9656;</span>
-              {actor["name"]}
-            </button>
-
-            <%!-- Actor detail (expanded) --%>
-            <div :if={@selected_actor == actor["name"]} class="px-3 pb-2">
-              <%!-- State fields --%>
-              <div :if={actor["state"] != []} class="mt-1">
-                <div class="text-neutral-400 text-xs uppercase tracking-wide mb-0.5">state</div>
-                <div :for={field <- actor["state"]} class="text-xs pl-2 py-0.5 flex justify-between">
-                  <span>
-                    <span class="text-neutral-800">{field["name"]}</span><span class="text-neutral-400">:</span>
-                    <span class="text-blue-600">{field["type"]}</span>
-                  </span>
-                  <span :if={field["default"]} class="text-neutral-400">= {field["default"]}</span>
-                </div>
+      <div class="flex flex-1 overflow-hidden">
+        <%!-- Left: REPL terminal (75%) --%>
+        <div class="w-3/4 flex flex-col min-w-0">
+          <div class="flex-1 overflow-y-auto p-4 bg-neutral-900" id="repl-output">
+            <div :for={entry <- @history} class="mb-1">
+              <div :if={entry.type == :input} class="flex">
+                <span class="text-green-400 select-none mr-2">blimp&gt;</span>
+                <span class="text-neutral-100">{entry.text}</span>
               </div>
-
-              <%!-- Handlers --%>
-              <div :if={actor["handlers"] != []} class="mt-2">
-                <div class="text-neutral-400 text-xs uppercase tracking-wide mb-0.5">handlers</div>
-                <div :for={handler <- actor["handlers"]} class="text-xs pl-2 py-0.5">
-                  <span class="text-purple-600">:{handler["message"]}</span><span
-                    :if={handler["params"] != []}
-                    class="text-neutral-500"
-                  >(<span :for={{param, pidx} <- Enum.with_index(handler["params"])}>{if pidx > 0, do: ", "}<span class="text-neutral-700">{param["name"]}</span><span class="text-neutral-400">:</span> <span class="text-blue-600">{param["type"]}</span></span>)</span>
-                  <span :if={handler["return_type"]} class="text-neutral-400"> -&gt; </span>
-                  <span :if={handler["return_type"]} class="text-green-600">{handler["return_type"]}</span>
-                  <span :if={handler["guard"]} class="text-amber-600 ml-1">when {handler["guard"]}</span>
-                  <span :if={handler["bubbles"]} class="text-red-500 ml-1">bubbles({handler["bubbles"]})</span>
-                </div>
+              <div :if={entry.type == :output} class="text-neutral-300 whitespace-pre-wrap">
+                {entry.text}
               </div>
-
-              <%!-- Holes --%>
-              <div :if={actor["holes"] != [] and actor["holes"] != nil} class="mt-2">
-                <div class="text-neutral-400 text-xs uppercase tracking-wide mb-0.5">holes</div>
-                <div :for={{hole, hidx} <- Enum.with_index(actor["holes"])} class="text-xs pl-2 py-1 bg-amber-50 rounded my-0.5">
-                  <div class="flex items-start justify-between gap-1">
-                    <div>
-                      <span class="text-amber-700">L{hole["line"]}</span>
-                      <span :if={hole["directive"]} class="text-neutral-600 ml-1">{hole["directive"]}</span>
-                    </div>
-                    <button
-                      phx-click="click_hole"
-                      phx-value-index={hidx}
-                      phx-value-actor={actor["name"]}
-                      class="px-1.5 py-0.5 bg-amber-200 hover:bg-amber-300 text-amber-800 rounded text-xs flex-shrink-0"
-                    >
-                      Fill
-                    </button>
-                  </div>
-                  <div class="text-neutral-400 mt-0.5">{hole["context"]}</div>
-                </div>
+              <div :if={entry.type == :error} class="text-red-400 whitespace-pre-wrap">
+                {entry.text}
               </div>
             </div>
           </div>
-        </div>
-      </div>
 
-      <%!-- Hole fill prompt panel --%>
-      <div :if={@selected_hole} class="border-t border-neutral-200 bg-neutral-50 px-4 py-3 flex-shrink-0">
-        <div class="flex items-center justify-between mb-2">
-          <div class="text-xs">
-            <span class="text-neutral-400">Filling hole in</span>
-            <span class="font-bold text-neutral-700 ml-1">{@selected_hole["actor"]}</span>
-            <span class="text-neutral-400 ml-2">at line {@selected_hole["line"]}</span>
+          <div class="border-t border-neutral-700 bg-neutral-800 p-3">
+            <form phx-submit="eval" class="flex gap-2">
+              <span class="text-green-400 py-2 select-none">blimp&gt;</span>
+              <input
+                type="text"
+                name="input"
+                placeholder="type an expression..."
+                class="flex-1 px-3 py-2 bg-neutral-900 border border-neutral-600 rounded text-sm font-mono text-neutral-100 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-blue-500/60"
+                autocomplete="off"
+                autofocus
+                id="repl-input"
+              />
+              <button
+                type="submit"
+                class="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700"
+              >
+                Eval
+              </button>
+            </form>
           </div>
-          <button phx-click="close_hole" class="text-neutral-400 hover:text-neutral-700 text-xs">close</button>
         </div>
-        <div :if={@selected_hole["directive"]} class="text-xs text-amber-700 mb-2">
-          Directive: {@selected_hole["directive"]}
+
+        <%!-- Right: state column (25%) --%>
+        <div class="w-1/4 border-l border-neutral-700 overflow-y-auto bg-neutral-900 p-4 shrink-0 flex flex-col">
+          <div class="text-xs font-semibold text-neutral-500 uppercase tracking-wide mb-3">State</div>
+          <div :if={@state_vars == []} class="text-xs text-neutral-600 italic">
+            No variables yet
+          </div>
+          <div :for={var <- @state_vars} class="mb-2">
+            <div class="flex items-baseline gap-2">
+              <span class="font-semibold text-blue-400 shrink-0 text-sm">{var.name}</span>
+              <span class="text-neutral-600 text-xs">=</span>
+            </div>
+            <div class="text-neutral-300 break-all font-mono text-xs pl-2 mt-0.5">{var.value}</div>
+          </div>
         </div>
-        <form phx-submit="submit_hole" class="flex gap-2">
-          <input
-            type="text"
-            name="prompt"
-            value={@hole_prompt}
-            phx-change="update_hole_prompt"
-            placeholder="Describe what should fill this hole..."
-            class="flex-1 px-2 py-1 text-xs border border-neutral-300 rounded bg-white focus:outline-none focus:border-blue-400"
-          />
-          <button type="submit" class="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">
-            Fill with AI
-          </button>
-        </form>
       </div>
     </div>
     """
   end
 
-  defp hole_line_class(line) do
-    if String.contains?(line, "_ #"), do: "bg-amber-50", else: ""
-  end
+  # ── handle_event ─────────────────────────────────────────
 
-  defp highlight_line(line) do
-    # Basic keyword highlighting for Blimp source
-    line
-    |> highlight_comments()
-    |> Phoenix.HTML.raw()
-  end
+  @impl true
+  def handle_event("eval", %{"input" => input}, socket) do
+    input = String.trim(input)
 
-  defp highlight_comments(line) do
-    case String.split(line, "#", parts: 2) do
-      [code, comment] ->
-        escaped_code = Phoenix.HTML.html_escape(code) |> Phoenix.HTML.safe_to_string()
-        escaped_comment = Phoenix.HTML.html_escape("#" <> comment) |> Phoenix.HTML.safe_to_string()
-        highlight_keywords(escaped_code) <> ~s(<span class="text-neutral-400">) <> escaped_comment <> "</span>"
+    if input == "" do
+      {:noreply, socket}
+    else
+      history = socket.assigns.history ++ [%{type: :input, text: input}]
+      socket = assign(socket, :history, history)
 
-      [code] ->
-        escaped = Phoenix.HTML.html_escape(code) |> Phoenix.HTML.safe_to_string()
-        highlight_keywords(escaped)
+      if socket.assigns.port do
+        Port.command(socket.assigns.port, input <> "\n")
+      end
+
+      {:noreply, socket}
     end
   end
 
-  @keywords ~w(actor do end state on become reply when bubbles situation case orelse)
+  # ── handle_info: Port data ──────────────────────────────
 
-  defp highlight_keywords(html) do
-    Enum.reduce(@keywords, html, fn kw, acc ->
-      String.replace(acc, ~r/\b(#{kw})\b/, ~s(<span class="text-fuchsia-700 font-bold">\\1</span>))
-    end)
+  @impl true
+  def handle_info({port, {:data, data}}, %{assigns: %{port: port}} = socket) do
+    combined = socket.assigns.buffer <> data
+    {lines, remaining} = split_lines(combined)
+
+    {history, state_vars} =
+      Enum.reduce(lines, {socket.assigns.history, socket.assigns.state_vars}, fn line, {hist, vars} ->
+        parse_repl_line(line, hist, vars)
+      end)
+
+    socket =
+      socket
+      |> assign(:history, history)
+      |> assign(:state_vars, state_vars)
+      |> assign(:buffer, remaining)
+
+    {:noreply, socket}
+  end
+
+  def handle_info({port, {:exit_status, code}}, %{assigns: %{port: port}} = socket) do
+    history = socket.assigns.history ++ [%{type: :error, text: "REPL exited with code #{code}"}]
+
+    socket =
+      socket
+      |> assign(:port, nil)
+      |> assign(:history, history)
+
+    {:noreply, socket}
+  end
+
+  def handle_info(_msg, socket) do
+    {:noreply, socket}
+  end
+
+  # ── Private ─────────────────────────────────────────────
+
+  defp start_repl(socket) do
+    blimp_path = find_blimp_binary()
+
+    if blimp_path do
+      port =
+        Port.open({:spawn_executable, blimp_path}, [
+          {:args, ["--repl"]},
+          :binary,
+          :exit_status,
+          :stderr_to_stdout
+        ])
+
+      assign(socket, :port, port)
+    else
+      history = [%{type: :error, text: "blimp binary not found. Build with: cd chunks/lang && zig build"}]
+      assign(socket, :history, history)
+    end
+  end
+
+  defp find_blimp_binary do
+    repo_path = Application.get_env(:term_diff, :repo_path, File.cwd!())
+
+    candidates = [
+      Path.join([repo_path, "chunks/lang/zig-out/bin/blimp"]),
+      # Walk up from worktree to find the main repo's build
+      Path.join([repo_path, "..", "blimp", "chunks/lang/zig-out/bin/blimp"]) |> Path.expand(),
+      # Common locations
+      Path.expand("~/blimp/chunks/lang/zig-out/bin/blimp"),
+      System.find_executable("blimp")
+    ]
+
+    Enum.find(candidates, &(&1 && File.exists?(&1)))
+  end
+
+  defp split_lines(data) do
+    parts = String.split(data, "\n")
+    {complete, [remaining]} = Enum.split(parts, -1)
+    {complete, remaining}
+  end
+
+  defp parse_repl_line(line, history, state_vars) do
+    cond do
+      # Skip prompt lines
+      String.starts_with?(line, "blimp> ") -> {history, state_vars}
+      String.starts_with?(line, "blimp>") -> {history, state_vars}
+
+      # Skip banner
+      String.starts_with?(line, "Blimp REPL") -> {history, state_vars}
+
+      # State sidebar: header/footer
+      String.contains?(line, "┌─ state") -> {history, state_vars}
+      String.contains?(line, "└─") -> {history, state_vars}
+
+      # State sidebar: variable line "  │ name = value"
+      String.contains?(line, "│") ->
+        case parse_state_line(line) do
+          {:ok, name, value} ->
+            vars = update_state_var(state_vars, name, value)
+            {history, vars}
+
+          :skip ->
+            {history, state_vars}
+        end
+
+      # Result line "=> value"
+      String.starts_with?(line, "=> ") ->
+        result = String.trim_leading(line, "=> ")
+        {history ++ [%{type: :output, text: result}], state_vars}
+
+      # Error lines
+      String.starts_with?(line, "Error:") or String.starts_with?(line, "Parse error:") ->
+        {history ++ [%{type: :error, text: line}], state_vars}
+
+      # Other non-empty output
+      String.trim(line) != "" ->
+        {history ++ [%{type: :output, text: line}], state_vars}
+
+      true ->
+        {history, state_vars}
+    end
+  end
+
+  defp parse_state_line(line) do
+    case Regex.run(~r/│\s+(\w+)\s+=\s+(.+)$/, line) do
+      [_, name, value] -> {:ok, name, String.trim(value)}
+      _ -> :skip
+    end
+  end
+
+  defp update_state_var(vars, name, value) do
+    existing_idx = Enum.find_index(vars, &(&1.name == name))
+
+    if existing_idx do
+      List.replace_at(vars, existing_idx, %{name: name, value: value})
+    else
+      vars ++ [%{name: name, value: value}]
+    end
   end
 end

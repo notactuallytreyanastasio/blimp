@@ -29,6 +29,12 @@ defmodule TermDiffWeb.AgentComponents do
       >
         Agents
       </.link>
+      <.link
+        navigate="/repl"
+        class={"font-medium #{if @active_page == :repl, do: (if @dark_mode, do: "text-blue-400 underline underline-offset-4", else: "text-blue-600 underline underline-offset-4"), else: (if @dark_mode, do: "text-neutral-400 hover:text-neutral-200", else: "text-neutral-500 hover:text-neutral-800")}"}
+      >
+        REPL
+      </.link>
       <div class="flex-1"></div>
       <button
         :if={@active_page == :agents}

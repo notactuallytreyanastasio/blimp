@@ -1,30 +1,45 @@
-# A bank account demonstrating become as immutable state transitions
-# Every become is a snapshot -- time travel debugging shows the full ledger
-actor BankAccount do
+# Bank account with typed state, guards, message sends, and bubble strategies
+actor Bank do
+  state name: String :: "First National"
+end
+
+actor Bank.Account do
   state balance: Int :: 0
   state owner: String :: "unknown"
-  state ledger: [Any] :: []
+  state ledger: [Transaction] :: []
   state frozen: Bool :: false
 
-  on :deposit(amount: Int) -> {Atom, Int} do
+  on :deposit(amount: Int) when amount > 0 do
     entry = %{type: :deposit, amount: amount, balance: balance + amount}
     become balance: balance + amount,
            ledger: [entry | ledger]
-    reply {:ok, balance + amount}
+    reply balance + amount
   end
 
-  on :withdraw(amount: Int) -> {Atom, Int} do
-    entry = %{type: :withdrawal, amount: amount, balance: balance - amount}
-    become balance: balance - amount,
-           ledger: [entry | ledger]
-    reply {:ok, balance - amount}
+  on :deposit(amount: Int) when amount <= 0 do
+    reply :error
   end
 
-  on :transfer(to_account: String, amount: Int) -> {Atom, Int} do
-    entry = %{type: :transfer, to: to_account, amount: amount, balance: balance - amount}
-    become balance: balance - amount,
-           ledger: [entry | ledger]
-    reply {:transferred, amount}
+  on :withdraw(amount: Int) when amount > 0 do
+    situation balance - amount do
+      remaining when remaining >= 0 ->
+        entry = %{type: :withdrawal, amount: amount, balance: remaining}
+        become balance: remaining,
+               ledger: [entry | ledger]
+        reply remaining
+      _ # Hole: handle insufficient funds,
+        # consider overdraft protection or bubble
+    end
+  end
+
+  on :transfer(target: Actor, amount: Int)
+      when amount > 0
+      bubbles(CascadeBubble) do
+    become balance: balance - amount
+    target <- :deposit(amount) orelse bubble
+    entry = %{type: :transfer, to: target, amount: amount}
+    become ledger: [entry | ledger]
+    reply :ok
   end
 
   on :balance -> Int do
@@ -38,10 +53,5 @@ actor BankAccount do
   on :freeze -> Atom do
     become frozen: true
     reply :frozen
-  end
-
-  on :unfreeze -> Atom do
-    become frozen: false
-    reply :unfrozen
   end
 end
