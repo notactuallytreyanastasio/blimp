@@ -2,6 +2,7 @@ const std = @import("std");
 const Lexer = @import("lexer.zig").Lexer;
 const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
+const Checker = @import("checker.zig").Checker;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -30,6 +31,21 @@ pub fn main() !void {
         std.debug.print("Parse error: {} at line {}, col {}\n", .{ err, parser.current.line, parser.current.col });
         std.process.exit(1);
     };
+
+    // Type check
+    var checker = Checker.init(arena.allocator());
+    const check_result = checker.checkFile(nodes);
+    if (check_result.errors.len > 0) {
+        for (check_result.errors) |type_err| {
+            std.debug.print("Type error at line {}, col {}: {s}\n", .{
+                type_err.loc.line,
+                type_err.loc.col,
+                type_err.message,
+            });
+        }
+        std.debug.print("{d} type error(s) found.\n", .{check_result.errors.len});
+        std.process.exit(1);
+    }
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
@@ -75,9 +91,15 @@ fn printNode(writer: *std.io.Writer, node: ast.Node, indent: u32) void {
                 writer.print("(", .{}) catch {};
                 for (h.params, 0..) |p, i| {
                     if (i > 0) writer.print(", ", .{}) catch {};
-                    writer.print("{s}", .{p}) catch {};
+                    writer.print("{s}", .{p.name}) catch {};
+                    if (p.type_name) |tn| {
+                        writer.print(": {s}", .{tn}) catch {};
+                    }
                 }
                 writer.print(")", .{}) catch {};
+            }
+            if (h.return_type) |rt| {
+                writer.print(" -> {s}", .{rt}) catch {};
             }
             if (h.guard) |guard| {
                 writer.print(" when", .{}) catch {};

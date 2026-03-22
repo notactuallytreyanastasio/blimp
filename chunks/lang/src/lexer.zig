@@ -462,3 +462,12 @@ test "lex situation keyword" {
     try std.testing.expectEqual(Token.Kind.kw_end, lexer.next().kind);
     try std.testing.expectEqual(Token.Kind.eof, lexer.next().kind);
 }
+
+test "lex case keyword" {
+    var lexer = Lexer.init("case x do end");
+    try std.testing.expectEqual(Token.Kind.kw_case, lexer.next().kind);
+    try std.testing.expectEqual(Token.Kind.identifier, lexer.next().kind);
+    try std.testing.expectEqual(Token.Kind.kw_do, lexer.next().kind);
+    try std.testing.expectEqual(Token.Kind.kw_end, lexer.next().kind);
+    try std.testing.expectEqual(Token.Kind.eof, lexer.next().kind);
+}

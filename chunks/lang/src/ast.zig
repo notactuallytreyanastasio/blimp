@@ -40,6 +40,7 @@ pub const Node = struct {
         dot_access: DotAccess,
         hole: Hole,
         situation: Situation,
+        case_expr: CaseExpr,
         message_send: MessageSend,
         orelse_expr: OrElseExpr,
     };
@@ -55,10 +56,16 @@ pub const Node = struct {
 
     pub const MessageHandler = struct {
         name: []const u8, // atom name without colon
-        params: []const []const u8,
+        params: []const HandlerParam,
+        return_type: ?[]const u8 = null, // e.g. "Receipt", "[Item]"
         guard: ?*const Node = null,
         bubble_strategy: ?[]const u8 = null,
         body: []const Node,
+    };
+
+    pub const HandlerParam = struct {
+        name: []const u8,
+        type_name: ?[]const u8 = null, // null = untyped (legacy, checker will reject)
     };
 
     pub const BecomeStmt = struct {
@@ -163,6 +170,11 @@ pub const Node = struct {
     };
 
     pub const Situation = struct {
+        subject: *const Node,
+        branches: []const Branch,
+    };
+
+    pub const CaseExpr = struct {
         subject: *const Node,
         branches: []const Branch,
     };

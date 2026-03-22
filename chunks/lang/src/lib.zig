@@ -7,6 +7,8 @@ pub const Token = @import("token.zig").Token;
 pub const Lexer = @import("lexer.zig").Lexer;
 pub const ast = @import("ast.zig");
 pub const Parser = @import("parser.zig").Parser;
+pub const types = @import("types.zig");
+pub const Checker = @import("checker.zig").Checker;
 
 test {
     // Pull in tests from all modules

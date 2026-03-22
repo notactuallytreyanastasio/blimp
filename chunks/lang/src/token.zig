@@ -32,6 +32,7 @@ pub const Token = struct {
         kw_bubbles,
         kw_def,
         kw_situation,
+        kw_case,
         kw_orelse,
 
         // Operators
@@ -88,6 +89,7 @@ pub const Token = struct {
             .{ "bubbles", .kw_bubbles },
             .{ "def", .kw_def },
             .{ "situation", .kw_situation },
+            .{ "case", .kw_case },
             .{ "orelse", .kw_orelse },
             .{ "true", .true_lit },
             .{ "false", .false_lit },
