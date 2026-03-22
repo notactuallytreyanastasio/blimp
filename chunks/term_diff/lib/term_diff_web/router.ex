@@ -18,6 +18,8 @@ defmodule TermDiffWeb.Router do
     pipe_through :browser
 
     live "/", DiffLive
+    live "/agents", AgentLive
+    live "/agents/:id", AgentRunLive
     live "/repl", ReplLive
   end
 

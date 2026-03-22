@@ -30,7 +30,8 @@ defmodule TermDiff.AI.Claude do
     args = [
       "-p", prompt,
       "--output-format", "json",
-      "--allowedTools", allowed_tools
+      "--allowedTools", allowed_tools,
+      "--permission-mode", "plan"
     ]
 
     args = if system_prompt, do: args ++ ["--system-prompt", system_prompt], else: args

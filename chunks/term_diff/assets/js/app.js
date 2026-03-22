@@ -24,6 +24,8 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/term_diff"
 import topbar from "../vendor/topbar"
+import PromptSubmit from "./hooks/prompt_submit"
+import AgentAutoScroll from "./hooks/agent_auto_scroll"
 
 let Hooks = {...colocatedHooks}
 
@@ -77,6 +79,45 @@ Hooks.KeyNav = {
       if (selected) {
         selected.scrollIntoView({ block: "nearest", behavior: "smooth" })
       }
+    })
+  }
+}
+
+Hooks.PromptSubmit = PromptSubmit
+Hooks.AgentAutoScroll = AgentAutoScroll
+
+Hooks.LineSelect = {
+  mounted() {
+    let dragging = false
+
+    this.el.addEventListener("mousedown", (e) => {
+      if (e.target.closest("form, input, textarea, button")) return
+      const lineEl = e.target.closest("[data-line-num]")
+      if (!lineEl) return
+
+      const file = lineEl.dataset.file
+      const line = parseInt(lineEl.dataset.lineNum)
+      if (!file || isNaN(line)) return
+
+      dragging = true
+      this.pushEvent("select_line", { file, line, shift: e.shiftKey })
+      e.preventDefault()
+    })
+
+    this.el.addEventListener("mousemove", (e) => {
+      if (!dragging) return
+      const lineEl = e.target.closest("[data-line-num]")
+      if (!lineEl) return
+
+      const file = lineEl.dataset.file
+      const line = parseInt(lineEl.dataset.lineNum)
+      if (!file || isNaN(line)) return
+
+      this.pushEvent("select_line", { file, line, shift: true })
+    })
+
+    window.addEventListener("mouseup", () => {
+      dragging = false
     })
   }
 }

@@ -3,10 +3,13 @@ defmodule TermDiffWeb.DiffLive do
 
   require Logger
 
-  alias TermDiff.Diff.{CommitState, FileState, Navigation}
+  alias TermDiff.Agent.Orchestrator
+  alias TermDiff.Agent.Runs
+  alias TermDiff.Commentary.Store, as: CommentaryStore
+  alias TermDiff.Diff.{CommitState, FileState, LineSelection, Navigation}
   alias TermDiff.Git.{Diff, Log, Runner, Status, Watcher}
   alias TermDiff.Git.Types.RepoState
-  alias TermDiff.Commentary.Store, as: CommentaryStore
+  alias TermDiffWeb.AgentComponents
 
   @impl true
   def mount(params, _session, socket) do
@@ -32,6 +35,7 @@ defmodule TermDiffWeb.DiffLive do
       |> assign(:expanded_comments, MapSet.new())
       |> assign(:commit, CommitState.new())
       |> assign(:amend_diff, [])
+      |> assign(:line_selection, %LineSelection{})
 
     {:ok, socket}
   end
@@ -40,6 +44,7 @@ defmodule TermDiffWeb.DiffLive do
   def render(assigns) do
     ~H"""
     <div id="term-diff" phx-hook="KeyNav" class="h-screen flex flex-col font-mono text-[13px] leading-snug bg-white text-neutral-900">
+      <AgentComponents.nav_bar active_page={:diffs} />
       <.status_bar repo_state={@repo_state} nav={@nav} repo_path={@repo_path} commentary_status={@commentary_status} />
       <.keybinding_bar nav={@nav} />
 
@@ -58,8 +63,11 @@ defmodule TermDiffWeb.DiffLive do
           repo_state={@repo_state}
           selected_diff={@selected_diff}
           expanded_comments={@expanded_comments}
+          line_selection={@line_selection}
         />
       </div>
+
+      <.agent_prompt_float :if={@line_selection.active} line_selection={@line_selection} />
     </div>
     """
   end
@@ -114,15 +122,20 @@ defmodule TermDiffWeb.DiffLive do
 
   @impl true
   def handle_event("keydown", %{"key" => "Escape"}, socket) do
-    if CommitState.active?(socket.assigns.commit) do
-      socket =
-        socket
-        |> assign(:commit, CommitState.cancel(socket.assigns.commit))
-        |> assign(:amend_diff, [])
+    cond do
+      socket.assigns.line_selection.active ->
+        {:noreply, assign(socket, :line_selection, LineSelection.clear(socket.assigns.line_selection))}
 
-      {:noreply, socket}
-    else
-      {:noreply, socket}
+      CommitState.active?(socket.assigns.commit) ->
+        socket =
+          socket
+          |> assign(:commit, CommitState.cancel(socket.assigns.commit))
+          |> assign(:amend_diff, [])
+
+        {:noreply, socket}
+
+      true ->
+        {:noreply, socket}
     end
   end
 
@@ -201,6 +214,57 @@ defmodule TermDiffWeb.DiffLive do
       |> assign(:amend_diff, [])
 
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("select_line", %{"file" => file, "line" => line, "shift" => shift}, socket) do
+    line = if is_binary(line), do: String.to_integer(line), else: line
+    sel = socket.assigns.line_selection
+
+    new_sel =
+      if shift and sel.active and sel.file_path == file do
+        LineSelection.extend(sel, line)
+      else
+        LineSelection.start(sel, file, line)
+      end
+
+    {:noreply, assign(socket, :line_selection, new_sel)}
+  end
+
+  @impl true
+  def handle_event("clear_selection", _params, socket) do
+    {:noreply, assign(socket, :line_selection, LineSelection.clear(socket.assigns.line_selection))}
+  end
+
+  @impl true
+  def handle_event("submit_agent_prompt", %{"commentary" => commentary}, socket) do
+    commentary = String.trim(commentary)
+    sel = socket.assigns.line_selection
+
+    if commentary == "" or not sel.active do
+      {:noreply, socket}
+    else
+      {start_line, end_line} = LineSelection.selected_range(sel)
+      lines_text = extract_selected_lines(socket.assigns.selected_diff, start_line, end_line)
+
+      prompt =
+        "File: #{sel.file_path}\nLines #{start_line}-#{end_line}:\n```\n#{lines_text}\n```\n\n#{commentary}"
+
+      repo_path = socket.assigns.repo_path
+
+      case create_and_dispatch_agent(prompt, repo_path) do
+        {:ok, run} ->
+          socket =
+            socket
+            |> assign(:line_selection, LineSelection.clear(sel))
+            |> push_navigate(to: "/agents?panes=#{run.id}")
+
+          {:noreply, socket}
+
+        {:error, _reason} ->
+          {:noreply, put_flash(socket, :error, "Failed to start agent")}
+      end
+    end
   end
 
   @impl true
@@ -547,7 +611,77 @@ defmodule TermDiffWeb.DiffLive do
     CommentaryStore.get_annotations_for_line(file_path, line_number)
   end
 
+  defp extract_selected_lines(nil, _start, _end), do: ""
+
+  defp extract_selected_lines(diff, start_line, end_line) do
+    diff.hunks
+    |> Enum.flat_map(& &1.lines)
+    |> Enum.filter(fn line ->
+      num = line.new_line_number || line.old_line_number
+      num != nil and num >= start_line and num <= end_line
+    end)
+    |> Enum.map(fn line -> "#{line_prefix(line.type)}#{line.content}" end)
+    |> Enum.join("\n")
+  end
+
+  defp create_and_dispatch_agent(prompt, repo_path) do
+    run_attrs = %{
+      agent_type: "claude-code",
+      prompt: prompt,
+      status: "pending",
+      repo_path: repo_path
+    }
+
+    case Runs.create_run(run_attrs) do
+      {:ok, run} ->
+        case Orchestrator.dispatch(run.id) do
+          {:ok, _disposition} -> {:ok, run}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, changeset} ->
+        {:error, changeset}
+    end
+  end
+
   # ── Layout Components ──
+
+  defp agent_prompt_float(assigns) do
+    {start_line, end_line} = LineSelection.selected_range(assigns.line_selection)
+    assigns = assigns |> assign(:start_line, start_line) |> assign(:end_line, end_line)
+
+    ~H"""
+    <div class="fixed bottom-4 right-4 w-96 bg-white shadow-xl border border-neutral-300 rounded-lg p-3 z-50">
+      <div class="text-xs text-neutral-500 mb-2">
+        <span class="font-semibold">{@line_selection.file_path}</span>
+        <span class="text-neutral-400 ml-1">lines {@start_line}-{@end_line}</span>
+      </div>
+      <form phx-submit="submit_agent_prompt">
+        <textarea
+          name="commentary"
+          placeholder="What should the agent do with these lines?"
+          class="w-full h-20 p-2 text-sm border border-neutral-200 rounded resize-none font-mono focus:outline-none focus:ring-2 focus:ring-blue-400/60"
+          autofocus
+        ></textarea>
+        <div class="flex justify-between items-center mt-2">
+          <button
+            type="button"
+            phx-click="clear_selection"
+            class="text-xs text-neutral-500 hover:text-neutral-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded font-medium hover:bg-blue-700"
+          >
+            Send to Agent
+          </button>
+        </div>
+      </form>
+    </div>
+    """
+  end
 
   defp commit_layout(%{commit: %{phase: :error}} = assigns) do
     ~H"""
@@ -622,7 +756,7 @@ defmodule TermDiffWeb.DiffLive do
       <.file_list files={@repo_state.files} nav={@nav} diffs={@repo_state.diffs} />
     </div>
     <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :diff_view)}"} id="diff-pane" phx-hook="AutoScroll">
-      <.diff_pane diff={@selected_diff} nav={@nav} expanded_comments={@expanded_comments} />
+      <.diff_pane diff={@selected_diff} nav={@nav} expanded_comments={@expanded_comments} line_selection={@line_selection} />
     </div>
     """
   end
@@ -636,7 +770,7 @@ defmodule TermDiffWeb.DiffLive do
       <.commit_message detail={@commit_detail} />
     </div>
     <div :if={@nav.focus != :log_view} class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"} id="diff-pane" phx-hook="AutoScroll">
-      <.diff_pane diff={@commit_diff} nav={@nav} />
+      <.diff_pane diff={@commit_diff} nav={@nav} line_selection={%LineSelection{}} />
     </div>
     """
   end
@@ -739,7 +873,7 @@ defmodule TermDiffWeb.DiffLive do
 
   defp diff_pane(assigns) do
     ~H"""
-    <div>
+    <div id="line-select-area" phx-hook="LineSelect">
       <div class="text-neutral-500 text-xs mb-2 px-1">{@diff.path}</div>
       <div :if={@diff.binary} class="text-neutral-400 px-1">Binary file</div>
       <div :for={{hunk, idx} <- Enum.with_index(@diff.hunks)} class="mb-4">
@@ -750,8 +884,14 @@ defmodule TermDiffWeb.DiffLive do
           {hunk.header}
         </div>
         <div :for={line <- hunk.lines}>
+          <% line_num = line.new_line_number || line.old_line_number %>
           <% line_annotations = if line.new_line_number, do: annotations_for_line(@diff.path, line.new_line_number), else: [] %>
-          <div class={"flex #{line_class(line, hunk)}"}>
+          <% selected = LineSelection.line_selected?(@line_selection, line_num) %>
+          <div
+            class={"flex cursor-pointer #{if selected, do: "bg-blue-100 ring-1 ring-blue-300", else: line_class(line, hunk)}"}
+            data-line-num={line_num}
+            data-file={@diff.path}
+          >
             <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">{line.old_line_number || ""}</span>
             <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">{line.new_line_number || ""}</span>
             <span
