@@ -1,155 +1,169 @@
 # Blimp
 
-A radical approach to programming.
+An actor-oriented programming language with integrated AI agents, a persistent reasoning graph, and a browser-native development environment.
 
-## Overview
+The language, the tooling, and the runtime are designed as a single unified system. Code structure is runtime structure. Agents are first-class collaborators with persistent memory. It compiles to LLVM IR targeting WebAssembly.
 
-Blimp is an actor-oriented programming language with integrated AI agents, a persistent reasoning graph, and a browser-native development environment. It compiles to LLVM IR targeting WebAssembly.
+## The Language
 
-The language, the tooling, and the runtime are designed as a single unified system. Code structure is runtime structure. The REPL is a spatial navigation tool. Agents are first-class collaborators with persistent memory.
-
-## Language Design
-
-### Actors as the fundamental unit
-
-Every computation in Blimp happens inside an actor. Actors communicate via message passing, transition state via `become`, and are supervised by their containing actor.
+Everything is an actor. There are no modules, no classes, no separate concept of "pure functions." A helper function is just an actor with one handler that replies immediately.
 
 ```
-actor Checkout do
-  state items: [], total: 0
+actor Counter do
+  state count: Int :: 0
 
-  on :add(%{price: price} = item) when price > 0 do
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+end
+```
+
+### Typed State
+
+State fields require types. The `::` separates type from default value. The compiler enforces this, not the runtime.
+
+```
+actor BankAccount do
+  state balance: Int :: 0
+  state owner: String :: "unknown"
+  state ledger: [Transaction] :: []
+  state frozen: Bool :: false
+
+  on :deposit(amount: Int) do
+    become balance: balance + amount
+    reply balance + amount
+  end
+end
+```
+
+### Pipes
+
+The pipe operator `|>` chains transformations. `_` marks where the piped value goes.
+
+```
+receipt = items
+  |> calculate_tax(_, region)
+  |> apply_discount(_, code)
+  |> finalize(_, payment)
+```
+
+### Message Send
+
+Actors talk to each other with `<-`. No PIDs, no process registry. Siblings address each other by name.
+
+```
+Shop.Checkout <- :add(%{name: "shirt", price: 29.99})
+
+count = Shop.Inventory <- :check("shirt")
+
+receipt = Shop.Checkout <- :charge(payment) orelse bubble
+```
+
+### Guards
+
+Handlers can have `when` guards that filter on message parameters.
+
+```
+on :withdraw(amount: Int) when amount > 0 do
+  become balance: balance - amount
+  reply balance - amount
+end
+```
+
+### Situations and Holes
+
+`situation` is branching where ambiguity is explicitly allowed. A Hole (`_`) is a typed gap in your program that an agent fills. The comment after a Hole is a directive to the agent, not a note to yourself.
+
+```
+on :charge(payment: Payment) bubbles(CascadeBubble) do
+  situation validate(payment) do
+    :valid ->
+      receipt = items
+        |> calculate_tax(_, region)
+        |> finalize(_, payment)
+      become items: [], total: 0.0
+      reply receipt
+    _ # Hole: handle invalid payment,
+      # begin by researching documentation
+      # on transaction failure
+  end
+end
+```
+
+### Bubbles
+
+Failure is handled by Bubble actors that walk the supervision tree deciding who dies. Different bubbles have different blast radii. You declare the strategy per handler with `bubbles()`. On the caller side, `orelse` catches bubbles.
+
+```
+on :charge(payment: Payment) bubbles(CascadeBubble) do
+  # If this handler fails, CascadeBubble takes siblings down too
+end
+
+# Caller side: catch the bubble
+receipt = checkout <- :charge(payment) orelse :fallback
+```
+
+### Namespaces are Supervision Trees
+
+Dot-notation names define the supervision hierarchy. `Shop.Checkout` means Checkout is supervised by Shop. The namespace IS the blast radius.
+
+```
+actor Shop do
+  state region: Atom :: :us
+end
+
+actor Shop.Checkout do
+  state items: [Item] :: []
+  state total: Float :: 0.0
+
+  on :add(item: Item) do
     become items: [item | items],
-           total: total + price
-    reply :ok
+           total: total + item.price
+    reply length(items)
   end
+end
 
-  on :add(%{price: price}) when price <= 0 do
-    reply {:error, "price must be positive"}
-  end
+actor Shop.Inventory do
+  state stock: %{String => Int} :: %{}
 
-  on :checkout(payment) do
-    receipt = items
-      |> calculate_tax(_, region)
-      |> apply_discount(_, payment.code)
-      |> charge(payment)
-
-    become items: [], total: 0
-    reply {:ok, receipt}
+  on :check(item_name: String) do
+    reply lookup(stock, item_name)
   end
 end
 ```
-
-### Syntax
-
-Ruby's readability with Elixir's functional core.
-
-- `do/end` blocks, optional parentheses, expressive and readable
-- Pattern matching in message handler heads with guards
-- Immutable data, no mutation anywhere
-- `become` for explicit state transitions (from Carl Hewitt's original actor model)
-- Pipe operator `|>` with `_` placeholder for argument position
-- Atoms as lightweight identifiers (`:ok`, `:error`, `:add`)
-- Message send via `<-` operator
-
-### Supervisors are namespaces
-
-There is no separation between code organization and runtime topology. An actor that contains other actors is automatically a supervisor. The namespace hierarchy, the module structure, and the supervision tree are the same thing.
-
-```
-supervisor Shop do
-  supervisor Checkout do
-    actor TaxCalculator do
-      state rates: %{us: 0.08, eu_west: 0.21}
-
-      on :calculate(%{price: price}, region) do
-        rate = rates[region] || rates[:default]
-        reply {:ok, price * rate}
-      end
-    end
-
-    actor PaymentProcessor do
-      on :charge(amount, card) do
-        result = gateway
-          |> connect()
-          |> authorize(_, card, amount)
-          |> capture(_)
-        reply result
-      end
-    end
-
-    on :checkout(payment) do
-      {:ok, tax} = TaxCalculator <- :calculate(%{price: total}, :us)
-      # ...
-    end
-  end
-end
-```
-
-Sibling actors address each other by name. No PIDs, no process registry. The supervisor itself can have state and handle messages.
-
-### Immutability and time-travel debugging
-
-Every `become` produces a new state snapshot. The history is the chain of snapshots. You can address past versions of an actor and send them messages:
-
-```
-blimp> Checkout @ t1 <- :summary
-=> {[%{name: "shirt", price: 29.99}], 29.99}
-```
-
-This works because immutability means every past state is still valid.
 
 ## Tooling
 
-### The REPL
+### Diff Follower
 
-Split-pane interface inspired by March. Left side is your session, right side is live program insight: variables in scope, actor state, agent commentary, autocomplete suggestions. Curated by default, full view on demand.
+A Phoenix LiveView app that follows file changes in real time, stages, unstages, commits, with keyboard navigation and follow mode. This is the primary development interface right now. We use it to build itself.
 
-Navigation is spatial. `open Project`, `cd Module`, `..` to go up. The REPL is a place you navigate, not just a prompt.
+### Agent Multiplexer
 
-### Agent system
+A 2x2 split-pane grid for running up to 4 Claude Code sessions simultaneously. Each pane streams agent output in real time, with per-pane chat for continuing conversations. The sidebar shows run history and lets you open any past run into a pane.
 
-AI agents run alongside your code with two non-overlapping interaction channels:
+### Decision Graph
 
-- `tab` accepts autocomplete suggestions, including `_` pipe placeholder positioning
-- `shift+tab` expands inline annotations (Google Docs style) left by agents in the code gutter
+A persistent reasoning graph (deciduous) tracks every goal, decision, action, and outcome across sessions. The web viewer shows the full graph with git commit links.
 
-Agents have persistent living memory via decision graphs. They remember what they noticed, what they tried, what you accepted, and what you rejected, across sessions. Decision graphs merge when agents agree and surface conflicts to the user when they disagree.
+## Implementation Status
 
-### The multiplexer
+The grammar is not hypothetical. We have:
 
-Top-level grid view of all agent workspaces. Your REPL is one cell. You can drop into any agent's REPL to see its live working state, history, decision tree, and talk to it directly.
+- **Zig parser** that builds typed ASTs from Blimp source
+- **Tree-sitter grammar** with corpus tests for all constructs
+- **Diff follower** (Phoenix LiveView, fully functional)
+- **Agent multiplexer** (Phoenix LiveView, functional, 4-pane split)
+- **Decision graph** tracking all design evolution
 
-The semantic diff viewer, the code editor, and agent workspaces are all panes in the multiplexer. Everything is a REPL inside the grid. This is the first thing being built.
+What parses today: actors, typed state, message handlers with params, `when` guards, `bubbles()` annotations, `become`, `reply`, pipes `|>`, message send `<-`, `orelse`, `situation` with branches, Holes (`_`), dot-notation actor names, binary operators, function calls, dot access, atoms, strings, integers, floats, booleans, nil, lists, maps, tuples, comments.
 
-### Decision trees
-
-Every agent and the user maintains a decision tree tracking reasoning, observations, and conclusions. Trees merge when agents agree and present conflicts with full reasoning chains when they disagree. The user resolves conflicts as the final authority, and the rationale is captured.
-
-## Compilation
-
-Blimp compiles to LLVM IR. The primary target is `wasm32` for browser execution. The same frontend can target `x86_64`/`aarch64` for native execution later.
-
-The actor runtime requires a green-thread scheduler (similar to Erlang's BEAM) compiled to WASM, multiplexing many actors onto few real threads.
-
-## Status
-
-Early design phase. The design journal, decision graph, and first blog post exist. No implementation yet.
-
-**Build order:**
-1. Multiplexer (web-based pane grid, the shell for everything else)
-2. Language frontend (parser, type checker, IR generation)
-3. Actor runtime (green-thread scheduler targeting WASM)
-4. Agent protocol (standard interface for agent definition, memory persistence, graph merge logic)
-
-## Open questions
-
-- Type system design (structural? nominal? gradual?)
-- Pure functions and data types outside actors
-- Protocols and interfaces
-- Agent definition (are agents special actors? written in Blimp?)
-- Collaboration model (shared live environments vs. separate images that sync)
-- Natural language boundary (where does talking to agents end and writing code begin?)
+**Build order (remaining):**
+1. Type checker
+2. Actor runtime (green-thread scheduler targeting WASM)
+3. Agent protocol (Hole filling, decision graph merge)
+4. The canvas (spatial visualization of running programs)
 
 ## Links
 
