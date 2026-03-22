@@ -1,46 +1,50 @@
 # A simple game character with health, inventory, and combat
 actor Character do
-  state name: "hero", hp: 100, max_hp: 100, inventory: [], gold: 0
+  state name: String :: "hero"
+  state hp: Int :: 100
+  state max_hp: Int :: 100
+  state inventory: [Item] :: []
+  state gold: Int :: 0
 
-  on :take_damage(amount) do
+  on :take_damage(amount: Int) -> {Atom, Int} do
     new_hp = hp - amount
     become hp: max(new_hp, 0)
     reply {:hp, max(new_hp, 0)}
   end
 
-  on :heal(amount) do
+  on :heal(amount: Int) -> {Atom, Int} do
     new_hp = min(hp + amount, max_hp)
     become hp: new_hp
     reply {:healed, new_hp}
   end
 
-  on :pickup(item) do
+  on :pickup(item: Item) -> {Atom, Item} do
     become inventory: [item | inventory]
     reply {:ok, item}
   end
 
-  on :drop(item) do
+  on :drop(item: Item) -> Atom do
     become inventory: remove(inventory, item)
     reply :ok
   end
 
-  on :buy(item, cost) do
+  on :buy(item: Item, cost: Int) -> {Atom, Item} do
     become gold: gold - cost,
            inventory: [item | inventory]
     reply {:bought, item}
   end
 
-  on :sell(item, price) do
+  on :sell(item: Item, price: Int) -> {Atom, Int} do
     become gold: gold + price,
            inventory: remove(inventory, item)
     reply {:sold, price}
   end
 
-  on :status do
+  on :status -> %{Atom => Any} do
     reply %{name: name, hp: hp, gold: gold, items: length(inventory)}
   end
 
-  on :alive? do
+  on :alive? -> Bool do
     reply hp > 0
   end
 end

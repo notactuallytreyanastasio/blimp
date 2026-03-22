@@ -1,0 +1,47 @@
+# Case: exhaustive pattern matching
+# Unlike situation (which allows Holes for agent-filled branches),
+# case requires every branch to be explicitly covered.
+
+actor TrafficLight do
+  state color: Atom :: :red
+
+  on :next -> Atom do
+    case color do
+      :red -> become color: :green
+        reply :green
+      :green -> become color: :yellow
+        reply :yellow
+      :yellow -> become color: :red
+        reply :red
+    end
+  end
+
+  on :status -> Atom do
+    reply color
+  end
+end
+
+actor OrderProcessor do
+  state status: Atom :: :pending
+
+  on :process(order: Order) -> Any do
+    case validate(order) do
+      :ok ->
+        result = fulfill(order)
+        become status: :completed
+        reply result
+      :error ->
+        become status: :failed
+        reply :order_invalid
+    end
+  end
+
+  on :check_priority(order: Order) -> Int do
+    case order.tier do
+      :platinum -> reply 1
+      :gold -> reply 2
+      :silver -> reply 3
+      :bronze -> reply 4
+    end
+  end
+end

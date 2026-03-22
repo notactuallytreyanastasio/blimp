@@ -1,19 +1,20 @@
 # Message send and orelse examples
 actor Shop do
-  state checkout: nil, inventory: nil
+  state checkout: Checkout :: nil
+  state inventory: Inventory :: nil
 
-  on :purchase(item, payment) do
+  on :purchase(item: Item, payment: Payment) -> Any do
     checkout <- :add(item)
     result = checkout <- :charge(payment) orelse :error
     reply result
   end
 
-  on :restock(item) do
+  on :restock(item: Item) -> Atom do
     inventory <- :add(item)
     reply :ok
   end
 
-  on :ping do
+  on :ping -> Atom do
     checkout <- :heartbeat
     reply :ok
   end

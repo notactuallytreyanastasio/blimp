@@ -3,31 +3,32 @@
 # Use _ as a placeholder for where the piped value goes.
 
 actor DataProcessor do
-  state items: [], processed: 0
+  state items: [Item] :: []
+  state processed: Int :: 0
 
-  on :push(item) do
+  on :push(item: Item) -> Atom do
     become items: [item | items],
            processed: processed + 1
     reply :ok
   end
 
   # Simple pipe: pass items to a single function
-  on :count do
+  on :count -> Int do
     reply items |> length(_)
   end
 
   # Chained pipes: filter then count
-  on :count_active do
+  on :count_active -> Int do
     reply items |> filter(_, :active) |> length(_)
   end
 
   # Pipe into a bare function (no args)
-  on :sorted do
+  on :sorted -> [Item] do
     reply items |> sort
   end
 
   # Pipe with multiple steps
-  on :first_active do
+  on :first_active -> Item do
     reply items |> filter(_, :active) |> first(_)
   end
 end

@@ -1,31 +1,33 @@
 # A data processing pipeline actor
 # Collects items, transforms them, emits batches
 actor Pipeline do
-  state buffer: [], batch_size: 10, processed: 0
+  state buffer: [Item] :: []
+  state batch_size: Int :: 10
+  state processed: Int :: 0
 
-  on :push(item) do
+  on :push(item: Item) -> {Atom, Int} do
     new_buffer = [item | buffer]
     become buffer: new_buffer,
            processed: processed + 1
     reply {:buffered, length(new_buffer)}
   end
 
-  on :flush do
+  on :flush -> {Atom, [Item]} do
     result = buffer
     become buffer: []
     reply {:flushed, result}
   end
 
-  on :stats do
+  on :stats -> %{Atom => Int} do
     reply %{buffered: length(buffer), total_processed: processed, batch_size: batch_size}
   end
 
-  on :configure(new_batch_size) do
+  on :configure(new_batch_size: Int) -> {Atom, Int} do
     become batch_size: new_batch_size
     reply {:ok, new_batch_size}
   end
 
-  on :reset do
+  on :reset -> Atom do
     become buffer: [], processed: 0
     reply :reset
   end
