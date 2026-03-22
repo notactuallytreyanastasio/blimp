@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Actors Are Alive</title>
+
+<meta name="description" content="We have a REPL, actors spawn, messages fly, and Blimp compiles to native code via LLVM. Here's what happened in one very long day.">
+<meta name="author" content="Bobby Grayson">
+
+<meta property="og:type" content="article">
+<meta property="og:title" content="Actors Are Alive">
+<meta property="og:description" content="We have a REPL, actors spawn, messages fly, and Blimp compiles to native code via LLVM. Here's what happened in one very long day.">
+<meta property="og:url" content="https://blimp.bobbby.online/blog/2026-03-22-actors-are-alive.html">
+<meta property="og:site_name" content="Blimp Design Journal">
+
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="nav"><a href="index.html">blimp / design journal</a></div>
+
+<h1>Actors Are Alive</h1>
+<div class="post-date">March 22, 2026</div>
+
+<p>One day. We built a REPL, an expression evaluator, an actor runtime with a registry, Elm-style error messages, compiled Blimp to native code via LLVM, and started on a TUI that'll make you forget you're in a terminal. Here's the whole thing.</p>
+
+<h2>The REPL</h2>
+
+<p>The REPL is a split-pane TUI. Left side is your session, right side is live state. Every variable you define, every actor you spawn, shows up on the right immediately. You always see the full picture.</p>
+
+<pre><code><span class="st">blimp></span> x = <span class="nr">42</span>
+=> <span class="nr">42</span>
+<span class="st">blimp></span> y = [<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>]
+=> [<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>]
+<span class="st">blimp></span> y <span class="op">|></span> length(_)
+=> <span class="nr">3</span>
+<span class="st">blimp></span> %{language: <span class="st">"blimp"</span>, version: <span class="nr">1</span>, fun: <span class="nr">true</span>}
+=> %{language: <span class="st">"blimp"</span>, version: <span class="nr">1</span>, fun: <span class="nr">true</span>}</code></pre>
+
+<p>The state sidebar on the right updates after every evaluation. It shows <code>x = 42</code>, <code>y = [1, 2, 3]</code>, <code>name = "blimp"</code>. When you spawn actors, they show up there too as <code>ref&lt;Counter:1&gt;</code>. You're always looking at the full state of your session.</p>
+
+<p>The evaluator handles everything: arithmetic with proper precedence, strings, atoms, booleans, lists, tuples, maps, pipes with <code>_</code> placeholder, <code>orelse</code> for nil fallbacks, <code>situation</code>/<code>case</code> pattern matching, dot access on maps. Nine built-in functions: <code>length</code>, <code>max</code>, <code>min</code>, <code>append</code>, <code>reverse</code>, <code>lookup</code>, <code>put</code>, <code>keys</code>, <code>now</code>.</p>
+
+<h2>Actors: Templates, Spawn, Refs</h2>
+
+<p>This is the part that makes me grin. Actor definitions are templates. <code>spawn</code> creates instances. You get back a ref, and that ref is how you talk to it.</p>
+
+<pre><code><span class="kw">actor</span> <span class="fn">Counter</span> <span class="kw">do</span>
+  <span class="kw">state</span> count: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:increment</span> <span class="kw">do</span>
+    <span class="kw">become</span> count: count + <span class="nr">1</span>
+    <span class="kw">reply</span> count + <span class="nr">1</span>
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:get</span> <span class="kw">do</span>
+    <span class="kw">reply</span> count
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+c1 = <span class="kw">spawn</span> <span class="fn">Counter</span>     <span class="cm"># => ref&lt;Counter:1&gt;</span>
+c2 = <span class="kw">spawn</span> <span class="fn">Counter</span>     <span class="cm"># => ref&lt;Counter:2&gt;</span>
+
+c1 <span class="op">&lt;-</span> <span class="st">:increment</span>      <span class="cm"># => 1</span>
+c1 <span class="op">&lt;-</span> <span class="st">:increment</span>      <span class="cm"># => 2</span>
+c2 <span class="op">&lt;-</span> <span class="st">:increment</span>      <span class="cm"># => 1 (independent state)</span>
+c1 <span class="op">&lt;-</span> <span class="st">:get</span>            <span class="cm"># => 2</span>
+c2 <span class="op">&lt;-</span> <span class="st">:get</span>            <span class="cm"># => 1</span></code></pre>
+
+<p>Two instances of the same actor, completely independent state. <code>c1</code> and <code>c2</code> are lightweight refs, like Erlang PIDs. The actual state lives in a global registry. <code>become</code> updates state for the next message, not the current scope. That's real actor semantics, not a simulation.</p>
+
+<p>Guards work too. <code>on :withdraw(amount: Int) when amount > 0</code> only fires if the guard passes. Multiple handlers for the same message with different guards give you clean dispatch without nested conditionals.</p>
+
+<h2>Elm-Style Errors</h2>
+
+<p>I'm really proud of these. Every error tells you exactly what went wrong, shows you the code that caused it, and suggests what you probably meant.</p>
+
+<pre><code><span class="st">blimp></span> bonk + <span class="nr">1</span>
+
+<span class="cm">-- UNDEFINED VARIABLE ----------------------------</span>
+
+  bonk + <span class="nr">1</span>
+  I can't find a variable called `bonk`.
+
+  Variables in scope:
+      x = <span class="nr">42</span>
+      y = [<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>]</code></pre>
+
+<pre><code><span class="st">blimp></span> foobar(<span class="nr">42</span>)
+
+<span class="cm">-- UNKNOWN FUNCTION ------------------------------</span>
+
+  foobar(<span class="nr">42</span>)
+  I don't know a function called `foobar`.
+
+  Built-in functions:
+      length, max, min, append, reverse,
+      lookup, put, keys, now</code></pre>
+
+<p>Six error types, all with this format: UNDEFINED VARIABLE (lists what's in scope), TYPE MISMATCH, DIVISION BY ZERO, UNKNOWN FUNCTION (lists available builtins), NOT AVAILABLE IN REPL (suggests expressions to try), NO MATCHING HANDLER (names the actor and message). The Elm compiler set the bar for error messages and we're going for it.</p>
+
+<h2>Compiled to Native via LLVM</h2>
+
+<p>Separate from the REPL, we have a compiler. It takes Blimp source, runs it through the LLVM C API (called from Zig via <code>@cImport</code>), and produces a native binary.</p>
+
+<pre><code>$ echo "<span class="nr">1</span> + <span class="nr">2</span> * <span class="nr">3</span>" > hello.blimp
+$ blimp-compile hello.blimp -o hello
+$ ./hello
+<span class="nr">7</span></code></pre>
+
+<p>Right now it handles integer and float arithmetic, comparisons, and unary ops. The codegen creates an LLVM module, adds a <code>main</code> function, compiles the expression tree into LLVM IR instructions, emits an object file, and shells out to <code>cc</code> to link against a tiny C runtime that provides <code>blimp_print_int</code>. It's a prototype, but it's a real compiler producing real machine code. The REPL interprets, the compiler compiles, both from the same parser and AST.</p>
+
+<h2>The Multiplexer</h2>
+
+<p>The diff viewer grew a sibling. The agents page at <code>/agents</code> is a multiplexer that runs up to four Claude sessions in a split-pane grid. Each pane streams output in real time. You can click lines in the diff viewer, write commentary about what you want changed, and it spawns an agent that jumps into the multiplexer view.</p>
+
+<p>Everything is URL-parameterized: <code>/agents?panes=12,34&amp;dark=1</code> restores exactly which panes are open and whether dark mode is on. Navigate away and come back, you're right where you left off. Permission requests from the agent show up as Allow/Deny buttons inline in the output. It feels like a real IDE, not a chat window.</p>
+
+<h2>Agent Decision Trees</h2>
+
+<p>Here's the weird one. Every agent that spawns from the multiplexer gets a root node in the deciduous decision graph. The agent's system prompt tells it to log its reasoning: goals, options, decisions, actions, outcomes. All linked to its root node.</p>
+
+<p>When the agent dies, its decision subtree stays in the graph. A new agent can pick up where the dead one left off. Active agents can see what other agents are working on, which files they're touching, what they've decided. The deciduous trees merge when agents agree and surface conflicts when they disagree.</p>
+
+<p>This is the "each agent would have a deciduous tree" idea from the original charter. It's real now.</p>
+
+<h2>The Design Stack</h2>
+
+<p>We also wrote four design documents today:</p>
+
+<ul>
+<li><strong>compilation.md</strong>: The full pipeline from AST to LLVM IR. Blimp IR design, runtime type representation, actor struct layout, Perceus RC, five build phases.</li>
+<li><strong>repl.md</strong>: REPL architecture, the evaluator, state sidebar, Elm errors, multi-line input, actor runtime, LiveView integration.</li>
+<li><strong>actor-runtime.md</strong>: Per-actor arenas, Perceus RC, preemptive scheduling via reduction counting, FIFO run queue, the registry, supervision from dot notation.</li>
+<li><strong>tui.md</strong>: The Elm Architecture for the TUI, vim modes, syntax highlighting, tab completion, libvaxis integration.</li>
+</ul>
+
+<h2>What's Next</h2>
+
+<p>The TUI is getting rebuilt with libvaxis, a proper terminal UI framework. TEA architecture, vim navigation (normal/insert/command modes), syntax highlighting, tab completion, scrollable panels, mouse support. The current raw ANSI version works but it's janky. The next version will feel like a real editor.</p>
+
+<p>After that: the Blimp IR (lowering AST to SSA basic blocks), then codegen for data structures, then the actor runtime in compiled code. Per-actor arenas, Perceus reference counting, and a preemptive scheduler with reduction counting. The BEAM solved this 30 years ago. We're solving it in Zig targeting WASM. Same semantics, different century.</p>
+
+<p>This is as much art project and craft experiment as it is any real attempt at making a useful tool. But the actors are alive, and that feels pretty good.</p>
+
+</body>
+</html>
