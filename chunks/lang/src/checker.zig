@@ -17,28 +17,237 @@ pub const CheckResult = struct {
     errors: []const TypeError,
 };
 
+// ============================================================
+// Actor Registry: cross-actor type information
+// ============================================================
+
+/// Signature of a single message handler.
+pub const HandlerSig = struct {
+    param_names: []const []const u8,
+    param_types: []const Type,
+    return_type: ?Type,
+};
+
+/// State field entry: a name and its type.
+const StateField = struct {
+    name: []const u8,
+    ty: Type,
+};
+
+/// Handler entry: a message name and its signature.
+const HandlerEntry = struct {
+    name: []const u8,
+    sig: HandlerSig,
+};
+
+/// All type information for a single actor.
+pub const ActorInfo = struct {
+    state_fields: std.ArrayList(StateField),
+    handlers: std.ArrayList(HandlerEntry),
+
+    fn init() ActorInfo {
+        return .{
+            .state_fields = .{ .items = &.{}, .capacity = 0 },
+            .handlers = .{ .items = &.{}, .capacity = 0 },
+        };
+    }
+
+    /// Look up a state field type by name.
+    pub fn lookupStateField(self: *const ActorInfo, name: []const u8) ?Type {
+        for (self.state_fields.items) |sf| {
+            if (std.mem.eql(u8, sf.name, name)) return sf.ty;
+        }
+        return null;
+    }
+
+    /// Look up a handler signature by message name.
+    pub fn lookupHandler(self: *const ActorInfo, name: []const u8) ?HandlerSig {
+        for (self.handlers.items) |h| {
+            if (std.mem.eql(u8, h.name, name)) return h.sig;
+        }
+        return null;
+    }
+};
+
+/// Registry entry: an actor name and its info.
+const RegistryEntry = struct {
+    name: []const u8,
+    info: ActorInfo,
+};
+
+/// Registry of all actors and their type information.
+/// Uses ArrayList with linear search (small number of actors).
+pub const ActorRegistry = struct {
+    entries: std.ArrayList(RegistryEntry),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) ActorRegistry {
+        return .{
+            .entries = .{ .items = &.{}, .capacity = 0 },
+            .allocator = allocator,
+        };
+    }
+
+    /// Register a new actor (or get existing). Returns a pointer to its ActorInfo.
+    pub fn register(self: *ActorRegistry, name: []const u8) *ActorInfo {
+        // Check if already registered
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.name, name)) return &entry.info;
+        }
+        // Create new entry
+        self.entries.append(self.allocator, .{
+            .name = name,
+            .info = ActorInfo.init(),
+        }) catch return &self.entries.items[0].info; // fallback (shouldn't happen with arena)
+        return &self.entries.items[self.entries.items.len - 1].info;
+    }
+
+    /// Look up an actor by name.
+    pub fn lookupActor(self: *const ActorRegistry, name: []const u8) ?*const ActorInfo {
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.name, name)) return &entry.info;
+        }
+        return null;
+    }
+};
+
+// ============================================================
+// Built-in function signatures
+// ============================================================
+
+/// Represents a built-in function's type signature.
+/// Uses a tag to describe polymorphic behavior.
+const BuiltinKind = enum {
+    /// length([T]) -> Int
+    length,
+    /// max(Int, Int) -> Int
+    max,
+    /// min(Int, Int) -> Int
+    min,
+    /// remove([T], T) -> [T]
+    remove,
+    /// append([T], T) -> [T]
+    append_fn,
+    /// lookup(%{K => V}, K) -> V
+    lookup_fn,
+    /// insert(%{K => V}, K, V) -> %{K => V}
+    insert_fn,
+    /// keys(%{K => V}) -> [K]
+    keys,
+    /// now() -> Int
+    now,
+    /// validate(Any) -> Atom
+    validate,
+};
+
+const BuiltinEntry = struct {
+    name: []const u8,
+    kind: BuiltinKind,
+};
+
+const builtins = [_]BuiltinEntry{
+    .{ .name = "length", .kind = .length },
+    .{ .name = "max", .kind = .max },
+    .{ .name = "min", .kind = .min },
+    .{ .name = "remove", .kind = .remove },
+    .{ .name = "append", .kind = .append_fn },
+    .{ .name = "lookup", .kind = .lookup_fn },
+    .{ .name = "insert", .kind = .insert_fn },
+    .{ .name = "keys", .kind = .keys },
+    .{ .name = "now", .kind = .now },
+    .{ .name = "validate", .kind = .validate },
+};
+
+fn lookupBuiltin(name: []const u8) ?BuiltinKind {
+    for (&builtins) |*b| {
+        if (std.mem.eql(u8, b.name, name)) return b.kind;
+    }
+    return null;
+}
+
 /// Type checker: walks the AST and validates types.
 pub const Checker = struct {
     allocator: std.mem.Allocator,
     env: TypeEnv,
     errors: std.ArrayList(TypeError),
+    registry: ActorRegistry,
+    /// The name of the actor currently being checked (for self-send resolution).
+    current_actor: ?[]const u8,
 
     pub fn init(allocator: std.mem.Allocator) Checker {
         return .{
             .allocator = allocator,
             .env = TypeEnv.init(allocator),
             .errors = .{ .items = &.{}, .capacity = 0 },
+            .registry = ActorRegistry.init(allocator),
+            .current_actor = null,
         };
     }
 
     /// Check a complete file (list of top-level nodes).
+    /// Two-pass approach:
+    ///   Pass 1: Collect actor state fields and handler signatures into the registry.
+    ///   Pass 2: Type-check bodies with full cross-actor knowledge.
     pub fn checkFile(self: *Checker, nodes: []const Node) CheckResult {
+        // Pass 1: register all actors, their state fields, and handler signatures
+        for (nodes) |node| {
+            switch (node.kind) {
+                .actor_def => |a| self.registerActor(a),
+                else => {},
+            }
+        }
+        // Pass 2: type-check bodies
         for (nodes) |node| {
             self.checkNode(node);
         }
         return .{
             .errors = self.errors.toOwnedSlice(self.allocator) catch &.{},
         };
+    }
+
+    /// Pass 1: Walk an actor definition and register its state fields and handler signatures.
+    fn registerActor(self: *Checker, actor: Node.ActorDef) void {
+        const info = self.registry.register(actor.name);
+        for (actor.body) |stmt| {
+            switch (stmt.kind) {
+                .state_def => |s| {
+                    for (s.fields) |field| {
+                        if (field.type_name) |tn| {
+                            const field_type = types.parseTypeName(self.allocator, tn) catch .hole;
+                            info.state_fields.append(self.allocator, .{
+                                .name = field.key,
+                                .ty = field_type,
+                            }) catch {};
+                        }
+                    }
+                },
+                .message_handler => |h| {
+                    var p_names: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+                    var p_types: std.ArrayList(Type) = .{ .items = &.{}, .capacity = 0 };
+                    for (h.params) |param| {
+                        p_names.append(self.allocator, param.name) catch {};
+                        if (param.type_name) |tn| {
+                            p_types.append(self.allocator, types.parseTypeName(self.allocator, tn) catch .hole) catch {};
+                        } else {
+                            p_types.append(self.allocator, .any) catch {};
+                        }
+                    }
+                    var ret_type: ?Type = null;
+                    if (h.return_type) |rt| {
+                        ret_type = types.parseTypeName(self.allocator, rt) catch .hole;
+                    }
+                    info.handlers.append(self.allocator, .{
+                        .name = h.name,
+                        .sig = .{
+                            .param_names = p_names.toOwnedSlice(self.allocator) catch &.{},
+                            .param_types = p_types.toOwnedSlice(self.allocator) catch &.{},
+                            .return_type = ret_type,
+                        },
+                    }) catch {};
+                },
+                else => {},
+            }
+        }
     }
 
     /// Check a single AST node.
@@ -50,17 +259,24 @@ pub const Checker = struct {
             .reply_stmt => |r| self.checkReplyStmt(r),
             .assign_stmt => |a| self.checkAssignStmt(a),
             .message_handler => |h| self.checkMessageHandler(h, node.loc),
+            // Expression statements: infer type to trigger any errors (e.g., message sends)
+            .message_send, .func_call, .pipe_expr, .dot_access => {
+                _ = self.inferExpr(node);
+            },
             else => {},
         }
     }
 
     /// Check an actor definition: push scope, check body, pop scope.
     fn checkActorDef(self: *Checker, actor: Node.ActorDef, _: Loc) void {
+        const prev_actor = self.current_actor;
+        self.current_actor = actor.name;
         self.env.pushScope();
         for (actor.body) |stmt| {
             self.checkNode(stmt);
         }
         self.env.popScope();
+        self.current_actor = prev_actor;
     }
 
     /// Check state declarations: for each field with a type annotation and default value,
@@ -184,10 +400,10 @@ pub const Checker = struct {
             .list_lit => |l| self.inferListLit(l),
             .tuple_lit => |t| self.inferTupleLit(t),
             .map_lit => |m| self.inferMapLit(m),
-            .func_call => .hole, // Cannot infer without function signatures
-            .pipe_expr => .hole, // Cannot infer pipe results yet
-            .dot_access => .hole, // Cannot infer field access yet
-            .message_send => .hole, // Cannot infer message send results yet
+            .func_call => |fc| self.inferFuncCall(fc, node.loc),
+            .pipe_expr => |pe| self.inferPipeExpr(pe),
+            .dot_access => |da| self.inferDotAccess(da, node.loc),
+            .message_send => |ms| self.inferMessageSend(ms, node.loc),
             .orelse_expr => |oe| self.inferExpr(oe.try_expr.*),
             .situation => .hole, // Cannot infer situation results yet
             else => .hole,
@@ -316,6 +532,205 @@ pub const Checker = struct {
         const val_ptr = self.allocator.create(Type) catch return .hole;
         val_ptr.* = val_type;
         return Type{ .map = .{ .key = key_ptr, .value = val_ptr } };
+    }
+
+    /// Infer the return type of a function call using built-in signatures.
+    fn inferFuncCall(self: *Checker, fc: Node.FuncCall, loc: Loc) Type {
+        // Check if it's a known built-in function
+        if (lookupBuiltin(fc.name)) |kind| {
+            return self.resolveBuiltinReturn(kind, fc.args, loc);
+        }
+        // Unknown function -- return hole
+        return .hole;
+    }
+
+    /// Resolve the return type of a built-in function given its arguments.
+    fn resolveBuiltinReturn(self: *Checker, kind: BuiltinKind, args: []const Node, loc: Loc) Type {
+        switch (kind) {
+            .length => {
+                // length([T]) -> Int
+                if (args.len != 1) {
+                    self.addError(loc, "length() expects 1 argument, got {d}", .{args.len});
+                    return .hole;
+                }
+                const arg_type = self.inferExpr(args[0]);
+                if (arg_type != .list and arg_type != .hole and arg_type != .any and arg_type != .nil) {
+                    self.addError(loc, "length() expects a list, got {s}", .{arg_type.typeName()});
+                }
+                return .int;
+            },
+            .max, .min => {
+                // max(Int, Int) -> Int, min(Int, Int) -> Int
+                if (args.len != 2) {
+                    const name: []const u8 = if (kind == .max) "max" else "min";
+                    self.addError(loc, "{s}() expects 2 arguments, got {d}", .{ name, args.len });
+                    return .hole;
+                }
+                const a = self.inferExpr(args[0]);
+                const b = self.inferExpr(args[1]);
+                if (a != .int and a != .hole and a != .any) {
+                    self.addError(loc, "max/min expects Int arguments, got {s}", .{a.typeName()});
+                }
+                if (b != .int and b != .hole and b != .any) {
+                    self.addError(loc, "max/min expects Int arguments, got {s}", .{b.typeName()});
+                }
+                return .int;
+            },
+            .remove => {
+                // remove([T], T) -> [T]
+                if (args.len != 2) {
+                    self.addError(loc, "remove() expects 2 arguments, got {d}", .{args.len});
+                    return .hole;
+                }
+                const list_type = self.inferExpr(args[0]);
+                _ = self.inferExpr(args[1]);
+                if (list_type == .list) return list_type;
+                return .hole;
+            },
+            .append_fn => {
+                // append([T], T) -> [T]
+                if (args.len != 2) {
+                    self.addError(loc, "append() expects 2 arguments, got {d}", .{args.len});
+                    return .hole;
+                }
+                const list_type = self.inferExpr(args[0]);
+                _ = self.inferExpr(args[1]);
+                if (list_type == .list) return list_type;
+                return .hole;
+            },
+            .lookup_fn => {
+                // lookup(%{K => V}, K) -> V
+                if (args.len != 2) {
+                    self.addError(loc, "lookup() expects 2 arguments, got {d}", .{args.len});
+                    return .hole;
+                }
+                const map_type = self.inferExpr(args[0]);
+                _ = self.inferExpr(args[1]);
+                if (map_type == .map) return map_type.map.value.*;
+                return .hole;
+            },
+            .insert_fn => {
+                // insert(%{K => V}, K, V) -> %{K => V}
+                if (args.len != 3) {
+                    self.addError(loc, "insert() expects 3 arguments, got {d}", .{args.len});
+                    return .hole;
+                }
+                const map_type = self.inferExpr(args[0]);
+                _ = self.inferExpr(args[1]);
+                _ = self.inferExpr(args[2]);
+                if (map_type == .map) return map_type;
+                return .hole;
+            },
+            .keys => {
+                // keys(%{K => V}) -> [K]
+                if (args.len != 1) {
+                    self.addError(loc, "keys() expects 1 argument, got {d}", .{args.len});
+                    return .hole;
+                }
+                const map_type = self.inferExpr(args[0]);
+                if (map_type == .map) {
+                    const key_ptr = self.allocator.create(Type) catch return .hole;
+                    key_ptr.* = map_type.map.key.*;
+                    return Type{ .list = key_ptr };
+                }
+                return .hole;
+            },
+            .now => {
+                // now() -> Int
+                if (args.len != 0) {
+                    self.addError(loc, "now() expects 0 arguments, got {d}", .{args.len});
+                }
+                return .int;
+            },
+            .validate => {
+                // validate(Any) -> Atom
+                if (args.len != 1) {
+                    self.addError(loc, "validate() expects 1 argument, got {d}", .{args.len});
+                    return .hole;
+                }
+                _ = self.inferExpr(args[0]);
+                return .atom;
+            },
+        }
+    }
+
+    /// Infer the result type of a pipe expression.
+    /// items |> length(_) => infer the right side (the function call gets the piped value).
+    fn inferPipeExpr(self: *Checker, pe: Node.PipeExpr) Type {
+        _ = self.inferExpr(pe.left.*);
+        return self.inferExpr(pe.right.*);
+    }
+
+    /// Infer the type of a dot access expression.
+    /// If the object has a known actor type, look up the field in the registry.
+    fn inferDotAccess(self: *Checker, da: Node.DotAccess, _: Loc) Type {
+        const obj_type = self.inferExpr(da.object.*);
+        // If the object is an actor type, look up the field in the registry
+        if (obj_type == .actor) {
+            if (self.registry.lookupActor(obj_type.actor)) |info| {
+                if (info.lookupStateField(da.field)) |field_type| {
+                    return field_type;
+                }
+            }
+        }
+        return .hole;
+    }
+
+    /// Infer the return type of a message send expression.
+    /// target <- :message(args) => look up the target actor and handler in the registry.
+    fn inferMessageSend(self: *Checker, ms: Node.MessageSend, loc: Loc) Type {
+        // Try to determine which actor the target refers to
+        const target_actor_name = self.resolveActorName(ms.target.*);
+        if (target_actor_name) |actor_name| {
+            if (self.registry.lookupActor(actor_name)) |info| {
+                if (info.lookupHandler(ms.message)) |sig| {
+                    // Check argument count
+                    if (ms.args.len != sig.param_types.len) {
+                        self.addError(loc, "message :{s} expects {d} argument(s), got {d}", .{
+                            ms.message,
+                            sig.param_types.len,
+                            ms.args.len,
+                        });
+                    } else {
+                        // Check argument types
+                        for (ms.args, sig.param_types, 0..) |arg, expected, i| {
+                            const arg_type = self.inferExpr(arg);
+                            if (!arg_type.isSubtypeOf(expected)) {
+                                self.addError(arg.loc, "argument {d} to :{s} expected {s}, got {s}", .{
+                                    i + 1,
+                                    ms.message,
+                                    expected.typeName(),
+                                    arg_type.typeName(),
+                                });
+                            }
+                        }
+                    }
+                    return sig.return_type orelse .hole;
+                }
+            }
+        }
+        // Infer args even if we can't resolve the target (for error propagation)
+        for (ms.args) |arg| {
+            _ = self.inferExpr(arg);
+        }
+        return .hole;
+    }
+
+    /// Try to resolve an expression to an actor name for message send targets.
+    /// Handles: identifiers that are known actor names, or variables with actor types.
+    fn resolveActorName(self: *Checker, node: Node) ?[]const u8 {
+        switch (node.kind) {
+            .identifier => |id| {
+                // Check if identifier is a registered actor name directly
+                if (self.registry.lookupActor(id.name) != null) return id.name;
+                // Check if the identifier has an actor type in the environment
+                if (self.env.lookup(id.name)) |ty| {
+                    if (ty == .actor) return ty.actor;
+                }
+                return null;
+            },
+            else => return null,
+        }
     }
 
     // ============================================================
@@ -828,4 +1243,516 @@ test "handler with typed params, return type, guard, and bubbles" {
         \\end
     , &arena);
     try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// ============================================================
+// Actor Registry tests
+// ============================================================
+
+test "registry collects actor state fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    var parser = @import("parser.zig").Parser.init(alloc,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  state name: String :: "bob"
+        \\end
+    );
+    const nodes = parser.parseFile() catch unreachable;
+    _ = checker.checkFile(nodes);
+
+    // Registry should have Counter with two state fields
+    const info = checker.registry.lookupActor("Counter");
+    try std.testing.expect(info != null);
+    try std.testing.expectEqual(@as(usize, 2), info.?.state_fields.items.len);
+    try std.testing.expect(info.?.lookupStateField("count").?.eql(.int));
+    try std.testing.expect(info.?.lookupStateField("name").?.eql(.string));
+}
+
+test "registry collects handler signatures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    var parser = @import("parser.zig").Parser.init(alloc,
+        \\actor Cart do
+        \\  state total: Int :: 0
+        \\  on :add(item: Item) -> Int do
+        \\    reply 1
+        \\  end
+        \\  on :clear do
+        \\    become total: 0
+        \\  end
+        \\end
+    );
+    const nodes = parser.parseFile() catch unreachable;
+    _ = checker.checkFile(nodes);
+
+    const info = checker.registry.lookupActor("Cart");
+    try std.testing.expect(info != null);
+    try std.testing.expectEqual(@as(usize, 2), info.?.handlers.items.len);
+
+    // :add handler
+    const add_sig = info.?.lookupHandler("add");
+    try std.testing.expect(add_sig != null);
+    try std.testing.expectEqual(@as(usize, 1), add_sig.?.param_types.len);
+    try std.testing.expect(add_sig.?.return_type != null);
+    try std.testing.expect(add_sig.?.return_type.?.eql(.int));
+
+    // :clear handler
+    const clear_sig = info.?.lookupHandler("clear");
+    try std.testing.expect(clear_sig != null);
+    try std.testing.expectEqual(@as(usize, 0), clear_sig.?.param_types.len);
+    try std.testing.expect(clear_sig.?.return_type == null);
+}
+
+test "registry collects multiple actors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    var parser = @import("parser.zig").Parser.init(alloc,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :increment do
+        \\    become count: count + 1
+        \\  end
+        \\end
+        \\actor Logger do
+        \\  state messages: [String] :: []
+        \\  on :log(msg: String) do
+        \\    reply :ok
+        \\  end
+        \\end
+    );
+    const nodes = parser.parseFile() catch unreachable;
+    _ = checker.checkFile(nodes);
+
+    try std.testing.expect(checker.registry.lookupActor("Counter") != null);
+    try std.testing.expect(checker.registry.lookupActor("Logger") != null);
+    try std.testing.expect(checker.registry.lookupActor("Missing") == null);
+}
+
+// ============================================================
+// Message send type checking tests
+// ============================================================
+
+test "message send resolves return type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor Cart do
+        \\  state total: Int :: 0
+        \\  on :total -> Int do
+        \\    reply total
+        \\  end
+        \\end
+        \\actor Cashier do
+        \\  on :checkout do
+        \\    result = Cart <- :total
+        \\    reply result
+        \\  end
+        \\end
+    , &arena);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "message send with correct arg type passes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor Cart do
+        \\  state total: Int :: 0
+        \\  on :add(amount: Int) -> Atom do
+        \\    become total: total + amount
+        \\    reply :ok
+        \\  end
+        \\end
+        \\actor Cashier do
+        \\  on :process do
+        \\    Cart <- :add(42)
+        \\  end
+        \\end
+    , &arena);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "message send with wrong arg type produces error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor Cart do
+        \\  state total: Int :: 0
+        \\  on :add(amount: Int) -> Atom do
+        \\    become total: total + amount
+        \\    reply :ok
+        \\  end
+        \\end
+        \\actor Cashier do
+        \\  on :process do
+        \\    Cart <- :add("not a number")
+        \\  end
+        \\end
+    , &arena);
+    try std.testing.expectEqual(@as(usize, 1), result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0].message, "expected Int, got String") != null);
+}
+
+test "message send with wrong arg count produces error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor Cart do
+        \\  state total: Int :: 0
+        \\  on :add(amount: Int) do
+        \\    become total: total + amount
+        \\  end
+        \\end
+        \\actor Cashier do
+        \\  on :process do
+        \\    Cart <- :add(1, 2)
+        \\  end
+        \\end
+    , &arena);
+    try std.testing.expectEqual(@as(usize, 1), result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0].message, "expects 1 argument(s), got 2") != null);
+}
+
+test "message send to unknown actor returns hole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor A do
+        \\  on :go do
+        \\    unknown <- :msg
+        \\  end
+        \\end
+    , &arena);
+    // No error for unknown targets -- just returns hole
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// ============================================================
+// Dot access tests
+// ============================================================
+
+test "dot access on actor-typed variable resolves field" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    // Manually register an actor with a state field
+    const info = checker.registry.register("Item");
+    info.state_fields.append(alloc, .{ .name = "price", .ty = .float }) catch unreachable;
+
+    // Define a variable with actor type "Item"
+    checker.env.define("item", Type{ .actor = "Item" });
+
+    // Build: item.price
+    const obj_node = Node{ .kind = .{ .identifier = .{ .name = "item" } }, .loc = .{ .line = 1, .col = 1 } };
+    const obj_ptr = alloc.create(Node) catch unreachable;
+    obj_ptr.* = obj_node;
+    const dot_node = Node{
+        .kind = .{ .dot_access = .{ .object = obj_ptr, .field = "price" } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(dot_node);
+    try std.testing.expect(result.eql(.float));
+}
+
+test "dot access on unknown type returns hole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    checker.env.define("x", .int);
+
+    const obj_node = Node{ .kind = .{ .identifier = .{ .name = "x" } }, .loc = .{ .line = 1, .col = 1 } };
+    const obj_ptr = alloc.create(Node) catch unreachable;
+    obj_ptr.* = obj_node;
+    const dot_node = Node{
+        .kind = .{ .dot_access = .{ .object = obj_ptr, .field = "foo" } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(dot_node);
+    try std.testing.expect(result.eql(.hole));
+}
+
+test "dot access on unregistered actor returns hole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    checker.env.define("item", Type{ .actor = "UnknownActor" });
+
+    const obj_node = Node{ .kind = .{ .identifier = .{ .name = "item" } }, .loc = .{ .line = 1, .col = 1 } };
+    const obj_ptr = alloc.create(Node) catch unreachable;
+    obj_ptr.* = obj_node;
+    const dot_node = Node{
+        .kind = .{ .dot_access = .{ .object = obj_ptr, .field = "price" } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(dot_node);
+    try std.testing.expect(result.eql(.hole));
+}
+
+// ============================================================
+// Built-in function tests
+// ============================================================
+
+test "length returns Int" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const elems = [_]Node{
+        .{ .kind = .{ .integer_lit = .{ .value = 1 } }, .loc = .{ .line = 1, .col = 2 } },
+    };
+    const list_arg = Node{
+        .kind = .{ .list_lit = .{ .elements = &elems, .tail = null } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const args = [_]Node{list_arg};
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "length", .args = &args } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result.eql(.int));
+}
+
+test "max returns Int" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const args = [_]Node{
+        .{ .kind = .{ .integer_lit = .{ .value = 1 } }, .loc = .{ .line = 1, .col = 5 } },
+        .{ .kind = .{ .integer_lit = .{ .value = 2 } }, .loc = .{ .line = 1, .col = 8 } },
+    };
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "max", .args = &args } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result.eql(.int));
+}
+
+test "min returns Int" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const args = [_]Node{
+        .{ .kind = .{ .integer_lit = .{ .value = 5 } }, .loc = .{ .line = 1, .col = 5 } },
+        .{ .kind = .{ .integer_lit = .{ .value = 3 } }, .loc = .{ .line = 1, .col = 8 } },
+    };
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "min", .args = &args } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result.eql(.int));
+}
+
+test "now returns Int" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "now", .args = &.{} } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result.eql(.int));
+}
+
+test "validate returns Atom" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const args = [_]Node{
+        .{ .kind = .{ .integer_lit = .{ .value = 42 } }, .loc = .{ .line = 1, .col = 10 } },
+    };
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "validate", .args = &args } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result.eql(.atom));
+}
+
+test "lookup returns map value type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    // Create a map variable: %{String => Int}
+    const key_ptr = alloc.create(Type) catch unreachable;
+    key_ptr.* = .string;
+    const val_ptr = alloc.create(Type) catch unreachable;
+    val_ptr.* = .int;
+    checker.env.define("stock", Type{ .map = .{ .key = key_ptr, .value = val_ptr } });
+
+    const args = [_]Node{
+        .{ .kind = .{ .identifier = .{ .name = "stock" } }, .loc = .{ .line = 1, .col = 8 } },
+        .{ .kind = .{ .string_lit = .{ .value = "item" } }, .loc = .{ .line = 1, .col = 15 } },
+    };
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "lookup", .args = &args } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result.eql(.int));
+}
+
+test "keys returns list of key type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const key_ptr = alloc.create(Type) catch unreachable;
+    key_ptr.* = .string;
+    const val_ptr = alloc.create(Type) catch unreachable;
+    val_ptr.* = .int;
+    checker.env.define("stock", Type{ .map = .{ .key = key_ptr, .value = val_ptr } });
+
+    const args = [_]Node{
+        .{ .kind = .{ .identifier = .{ .name = "stock" } }, .loc = .{ .line = 1, .col = 6 } },
+    };
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "keys", .args = &args } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result == .list);
+    try std.testing.expect(result.list.eql(.string));
+}
+
+test "unknown function returns hole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "some_custom_fn", .args = &.{} } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    const result = checker.inferExpr(call_node);
+    try std.testing.expect(result.eql(.hole));
+}
+
+test "length with wrong arg count produces error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "length", .args = &.{} } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    _ = checker.inferExpr(call_node);
+    const errs = checker.errors.toOwnedSlice(alloc) catch &.{};
+    try std.testing.expectEqual(@as(usize, 1), errs.len);
+    try std.testing.expect(std.mem.indexOf(u8, errs[0].message, "expects 1 argument") != null);
+}
+
+test "length with non-list arg produces error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var checker = Checker.init(alloc);
+    const args = [_]Node{
+        .{ .kind = .{ .integer_lit = .{ .value = 42 } }, .loc = .{ .line = 1, .col = 8 } },
+    };
+    const call_node = Node{
+        .kind = .{ .func_call = .{ .name = "length", .args = &args } },
+        .loc = .{ .line = 1, .col = 1 },
+    };
+    _ = checker.inferExpr(call_node);
+    const errs = checker.errors.toOwnedSlice(alloc) catch &.{};
+    try std.testing.expectEqual(@as(usize, 1), errs.len);
+    try std.testing.expect(std.mem.indexOf(u8, errs[0].message, "expects a list") != null);
+}
+
+// ============================================================
+// Pipe expression inference tests
+// ============================================================
+
+test "pipe into built-in function resolves type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor A do
+        \\  state items: [Int] :: []
+        \\  on :count -> Int do
+        \\    reply items |> length(_)
+        \\  end
+        \\end
+    , &arena);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+// ============================================================
+// Integration test: multi-actor cross-checking
+// ============================================================
+
+test "cross-actor message send type checks end-to-end" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor Inventory do
+        \\  state stock: %{String => Int} :: %{}
+        \\  on :check(item_name: String) -> Int do
+        \\    reply lookup(stock, item_name)
+        \\  end
+        \\end
+        \\actor Shop do
+        \\  on :query do
+        \\    count = Inventory <- :check("widget")
+        \\    reply count
+        \\  end
+        \\end
+    , &arena);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "cross-actor wrong type at send site" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = testCheckWithArena(
+        \\actor Inventory do
+        \\  state stock: %{String => Int} :: %{}
+        \\  on :check(item_name: String) -> Int do
+        \\    reply 0
+        \\  end
+        \\end
+        \\actor Shop do
+        \\  on :query do
+        \\    Inventory <- :check(42)
+        \\  end
+        \\end
+    , &arena);
+    try std.testing.expectEqual(@as(usize, 1), result.errors.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.errors[0].message, "expected String, got Int") != null);
 }
