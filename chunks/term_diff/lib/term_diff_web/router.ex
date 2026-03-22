@@ -18,6 +18,7 @@ defmodule TermDiffWeb.Router do
     pipe_through :browser
 
     live "/", DiffLive
+    live "/repl", ReplLive
   end
 
   # Other scopes may use custom stacks.
