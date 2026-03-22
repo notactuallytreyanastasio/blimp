@@ -621,6 +621,7 @@ pub const Parser = struct {
                 self.advance();
                 return Node{ .kind = .{ .hole = .{ .directive = null } }, .loc = loc };
             },
+            .kw_spawn => return self.parseSpawnExpr(),
             .lbracket => return self.parseListLit(),
             .lbrace => return self.parseTupleLit(),
             .percent => return self.parseMapLit(),
@@ -632,6 +633,32 @@ pub const Parser = struct {
             },
             else => return error.UnexpectedToken,
         }
+    }
+
+    /// Parse: spawn ActorName or spawn ActorName, key: value, key: value
+    fn parseSpawnExpr(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_spawn);
+
+        // Expect an upper_identifier for the actor name
+        if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
+        const actor_name = self.current.lexeme;
+        self.advance();
+
+        // Optional state overrides: , key: value, key: value
+        var overrides: []const Node.KeyValue = &.{};
+        if (self.current.kind == .comma) {
+            self.advance();
+            overrides = try self.parseKeyValueList();
+        }
+
+        return Node{
+            .kind = .{ .spawn_expr = .{
+                .actor_name = actor_name,
+                .overrides = overrides,
+            } },
+            .loc = loc,
+        };
     }
 
     fn parseFuncCall(self: *Parser, name: []const u8, loc: Loc) ParseError!Node {

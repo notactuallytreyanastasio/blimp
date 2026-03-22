@@ -6,6 +6,9 @@ const Environment = @import("env.zig").Environment;
 const builtins_mod = @import("builtins.zig");
 const BuiltinRegistry = builtins_mod.BuiltinRegistry;
 const errors = @import("errors.zig");
+const registry_mod = @import("registry.zig");
+const Registry = registry_mod.Registry;
+const ActorRef = registry_mod.ActorRef;
 pub const BlimpError = errors.BlimpError;
 
 pub const EvalError = builtins_mod.EvalError;
@@ -15,12 +18,13 @@ pub const Evaluator = struct {
     allocator: std.mem.Allocator,
     env: Environment,
     builtins: BuiltinRegistry,
+    registry: Registry,
     last_error: ?BlimpError = null,
     source: []const u8 = "",
     actor_ctx: ?*ActorContext = null,
 
     pub const ActorContext = struct {
-        instance: *Value.ActorInstance,
+        entry: *registry_mod.ActorEntry,
         reply_value: ?*const Value = null,
     };
 
@@ -29,6 +33,7 @@ pub const Evaluator = struct {
             .allocator = allocator,
             .env = Environment.init(allocator),
             .builtins = BuiltinRegistry.init(allocator),
+            .registry = Registry.init(allocator),
         };
     }
 
@@ -166,6 +171,9 @@ pub const Evaluator = struct {
 
             // Message send
             .message_send => |ms| return self.evalMessageSend(ms),
+
+            // Spawn expression
+            .spawn_expr => |se| return self.evalSpawnExpr(se),
         }
     }
 
@@ -200,32 +208,61 @@ pub const Evaluator = struct {
             }
         }
 
-        // Create the actor instance (heap-allocated for stable pointer)
-        const instance = self.allocator.create(Value.ActorInstance) catch return error.OutOfMemory;
-        const state_owned = state_fields_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
-        instance.* = .{
-            .name = def.name,
-            .state_fields = state_owned,
-            .handlers = handlers_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
-        };
+        const default_state = state_fields_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        const handlers = handlers_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
 
+        // Register the template in the registry
+        self.registry.registerTemplate(def.name, default_state, handlers);
+
+        // Bind the actor name as an atom in the environment (template marker)
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
-        v.* = Value{ .actor_instance = instance };
+        v.* = Value{ .atom = def.name };
 
-        // Bind the actor name in the environment
         self.env.define(def.name, v);
 
+        return v;
+    }
+
+    fn evalSpawnExpr(self: *Evaluator, se: ast.Node.SpawnExpr) EvalError!*const Value {
+        // Look up the template in the registry
+        const template = self.registry.lookupTemplate(se.actor_name) orelse {
+            self.last_error = errors.templateNotFound(se.actor_name, self.source);
+            return error.UndefinedVariable;
+        };
+
+        // Evaluate override values
+        var overrides_list = std.ArrayList(Value.MapEntry){ .items = &.{}, .capacity = 0 };
+        for (se.overrides) |ov| {
+            const val = try self.eval(ov.value);
+            overrides_list.append(self.allocator, .{
+                .key = ov.key,
+                .val = val,
+            }) catch return error.OutOfMemory;
+        }
+        const overrides = overrides_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+
+        // Spawn a new instance
+        const ref = self.registry.spawn(template, overrides);
+
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .actor_ref = ref };
         return v;
     }
 
     fn evalMessageSend(self: *Evaluator, ms: ast.Node.MessageSend) EvalError!*const Value {
         const target_val = try self.eval(ms.target.*);
 
-        // Target must be an actor_instance
+        // Target must be an actor_ref
         switch (target_val.*) {
-            .actor_instance => |instance| {
+            .actor_ref => |ref| {
+                // Look up the instance in the registry
+                const entry = self.registry.getInstance(ref) orelse {
+                    self.last_error = errors.notAnActor(self.source);
+                    return error.TypeError;
+                };
+
                 // Find a matching handler
-                for (instance.handlers) |handler| {
+                for (entry.handlers) |handler| {
                     if (!std.mem.eql(u8, handler.name, ms.message)) continue;
 
                     // Check argument count
@@ -247,7 +284,7 @@ pub const Evaluator = struct {
                         }
 
                         // Bind state fields
-                        for (instance.state_fields) |field| {
+                        for (entry.state_fields) |field| {
                             self.env.define(field.key, field.val);
                         }
 
@@ -268,13 +305,13 @@ pub const Evaluator = struct {
                     }
 
                     // Bind state fields as variables
-                    for (instance.state_fields) |field| {
+                    for (entry.state_fields) |field| {
                         self.env.define(field.key, field.val);
                     }
 
                     // Set actor context
                     var ctx = ActorContext{
-                        .instance = instance,
+                        .entry = entry,
                         .reply_value = null,
                     };
                     const prev_ctx = self.actor_ctx;
@@ -305,7 +342,7 @@ pub const Evaluator = struct {
                 }
 
                 // No handler matched
-                self.last_error = errors.noMatchingHandler(instance.name, ms.message, self.source);
+                self.last_error = errors.noMatchingHandler(ref.type_name, ms.message, self.source);
                 return error.UndefinedVariable;
             },
             else => {
@@ -324,8 +361,8 @@ pub const Evaluator = struct {
         for (bs.fields) |field| {
             const new_val = try self.eval(field.value);
 
-            // Find the matching state field and update it in place
-            for (ctx.instance.state_fields) |*state_field| {
+            // Find the matching state field and update it in place via the registry entry
+            for (ctx.entry.state_fields) |*state_field| {
                 if (std.mem.eql(u8, state_field.key, field.key)) {
                     state_field.val = new_val;
                     break;
@@ -1048,7 +1085,7 @@ fn evalProgram(allocator: std.mem.Allocator, evaluator: *Evaluator, source: []co
     return nil_val;
 }
 
-test "define actor and inspect" {
+test "define actor template" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1067,15 +1104,15 @@ test "define actor and inspect" {
         \\end
     );
 
-    // Should be an actor_instance
-    try std.testing.expect(result.* == .actor_instance);
-    try std.testing.expectEqualStrings("Counter", result.actor_instance.name);
-    try std.testing.expectEqual(@as(usize, 1), result.actor_instance.state_fields.len);
-    try std.testing.expectEqualStrings("count", result.actor_instance.state_fields[0].key);
-    try std.testing.expect(result.actor_instance.state_fields[0].val.eql(Value{ .integer = 0 }));
+    // Should be an atom with the template name (not an instance)
+    try std.testing.expect(result.* == .atom);
+    try std.testing.expectEqualStrings("Counter", result.atom);
+
+    // Template should exist in registry
+    try std.testing.expect(evaluator.registry.lookupTemplate("Counter") != null);
 }
 
-test "send message to actor" {
+test "spawn creates instance with ref" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1091,9 +1128,108 @@ test "send message to actor" {
         \\end
     );
 
-    // become updates state for NEXT message; reply sees old scope
-    const result = try evalStmt(alloc, &evaluator, "Counter <- :increment");
-    try std.testing.expect(result.eql(Value{ .integer = 1 }));
+    const result = try evalStmt(alloc, &evaluator, "c = spawn Counter");
+    try std.testing.expect(result.* == .actor_ref);
+    try std.testing.expectEqualStrings("Counter", result.actor_ref.type_name);
+}
+
+test "multiple spawns are independent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :increment do
+        \\    become count: count + 1
+        \\    reply count + 1
+        \\  end
+        \\end
+    );
+
+    _ = try evalStmt(alloc, &evaluator, "c1 = spawn Counter");
+    _ = try evalStmt(alloc, &evaluator, "c2 = spawn Counter");
+
+    // Increment c1
+    const r1 = try evalStmt(alloc, &evaluator, "c1 <- :increment");
+    try std.testing.expect(r1.eql(Value{ .integer = 1 }));
+
+    // Increment c2 independently
+    const r2 = try evalStmt(alloc, &evaluator, "c2 <- :increment");
+    try std.testing.expect(r2.eql(Value{ .integer = 1 }));
+}
+
+test "spawn with state overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :increment do
+        \\    become count: count + 1
+        \\    reply count + 1
+        \\  end
+        \\end
+    );
+
+    _ = try evalStmt(alloc, &evaluator, "c = spawn Counter, count: 10");
+    const result = try evalStmt(alloc, &evaluator, "c <- :increment");
+    try std.testing.expect(result.eql(Value{ .integer = 11 }));
+}
+
+test "send message to ref" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :increment do
+        \\    become count: count + 1
+        \\    reply count + 1
+        \\  end
+        \\end
+    );
+
+    _ = try evalStmt(alloc, &evaluator, "c = spawn Counter");
+    const r1 = try evalStmt(alloc, &evaluator, "c <- :increment");
+    try std.testing.expect(r1.eql(Value{ .integer = 1 }));
+    const r2 = try evalStmt(alloc, &evaluator, "c <- :increment");
+    try std.testing.expect(r2.eql(Value{ .integer = 2 }));
+}
+
+test "ref comparison" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :get do
+        \\    reply count
+        \\  end
+        \\end
+    );
+
+    _ = try evalStmt(alloc, &evaluator, "c1 = spawn Counter");
+    _ = try evalStmt(alloc, &evaluator, "c2 = spawn Counter");
+
+    // c1 == c1 should be true
+    const r1 = try evalStmt(alloc, &evaluator, "c1 == c1");
+    try std.testing.expect(r1.eql(Value{ .boolean = true }));
+
+    // c1 == c2 should be false
+    const r2 = try evalStmt(alloc, &evaluator, "c1 == c2");
+    try std.testing.expect(r2.eql(Value{ .boolean = false }));
 }
 
 test "actor state persists across messages" {
@@ -1115,12 +1251,14 @@ test "actor state persists across messages" {
         \\end
     );
 
+    _ = try evalStmt(alloc, &evaluator, "c = spawn Counter");
+
     // Send :increment twice
-    _ = try evalStmt(alloc, &evaluator, "Counter <- :increment");
-    _ = try evalStmt(alloc, &evaluator, "Counter <- :increment");
+    _ = try evalStmt(alloc, &evaluator, "c <- :increment");
+    _ = try evalStmt(alloc, &evaluator, "c <- :increment");
 
     // Send :get to check state -- become persists across messages
-    const result = try evalStmt(alloc, &evaluator, "Counter <- :get");
+    const result = try evalStmt(alloc, &evaluator, "c <- :get");
     try std.testing.expect(result.eql(Value{ .integer = 2 }));
 }
 
@@ -1143,11 +1281,13 @@ test "actor become updates state" {
         \\end
     );
 
+    _ = try evalStmt(alloc, &evaluator, "g = spawn Greeter");
+
     // reply n (the param) not name (which still has old scope value)
-    const r1 = try evalStmt(alloc, &evaluator, "Greeter <- :set_name(\"Alice\")");
+    const r1 = try evalStmt(alloc, &evaluator, "g <- :set_name(\"Alice\")");
     try std.testing.expect(r1.eql(Value{ .string = "Alice" }));
 
-    const r2 = try evalStmt(alloc, &evaluator, "Greeter <- :greet");
+    const r2 = try evalStmt(alloc, &evaluator, "g <- :greet");
     try std.testing.expect(r2.eql(Value{ .string = "Alice" }));
 }
 
@@ -1167,10 +1307,12 @@ test "message send with args" {
         \\end
     );
 
-    const r1 = try evalStmt(alloc, &evaluator, "Adder <- :add(5)");
+    _ = try evalStmt(alloc, &evaluator, "a = spawn Adder");
+
+    const r1 = try evalStmt(alloc, &evaluator, "a <- :add(5)");
     try std.testing.expect(r1.eql(Value{ .integer = 5 }));
 
-    const r2 = try evalStmt(alloc, &evaluator, "Adder <- :add(3)");
+    const r2 = try evalStmt(alloc, &evaluator, "a <- :add(3)");
     try std.testing.expect(r2.eql(Value{ .integer = 8 }));
 }
 
@@ -1189,7 +1331,9 @@ test "unknown handler error" {
         \\end
     );
 
-    const result = evalStmt(alloc, &evaluator, "Simple <- :nonexistent");
+    _ = try evalStmt(alloc, &evaluator, "s = spawn Simple");
+
+    const result = evalStmt(alloc, &evaluator, "s <- :nonexistent");
     try std.testing.expectError(error.UndefinedVariable, result);
 }
 
@@ -1212,11 +1356,23 @@ test "handler with guard" {
         \\end
     );
 
+    _ = try evalStmt(alloc, &evaluator, "acc = spawn Account");
+
     // Withdraw a valid amount
-    const r1 = try evalStmt(alloc, &evaluator, "Account <- :withdraw(30)");
+    const r1 = try evalStmt(alloc, &evaluator, "acc <- :withdraw(30)");
     try std.testing.expect(r1.eql(Value{ .integer = 70 }));
 
     // Check balance persisted
-    const r2 = try evalStmt(alloc, &evaluator, "Account <- :get_balance");
+    const r2 = try evalStmt(alloc, &evaluator, "acc <- :get_balance");
     try std.testing.expect(r2.eql(Value{ .integer = 70 }));
+}
+
+test "spawn template not found error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = evalStmt(alloc, &evaluator, "c = spawn Nonexistent");
+    try std.testing.expectError(error.UndefinedVariable, result);
 }

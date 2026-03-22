@@ -43,6 +43,7 @@ pub const Node = struct {
         case_expr: CaseExpr,
         message_send: MessageSend,
         orelse_expr: OrElseExpr,
+        spawn_expr: SpawnExpr,
     };
 
     pub const ActorDef = struct {
@@ -193,6 +194,11 @@ pub const Node = struct {
     pub const OrElseExpr = struct {
         try_expr: *const Node,
         fallback: *const Node,
+    };
+
+    pub const SpawnExpr = struct {
+        actor_name: []const u8,
+        overrides: []const KeyValue,
     };
 
     /// Key-value pair for state, become, and map literals.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const registry_mod = @import("registry.zig");
 
 /// A runtime value in the Blimp language.
 pub const Value = union(enum) {
@@ -12,7 +13,7 @@ pub const Value = union(enum) {
     list: []const *const Value,
     tuple: []const *const Value,
     map: []const MapEntry,
-    actor_instance: *ActorInstance,
+    actor_ref: registry_mod.ActorRef,
 
     pub const MapEntry = struct {
         key: []const u8,
@@ -67,14 +68,8 @@ pub const Value = union(enum) {
                 }
                 writer.writeAll("}") catch {};
             },
-            .actor_instance => |inst| {
-                writer.print("<actor {s} {{ ", .{inst.name}) catch {};
-                for (inst.state_fields, 0..) |field, i| {
-                    if (i > 0) writer.writeAll(", ") catch {};
-                    writer.print("{s}: ", .{field.key}) catch {};
-                    field.val.format(writer);
-                }
-                writer.writeAll(" }>") catch {};
+            .actor_ref => |ref| {
+                writer.print("ref<{s}:{d}>", .{ ref.type_name, ref.id }) catch {};
             },
         }
     }
@@ -118,9 +113,9 @@ pub const Value = union(enum) {
                 }
                 return true;
             },
-            .actor_instance => |inst_a| {
-                const inst_b = b.actor_instance;
-                return std.mem.eql(u8, inst_a.name, inst_b.name);
+            .actor_ref => |ref_a| {
+                const ref_b = b.actor_ref;
+                return ref_a.id == ref_b.id;
             },
         };
     }

@@ -215,6 +215,26 @@ pub fn wrongArgCount(handler_name: []const u8, expected: usize, got: usize, sour
     };
 }
 
+/// Build a rich error when no actor template is found for a spawn.
+pub fn templateNotFound(name: []const u8, source: []const u8) BlimpError {
+    return .{
+        .title = "TEMPLATE NOT FOUND",
+        .source_line = source,
+        .message = std.fmt.allocPrint(std.heap.page_allocator, "No actor template called `{s}` is defined.", .{name}) catch "Template not found.",
+        .hint = "Define an actor first:\n      actor Counter do\n        state count: Int :: 0\n        on :increment do ... end\n      end",
+    };
+}
+
+/// Build a rich error when an actor template is already defined.
+pub fn alreadyDefined(name: []const u8, source: []const u8) BlimpError {
+    return .{
+        .title = "ALREADY DEFINED",
+        .source_line = source,
+        .message = std.fmt.allocPrint(std.heap.page_allocator, "Actor template `{s}` is already defined.", .{name}) catch "Template already defined.",
+        .hint = "Each actor name can only be defined once per program.",
+    };
+}
+
 /// Build a rich error for a parse error, detecting common mistakes.
 pub fn parseError(source: []const u8) BlimpError {
     // Check for common keyword-as-variable mistakes

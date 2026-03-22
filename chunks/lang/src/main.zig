@@ -268,6 +268,14 @@ fn printInline(writer: *std.io.Writer, node: ast.Node) void {
             printInline(writer, oe.fallback.*);
             writer.print(")", .{}) catch {};
         },
+        .spawn_expr => |se| {
+            writer.print(" (spawn {s}", .{se.actor_name}) catch {};
+            for (se.overrides) |ov| {
+                writer.print(" {s}:", .{ov.key}) catch {};
+                printInline(writer, ov.value);
+            }
+            writer.print(")", .{}) catch {};
+        },
         else => writer.print(" ???", .{}) catch {},
     }
 }

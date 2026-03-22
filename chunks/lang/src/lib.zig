@@ -15,6 +15,7 @@ pub const Environment = @import("env.zig").Environment;
 pub const builtins = @import("builtins.zig");
 pub const Evaluator = @import("eval.zig").Evaluator;
 pub const errors = @import("errors.zig");
+pub const Registry = @import("registry.zig").Registry;
 
 test {
     // Pull in tests from all modules
