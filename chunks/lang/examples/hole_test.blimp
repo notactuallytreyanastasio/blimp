@@ -1,0 +1,10 @@
+# Test file demonstrating Holes in Blimp programs
+actor Test do
+  state count: Int :: 0
+  on :process(event: Event) -> Atom do
+    situation event do
+      :known -> reply :ok
+      _ -> reply _ # Hole: handle unknown events
+    end
+  end
+end

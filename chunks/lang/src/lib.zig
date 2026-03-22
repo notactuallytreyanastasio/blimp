@@ -9,6 +9,7 @@ pub const ast = @import("ast.zig");
 pub const Parser = @import("parser.zig").Parser;
 pub const types = @import("types.zig");
 pub const Checker = @import("checker.zig").Checker;
+pub const introspect = @import("introspect.zig");
 
 test {
     // Pull in tests from all modules

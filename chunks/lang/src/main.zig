@@ -3,6 +3,7 @@ const Lexer = @import("lexer.zig").Lexer;
 const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
 const Checker = @import("checker.zig").Checker;
+const introspect = @import("introspect.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -45,6 +46,16 @@ pub fn main() !void {
         }
         std.debug.print("{d} type error(s) found.\n", .{check_result.errors.len});
         std.process.exit(1);
+    }
+
+    // Check for --introspect flag
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "--introspect")) {
+        var stdout_buf: [16384]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+        introspect.writeJson(&stdout_writer.interface, nodes, source, arena.allocator());
+        stdout_writer.interface.writeAll("\n") catch {};
+        stdout_writer.interface.flush() catch {};
+        return;
     }
 
     var stdout_buf: [4096]u8 = undefined;
