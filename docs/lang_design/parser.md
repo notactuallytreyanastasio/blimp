@@ -168,6 +168,55 @@ There is no separate concept of "pure functions" or "helper modules." Everything
 
 `System` is the root actor that provides primitives (math, IO, strings). You're always inside System.
 
+### D10: `case` keyword for exhaustive pattern matching (2026-03-21)
+
+`case` is the strict counterpart to `situation`. Same syntax, different semantics:
+- `case` demands exhaustiveness -- every branch must be covered, compiler proves it
+- `situation` permits ambiguity -- branches can have Holes that agents fill
+
+```
+case color do
+  :red -> become color: :green
+  :green -> become color: :yellow
+  :yellow -> become color: :red
+end
+```
+
+Separate `case_expr` AST node (same shape as `Situation` but distinct tag). Exhaustiveness checking is a future type checker pass.
+
+### D11: Explicit types everywhere -- no inference, no gradual typing (2026-03-21)
+
+**Types are mandatory.** Every handler parameter must declare its type. Every handler can declare a return type. Every state field must declare its type.
+
+```
+on :charge(payment: Payment) -> {Atom, Int} when payment > 0 bubbles(CascadeBubble) do
+  ...
+end
+```
+
+The syntax order is: `on :name(params) -> ReturnType when guard bubbles(Strategy) do`
+
+This is a deliberate choice -- not inference, not gradual. The contracts are what the REPL displays, what agents read, what the checker enforces, and what time-travel annotates. Every character of type annotation does quadruple duty.
+
+Type syntax supports:
+- Primitives: `Int`, `Float`, `String`, `Bool`, `Atom`, `Any`
+- Lists: `[Item]`, `[Int]`
+- Tuples: `{Atom, Int}`, `{String, [Item]}`
+- Maps: `%{String => Int}`, `%{Atom => Any}`
+- Actor references: any `UpperCase` name
+
+### D12: Type checker -- first pass (2026-03-21)
+
+The type checker (`checker.zig`) walks the AST and validates:
+- State default values match declared types
+- `become` field values match declared state types
+- Handler parameters are typed (error if missing annotation)
+- `reply` values match declared return types
+- Binary/unary operations have compatible operand types
+- Int promotes to Float, nil is subtype of list/map/actor
+
+**Known limitation:** The checker cannot verify that a map literal `%{name: "x"}` satisfies a named actor type like `Message`. This requires type aliases or struct definitions -- a future addition. Until then, `Any` is the escape hatch for unverifiable structural-vs-nominal mismatches.
+
 ---
 
 ## Open Questions
@@ -210,6 +259,24 @@ For the first pass, standard math precedence:
 `item.price` is dot access. Is this just syntactic sugar for `item[:price]`? Or a distinct operation?
 
 **Current thinking:** Dot access is its own AST node. It's the primary way to access fields. Bracket access `item[:price]` is separate and works on maps. Both parse as postfix operators.
+
+### Q7: Type aliases / struct definitions?
+
+The checker can verify `{:ok, 42}` matches `{Atom, Int}` structurally. But it cannot verify that `%{name: "x", hp: 100}` matches a named type like `Character`. We need either:
+
+- **Type aliases:** `type Receipt = {Atom, Int}` -- pure structural synonyms
+- **Struct definitions:** actors implicitly define a struct type from their state fields, so `Character` means `%{name: String, hp: Int, ...}`
+- **Both:** aliases for ad-hoc types, struct projection for actor types
+
+This is the next major type system decision. It determines whether the type checker can close the gap between map literals and named types without `Any` escape hatches.
+
+### Q8: Should map keys be atoms or strings?
+
+Map literal shorthand `%{name: "x"}` produces atom keys (`:name`). But `%{String => Any}` declares string keys. These don't match. Options:
+
+- Shorthand `name:` always produces Atom keys (current behavior) -- declared map types should use `%{Atom => V}`
+- Shorthand `name:` produces String keys -- more compatible with JSON-style data
+- Both forms: `name:` for atom keys, `"name":` for string keys
 
 ---
 
