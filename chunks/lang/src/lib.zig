@@ -10,6 +10,11 @@ pub const Parser = @import("parser.zig").Parser;
 pub const types = @import("types.zig");
 pub const Checker = @import("checker.zig").Checker;
 pub const introspect = @import("introspect.zig");
+pub const Value = @import("value.zig").Value;
+pub const Environment = @import("env.zig").Environment;
+pub const builtins = @import("builtins.zig");
+pub const Evaluator = @import("eval.zig").Evaluator;
+pub const errors = @import("errors.zig");
 
 test {
     // Pull in tests from all modules

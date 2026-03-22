@@ -4,6 +4,8 @@ const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
 const Checker = @import("checker.zig").Checker;
 const introspect = @import("introspect.zig");
+const Evaluator = @import("eval.zig").Evaluator;
+const Value = @import("value.zig").Value;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -13,9 +15,26 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Check for --repl flag
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--repl")) {
+        const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+        if (is_tty) {
+            repl(allocator);
+        } else {
+            replPlain(allocator);
+        }
+        return;
+    }
+
     if (args.len < 2) {
-        std.debug.print("Usage: blimp <file.blimp>\n", .{});
-        std.process.exit(1);
+        // No arguments -- enter REPL mode
+        const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+        if (is_tty) {
+            repl(allocator);
+        } else {
+            replPlain(allocator);
+        }
+        return;
     }
 
     const source = std.fs.cwd().readFileAlloc(allocator, args[1], 1024 * 1024) catch |err| {
@@ -250,5 +269,437 @@ fn printInline(writer: *std.io.Writer, node: ast.Node) void {
             writer.print(")", .{}) catch {};
         },
         else => writer.print(" ???", .{}) catch {},
+    }
+}
+
+/// Count the net depth change from `do` and `end` keywords in a line.
+/// Uses simple word-boundary checking.
+fn countDepthChange(line: []const u8) i32 {
+    var delta: i32 = 0;
+    var i: usize = 0;
+    while (i < line.len) {
+        // Skip whitespace
+        if (line[i] == ' ' or line[i] == '\t' or line[i] == '\n' or line[i] == '\r') {
+            i += 1;
+            continue;
+        }
+        // Check for "do" keyword at word boundary
+        if (i + 2 <= line.len and std.mem.eql(u8, line[i .. i + 2], "do")) {
+            const before_ok = (i == 0) or (line[i - 1] == ' ' or line[i - 1] == '\t' or line[i - 1] == '\n' or line[i - 1] == ')');
+            const after_ok = (i + 2 >= line.len) or (line[i + 2] == ' ' or line[i + 2] == '\t' or line[i + 2] == '\n' or line[i + 2] == '\r');
+            if (before_ok and after_ok) {
+                delta += 1;
+                i += 2;
+                continue;
+            }
+        }
+        // Check for "end" keyword at word boundary
+        if (i + 3 <= line.len and std.mem.eql(u8, line[i .. i + 3], "end")) {
+            const before_ok = (i == 0) or (line[i - 1] == ' ' or line[i - 1] == '\t' or line[i - 1] == '\n');
+            const after_ok = (i + 3 >= line.len) or (line[i + 3] == ' ' or line[i + 3] == '\t' or line[i + 3] == '\n' or line[i + 3] == '\r');
+            if (before_ok and after_ok) {
+                delta -= 1;
+                i += 3;
+                continue;
+            }
+        }
+        // Skip to next whitespace (move past current word)
+        while (i < line.len and line[i] != ' ' and line[i] != '\t' and line[i] != '\n' and line[i] != '\r') {
+            i += 1;
+        }
+    }
+    return delta;
+}
+
+fn replPlain(allocator: std.mem.Allocator) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var evaluator = Evaluator.init(arena.allocator());
+
+    var stdin_buf: [4096]u8 = undefined;
+    var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_writer.interface;
+
+    stdout.writeAll("Blimp REPL (type expressions, Ctrl-D to exit)\n") catch {};
+    stdout_writer.interface.flush() catch {};
+
+    var multi_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+    var depth: i32 = 0;
+
+    while (true) {
+        if (depth > 0) {
+            stdout.writeAll("  ... ") catch break;
+        } else {
+            stdout.writeAll("blimp> ") catch break;
+        }
+        stdout_writer.interface.flush() catch break;
+
+        const line = stdin_reader.interface.takeDelimiterExclusive('\n') catch break;
+        stdin_reader.interface.toss(1);
+        if (line.len == 0 and depth == 0) continue;
+
+        // Accumulate into multi-line buffer
+        if (multi_buf.items.len > 0) {
+            multi_buf.append(arena.allocator(), '\n') catch continue;
+        }
+        multi_buf.appendSlice(arena.allocator(), line) catch continue;
+
+        depth += countDepthChange(line);
+
+        // If still inside a block, continue reading
+        if (depth > 0) continue;
+
+        // We have a complete input - copy it out and reset
+        const source = arena.allocator().alloc(u8, multi_buf.items.len) catch continue;
+        @memcpy(source, multi_buf.items);
+        multi_buf.items.len = 0;
+        depth = 0;
+
+        // Decide whether to use parseFile (multi-line with actor) or parseStatement
+        const is_multiline = std.mem.indexOf(u8, source, "\n") != null;
+
+        if (is_multiline) {
+            var parser = Parser.init(arena.allocator(), source);
+            const nodes = parser.parseFilePublic() catch {
+                const parse_err = @import("errors.zig").parseError(source);
+                parse_err.formatPlain(&stdout_writer.interface);
+                stdout_writer.interface.flush() catch {};
+                continue;
+            };
+
+            evaluator.setSource(source);
+            var last_result: ?*const Value = null;
+            var had_error = false;
+            for (nodes) |node| {
+                last_result = evaluator.eval(node) catch {
+                    if (evaluator.last_error) |rich_err| {
+                        rich_err.formatPlain(&stdout_writer.interface);
+                    } else {
+                        stdout.writeAll("Error: unknown\n") catch {};
+                    }
+                    stdout_writer.interface.flush() catch {};
+                    had_error = true;
+                    break;
+                };
+            }
+            if (had_error) continue;
+
+            if (last_result) |result| {
+                stdout.writeAll("=> ") catch {};
+                result.format(&stdout_writer.interface);
+                stdout.writeAll("\n") catch {};
+            }
+        } else {
+            var parser = Parser.init(arena.allocator(), source);
+            const node = parser.parseStatementPublic() catch {
+                const parse_err = @import("errors.zig").parseError(source);
+                parse_err.formatPlain(&stdout_writer.interface);
+                stdout_writer.interface.flush() catch {};
+                continue;
+            };
+
+            evaluator.setSource(source);
+            const result = evaluator.eval(node) catch {
+                if (evaluator.last_error) |rich_err| {
+                    rich_err.formatPlain(&stdout_writer.interface);
+                } else {
+                    stdout.writeAll("Error: unknown\n") catch {};
+                }
+                stdout_writer.interface.flush() catch {};
+                continue;
+            };
+
+            stdout.writeAll("=> ") catch {};
+            result.format(&stdout_writer.interface);
+            stdout.writeAll("\n") catch {};
+        }
+
+        // Print state in parseable format for LiveView
+        const bindings = evaluator.env.allBindings(arena.allocator());
+        if (bindings.len > 0) {
+            stdout.writeAll("  ┌─ state ─────────────────────\n") catch {};
+            for (bindings) |binding| {
+                stdout.print("  │ {s} = ", .{binding.name}) catch {};
+                binding.val.format(&stdout_writer.interface);
+                stdout.writeAll("\n") catch {};
+            }
+            stdout.writeAll("  └─────────────────────────────\n") catch {};
+        }
+        stdout_writer.interface.flush() catch {};
+    }
+}
+
+fn formatBlimpError(err: @import("errors.zig").BlimpError, alloc: std.mem.Allocator) []const u8 {
+    var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+
+    buf.appendSlice(alloc, "-- ") catch {};
+    buf.appendSlice(alloc, err.title) catch {};
+    buf.appendSlice(alloc, " --\n") catch {};
+    buf.appendSlice(alloc, err.message) catch {};
+    if (err.hint) |h| {
+        buf.appendSlice(alloc, "\n") catch {};
+        buf.appendSlice(alloc, h) catch {};
+    }
+    return buf.items;
+}
+
+const HistoryEntry = struct {
+    kind: enum { input, output, err },
+    text: []const u8,
+};
+
+fn repl(allocator: std.mem.Allocator) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var evaluator = Evaluator.init(arena.allocator());
+
+    var stdin_buf: [4096]u8 = undefined;
+    var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+    var stdout_buf: [8192]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_writer.interface;
+
+    var history = std.ArrayList(HistoryEntry){ .items = &.{}, .capacity = 0 };
+
+    // Get terminal size
+    const term_size = getTerminalSize();
+    const total_cols = term_size.cols;
+    const total_rows = term_size.rows;
+    const left_cols = (total_cols * 3) / 4;
+    const right_cols = total_cols - left_cols - 1; // -1 for border
+
+    // Initial draw
+    drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+    stdout_writer.interface.flush() catch {};
+
+    var multi_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+    var depth: i32 = 0;
+
+    while (true) {
+        // Position cursor at input line
+        moveCursor(stdout, total_rows, 1);
+        // Clear the input line
+        stdout.writeAll("\x1b[2K") catch {};
+        if (depth > 0) {
+            stdout.writeAll("\x1b[90m  ...\x1b[0m ") catch {};
+        } else {
+            stdout.writeAll("\x1b[32mblimp>\x1b[0m ") catch {};
+        }
+        stdout_writer.interface.flush() catch break;
+
+        // Read a line from stdin
+        const line = stdin_reader.interface.takeDelimiterExclusive('\n') catch break;
+        stdin_reader.interface.toss(1);
+        if (line.len == 0 and depth == 0) continue;
+
+        // Copy line to arena
+        const line_copy = arena.allocator().alloc(u8, line.len) catch continue;
+        @memcpy(line_copy, line);
+
+        // Accumulate into multi-line buffer
+        if (multi_buf.items.len > 0) {
+            multi_buf.append(arena.allocator(), '\n') catch continue;
+        }
+        multi_buf.appendSlice(arena.allocator(), line_copy) catch continue;
+
+        depth += countDepthChange(line_copy);
+
+        // If still inside a block, continue reading
+        if (depth > 0) continue;
+
+        // We have a complete input
+        const source = arena.allocator().alloc(u8, multi_buf.items.len) catch continue;
+        @memcpy(source, multi_buf.items);
+        multi_buf.items.len = 0;
+        depth = 0;
+
+        // Record input
+        history.append(arena.allocator(), .{ .kind = .input, .text = source }) catch {};
+
+        // Decide whether to use parseFile or parseStatement
+        const is_multiline = std.mem.indexOf(u8, source, "\n") != null;
+
+        if (is_multiline) {
+            var parser = Parser.init(arena.allocator(), source);
+            const nodes = parser.parseFilePublic() catch {
+                const pe = @import("errors.zig").parseError(source);
+                const err_text = formatBlimpError(pe, arena.allocator());
+                history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
+                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                stdout_writer.interface.flush() catch {};
+                continue;
+            };
+
+            evaluator.setSource(source);
+            var last_result: ?*const Value = null;
+            var had_error = false;
+            for (nodes) |node| {
+                last_result = evaluator.eval(node) catch {
+                    const err_text = if (evaluator.last_error) |rich_err|
+                        formatBlimpError(rich_err, arena.allocator())
+                    else
+                        "Unknown error";
+                    history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
+                    had_error = true;
+                    break;
+                };
+            }
+            if (had_error) {
+                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                stdout_writer.interface.flush() catch {};
+                continue;
+            }
+
+            if (last_result) |result| {
+                const result_text = formatValue(result, arena.allocator());
+                history.append(arena.allocator(), .{ .kind = .output, .text = result_text }) catch {};
+            }
+        } else {
+            var parser = Parser.init(arena.allocator(), source);
+            const node = parser.parseStatementPublic() catch {
+                const pe = @import("errors.zig").parseError(source);
+                const err_text = formatBlimpError(pe, arena.allocator());
+                history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
+                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                stdout_writer.interface.flush() catch {};
+                continue;
+            };
+
+            evaluator.setSource(source);
+            const result = evaluator.eval(node) catch {
+                const err_text = if (evaluator.last_error) |rich_err|
+                    formatBlimpError(rich_err, arena.allocator())
+                else
+                    "Unknown error";
+                history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
+                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                stdout_writer.interface.flush() catch {};
+                continue;
+            };
+
+            // Format result to string
+            const result_text = formatValue(result, arena.allocator());
+            history.append(arena.allocator(), .{ .kind = .output, .text = result_text }) catch {};
+        }
+
+        drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+        stdout_writer.interface.flush() catch {};
+    }
+
+    // Restore terminal: move to bottom, clear
+    moveCursor(stdout, total_rows, 1);
+    stdout.writeAll("\n") catch {};
+    stdout_writer.interface.flush() catch {};
+}
+
+fn formatValue(val: *const @import("value.zig").Value, alloc: std.mem.Allocator) []const u8 {
+    var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+    val.format(buf.writer(alloc));
+    return buf.items;
+}
+
+fn getTerminalSize() struct { rows: u32, cols: u32 } {
+    var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const err = std.posix.system.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (err == 0) {
+        return .{ .rows = ws.row, .cols = ws.col };
+    }
+    return .{ .rows = 40, .cols = 120 };
+}
+
+fn moveCursor(writer: anytype, row: u32, col: u32) void {
+    writer.print("\x1b[{d};{d}H", .{ row, col }) catch {};
+}
+
+fn drawScreen(
+    writer: anytype,
+    history: *const std.ArrayList(HistoryEntry),
+    env: *const @import("env.zig").Environment,
+    alloc: std.mem.Allocator,
+    total_rows: u32,
+    left_cols: u32,
+    right_cols: u32,
+) void {
+    const content_rows = total_rows - 1; // reserve bottom row for input
+
+    // Clear screen
+    writer.writeAll("\x1b[2J") catch {};
+
+    // Draw the vertical border
+    for (1..content_rows + 1) |row| {
+        moveCursor(writer, @intCast(row), left_cols + 1);
+        writer.writeAll("\x1b[90m│\x1b[0m") catch {};
+    }
+
+    // Draw state panel header (right side)
+    moveCursor(writer, 1, left_cols + 3);
+    writer.writeAll("\x1b[1;37m STATE \x1b[0m") catch {};
+
+    // Draw state variables (right side)
+    const bindings = env.allBindings(alloc);
+    for (bindings, 0..) |binding, i| {
+        const row: u32 = @intCast(i + 3);
+        if (row >= content_rows) break;
+        moveCursor(writer, row, left_cols + 3);
+        writer.print("\x1b[34m{s}\x1b[0m \x1b[90m=\x1b[0m ", .{binding.name}) catch {};
+
+        // Format value, truncate to fit
+        const val_text = formatValue(binding.val, alloc);
+        const max_val_len = if (right_cols > 10) right_cols - 10 else 5;
+        if (val_text.len > max_val_len) {
+            writer.writeAll(val_text[0..max_val_len]) catch {};
+            writer.writeAll("...") catch {};
+        } else {
+            writer.writeAll(val_text) catch {};
+        }
+    }
+
+    // Draw REPL history (left side), show last N entries that fit
+    const max_history_lines = content_rows - 2; // leave room for header
+    var lines_used: u32 = 0;
+
+    // Count how many history entries fit (each entry is 1-2 lines)
+    var start_idx: usize = 0;
+    if (history.items.len > 0) {
+        var count: u32 = 0;
+        var idx: usize = history.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const needed: u32 = if (history.items[idx].kind == .input) 2 else 1;
+            if (count + needed > max_history_lines) {
+                start_idx = idx + 1;
+                break;
+            }
+            count += needed;
+        }
+    }
+
+    // Header
+    moveCursor(writer, 1, 2);
+    writer.writeAll("\x1b[1;37m BLIMP REPL \x1b[90m(Ctrl-D to exit)\x1b[0m") catch {};
+    lines_used = 2;
+
+    // Render visible history
+    for (history.items[start_idx..]) |entry| {
+        lines_used += 1;
+        if (lines_used >= content_rows) break;
+
+        moveCursor(writer, lines_used, 2);
+
+        switch (entry.kind) {
+            .input => {
+                writer.print("\x1b[32mblimp>\x1b[0m {s}", .{entry.text}) catch {};
+            },
+            .output => {
+                writer.print("\x1b[37m=> {s}\x1b[0m", .{entry.text}) catch {};
+            },
+            .err => {
+                writer.print("\x1b[31m{s}\x1b[0m", .{entry.text}) catch {};
+            },
+        }
     }
 }

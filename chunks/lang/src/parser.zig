@@ -348,6 +348,30 @@ pub const Parser = struct {
         return expr;
     }
 
+    /// Public wrapper for file parsing (used by REPL multi-line input).
+    pub fn parseFilePublic(self: *Parser) ParseError![]const Node {
+        return self.parseFile();
+    }
+
+    /// Public wrapper for expression parsing (used by REPL and evaluator).
+    pub fn parseExpressionPublic(self: *Parser) ParseError!Node {
+        return self.parseExpression();
+    }
+
+    /// Public wrapper for statement parsing (used by REPL).
+    /// Tries to parse an assignment (identifier = expr), falls back to expression.
+    /// Also handles situation/case as top-level statements.
+    pub fn parseStatementPublic(self: *Parser) ParseError!Node {
+        self.skipNewlines();
+        if (self.current.kind == .kw_situation) {
+            return self.parseSituation();
+        }
+        if (self.current.kind == .kw_case) {
+            return self.parseCase();
+        }
+        return self.parseExpressionStatement();
+    }
+
     // ============================================================
     // Expression parsing (Pratt / precedence climbing)
     // ============================================================

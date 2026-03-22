@@ -1,0 +1,1222 @@
+const std = @import("std");
+const ast = @import("ast.zig");
+const value_mod = @import("value.zig");
+const Value = value_mod.Value;
+const Environment = @import("env.zig").Environment;
+const builtins_mod = @import("builtins.zig");
+const BuiltinRegistry = builtins_mod.BuiltinRegistry;
+const errors = @import("errors.zig");
+pub const BlimpError = errors.BlimpError;
+
+pub const EvalError = builtins_mod.EvalError;
+
+/// Tree-walking interpreter for Blimp expressions.
+pub const Evaluator = struct {
+    allocator: std.mem.Allocator,
+    env: Environment,
+    builtins: BuiltinRegistry,
+    last_error: ?BlimpError = null,
+    source: []const u8 = "",
+    actor_ctx: ?*ActorContext = null,
+
+    pub const ActorContext = struct {
+        instance: *Value.ActorInstance,
+        reply_value: ?*const Value = null,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) Evaluator {
+        return .{
+            .allocator = allocator,
+            .env = Environment.init(allocator),
+            .builtins = BuiltinRegistry.init(allocator),
+        };
+    }
+
+    /// Set the source text for error reporting before eval.
+    pub fn setSource(self: *Evaluator, src: []const u8) void {
+        self.source = src;
+        self.last_error = null;
+    }
+
+    /// Evaluate a single AST node to a runtime Value.
+    pub fn eval(self: *Evaluator, node: ast.Node) EvalError!*const Value {
+        switch (node.kind) {
+            // Literals
+            .integer_lit => |lit| {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                v.* = Value{ .integer = lit.value };
+                return v;
+            },
+            .float_lit => |lit| {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                v.* = Value{ .float = lit.value };
+                return v;
+            },
+            .string_lit => |lit| {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                // Strip surrounding quotes if present
+                const raw = lit.value;
+                const s = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
+                    raw[1 .. raw.len - 1]
+                else
+                    raw;
+                v.* = Value{ .string = s };
+                return v;
+            },
+            .atom_lit => |lit| {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                v.* = Value{ .atom = lit.name };
+                return v;
+            },
+            .bool_lit => |lit| {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                v.* = Value{ .boolean = lit.value };
+                return v;
+            },
+            .nil_lit => {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                v.* = .nil;
+                return v;
+            },
+            .hole => {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                v.* = .hole;
+                return v;
+            },
+
+            // Identifier
+            .identifier => |id| {
+                if (self.env.lookup(id.name)) |val| {
+                    return val;
+                }
+                self.last_error = errors.undefinedVariable(id.name, self.source, &self.env, self.allocator);
+                return error.UndefinedVariable;
+            },
+
+            // Assignment
+            .assign_stmt => |assign| {
+                const val = try self.eval(assign.value.*);
+                self.env.define(assign.name, val);
+                return val;
+            },
+
+            // Binary operations
+            .binary_op => |op| return self.evalBinaryOp(op) catch |err| {
+                if (self.last_error == null and err == error.TypeError) {
+                    self.last_error = errors.typeMismatch(self.source);
+                } else if (self.last_error == null and err == error.DivisionByZero) {
+                    self.last_error = errors.divisionByZero(self.source);
+                }
+                return err;
+            },
+
+            // Unary operations
+            .unary_op => |op| return self.evalUnaryOp(op),
+
+            // Function call
+            .func_call => |call| return self.evalFuncCall(call),
+
+            // Pipe expression
+            .pipe_expr => |pipe| return self.evalPipe(pipe),
+
+            // List literal
+            .list_lit => |list| return self.evalList(list),
+
+            // Tuple literal
+            .tuple_lit => |tuple| return self.evalTuple(tuple),
+
+            // Map literal
+            .map_lit => |map| return self.evalMap(map),
+
+            // Dot access
+            .dot_access => |da| return self.evalDotAccess(da),
+
+            // Orelse
+            .orelse_expr => |oe| return self.evalOrElse(oe),
+
+            // Situation (pattern matching)
+            .situation => |sit| return self.evalSituation(sit),
+
+            // Case (same as situation for eval purposes)
+            .case_expr => |ce| return self.evalSituation(ast.Node.Situation{
+                .subject = ce.subject,
+                .branches = ce.branches,
+            }),
+
+            // Actor definition
+            .actor_def => |def| return self.evalActorDef(def),
+
+            // State def is handled inside evalActorDef; standalone is an error
+            .state_def => {
+                self.last_error = errors.notSupportedInRepl("state", self.source);
+                return error.NotSupported;
+            },
+
+            // Message handler is handled inside evalActorDef; standalone is an error
+            .message_handler => {
+                self.last_error = errors.notSupportedInRepl("on", self.source);
+                return error.NotSupported;
+            },
+
+            // Become statement
+            .become_stmt => |bs| return self.evalBecomeStmt(bs),
+
+            // Reply statement
+            .reply_stmt => |rs| return self.evalReplyStmt(rs),
+
+            // Message send
+            .message_send => |ms| return self.evalMessageSend(ms),
+        }
+    }
+
+    fn evalActorDef(self: *Evaluator, def: ast.Node.ActorDef) EvalError!*const Value {
+        // Collect state fields and handlers from the body
+        var state_fields_list = std.ArrayList(Value.MapEntry){ .items = &.{}, .capacity = 0 };
+        var handlers_list = std.ArrayList(Value.HandlerDef){ .items = &.{}, .capacity = 0 };
+
+        for (def.body) |body_node| {
+            switch (body_node.kind) {
+                .state_def => |sd| {
+                    for (sd.fields) |field| {
+                        // Evaluate the default value
+                        const val = self.eval(field.value) catch |err| return err;
+                        state_fields_list.append(self.allocator, .{
+                            .key = field.key,
+                            .val = val,
+                        }) catch return error.OutOfMemory;
+                    }
+                },
+                .message_handler => |mh| {
+                    handlers_list.append(self.allocator, .{
+                        .name = mh.name,
+                        .params = mh.params,
+                        .guard = mh.guard,
+                        .body = mh.body,
+                    }) catch return error.OutOfMemory;
+                },
+                else => {
+                    // Ignore other body nodes (e.g. nested actors, not yet supported)
+                },
+            }
+        }
+
+        // Create the actor instance (heap-allocated for stable pointer)
+        const instance = self.allocator.create(Value.ActorInstance) catch return error.OutOfMemory;
+        const state_owned = state_fields_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        instance.* = .{
+            .name = def.name,
+            .state_fields = state_owned,
+            .handlers = handlers_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+        };
+
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .actor_instance = instance };
+
+        // Bind the actor name in the environment
+        self.env.define(def.name, v);
+
+        return v;
+    }
+
+    fn evalMessageSend(self: *Evaluator, ms: ast.Node.MessageSend) EvalError!*const Value {
+        const target_val = try self.eval(ms.target.*);
+
+        // Target must be an actor_instance
+        switch (target_val.*) {
+            .actor_instance => |instance| {
+                // Find a matching handler
+                for (instance.handlers) |handler| {
+                    if (!std.mem.eql(u8, handler.name, ms.message)) continue;
+
+                    // Check argument count
+                    if (handler.params.len != ms.args.len) {
+                        self.last_error = errors.wrongArgCount(handler.name, handler.params.len, ms.args.len, self.source);
+                        return error.TypeError;
+                    }
+
+                    // Evaluate the guard if present
+                    if (handler.guard) |guard| {
+                        // Push a scope for guard evaluation with params and state
+                        self.env.pushScope();
+                        defer self.env.popScope();
+
+                        // Bind handler params
+                        for (handler.params, 0..) |param, i| {
+                            const arg_val = self.eval(ms.args[i]) catch |err| return err;
+                            self.env.define(param.name, arg_val);
+                        }
+
+                        // Bind state fields
+                        for (instance.state_fields) |field| {
+                            self.env.define(field.key, field.val);
+                        }
+
+                        const guard_val = self.eval(guard.*) catch |err| return err;
+                        if (!guard_val.truthy()) continue; // Guard failed, try next handler
+                    }
+
+                    // Execute the handler body
+                    self.env.pushScope();
+
+                    // Bind handler params
+                    for (handler.params, 0..) |param, i| {
+                        const arg_val = self.eval(ms.args[i]) catch |err| {
+                            self.env.popScope();
+                            return err;
+                        };
+                        self.env.define(param.name, arg_val);
+                    }
+
+                    // Bind state fields as variables
+                    for (instance.state_fields) |field| {
+                        self.env.define(field.key, field.val);
+                    }
+
+                    // Set actor context
+                    var ctx = ActorContext{
+                        .instance = instance,
+                        .reply_value = null,
+                    };
+                    const prev_ctx = self.actor_ctx;
+                    self.actor_ctx = &ctx;
+
+                    // Evaluate handler body
+                    var last_val: *const Value = undefined;
+                    var has_val = false;
+                    for (handler.body) |stmt| {
+                        last_val = self.eval(stmt) catch |err| {
+                            self.actor_ctx = prev_ctx;
+                            self.env.popScope();
+                            return err;
+                        };
+                        has_val = true;
+                    }
+
+                    // Restore context
+                    self.actor_ctx = prev_ctx;
+                    self.env.popScope();
+
+                    // Return reply value if set, otherwise last value or nil
+                    if (ctx.reply_value) |rv| return rv;
+                    if (has_val) return last_val;
+                    const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+                    nil_val.* = .nil;
+                    return nil_val;
+                }
+
+                // No handler matched
+                self.last_error = errors.noMatchingHandler(instance.name, ms.message, self.source);
+                return error.UndefinedVariable;
+            },
+            else => {
+                self.last_error = errors.notAnActor(self.source);
+                return error.TypeError;
+            },
+        }
+    }
+
+    fn evalBecomeStmt(self: *Evaluator, bs: ast.Node.BecomeStmt) EvalError!*const Value {
+        const ctx = self.actor_ctx orelse {
+            self.last_error = errors.becomeOutsideHandler(self.source);
+            return error.NotSupported;
+        };
+
+        for (bs.fields) |field| {
+            const new_val = try self.eval(field.value);
+
+            // Find the matching state field and update it in place
+            for (ctx.instance.state_fields) |*state_field| {
+                if (std.mem.eql(u8, state_field.key, field.key)) {
+                    state_field.val = new_val;
+                    break;
+                }
+            }
+        }
+
+        // State is updated for the NEXT message. Scope bindings within this
+        // handler body keep the old values (become is a snapshot transition).
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+
+    fn evalReplyStmt(self: *Evaluator, rs: ast.Node.ReplyStmt) EvalError!*const Value {
+        const ctx = self.actor_ctx orelse {
+            self.last_error = errors.replyOutsideHandler(self.source);
+            return error.NotSupported;
+        };
+
+        const val = try self.eval(rs.value.*);
+        ctx.reply_value = val;
+        return val;
+    }
+
+    fn evalBinaryOp(self: *Evaluator, op: ast.Node.BinaryOp) EvalError!*const Value {
+        const left = try self.eval(op.left.*);
+        const right = try self.eval(op.right.*);
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+
+        switch (op.op) {
+            .add => {
+                switch (left.*) {
+                    .integer => |a| switch (right.*) {
+                        .integer => |b| {
+                            result.* = Value{ .integer = a + b };
+                            return result;
+                        },
+                        .float => |b| {
+                            result.* = Value{ .float = @as(f64, @floatFromInt(a)) + b };
+                            return result;
+                        },
+                        else => return error.TypeError,
+                    },
+                    .float => |a| switch (right.*) {
+                        .integer => |b| {
+                            result.* = Value{ .float = a + @as(f64, @floatFromInt(b)) };
+                            return result;
+                        },
+                        .float => |b| {
+                            result.* = Value{ .float = a + b };
+                            return result;
+                        },
+                        else => return error.TypeError,
+                    },
+                    .string => |a| switch (right.*) {
+                        .string => |b| {
+                            const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
+                            @memcpy(new_str[0..a.len], a);
+                            @memcpy(new_str[a.len..], b);
+                            result.* = Value{ .string = new_str };
+                            return result;
+                        },
+                        else => return error.TypeError,
+                    },
+                    else => return error.TypeError,
+                }
+            },
+            .sub => return self.evalArithOp(left.*, right.*, result, .sub),
+            .mul => return self.evalArithOp(left.*, right.*, result, .mul),
+            .div => return self.evalArithOp(left.*, right.*, result, .div),
+            .eq => {
+                result.* = Value{ .boolean = left.eql(right.*) };
+                return result;
+            },
+            .neq => {
+                result.* = Value{ .boolean = !left.eql(right.*) };
+                return result;
+            },
+            .lt => return self.evalCompareOp(left.*, right.*, result, .lt),
+            .gt => return self.evalCompareOp(left.*, right.*, result, .gt),
+            .lte => return self.evalCompareOp(left.*, right.*, result, .lte),
+            .gte => return self.evalCompareOp(left.*, right.*, result, .gte),
+            .and_op => {
+                result.* = Value{ .boolean = left.truthy() and right.truthy() };
+                return result;
+            },
+            .or_op => {
+                result.* = Value{ .boolean = left.truthy() or right.truthy() };
+                return result;
+            },
+        }
+    }
+
+    const ArithOp = enum { sub, mul, div };
+
+    fn evalArithOp(self: *Evaluator, left: Value, right: Value, result: *Value, op: ArithOp) EvalError!*const Value {
+        _ = self;
+        switch (left) {
+            .integer => |a| switch (right) {
+                .integer => |b| {
+                    result.* = switch (op) {
+                        .sub => Value{ .integer = a - b },
+                        .mul => Value{ .integer = a * b },
+                        .div => blk: {
+                            if (b == 0) return error.DivisionByZero;
+                            break :blk Value{ .integer = @divTrunc(a, b) };
+                        },
+                    };
+                    return result;
+                },
+                .float => |b| {
+                    const fa: f64 = @floatFromInt(a);
+                    result.* = switch (op) {
+                        .sub => Value{ .float = fa - b },
+                        .mul => Value{ .float = fa * b },
+                        .div => blk: {
+                            if (b == 0.0) return error.DivisionByZero;
+                            break :blk Value{ .float = fa / b };
+                        },
+                    };
+                    return result;
+                },
+                else => return error.TypeError,
+            },
+            .float => |a| switch (right) {
+                .integer => |b| {
+                    const fb: f64 = @floatFromInt(b);
+                    result.* = switch (op) {
+                        .sub => Value{ .float = a - fb },
+                        .mul => Value{ .float = a * fb },
+                        .div => blk: {
+                            if (fb == 0.0) return error.DivisionByZero;
+                            break :blk Value{ .float = a / fb };
+                        },
+                    };
+                    return result;
+                },
+                .float => |b| {
+                    result.* = switch (op) {
+                        .sub => Value{ .float = a - b },
+                        .mul => Value{ .float = a * b },
+                        .div => blk: {
+                            if (b == 0.0) return error.DivisionByZero;
+                            break :blk Value{ .float = a / b };
+                        },
+                    };
+                    return result;
+                },
+                else => return error.TypeError,
+            },
+            else => return error.TypeError,
+        }
+    }
+
+    const CmpOp = enum { lt, gt, lte, gte };
+
+    fn evalCompareOp(self: *Evaluator, left: Value, right: Value, result: *Value, op: CmpOp) EvalError!*const Value {
+        _ = self;
+        switch (left) {
+            .integer => |a| switch (right) {
+                .integer => |b| {
+                    result.* = Value{
+                        .boolean = switch (op) {
+                            .lt => a < b,
+                            .gt => a > b,
+                            .lte => a <= b,
+                            .gte => a >= b,
+                        },
+                    };
+                    return result;
+                },
+                .float => |b| {
+                    const fa: f64 = @floatFromInt(a);
+                    result.* = Value{
+                        .boolean = switch (op) {
+                            .lt => fa < b,
+                            .gt => fa > b,
+                            .lte => fa <= b,
+                            .gte => fa >= b,
+                        },
+                    };
+                    return result;
+                },
+                else => return error.TypeError,
+            },
+            .float => |a| switch (right) {
+                .integer => |b| {
+                    const fb: f64 = @floatFromInt(b);
+                    result.* = Value{
+                        .boolean = switch (op) {
+                            .lt => a < fb,
+                            .gt => a > fb,
+                            .lte => a <= fb,
+                            .gte => a >= fb,
+                        },
+                    };
+                    return result;
+                },
+                .float => |b| {
+                    result.* = Value{
+                        .boolean = switch (op) {
+                            .lt => a < b,
+                            .gt => a > b,
+                            .lte => a <= b,
+                            .gte => a >= b,
+                        },
+                    };
+                    return result;
+                },
+                else => return error.TypeError,
+            },
+            else => return error.TypeError,
+        }
+    }
+
+    fn evalUnaryOp(self: *Evaluator, op: ast.Node.UnaryOp) EvalError!*const Value {
+        const operand = try self.eval(op.operand.*);
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        switch (op.op) {
+            .negate => switch (operand.*) {
+                .integer => |n| {
+                    result.* = Value{ .integer = -n };
+                    return result;
+                },
+                .float => |f| {
+                    result.* = Value{ .float = -f };
+                    return result;
+                },
+                else => return error.TypeError,
+            },
+            .not => {
+                result.* = Value{ .boolean = !operand.truthy() };
+                return result;
+            },
+        }
+    }
+
+    fn evalFuncCall(self: *Evaluator, call: ast.Node.FuncCall) EvalError!*const Value {
+        // Look up the builtin
+        const func = self.builtins.get(call.name) orelse {
+            self.last_error = errors.unknownFunction(call.name, self.source);
+            return error.UndefinedVariable;
+        };
+
+        // Evaluate arguments
+        const args = self.allocator.alloc(*const Value, call.args.len) catch return error.OutOfMemory;
+        for (call.args, 0..) |arg, i| {
+            args[i] = try self.eval(arg);
+        }
+
+        return func(self.allocator, args);
+    }
+
+    fn evalPipe(self: *Evaluator, pipe: ast.Node.PipeExpr) EvalError!*const Value {
+        const left_val = try self.eval(pipe.left.*);
+
+        // If right side is a func_call, check for hole args and substitute
+        switch (pipe.right.kind) {
+            .func_call => |call| {
+                const func = self.builtins.get(call.name) orelse return error.UndefinedVariable;
+
+                // Check if any arg is a hole -- if so, substitute left value
+                var has_hole = false;
+                for (call.args) |arg| {
+                    if (arg.kind == .hole) {
+                        has_hole = true;
+                        break;
+                    }
+                }
+
+                if (has_hole) {
+                    const args = self.allocator.alloc(*const Value, call.args.len) catch return error.OutOfMemory;
+                    for (call.args, 0..) |arg, i| {
+                        if (arg.kind == .hole) {
+                            args[i] = left_val;
+                        } else {
+                            args[i] = try self.eval(arg);
+                        }
+                    }
+                    return func(self.allocator, args);
+                } else {
+                    // No hole -- pass left as first arg
+                    const args = self.allocator.alloc(*const Value, call.args.len + 1) catch return error.OutOfMemory;
+                    args[0] = left_val;
+                    for (call.args, 0..) |arg, i| {
+                        args[i + 1] = try self.eval(arg);
+                    }
+                    return func(self.allocator, args);
+                }
+            },
+            .identifier => |id| {
+                // Pipe into bare function name: items |> length
+                const func = self.builtins.get(id.name) orelse return error.UndefinedVariable;
+                const args = self.allocator.alloc(*const Value, 1) catch return error.OutOfMemory;
+                args[0] = left_val;
+                return func(self.allocator, args);
+            },
+            else => return error.UnsupportedOperation,
+        }
+    }
+
+    fn evalList(self: *Evaluator, list: ast.Node.ListLit) EvalError!*const Value {
+        const items = self.allocator.alloc(*const Value, list.elements.len) catch return error.OutOfMemory;
+        for (list.elements, 0..) |elem, i| {
+            items[i] = try self.eval(elem);
+        }
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .list = items };
+        return result;
+    }
+
+    fn evalTuple(self: *Evaluator, tuple: ast.Node.TupleLit) EvalError!*const Value {
+        const items = self.allocator.alloc(*const Value, tuple.elements.len) catch return error.OutOfMemory;
+        for (tuple.elements, 0..) |elem, i| {
+            items[i] = try self.eval(elem);
+        }
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .tuple = items };
+        return result;
+    }
+
+    fn evalMap(self: *Evaluator, map: ast.Node.MapLit) EvalError!*const Value {
+        const entries = self.allocator.alloc(Value.MapEntry, map.entries.len) catch return error.OutOfMemory;
+        for (map.entries, 0..) |entry, i| {
+            const val = try self.eval(entry.value);
+            entries[i] = .{ .key = entry.key, .val = val };
+        }
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .map = entries };
+        return result;
+    }
+
+    fn evalDotAccess(self: *Evaluator, da: ast.Node.DotAccess) EvalError!*const Value {
+        const obj = try self.eval(da.object.*);
+        switch (obj.*) {
+            .map => |entries| {
+                for (entries) |entry| {
+                    if (std.mem.eql(u8, entry.key, da.field)) {
+                        return entry.val;
+                    }
+                }
+                // Field not found, return nil
+                const result = self.allocator.create(Value) catch return error.OutOfMemory;
+                result.* = .nil;
+                return result;
+            },
+            else => return error.TypeError,
+        }
+    }
+
+    fn evalOrElse(self: *Evaluator, oe: ast.Node.OrElseExpr) EvalError!*const Value {
+        const try_val = try self.eval(oe.try_expr.*);
+        switch (try_val.*) {
+            .nil, .hole => return self.eval(oe.fallback.*),
+            else => return try_val,
+        }
+    }
+
+    fn evalSituation(self: *Evaluator, sit: ast.Node.Situation) EvalError!*const Value {
+        const subject = try self.eval(sit.subject.*);
+
+        for (sit.branches) |branch| {
+            if (branch.pattern) |pattern| {
+                // Evaluate the pattern and compare
+                const pat_val = try self.eval(pattern.*);
+                if (subject.eql(pat_val.*)) {
+                    return self.evalBody(branch.body);
+                }
+            } else {
+                // Wildcard/hole branch -- always matches
+                return self.evalBody(branch.body);
+            }
+        }
+
+        // No branch matched, return nil
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+
+    fn evalBody(self: *Evaluator, body: []const ast.Node) EvalError!*const Value {
+        var last: *const Value = undefined;
+        var has_val = false;
+        for (body) |stmt| {
+            last = try self.eval(stmt);
+            has_val = true;
+        }
+        if (has_val) return last;
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+};
+
+// ============================================================
+// Tests
+// ============================================================
+
+const Parser = @import("parser.zig").Parser;
+
+fn evalExpr(allocator: std.mem.Allocator, source: []const u8) EvalError!*const Value {
+    var parser = Parser.init(allocator, source);
+    const node = parser.parseExpressionPublic() catch return error.UnsupportedOperation;
+    var evaluator = Evaluator.init(allocator);
+    return evaluator.eval(node);
+}
+
+fn evalStmt(allocator: std.mem.Allocator, evaluator: *Evaluator, source: []const u8) EvalError!*const Value {
+    var parser = Parser.init(allocator, source);
+    const node = parser.parseStatementPublic() catch return error.UnsupportedOperation;
+    return evaluator.eval(node);
+}
+
+test "evaluate integer literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "42");
+    try std.testing.expect(result.eql(Value{ .integer = 42 }));
+}
+
+test "evaluate float literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "3.14");
+    try std.testing.expect(result.* == .float);
+}
+
+test "evaluate string literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "\"hello\"");
+    try std.testing.expect(result.eql(Value{ .string = "hello" }));
+}
+
+test "evaluate atom literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), ":ok");
+    try std.testing.expect(result.eql(Value{ .atom = "ok" }));
+}
+
+test "evaluate boolean literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "true");
+    try std.testing.expect(result.eql(Value{ .boolean = true }));
+}
+
+test "evaluate nil literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "nil");
+    try std.testing.expect(result.eql(.nil));
+}
+
+test "evaluate arithmetic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "1 + 2");
+    try std.testing.expect(result.eql(Value{ .integer = 3 }));
+}
+
+test "evaluate arithmetic subtraction" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "10 - 3");
+    try std.testing.expect(result.eql(Value{ .integer = 7 }));
+}
+
+test "evaluate arithmetic multiplication" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "3 * 4");
+    try std.testing.expect(result.eql(Value{ .integer = 12 }));
+}
+
+test "evaluate arithmetic division" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "10 / 3");
+    try std.testing.expect(result.eql(Value{ .integer = 3 }));
+}
+
+test "evaluate comparison" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "1 < 2");
+    try std.testing.expect(result.eql(Value{ .boolean = true }));
+}
+
+test "evaluate equality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "42 == 42");
+    try std.testing.expect(result.eql(Value{ .boolean = true }));
+}
+
+test "evaluate inequality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "1 != 2");
+    try std.testing.expect(result.eql(Value{ .boolean = true }));
+}
+
+test "evaluate logical and" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "true && false");
+    try std.testing.expect(result.eql(Value{ .boolean = false }));
+}
+
+test "evaluate logical or" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "true || false");
+    try std.testing.expect(result.eql(Value{ .boolean = true }));
+}
+
+test "evaluate unary negate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "-42");
+    try std.testing.expect(result.eql(Value{ .integer = -42 }));
+}
+
+test "evaluate unary not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "!true");
+    try std.testing.expect(result.eql(Value{ .boolean = false }));
+}
+
+test "evaluate list literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "[1, 2, 3]");
+    try std.testing.expect(result.* == .list);
+    try std.testing.expectEqual(@as(usize, 3), result.list.len);
+    try std.testing.expect(result.list[0].eql(Value{ .integer = 1 }));
+    try std.testing.expect(result.list[2].eql(Value{ .integer = 3 }));
+}
+
+test "evaluate tuple literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "{:ok, 42}");
+    try std.testing.expect(result.* == .tuple);
+    try std.testing.expectEqual(@as(usize, 2), result.tuple.len);
+    try std.testing.expect(result.tuple[0].eql(Value{ .atom = "ok" }));
+    try std.testing.expect(result.tuple[1].eql(Value{ .integer = 42 }));
+}
+
+test "evaluate variable assignment and lookup" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const assign_result = try evalStmt(alloc, &evaluator, "x = 42");
+    try std.testing.expect(assign_result.eql(Value{ .integer = 42 }));
+
+    // Now look up x
+    var parser2 = Parser.init(alloc, "x");
+    const node2 = parser2.parseExpressionPublic() catch unreachable;
+    const lookup_result = try evaluator.eval(node2);
+    try std.testing.expect(lookup_result.eql(Value{ .integer = 42 }));
+}
+
+test "evaluate function call length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "length([1, 2, 3])");
+    try std.testing.expect(result.eql(Value{ .integer = 3 }));
+}
+
+test "evaluate function call max" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "max(5, 10)");
+    try std.testing.expect(result.eql(Value{ .integer = 10 }));
+}
+
+test "evaluate function call min" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "min(5, 10)");
+    try std.testing.expect(result.eql(Value{ .integer = 5 }));
+}
+
+test "evaluate pipe expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "[1, 2, 3] |> length(_)");
+    try std.testing.expect(result.eql(Value{ .integer = 3 }));
+}
+
+test "evaluate pipe into bare function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "[1, 2, 3] |> length");
+    try std.testing.expect(result.eql(Value{ .integer = 3 }));
+}
+
+test "evaluate pipe into reverse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "[1, 2, 3] |> reverse");
+    try std.testing.expect(result.* == .list);
+    try std.testing.expect(result.list[0].eql(Value{ .integer = 3 }));
+    try std.testing.expect(result.list[2].eql(Value{ .integer = 1 }));
+}
+
+test "evaluate dot access on map" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalStmt(alloc, &evaluator, "m = %{name: \"bob\", age: 30}");
+
+    var parser = Parser.init(alloc, "m.name");
+    const node = parser.parseExpressionPublic() catch unreachable;
+    const result = try evaluator.eval(node);
+    try std.testing.expect(result.eql(Value{ .string = "bob" }));
+}
+
+test "evaluate orelse with nil" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "nil orelse 42");
+    try std.testing.expect(result.eql(Value{ .integer = 42 }));
+}
+
+test "evaluate orelse with value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "10 orelse 42");
+    try std.testing.expect(result.eql(Value{ .integer = 10 }));
+}
+
+test "evaluate situation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalStmt(alloc, &evaluator, "x = :ok");
+
+    // Parse and eval a situation expression
+    const source =
+        \\situation x do
+        \\  :ok -> 1
+        \\  :error -> 2
+        \\end
+    ;
+    var parser = Parser.init(alloc, source);
+    // parseSituation is only accessible through parseActorBody, but situation is
+    // also a top-level expression in our statement parser. Let's use parseStatementPublic.
+    const node = parser.parseStatementPublic() catch unreachable;
+    const result = try evaluator.eval(node);
+    try std.testing.expect(result.eql(Value{ .integer = 1 }));
+}
+
+test "evaluate situation wildcard branch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalStmt(alloc, &evaluator, "x = :unknown");
+
+    const source =
+        \\situation x do
+        \\  :ok -> 1
+        \\  _ -> 0
+        \\end
+    ;
+    var parser = Parser.init(alloc, source);
+    const node = parser.parseStatementPublic() catch unreachable;
+    const result = try evaluator.eval(node);
+    try std.testing.expect(result.eql(Value{ .integer = 0 }));
+}
+
+test "evaluate precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // 2 + 3 * 4 should be 2 + 12 = 14
+    const result = try evalExpr(arena.allocator(), "2 + 3 * 4");
+    try std.testing.expect(result.eql(Value{ .integer = 14 }));
+}
+
+test "evaluate division by zero" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = evalExpr(arena.allocator(), "10 / 0");
+    try std.testing.expectError(error.DivisionByZero, result);
+}
+
+test "evaluate undefined variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = evalExpr(arena.allocator(), "undefined_var");
+    try std.testing.expectError(error.UndefinedVariable, result);
+}
+
+/// Evaluate a multi-line program (actor defs + statements), return the last value.
+fn evalProgram(allocator: std.mem.Allocator, evaluator: *Evaluator, source: []const u8) EvalError!*const Value {
+    var parser = Parser.init(allocator, source);
+    const nodes = parser.parseFilePublic() catch return error.UnsupportedOperation;
+    var last: *const Value = undefined;
+    var has_val = false;
+    for (nodes) |node| {
+        last = try evaluator.eval(node);
+        has_val = true;
+    }
+    if (has_val) return last;
+    const nil_val = allocator.create(Value) catch return error.OutOfMemory;
+    nil_val.* = .nil;
+    return nil_val;
+}
+
+test "define actor and inspect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = try evalProgram(alloc, &evaluator,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :increment do
+        \\    become count: count + 1
+        \\    reply count
+        \\  end
+        \\  on :get do
+        \\    reply count
+        \\  end
+        \\end
+    );
+
+    // Should be an actor_instance
+    try std.testing.expect(result.* == .actor_instance);
+    try std.testing.expectEqualStrings("Counter", result.actor_instance.name);
+    try std.testing.expectEqual(@as(usize, 1), result.actor_instance.state_fields.len);
+    try std.testing.expectEqualStrings("count", result.actor_instance.state_fields[0].key);
+    try std.testing.expect(result.actor_instance.state_fields[0].val.eql(Value{ .integer = 0 }));
+}
+
+test "send message to actor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :increment do
+        \\    become count: count + 1
+        \\    reply count + 1
+        \\  end
+        \\end
+    );
+
+    // become updates state for NEXT message; reply sees old scope
+    const result = try evalStmt(alloc, &evaluator, "Counter <- :increment");
+    try std.testing.expect(result.eql(Value{ .integer = 1 }));
+}
+
+test "actor state persists across messages" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Counter do
+        \\  state count: Int :: 0
+        \\  on :increment do
+        \\    become count: count + 1
+        \\    reply count + 1
+        \\  end
+        \\  on :get do
+        \\    reply count
+        \\  end
+        \\end
+    );
+
+    // Send :increment twice
+    _ = try evalStmt(alloc, &evaluator, "Counter <- :increment");
+    _ = try evalStmt(alloc, &evaluator, "Counter <- :increment");
+
+    // Send :get to check state -- become persists across messages
+    const result = try evalStmt(alloc, &evaluator, "Counter <- :get");
+    try std.testing.expect(result.eql(Value{ .integer = 2 }));
+}
+
+test "actor become updates state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Greeter do
+        \\  state name: String :: "world"
+        \\  on :set_name(n) do
+        \\    become name: n
+        \\    reply n
+        \\  end
+        \\  on :greet do
+        \\    reply name
+        \\  end
+        \\end
+    );
+
+    // reply n (the param) not name (which still has old scope value)
+    const r1 = try evalStmt(alloc, &evaluator, "Greeter <- :set_name(\"Alice\")");
+    try std.testing.expect(r1.eql(Value{ .string = "Alice" }));
+
+    const r2 = try evalStmt(alloc, &evaluator, "Greeter <- :greet");
+    try std.testing.expect(r2.eql(Value{ .string = "Alice" }));
+}
+
+test "message send with args" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Adder do
+        \\  state total: Int :: 0
+        \\  on :add(n) do
+        \\    become total: total + n
+        \\    reply total + n
+        \\  end
+        \\end
+    );
+
+    const r1 = try evalStmt(alloc, &evaluator, "Adder <- :add(5)");
+    try std.testing.expect(r1.eql(Value{ .integer = 5 }));
+
+    const r2 = try evalStmt(alloc, &evaluator, "Adder <- :add(3)");
+    try std.testing.expect(r2.eql(Value{ .integer = 8 }));
+}
+
+test "unknown handler error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Simple do
+        \\  state x: Int :: 0
+        \\  on :get do
+        \\    reply x
+        \\  end
+        \\end
+    );
+
+    const result = evalStmt(alloc, &evaluator, "Simple <- :nonexistent");
+    try std.testing.expectError(error.UndefinedVariable, result);
+}
+
+test "handler with guard" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Account do
+        \\  state balance: Int :: 100
+        \\  on :withdraw(amount) when amount > 0 do
+        \\    become balance: balance - amount
+        \\    reply balance - amount
+        \\  end
+        \\  on :get_balance do
+        \\    reply balance
+        \\  end
+        \\end
+    );
+
+    // Withdraw a valid amount
+    const r1 = try evalStmt(alloc, &evaluator, "Account <- :withdraw(30)");
+    try std.testing.expect(r1.eql(Value{ .integer = 70 }));
+
+    // Check balance persisted
+    const r2 = try evalStmt(alloc, &evaluator, "Account <- :get_balance");
+    try std.testing.expect(r2.eql(Value{ .integer = 70 }));
+}
