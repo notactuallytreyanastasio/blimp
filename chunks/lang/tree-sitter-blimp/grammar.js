@@ -180,6 +180,7 @@ module.exports = grammar({
 
     _primary: ($) =>
       choice(
+        $.spawn_expression,
         $.integer,
         $.float,
         $.string,
@@ -193,6 +194,13 @@ module.exports = grammar({
         $.tuple,
         $.map,
         $.parenthesized_expression,
+      ),
+
+    // spawn Counter or spawn Counter(count: 10)
+    spawn_expression: ($) =>
+      choice(
+        prec(10, seq("spawn", $.upper_identifier, "(", $.key_value_list, ")")),
+        prec(8, seq("spawn", $.upper_identifier)),
       ),
 
     parenthesized_expression: ($) => seq("(", $._expression, ")"),

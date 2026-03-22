@@ -100,6 +100,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "state_definition",
           "named": true
         },
@@ -210,6 +214,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -313,6 +321,10 @@
         },
         {
           "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -447,6 +459,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -542,6 +558,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -614,6 +634,10 @@
         },
         {
           "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -701,6 +725,10 @@
         },
         {
           "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -829,6 +857,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -917,6 +949,10 @@
         },
         {
           "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -1058,6 +1094,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -1153,6 +1193,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -1241,6 +1285,10 @@
         },
         {
           "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -1350,6 +1398,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -1441,6 +1493,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -1529,6 +1585,10 @@
         },
         {
           "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -1658,6 +1718,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -1753,6 +1817,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -1782,6 +1850,25 @@
       "types": [
         {
           "type": "actor_definition",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "spawn_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "key_value_list",
+          "named": true
+        },
+        {
+          "type": "upper_identifier",
           "named": true
         }
       ]
@@ -1877,6 +1964,10 @@
         },
         {
           "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -1990,6 +2081,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -2084,6 +2179,10 @@
           "named": true
         },
         {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -2168,6 +2267,10 @@
         },
         {
           "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
           "named": true
         },
         {
@@ -2364,6 +2467,10 @@
   },
   {
     "type": "situation",
+    "named": false
+  },
+  {
+    "type": "spawn",
     "named": false
   },
   {

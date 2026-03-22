@@ -11,6 +11,7 @@
 "orelse" @keyword
 "when" @keyword
 "bubbles" @keyword
+"spawn" @keyword
 
 ; Literals
 (integer) @number

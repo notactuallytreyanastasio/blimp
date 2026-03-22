@@ -1026,6 +1026,10 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "spawn_expression"
+        },
+        {
+          "type": "SYMBOL",
           "name": "integer"
         },
         {
@@ -1075,6 +1079,57 @@
         {
           "type": "SYMBOL",
           "name": "parenthesized_expression"
+        }
+      ]
+    },
+    "spawn_expression": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "PREC",
+          "value": 10,
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "spawn"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "upper_identifier"
+              },
+              {
+                "type": "STRING",
+                "value": "("
+              },
+              {
+                "type": "SYMBOL",
+                "name": "key_value_list"
+              },
+              {
+                "type": "STRING",
+                "value": ")"
+              }
+            ]
+          }
+        },
+        {
+          "type": "PREC",
+          "value": 8,
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "spawn"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "upper_identifier"
+              }
+            ]
+          }
         }
       ]
     },

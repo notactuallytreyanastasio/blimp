@@ -1,0 +1,76 @@
+================
+Spawn actor
+================
+
+actor Counter do
+  state count: Int :: 0
+  on :get do
+    reply count
+  end
+end
+
+actor Main do
+  on :run do
+    c = spawn Counter
+    reply c
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (type_name
+            (upper_identifier))
+          (integer))))
+    (message_handler
+      (atom)
+      (reply_statement
+        (identifier))))
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (assignment
+        (identifier)
+        (spawn_expression
+          (upper_identifier)))
+      (reply_statement
+        (identifier)))))
+
+================
+Spawn with state overrides
+================
+
+actor Main do
+  on :run do
+    c = spawn Counter(count: 10)
+    reply c
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (assignment
+        (identifier)
+        (spawn_expression
+          (upper_identifier)
+          (key_value_list
+            (key_value_pair
+              (identifier)
+              (integer)))))
+      (reply_statement
+        (identifier)))))
