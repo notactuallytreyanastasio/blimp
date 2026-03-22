@@ -5,18 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>The Construction of Blimp</title>
 
-<meta name="description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, Holes, situations, bubbles, and jazz computers.">
+<meta name="description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, pipes, message sends, guards, Holes, situations, bubbles, and jazz computers.">
 <meta name="author" content="Bobby Grayson">
 
 <meta property="og:type" content="article">
 <meta property="og:title" content="The Construction of Blimp">
-<meta property="og:description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, Holes, situations, bubbles, and jazz computers.">
+<meta property="og:description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, pipes, message sends, guards, Holes, situations, bubbles, and jazz computers.">
 <meta property="og:url" content="https://blimp.bobbby.online/blog/2026-03-21-the-construction-of-blimp.html">
 <meta property="og:site_name" content="Blimp Design Journal">
 
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="The Construction of Blimp">
-<meta name="twitter:description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, Holes, situations, bubbles, and jazz computers.">
+<meta name="twitter:description" content="Walking through the grammar of Blimp piece by piece. Actors, typed state, pipes, message sends, guards, Holes, situations, bubbles, and jazz computers.">
 
 <link rel="stylesheet" href="style.css">
 <style>
@@ -133,7 +133,7 @@ body.tldr-mode .tldr-bubble {
 
 <div class="section-header">
 <h2>Feeling the Grammar</h2>
-<div class="tldr-bubble">We built a parser in Zig with a tree-sitter grammar. The syntax is no longer hypothetical. This post walks through every construct as it exists right now, writing real programs to see how the language feels. Actors, typed state, Holes, situations, bubbles. Some of this will change. We're nailing the good parts early.</div>
+<div class="tldr-bubble">We built a parser in Zig with a tree-sitter grammar. The syntax is not hypothetical. This post walks through every construct as it exists right now, writing real programs to see how the language feels. Actors, typed state, pipes, message sends, guards, Holes, situations, bubbles. All of it parses. Some of this will change. We're nailing the good parts early.</div>
 </div>
 <div class="section-content">
 
@@ -143,15 +143,13 @@ body.tldr-mode .tldr-bubble {
 
 <p>So, we want it to feel good.</p>
 
-<p>To begin with, we built a parser. It is written in Zig with a tree-sitter grammar that mirrors it and it can parse real Blimp code into an AST right now.</p>
+<p>To begin with, we built a parser. It is written in Zig with a tree-sitter grammar that mirrors it and it can parse real Blimp code into an AST right now. There's a full corpus of test cases that exercises every construct you'll see in this post. This is not hypothetical syntax, it's running code.</p>
 
 <p>And all of this ties into the tooling. Everything is powered by a diff viewer that follows the work as a multiplexer. You can drop messages to sessions trivially, each agent sitting there in its own pane. The diffs are semantic, not line-by-line text diffs, structural diffs that know a function moved, not that 30 lines were deleted and 30 were added somewhere else. Time travel works at two levels: version control gives you the history of your source, and the debugger gives you the history of your system's state itself because every <code>become</code> is a snapshot. You can scrub through both. The language works reflexively, it can describe its own behaviors, its own flow, its own contracts and boundaries while also running them. The tools and the language are the same thing.</p>
 
-<p>This sounds crazy but I already have the diff viewer with the multiplexer in a functional state on a branch. It follows files, it stages, it commits, it has keyboard nav and follow mode. It's actively going to start being a core piece of the language as we build it. Right now we're using these tools with Claude, but later it'll be an agent specially trained on Blimp itself as we implement more and more of it and start writing libraries and the standard actors and all the rest. We're building the tool that builds the language that defines the tool. It's turtles all the way down and I'm having a great time.</p>
+<p>This sounds crazy but I already have the diff viewer with the multiplexer in a functional state. It follows files, it stages, it commits, it has keyboard nav and follow mode. The multiplexer runs up to four Claude sessions side by side in a split-pane grid. We're using these tools with Claude to build this, but later it'll be agents specially trained on Blimp itself as we implement more and more of it and start writing libraries and the standard actors and all the rest. We're building the tool that builds the language that defines the tool. It's turtles all the way down and I'm having a great time.</p>
 
-<p>The syntax is not hypothetical at this point, so we have to make some pretty explicit choices.</p>
-
-<p>As it sits, we want this to really stick, so I am writing out a bunch of programs right now as it is to just see how it feels for the exercise of this post. A good bit of this obviously will change, but we are going to try to nail "the good parts" early.</p>
+<p>So with that, let me walk through every piece of the grammar as it sits right now. I'm writing out programs to feel how they work. A good bit of this will change, but we're going to try to nail "the good parts" early.</p>
 
 </div>
 
@@ -161,7 +159,7 @@ body.tldr-mode .tldr-bubble {
 </div>
 <div class="section-content">
 
-<p>So with that, let's begin with Actors. They are the most important primitive we have.</p>
+<p>Actors are the most important primitive we have. There's no separate concept of "pure functions" or "helper modules." Some actors hold state and handle many messages. Some are tiny and do one thing.</p>
 
 <pre><code><span class="kw">actor</span> <span class="fn">Counter</span> <span class="kw">do</span>
   <span class="kw">state</span> count: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
@@ -172,17 +170,13 @@ body.tldr-mode .tldr-bubble {
   <span class="kw">end</span>
 <span class="kw">end</span></code></pre>
 
-<p>Actors hold state and reply to messages. You define them with <code>actor</code> and they come in PascalCase. The <code>do</code>/<code>end</code> blocks denote the wrapping up of that behavior.</p>
-
-<p>Lowercase names are always variables. This distinction just keeps things simple and clear.</p>
-
-<p>And here's the thing: everything is an actor. There's no separate concept of "pure functions" or "helper modules." Some actors hold state and handle many messages. Some are tiny and do one thing. A helper function is just an actor with one handler that replies immediately. <code>System</code> is the root actor that provides the primitives, math, IO, strings. You're always inside System.</p>
+<p>You define them with <code>actor</code> and they come in PascalCase. Lowercase names are always variables. This distinction just keeps things simple and clear. <code>System</code> is the root actor that provides the primitives, math, IO, strings. You're always inside System.</p>
 
 </div>
 
 <div class="section-header">
 <h2>Typed State</h2>
-<div class="tldr-bubble">State fields require types. <code>state name: Type :: default</code>. The <code>::</code> separates type from default value. Types are rigid. The compiler catches mistakes, not the runtime. Since types are enforced, you don't need {:ok, value} tuples. If the handler ran, the types matched.</div>
+<div class="tldr-bubble">State fields require types. <code>state name: Type :: default</code>. The <code>::</code> separates type from default value. Types are rigid. The compiler catches mistakes, not the runtime.</div>
 </div>
 <div class="section-content">
 
@@ -202,15 +196,92 @@ body.tldr-mode .tldr-bubble {
 
 <p>The <code>:</code> separates the field name from its type. <code>::</code> separates the type from the default value. <code>[Item]</code> for lists, <code>%{Atom => Float}</code> for maps.</p>
 
-<p>Types are rigid. We want them everywhere we can get them. The compiler catches mistakes, not the runtime.</p>
+<p>Types are rigid. The compiler catches mistakes, not the runtime. And because of that type safety, notice there's no <code>{:ok, value}</code> tuple on the reply. If the handler ran at all, the types matched. If someone sends a <code>:deposit</code> with a <code>String</code>, the message just doesn't match, it never enters the <code>do</code> block. So <code>reply balance + amount</code> is enough. No wrapping needed.</p>
 
-<p>And because of that type safety, notice there's no <code>{:ok, value}</code> tuple on the reply. If the handler ran at all, the types matched. If someone sends a <code>:deposit</code> with a <code>String</code>, the message just doesn't match, it never enters the <code>do</code> block. So <code>reply balance + amount</code> is enough. No wrapping needed.</p>
+</div>
+
+<div class="section-header">
+<h2>Pipes</h2>
+<div class="tldr-bubble">The <code>|></code> operator chains transformations. <code>_</code> marks where the piped value goes. Left-associative, works with any expression on the right side. Feels like Elixir but with explicit placement.</div>
+</div>
+<div class="section-content">
+
+<p>Fuck yes I need my pipes. The <code>|></code> operator chains transformations and <code>_</code> marks where the piped value goes.</p>
+
+<pre><code>receipt = items
+  <span class="op">|></span> calculate_tax(_, region)
+  <span class="op">|></span> apply_discount(_, code)
+  <span class="op">|></span> finalize(_, payment)</code></pre>
+
+<p>This is like Elixir's pipes but with explicit argument placement. In Elixir, the pipe always inserts as the first argument. In Blimp, <code>_</code> tells you exactly where the value goes. That's a small thing but it matters when you're reading code, there's never a question about which argument position gets the piped value.</p>
+
+<p>If the right side has no parens, it's just called as a no-arg function with the piped value:</p>
+
+<pre><code>items <span class="op">|></span> sort <span class="op">|></span> reverse</code></pre>
+
+<p>Pipes are left-associative, so <code>a |> b |> c</code> is <code>(a |> b) |> c</code>. They sit at a specific precedence level: lower than binary ops, higher than <code>orelse</code>, lower than message sends. So <code>x |> f orelse :default</code> means <code>(x |> f) orelse :default</code>, which is what you'd expect.</p>
+
+</div>
+
+<div class="section-header">
+<h2>Message Send</h2>
+<div class="tldr-bubble">Actors talk to each other with <code><-</code>. No PIDs, no process registry. Sibling actors address each other by name. Dot-notation names like <code>Shop.Checkout</code> define the supervision hierarchy.</div>
+</div>
+<div class="section-content">
+
+<p>The <code><-</code> operator sends a message to an actor and waits for the reply.</p>
+
+<pre><code><span class="cm"># Send a message, get the reply</span>
+Shop.Checkout <span class="op"><-</span> <span class="st">:add</span>(%{name: <span class="st">"shirt"</span>, price: <span class="nr">29.99</span>})
+
+<span class="cm"># Use the reply in a variable</span>
+count = Shop.Inventory <span class="op"><-</span> <span class="st">:check</span>(<span class="st">"shirt"</span>)
+
+<span class="cm"># Message send with orelse for failure recovery</span>
+receipt = Shop.Checkout <span class="op"><-</span> <span class="st">:charge</span>(payment) <span class="kw">orelse</span> <span class="kw">bubble</span></code></pre>
+
+<p>No PIDs, no process registry. Siblings address each other by name. The name IS the address. <code>Shop.Checkout</code> means Checkout supervised by Shop. That dot notation is not a module path, it's the actual supervision hierarchy. The namespace is the runtime topology.</p>
+
+<p>Message send sits at a specific precedence: higher than pipes, lower than binary operators. So you can pipe into a send target but you don't accidentally capture a binary expression as the target. This precedence chain, <code>orelse > pipe > send > binary ops</code>, makes complex expressions read naturally without extra parens.</p>
+
+</div>
+
+<div class="section-header">
+<h2>Guards</h2>
+<div class="tldr-bubble"><code>when</code> guards filter on message parameters. Handlers only fire if the guard passes. Combined with typed params, you get very precise dispatch without nested conditionals.</div>
+</div>
+<div class="section-content">
+
+<p>Handlers can have <code>when</code> guards that filter on the parameters.</p>
+
+<pre><code><span class="kw">actor</span> <span class="fn">Account</span> <span class="kw">do</span>
+  <span class="kw">state</span> balance: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:withdraw</span>(amount: <span class="fn">Int</span>) <span class="kw">when</span> amount > <span class="nr">0</span> <span class="kw">do</span>
+    <span class="kw">become</span> balance: balance - amount
+    <span class="kw">reply</span> balance - amount
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:withdraw</span>(amount: <span class="fn">Int</span>) <span class="kw">when</span> amount <= <span class="nr">0</span> <span class="kw">do</span>
+    <span class="kw">reply</span> <span class="st">:error</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+
+<p>The handler only fires if the guard expression evaluates to true. Combined with typed params, you get very precise dispatch. Two handlers for the same message with different guards, the runtime picks the first that matches. No nested <code>if</code> inside <code>case</code> inside handler body. Just separate handlers with clear conditions.</p>
+
+<p>Guards can use any expression, including function calls:</p>
+
+<pre><code><span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>) <span class="kw">when</span> valid?(payment) <span class="kw">bubbles</span>(<span class="fn">CascadeBubble</span>) <span class="kw">do</span>
+  <span class="cm"># only runs if valid?(payment) is truthy</span>
+<span class="kw">end</span></code></pre>
+
+<p>Notice the <code>when</code> and <code>bubbles()</code> can coexist on the same handler. The order is always: message name, params, guard, bubble strategy, do block.</p>
 
 </div>
 
 <div class="section-header">
 <h2>Holes</h2>
-<div class="tldr-bubble">The <code>_</code> operator creates a Hole. A Hole is not a wildcard. It's a typed gap in your program that an agent fills. It acts as identity until filled so your program keeps running. The comment after a Hole is a directive to the agent, not a note to yourself. Inside pipes, <code>_</code> is filled by the piped value. Elsewhere it's an agent Hole. Context resolves the ambiguity.</div>
+<div class="tldr-bubble">The <code>_</code> operator creates a Hole. A Hole is not a wildcard. It's a typed gap in your program that an agent fills. It acts as identity until filled so your program keeps running. The comment after a Hole is a directive to the agent. Inside pipes, <code>_</code> is filled by the piped value. Elsewhere it's an agent Hole. Context resolves the ambiguity.</div>
 </div>
 <div class="section-content">
 
@@ -277,7 +348,7 @@ items
 
 <div class="section-header">
 <h2>Bubbles</h2>
-<div class="tldr-bubble">Bubbles are failure actors. When something goes wrong, a Bubble actor spawns and walks up the supervision tree deciding who dies. Different Bubble actors have different blast radii: just me, me and my children, me and my siblings, or everything. Inspired by Temper's bubble model but adapted for actor supervision. <code>orelse</code> catches bubbles on the caller side.</div>
+<div class="tldr-bubble">Bubbles are failure actors. When something goes wrong, a Bubble actor spawns and walks up the supervision tree deciding who dies. Different Bubble actors have different blast radii. <code>orelse</code> catches bubbles on the caller side.</div>
 </div>
 <div class="section-content">
 
@@ -347,14 +418,14 @@ items
 
 <div class="section-header">
 <h2>Putting It Together</h2>
-<div class="tldr-bubble">A complete actor with typed state, a situation with Holes the agent fills, bubbles that are themselves actors, pipe chains, and message sends. The whole thing. Then: the open questions, the canvas, jazz computers, jazz cigarettes.</div>
+<div class="tldr-bubble">A complete system with typed state, guards, pipes, message sends, situations with Holes, bubbles, and dot-notation supervision. The whole thing. Then: the open questions, the canvas, jazz computers, jazz cigarettes.</div>
 </div>
 
 <div class="split section-content">
 
 <div class="split-pair">
 <div class="split-prose">
-<p>Here's a complete example showing how namespacing IS the supervision tree. <code>Shop.Checkout</code> means Checkout is supervised by Shop. Each actor is defined at the top level with dot notation:</p>
+<p>Here's a complete example showing how namespacing IS the supervision tree. <code>Shop.Checkout</code> means Checkout is supervised by Shop. Each actor is defined at the top level with dot notation. Typed state, guards, pipes, message sends, situations, Holes, bubbles, all of it together:</p>
 </div>
 <div class="split-leader"></div>
 <div class="split-side">
@@ -373,49 +444,13 @@ items
   <span class="kw">end</span>
 
   <span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>)
+      <span class="kw">when</span> valid?(payment)
       <span class="kw">bubbles</span>(<span class="fn">CascadeBubble</span>) <span class="kw">do</span>
-    <span class="kw">situation</span> validate(payment) <span class="kw">do</span>
-      <span class="st">:valid</span> <span class="op">-></span>
-        receipt = items
-          <span class="op">|></span> calculate_tax(_, region)
-          <span class="op">|></span> finalize(_, payment)
-        <span class="kw">become</span> items: [], total: <span class="nr">0.0</span>
-        <span class="kw">reply</span> receipt
-      _ <span class="cm"># Hole: handle invalid payment,
-        # begin by researching documentation
-        # on transaction failure</span>
-    <span class="kw">end</span>
-  <span class="kw">end</span>
-<span class="kw">end</span>
-
-<span class="kw">actor</span> <span class="fn">Shop.Inventory</span> <span class="kw">do</span>
-  <span class="kw">state</span> stock: %{<span class="fn">String</span> => <span class="fn">Int</span>} <span class="op">::</span> %{}
-
-  <span class="kw">on</span> <span class="st">:check</span>(item_name: <span class="fn">String</span>) <span class="kw">do</span>
-    <span class="kw">reply</span> lookup(stock, item_name)
-  <span class="kw">end</span>
-<span class="kw">end</span></code></pre>
-</div>
-</div>
-
-<div class="split-pair">
-<div class="split-prose">
-<p>If you want, you can also nest them inline. Same tree, same behavior, just a different way to organize the source:</p>
-</div>
-<div class="split-leader"></div>
-<div class="split-side">
-<pre><code><span class="kw">actor</span> <span class="fn">Shop</span> <span class="kw">do</span>
-  <span class="kw">state</span> region: <span class="fn">Atom</span> <span class="op">::</span> <span class="st">:us</span>
-<span class="kw">end</span>
-
-<span class="kw">actor</span> <span class="fn">Shop.Checkout</span> <span class="kw">do</span>
-  <span class="kw">state</span> items: [<span class="fn">Item</span>] <span class="op">::</span> []
-  <span class="kw">state</span> total: <span class="fn">Float</span> <span class="op">::</span> <span class="nr">0.0</span>
-
-  <span class="kw">on</span> <span class="st">:add</span>(item: <span class="fn">Item</span>) <span class="kw">do</span>
-    <span class="kw">become</span> items: [item | items],
-           total: total + item.price
-    <span class="kw">reply</span> length(items)
+    receipt = items
+      <span class="op">|></span> calculate_tax(_, region)
+      <span class="op">|></span> finalize(_, payment)
+    <span class="kw">become</span> items: [], total: <span class="nr">0.0</span>
+    <span class="kw">reply</span> receipt
   <span class="kw">end</span>
 
   <span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>)
@@ -447,7 +482,7 @@ items
 <div class="split-pair">
 <div class="split-prose">
 <p><code>Shop.Checkout</code> and <code>Shop.Inventory</code> are siblings. Shop supervises both. If Checkout's <code>:charge</code> handler bubbles with <code>CascadeBubble</code>, Inventory goes down too because they're siblings under the same supervisor. The namespace IS the blast radius.</p>
-<p>Either way, the tree is the same. Top-level with dots is the preferred style. It's explicit, each actor gets its own space, and you can see the supervision hierarchy right in the name. Nesting is there if you want it.</p>
+<p>Notice the two <code>:charge</code> handlers. The first has a <code>when valid?(payment)</code> guard, the happy path. The second doesn't, it's the catch-all with a <code>situation</code> and a Hole. Guards give you dispatch without nesting. The agent sees the Hole in the second handler and starts thinking about how to handle invalid payments while you keep writing the rest of the system.</p>
 <p>And talking to it:</p>
 </div>
 <div class="split-leader"></div>
@@ -459,6 +494,7 @@ Shop.Checkout <span class="op"><-</span> <span class="st">:add</span>(%{name: <s
 <span class="cm"># Check stock before charging</span>
 count = Shop.Inventory <span class="op"><-</span> <span class="st">:check</span>(<span class="st">"shirt"</span>)
 
+<span class="cm"># Charge with orelse for recovery</span>
 receipt = Shop.Checkout <span class="op"><-</span> <span class="st">:charge</span>(my_payment) <span class="kw">orelse</span> <span class="kw">bubble</span></code></pre>
 </div>
 </div>
