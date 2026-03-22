@@ -1,0 +1,131 @@
+================
+Case with atom branches
+================
+
+actor A do
+  on :msg do
+    case x do
+      :a -> reply 1
+      :b -> reply 2
+    end
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (case_expression
+        (identifier)
+        (case_branch
+          (atom)
+          (reply_statement
+            (integer)))
+        (case_branch
+          (atom)
+          (reply_statement
+            (integer)))))))
+
+================
+Case with hole branch
+================
+
+actor A do
+  on :msg do
+    case x do
+      :a -> reply 1
+      _ -> reply 0
+    end
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (case_expression
+        (identifier)
+        (case_branch
+          (atom)
+          (reply_statement
+            (integer)))
+        (case_branch
+          (hole)
+          (reply_statement
+            (integer)))))))
+
+================
+Case with multiple statements in branch
+================
+
+actor A do
+  on :msg do
+    case status do
+      :active -> become count: 1
+        reply :ok
+      :inactive -> reply :error
+    end
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (case_expression
+        (identifier)
+        (case_branch
+          (atom)
+          (become_statement
+            (key_value_list
+              (key_value_pair
+                (identifier)
+                (integer))))
+          (reply_statement
+            (atom)))
+        (case_branch
+          (atom)
+          (reply_statement
+            (atom)))))))
+
+================
+Case with function call subject
+================
+
+actor A do
+  on :msg do
+    case validate(input) do
+      :ok -> reply :success
+      :error -> reply :failure
+    end
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (case_expression
+        (function_call
+          (identifier)
+          (identifier))
+        (case_branch
+          (atom)
+          (reply_statement
+            (atom)))
+        (case_branch
+          (atom)
+          (reply_statement
+            (atom)))))))

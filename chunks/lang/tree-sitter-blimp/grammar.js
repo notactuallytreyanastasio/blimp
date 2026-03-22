@@ -52,7 +52,9 @@ module.exports = grammar({
     type_name: ($) =>
       prec(10, choice(
         $.upper_identifier,
-        seq("[", $.upper_identifier, "]"),  // [Item]
+        seq("[", $.type_name, "]"),                           // [Item], [Int]
+        seq("{", commaSep1($.type_name), "}"),                // {Atom, Int}
+        seq("%", "{", $.type_name, "=>", $.type_name, "}"),   // %{String => Int}
       )),
 
     // ============================================================
@@ -64,6 +66,7 @@ module.exports = grammar({
         "on",
         $.atom,
         optional($.parameter_list),
+        optional($.return_type),
         optional($.when_guard),
         optional($.bubbles_annotation),
         "do",
@@ -75,8 +78,16 @@ module.exports = grammar({
 
     bubbles_annotation: ($) => seq("bubbles", "(", $.upper_identifier, ")"),
 
+    return_type: ($) => seq("->", $.type_name),
+
     parameter_list: ($) =>
-      seq("(", commaSep1($.identifier), ")"),
+      seq("(", commaSep1($.handler_param), ")"),
+
+    handler_param: ($) =>
+      choice(
+        seq($.identifier, ":", $.type_name),  // typed: name: Type
+        $.identifier,                          // untyped (legacy, checker rejects)
+      ),
 
     // ============================================================
     // Statements
@@ -87,6 +98,7 @@ module.exports = grammar({
         $.become_statement,
         $.reply_statement,
         $.situation_expression,
+        $.case_expression,
         $.assignment,
         $._expression,
       ),
@@ -211,6 +223,16 @@ module.exports = grammar({
       seq("situation", $._expression, "do", repeat1($.situation_branch), "end"),
 
     situation_branch: ($) =>
+      prec(8, seq(choice($.hole, $._expression), "->", repeat1($._statement))),
+
+    // ============================================================
+    // Case expression (exhaustive pattern matching)
+    // ============================================================
+
+    case_expression: ($) =>
+      seq("case", $._expression, "do", repeat1($.case_branch), "end"),
+
+    case_branch: ($) =>
       prec(8, seq(choice($.hole, $._expression), "->", repeat1($._statement))),
 
     // ============================================================

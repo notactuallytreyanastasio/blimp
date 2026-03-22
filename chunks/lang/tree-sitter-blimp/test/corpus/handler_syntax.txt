@@ -3,7 +3,7 @@ Handler with guard
 ================
 
 actor Account do
-  on :withdraw(amount) when amount > 0 do
+  on :withdraw(amount: Int) when amount > 0 do
     reply :ok
   end
 end
@@ -16,7 +16,10 @@ end
     (message_handler
       (atom)
       (parameter_list
-        (identifier))
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
       (when_guard
         (binary_expression
           (identifier)
@@ -29,7 +32,7 @@ Handler with bubbles
 ================
 
 actor Payment do
-  on :charge(payment) bubbles(CascadeBubble) do
+  on :charge(payment: Payment) bubbles(CascadeBubble) do
     reply :ok
   end
 end
@@ -42,7 +45,10 @@ end
     (message_handler
       (atom)
       (parameter_list
-        (identifier))
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
       (bubbles_annotation
         (upper_identifier))
       (reply_statement
@@ -53,7 +59,7 @@ Handler with guard and bubbles
 ================
 
 actor Payment do
-  on :charge(payment) when payment > 0 bubbles(CascadeBubble) do
+  on :charge(payment: Payment) when payment > 0 bubbles(CascadeBubble) do
     reply :ok
   end
 end
@@ -66,7 +72,10 @@ end
     (message_handler
       (atom)
       (parameter_list
-        (identifier))
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
       (when_guard
         (binary_expression
           (identifier)
@@ -95,5 +104,39 @@ end
       (atom)
       (when_guard
         (identifier))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with return type, guard, and bubbles
+================
+
+actor Checkout do
+  on :charge(payment: Payment) -> Receipt when payment > 0 bubbles(CascadeBubble) do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (return_type
+        (type_name
+          (upper_identifier)))
+      (when_guard
+        (binary_expression
+          (identifier)
+          (integer)))
+      (bubbles_annotation
+        (upper_identifier))
       (reply_statement
         (atom)))))

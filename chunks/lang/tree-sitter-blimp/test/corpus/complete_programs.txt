@@ -62,9 +62,9 @@ Checkout with cons and dot access
 ================
 
 actor Checkout do
-  state items: [], total: 0
+  state items: [Item] :: [], total: Int :: 0
 
-  on :add(item) do
+  on :add(item: Item) do
     become items: [item | items],
            total: total + item.price
     reply :ok
@@ -84,14 +84,22 @@ end
       (typed_field_list
         (typed_field
           (identifier)
+          (type_name
+            (type_name
+              (upper_identifier)))
           (list))
         (typed_field
           (identifier)
+          (type_name
+            (upper_identifier))
           (integer))))
     (message_handler
       (atom)
       (parameter_list
-        (identifier))
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
       (become_statement
         (key_value_list
           (key_value_pair

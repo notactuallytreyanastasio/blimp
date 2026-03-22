@@ -7,6 +7,7 @@
 "become" @keyword
 "reply" @keyword
 "situation" @keyword
+"case" @keyword
 "orelse" @keyword
 "when" @keyword
 "bubbles" @keyword

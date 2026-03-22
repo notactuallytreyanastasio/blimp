@@ -91,7 +91,8 @@ end
         (typed_field
           (identifier)
           (type_name
-            (upper_identifier))
+            (type_name
+              (upper_identifier)))
           (list))))))
 
 ================
@@ -143,7 +144,32 @@ end
         (atom)))))
 
 ================
-Handler with parameters
+Handler with typed parameter
+================
+
+actor Cart do
+  on :add(item: Item) do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with untyped parameter (legacy)
 ================
 
 actor Cart do
@@ -160,16 +186,17 @@ end
     (message_handler
       (atom)
       (parameter_list
-        (identifier))
+        (handler_param
+          (identifier)))
       (reply_statement
         (atom)))))
 
 ================
-Handler with multiple parameters
+Handler with multiple typed parameters
 ================
 
 actor Chat do
-  on :send(user, text) do
+  on :send(user: String, text: String) do
     reply :ok
   end
 end
@@ -182,7 +209,64 @@ end
     (message_handler
       (atom)
       (parameter_list
-        (identifier)
-        (identifier))
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier)))
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (reply_statement
+        (atom)))))
+
+================
+Handler with return type
+================
+
+actor A do
+  on :get -> Int do
+    reply 42
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (return_type
+        (type_name
+          (upper_identifier)))
+      (reply_statement
+        (integer)))))
+
+================
+Handler with typed params and return type
+================
+
+actor Checkout do
+  on :charge(payment: Payment) -> Receipt do
+    reply :ok
+  end
+end
+
+---
+
+(source_file
+  (actor_definition
+    (upper_identifier)
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (return_type
+        (type_name
+          (upper_identifier)))
       (reply_statement
         (atom)))))
