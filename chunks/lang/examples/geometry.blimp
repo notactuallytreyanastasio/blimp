@@ -1,0 +1,13 @@
+actor Point do
+  state x: Int :: 0
+  state y: Int :: 0
+
+  on :move(dx, dy) do
+    become x: x + dx, y: y + dy
+    reply x + dx + y + dy
+  end
+end
+
+p = spawn Point, x: 3, y: 4
+p <- :move(10, 20)
+p.x + p.y

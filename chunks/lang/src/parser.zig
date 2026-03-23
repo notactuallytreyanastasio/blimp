@@ -39,11 +39,13 @@ pub const Parser = struct {
         return nodes.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
-    /// Parse a top-level construct (currently just actor definitions).
+    /// Parse a top-level construct: actor definitions, control flow, or standalone statements/expressions.
     fn parseTopLevel(self: *Parser) ParseError!Node {
         return switch (self.current.kind) {
             .kw_actor => self.parseActorDef(),
-            else => error.UnexpectedToken,
+            .kw_situation => self.parseSituation(),
+            .kw_case => self.parseCase(),
+            else => self.parseExpressionStatement(),
         };
     }
 

@@ -1,0 +1,17 @@
+actor Light do
+  state color: Atom :: :red
+
+  on :next do
+    situation color do
+      :red -> become color: :green
+      :green -> become color: :yellow
+      :yellow -> become color: :red
+    end
+    reply color
+  end
+end
+
+l = spawn Light
+l <- :next
+l <- :next
+l <- :next

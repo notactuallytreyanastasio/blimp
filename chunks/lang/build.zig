@@ -57,12 +57,13 @@ pub fn build(b: *std.Build) void {
     compile_exe.linkLibC();
 
     // Compile and install the C runtime as a static object
+    // Use ReleaseSafe to avoid UBSan symbols that won't link with plain cc
     const runtime_obj = b.addObject(.{
         .name = "blimp_runtime",
         .root_module = b.createModule(.{
             .root_source_file = null,
             .target = target,
-            .optimize = optimize,
+            .optimize = .ReleaseSafe,
         }),
     });
     runtime_obj.addCSourceFile(.{ .file = b.path("src/runtime.c") });

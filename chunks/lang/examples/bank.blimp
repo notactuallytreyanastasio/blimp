@@ -1,0 +1,35 @@
+actor Account do
+  state balance: Int :: 0
+
+  on :deposit(amount) when amount > 0 do
+    become balance: balance + amount
+    reply balance + amount
+  end
+
+  on :deposit(amount) do
+    reply balance
+  end
+
+  on :withdraw(amount) when amount > 0 do
+    become balance: balance - amount
+    reply balance - amount
+  end
+
+  on :get do
+    reply balance
+  end
+end
+
+actor Bank do
+  on :transfer(from, to, amount) do
+    from <- :withdraw(amount)
+    to <- :deposit(amount)
+    reply to <- :get
+  end
+end
+
+alice = spawn Account, balance: 1000
+bob = spawn Account, balance: 500
+bank = spawn Bank
+
+bank <- :transfer(alice, bob, 200)
