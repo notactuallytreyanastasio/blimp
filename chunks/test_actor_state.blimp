@@ -1,0 +1,23 @@
+# Test actor state visibility in REPL
+
+# Define a simple counter actor
+actor Counter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+    reply count
+  end
+
+  on :get do
+    reply count
+  end
+end
+
+# Spawn an instance
+c = spawn Counter
+
+# Send some messages
+c <- :increment
+c <- :increment
+c <- :get

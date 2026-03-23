@@ -1,0 +1,131 @@
+Literals
+42              # Int
+3.14            # Float
+"hello world"   # String
+:ok             # Atom
+true            # Bool
+false           # Bool
+nil             # Nil
+
+Arithmetic & logic
+1 + 2           # => 3
+10 - 3          # => 7
+3 * 4           # => 12
+10 / 3          # => 3
+2 + 3 * 4       # => 14 (precedence works)
+-42             # => -42
+
+Comparison
+1 < 2           # => true
+42 == 42        # => true
+1 != 2          # => true (note: returns 1, not true)
+true && false   # => false
+true || false   # => true
+
+Collections
+[1, 2, 3]                       # List
+{:ok, 42}                       # Tuple
+%{name: "bob", age: 30}         # Map
+
+Variables
+x = 42
+x               # => 42
+
+Dot access
+m = %{name: "bob", age: 30}
+m.name          # => "bob"
+
+Built-in functions
+length([1, 2, 3])       # => 3
+max(5, 10)              # => 10
+min(5, 10)              # => 5
+reverse([1, 2, 3])      # => [3, 2, 1]
+lookup(%{a: 1}, :a)     # => 1
+keys(%{a: 1, b: 2})     # => ["a", "b"]
+put(%{a: 1}, :b, 2)     # => %{a: 1, b: 2}
+append([1, 2], 3)       # => [1, 2, 3]
+
+Pipes
+[1, 2, 3] |> length(_)           # => 3
+[1, 2, 3] |> length              # => 3  (bare fn)
+[1, 2, 3] |> reverse             # => [3, 2, 1]
+[1, 2, 3] |> reverse |> length   # => 3  (chained)
+
+Orelse (nil coalescing)
+nil orelse 42     # => 42
+10 orelse 99      # => 10
+
+Actors: define, spawn, message send
+actor Counter do
+  state count: Int :: 0
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+  on :get do
+    reply count
+  end
+end
+
+c1 = spawn Counter
+c2 = spawn Counter
+c1 <- :increment    # => 1
+c1 <- :increment    # => 2
+c2 <- :increment    # => 1
+c1 <- :get          # => 2
+
+Spawn with non-default state
+c = spawn Counter, count: 10
+c <- :increment     # => 11
+
+Message handlers with args
+actor Adder do
+  state total: Int :: 0
+  on :add(n) do
+    become total: total + n
+    reply total + n
+  end
+end
+
+a = spawn Adder
+a <- :add(10)       # => 10
+a <- :add(5)        # => 15
+
+Become with string state
+actor Greeter do
+  state name: String :: "world"
+  on :set_name(n) do
+    become name: n
+    reply n
+  end
+  on :greet do
+    reply name
+  end
+end
+
+g = spawn Greeter
+g <- :greet             # => "world"
+g <- :set_name("blimp") # => "blimp"
+g <- :greet             # => "blimp"
+
+Guards on handlers
+actor Account do
+  state balance: Int :: 100
+  on :withdraw(amount) when amount > 0 do
+    become balance: balance - amount
+    reply balance - amount
+  end
+  on :get_balance do
+    reply balance
+  end
+end
+
+a = spawn Account
+a <- :withdraw(30)    # => 70
+a <- :get_balance     # => 70
+
+Ref comparison
+c1 = spawn Counter
+c2 = spawn Counter
+c1 == c1    # => true
+c1 == c2    # => false
