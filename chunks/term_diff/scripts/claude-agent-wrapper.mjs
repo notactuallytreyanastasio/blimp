@@ -150,6 +150,14 @@ if (args["system-prompt"]) options.systemPrompt = args["system-prompt"];
 if (args["append-system-prompt"])
   options.appendSystemPrompt = args["append-system-prompt"];
 
+// Load CLAUDE.md and project settings so agents get deciduous instructions
+options.settingSources = ["project"];
+
+// Default to opus if no model specified
+if (!options.model) {
+  options.model = "claude-opus-4-6";
+}
+
 // Filter permission mode - "interactive" is our custom mode handled by canUseTool
 const permMode = args["permission-mode"];
 if (permMode && permMode !== "interactive") {

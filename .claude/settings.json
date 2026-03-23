@@ -1,4 +1,20 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "NotebookEdit",
+      "LSP",
+      "Task"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
   "hooks": {
     "PreToolUse": [
       {

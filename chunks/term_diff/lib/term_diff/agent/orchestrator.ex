@@ -354,6 +354,9 @@ defmodule TermDiff.Agent.Orchestrator do
              permission_mode: parent_run.permission_mode,
              status: "pending"
            }) do
+      # Archive the parent so only the latest continuation shows in sidebar
+      Runs.archive_run(parent_run)
+
       config =
         %{run_id: run.id, resume_session_id: session_id}
         |> Map.merge(state.runner_config)

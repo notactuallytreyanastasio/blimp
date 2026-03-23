@@ -339,7 +339,7 @@ fn replPlain(allocator: std.mem.Allocator) void {
 
     while (true) {
         if (depth > 0) {
-            stdout.writeAll("  ... ") catch break;
+            stdout.writeAll("  ...  ") catch break;
         } else {
             stdout.writeAll("blimp> ") catch break;
         }
@@ -427,13 +427,30 @@ fn replPlain(allocator: std.mem.Allocator) void {
 
         // Print state in parseable format for LiveView
         const bindings = evaluator.env.allBindings(arena.allocator());
-        if (bindings.len > 0) {
+        const has_vars = bindings.len > 0;
+        const has_actors = evaluator.registry.instances.items.len > 0;
+
+        if (has_vars or has_actors) {
             stdout.writeAll("  ┌─ state ─────────────────────\n") catch {};
+
+            // Print environment bindings
             for (bindings) |binding| {
                 stdout.print("  │ {s} = ", .{binding.name}) catch {};
                 binding.val.format(&stdout_writer.interface);
                 stdout.writeAll("\n") catch {};
             }
+
+            // Print actor instances
+            for (evaluator.registry.instances.items) |instance| {
+                stdout.print("  │ {s}#{d} = %{{", .{instance.ref.type_name, instance.ref.id}) catch {};
+                for (instance.state_fields, 0..) |field, i| {
+                    if (i > 0) stdout.writeAll(", ") catch {};
+                    stdout.print("{s}: ", .{field.key}) catch {};
+                    field.val.format(&stdout_writer.interface);
+                }
+                stdout.writeAll("}\n") catch {};
+            }
+
             stdout.writeAll("  └─────────────────────────────\n") catch {};
         }
         stdout_writer.interface.flush() catch {};
@@ -481,7 +498,7 @@ fn repl(allocator: std.mem.Allocator) void {
     const right_cols = total_cols - left_cols - 1; // -1 for border
 
     // Initial draw
-    drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+    drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
     stdout_writer.interface.flush() catch {};
 
     var multi_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
@@ -537,7 +554,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 const pe = @import("errors.zig").parseError(source);
                 const err_text = formatBlimpError(pe, arena.allocator());
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
-                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             };
@@ -557,7 +574,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 };
             }
             if (had_error) {
-                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             }
@@ -572,7 +589,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 const pe = @import("errors.zig").parseError(source);
                 const err_text = formatBlimpError(pe, arena.allocator());
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
-                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             };
@@ -584,7 +601,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 else
                     "Unknown error";
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
-                drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             };
@@ -594,7 +611,7 @@ fn repl(allocator: std.mem.Allocator) void {
             history.append(arena.allocator(), .{ .kind = .output, .text = result_text }) catch {};
         }
 
-        drawScreen(stdout, &history, &evaluator.env, arena.allocator(), total_rows, left_cols, right_cols);
+        drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
         stdout_writer.interface.flush() catch {};
     }
 
@@ -626,7 +643,7 @@ fn moveCursor(writer: anytype, row: u32, col: u32) void {
 fn drawScreen(
     writer: anytype,
     history: *const std.ArrayList(HistoryEntry),
-    env: *const @import("env.zig").Environment,
+    evaluator: *const Evaluator,
     alloc: std.mem.Allocator,
     total_rows: u32,
     left_cols: u32,
@@ -648,11 +665,13 @@ fn drawScreen(
     writer.writeAll("\x1b[1;37m STATE \x1b[0m") catch {};
 
     // Draw state variables (right side)
-    const bindings = env.allBindings(alloc);
-    for (bindings, 0..) |binding, i| {
-        const row: u32 = @intCast(i + 3);
-        if (row >= content_rows) break;
-        moveCursor(writer, row, left_cols + 3);
+    var current_row: u32 = 3;
+    const bindings = evaluator.env.allBindings(alloc);
+
+    // First, show environment bindings
+    for (bindings) |binding| {
+        if (current_row >= content_rows) break;
+        moveCursor(writer, current_row, left_cols + 3);
         writer.print("\x1b[34m{s}\x1b[0m \x1b[90m=\x1b[0m ", .{binding.name}) catch {};
 
         // Format value, truncate to fit
@@ -664,6 +683,24 @@ fn drawScreen(
         } else {
             writer.writeAll(val_text) catch {};
         }
+        current_row += 1;
+    }
+
+    // Then, show actor instances
+    for (evaluator.registry.instances.items) |instance| {
+        if (current_row >= content_rows) break;
+        moveCursor(writer, current_row, left_cols + 3);
+        writer.print("\x1b[35m{s}#{d}\x1b[0m \x1b[90m=\x1b[0m %{{", .{instance.ref.type_name, instance.ref.id}) catch {};
+
+        // Format state fields inline
+        for (instance.state_fields, 0..) |field, i| {
+            if (i > 0) writer.writeAll(", ") catch {};
+            writer.print("{s}: ", .{field.key}) catch {};
+            const val_text = formatValue(field.val, alloc);
+            writer.writeAll(val_text) catch {};
+        }
+        writer.writeAll("}}") catch {};
+        current_row += 1;
     }
 
     // Draw REPL history (left side), show last N entries that fit

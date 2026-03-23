@@ -241,8 +241,15 @@ defmodule TermDiff.Agent.Runner.ClaudeCode do
   end
 
   defp wrapper_script_path do
-    Path.join(Application.app_dir(:term_diff, "priv"), "../scripts/claude-agent-wrapper.mjs")
-    |> Path.expand()
+    priv = :code.priv_dir(:term_diff) |> to_string()
+
+    app_root =
+      case File.read_link(priv) do
+        {:ok, target} -> priv |> Path.dirname() |> Path.join(target) |> Path.expand() |> Path.dirname()
+        {:error, _} -> Path.dirname(priv)
+      end
+
+    Path.join(app_root, "scripts/claude-agent-wrapper.mjs")
   end
 
   defp maybe_append_wrapper_arg(args, _flag, nil), do: args

@@ -76,7 +76,7 @@ pub const Parser = struct {
 
         var body: std.ArrayList(Node) = .empty;
         while (self.current.kind != .kw_end and self.current.kind != .eof) {
-            const stmt = try self.parseActorBody();
+            const stmt = try self.parseActorBodyTopLevel();
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
             self.skipNewlines();
         }
@@ -91,15 +91,39 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse a statement inside an actor body.
-    fn parseActorBody(self: *Parser) ParseError!Node {
+    /// Parse a statement at the top level of an actor definition.
+    /// Actor definitions should only contain state and on handlers at the top level.
+    fn parseActorBodyTopLevel(self: *Parser) ParseError!Node {
         return switch (self.current.kind) {
             .kw_state => self.parseStateDef(),
             .kw_on => self.parseMessageHandler(),
+            // Reject anything else - actor definition bodies should only have state and on
+            else => error.UnexpectedToken,
+        };
+    }
+
+    /// Parse a statement inside a message handler body.
+    /// Message handlers can contain become, reply, situation, assignments, etc.
+    fn parseHandlerBody(self: *Parser) ParseError!Node {
+        return switch (self.current.kind) {
+            .kw_state => error.UnexpectedToken, // state not allowed in handlers
+            .kw_on => error.UnexpectedToken, // nested handlers not allowed
             .kw_become => self.parseBecomeStmt(),
             .kw_reply => self.parseReplyStmt(),
             .kw_situation => self.parseSituation(),
             .kw_case => self.parseCase(),
+            .identifier => {
+                // Parse as expression statement, then validate it's not a bare identifier
+                const node = try self.parseExpressionStatement();
+                // Reject bare identifiers but allow assigns, sends, calls
+                if (node.kind == .identifier) return error.UnexpectedToken;
+                return node;
+            },
+            .upper_identifier => {
+                const node = try self.parseExpressionStatement();
+                if (node.kind == .identifier) return error.UnexpectedToken;
+                return node;
+            },
             else => self.parseExpressionStatement(),
         };
     }
@@ -154,6 +178,8 @@ pub const Parser = struct {
         }
 
         // Optional return type: -> Type
+        // Allow newlines before each signature component for multi-line handlers
+        self.skipNewlines();
         var return_type: ?[]const u8 = null;
         if (self.current.kind == .arrow) {
             self.advance();
@@ -161,6 +187,7 @@ pub const Parser = struct {
         }
 
         // Optional guard: when <expression>
+        self.skipNewlines();
         var guard: ?*const Node = null;
         if (self.current.kind == .kw_when) {
             self.advance();
@@ -171,6 +198,7 @@ pub const Parser = struct {
         }
 
         // Optional bubbles annotation: bubbles(ActorName)
+        self.skipNewlines();
         var bubble_strategy: ?[]const u8 = null;
         if (self.current.kind == .kw_bubbles) {
             self.advance();
@@ -181,13 +209,14 @@ pub const Parser = struct {
             try self.expect(.rparen);
         }
 
+        self.skipNewlines();
         try self.expect(.kw_do);
         self.skipNewlines();
 
         // Parse body until end
         var body: std.ArrayList(Node) = .empty;
         while (self.current.kind != .kw_end and self.current.kind != .eof) {
-            const stmt = try self.parseActorBody();
+            const stmt = try self.parseHandlerBody();
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
             self.skipNewlines();
         }
@@ -292,6 +321,17 @@ pub const Parser = struct {
         if (self.current.kind == .hole) {
             // Hole branch (default/wildcard) -- pattern stays null
             self.advance();
+            // If no arrow follows, this is a body-less hole directive
+            // (e.g. `_ # Hole: handle this case` where comment was eaten by lexer)
+            self.skipNewlines();
+            if (self.current.kind != .arrow) {
+                // Body-less hole: no arrow, no body - just the wildcard
+                const empty_body = self.allocator.alloc(Node, 0) catch return error.OutOfMemory;
+                return .{
+                    .pattern = null,
+                    .body = empty_body,
+                };
+            }
         } else {
             // Pattern expression
             const pat = try self.parseExpression();
@@ -315,7 +355,7 @@ pub const Parser = struct {
                 self.skipNewlines();
                 continue;
             }
-            const stmt = try self.parseActorBody();
+            const stmt = try self.parseHandlerBody();
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
             self.skipNewlines();
         }
@@ -635,10 +675,14 @@ pub const Parser = struct {
         }
     }
 
-    /// Parse: spawn ActorName or spawn ActorName, key: value, key: value
+    /// Parse: spawn ActorName, spawn(ActorName), spawn ActorName, k: v, or spawn(ActorName, k: v)
     fn parseSpawnExpr(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
         try self.expect(.kw_spawn);
+
+        // Allow optional parens: spawn(Counter) or spawn Counter
+        const has_parens = self.current.kind == .lparen;
+        if (has_parens) self.advance();
 
         // Expect an upper_identifier for the actor name
         if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
@@ -650,6 +694,11 @@ pub const Parser = struct {
         if (self.current.kind == .comma) {
             self.advance();
             overrides = try self.parseKeyValueList();
+        }
+
+        if (has_parens) {
+            if (self.current.kind != .rparen) return error.UnexpectedToken;
+            self.advance();
         }
 
         return Node{
@@ -1073,9 +1122,10 @@ test "parse binary expression" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply 1 + 2 * 3\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply 1 + 2 * 3\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
 
     // Should parse as 1 + (2 * 3) due to precedence
     const add = reply.value.kind.binary_op;
@@ -1090,9 +1140,10 @@ test "parse list literal with cons" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply [1, 2 | rest]\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply [1, 2 | rest]\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const list = reply.value.kind.list_lit;
 
     try std.testing.expectEqual(@as(usize, 2), list.elements.len);
@@ -1104,9 +1155,10 @@ test "parse tuple literal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply {:ok, 42}\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply {:ok, 42}\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const tuple = reply.value.kind.tuple_lit;
 
     try std.testing.expectEqual(@as(usize, 2), tuple.elements.len);
@@ -1118,9 +1170,10 @@ test "parse map literal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply %{name: \"bob\", age: 30}\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply %{name: \"bob\", age: 30}\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const map = reply.value.kind.map_lit;
 
     try std.testing.expectEqual(@as(usize, 2), map.entries.len);
@@ -1132,9 +1185,10 @@ test "parse function call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply calculate_tax(100, :us)\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply calculate_tax(100, :us)\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const call = reply.value.kind.func_call;
 
     try std.testing.expectEqualStrings("calculate_tax", call.name);
@@ -1215,9 +1269,10 @@ test "parse dot access" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply item.price\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply item.price\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const dot = reply.value.kind.dot_access;
 
     try std.testing.expectEqualStrings("item", dot.object.kind.identifier.name);
@@ -1228,9 +1283,10 @@ test "parse simple pipe" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> length(_)\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply items |> length(_)\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const pipe = reply.value.kind.pipe_expr;
 
     // Left side is the identifier "items"
@@ -1247,9 +1303,10 @@ test "parse chained pipes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> filter(_, :active) |> length(_)\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply items |> filter(_, :active) |> length(_)\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
 
     // Chained pipes are left-associative: (items |> filter(_, :active)) |> length(_)
     const outer_pipe = reply.value.kind.pipe_expr;
@@ -1272,9 +1329,10 @@ test "parse pipe into no-arg function" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply items |> sort\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply items |> sort\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const pipe = reply.value.kind.pipe_expr;
 
     try std.testing.expectEqualStrings("items", pipe.left.kind.identifier.name);
@@ -1286,9 +1344,10 @@ test "parse hole as expression" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parser = Parser.init(arena.allocator(), "actor A do\n  reply _\nend");
+    var parser = Parser.init(arena.allocator(), "actor A do\n  on :test do\n    reply _\n  end\nend");
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     // The hole should be parsed as a hole node
     const h = reply.value.kind.hole;
     try std.testing.expect(h.directive == null);
@@ -1369,11 +1428,14 @@ test "parse message send" {
 
     var parser = Parser.init(arena.allocator(),
         \\actor A do
-        \\  checkout <- :add(item)
+        \\  on :test do
+        \\    checkout <- :add(item)
+        \\  end
         \\end
     );
     const nodes = try parser.parseFile();
-    const body = nodes[0].kind.actor_def.body;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const body = handler.body;
     try std.testing.expectEqual(@as(usize, 1), body.len);
 
     const send = body[0].kind.message_send;
@@ -1389,11 +1451,14 @@ test "parse message send no args" {
 
     var parser = Parser.init(arena.allocator(),
         \\actor A do
-        \\  counter <- :increment
+        \\  on :test do
+        \\    counter <- :increment
+        \\  end
         \\end
     );
     const nodes = try parser.parseFile();
-    const body = nodes[0].kind.actor_def.body;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const body = handler.body;
     try std.testing.expectEqual(@as(usize, 1), body.len);
 
     const send = body[0].kind.message_send;
@@ -1408,11 +1473,14 @@ test "parse message send with orelse" {
 
     var parser = Parser.init(arena.allocator(),
         \\actor A do
-        \\  result = checkout <- :charge(payment) orelse :error
+        \\  on :test do
+        \\    result = checkout <- :charge(payment) orelse :error
+        \\  end
         \\end
     );
     const nodes = try parser.parseFile();
-    const body = nodes[0].kind.actor_def.body;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const body = handler.body;
     try std.testing.expectEqual(@as(usize, 1), body.len);
 
     // result = (orelse (send checkout :charge(payment)) :error)
@@ -1434,11 +1502,14 @@ test "parse orelse with expression" {
 
     var parser = Parser.init(arena.allocator(),
         \\actor A do
-        \\  reply x orelse 0
+        \\  on :test do
+        \\    reply x orelse 0
+        \\  end
         \\end
     );
     const nodes = try parser.parseFile();
-    const reply = nodes[0].kind.actor_def.body[0].kind.reply_stmt;
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const reply = handler.body[0].kind.reply_stmt;
     const orelse_node = reply.value.kind.orelse_expr;
 
     try std.testing.expectEqualStrings("x", orelse_node.try_expr.kind.identifier.name);
@@ -1688,4 +1759,99 @@ test "parse state with tuple type" {
     const nodes = try parser.parseFile();
     const state = nodes[0].kind.actor_def.body[0].kind.state_def;
     try std.testing.expectEqualStrings("{Int, String}", state.fields[0].type_name.?);
+}
+
+// === Bug 1: Multi-line handler signatures ===
+
+test "parse multi-line handler with when on next line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :charge(payment: Payment)
+        \\      when valid?(payment) do
+        \\    reply :ok
+        \\  end
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    try std.testing.expectEqualStrings("charge", handler.name);
+    try std.testing.expect(handler.guard != null);
+    const call = handler.guard.?.kind.func_call;
+    try std.testing.expectEqualStrings("valid?", call.name);
+}
+
+test "parse multi-line handler with when and bubbles on separate lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :charge(payment: Payment)
+        \\      when valid?(payment)
+        \\      bubbles(CascadeBubble) do
+        \\    reply :ok
+        \\  end
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    try std.testing.expectEqualStrings("charge", handler.name);
+    try std.testing.expect(handler.guard != null);
+    try std.testing.expect(handler.bubble_strategy != null);
+    try std.testing.expectEqualStrings("CascadeBubble", handler.bubble_strategy.?);
+}
+
+test "parse multi-line handler with return type on next line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :get
+        \\      -> Int do
+        \\    reply 42
+        \\  end
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    try std.testing.expectEqualStrings("get", handler.name);
+    try std.testing.expectEqualStrings("Int", handler.return_type.?);
+}
+
+// === Bug 2: Hole branches with comment directives ===
+
+test "parse situation with hole comment directive" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :msg do
+        \\    situation x do
+        \\      :ok -> reply 1
+        \\      _
+        \\    end
+        \\  end
+        \\end
+    );
+
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const sit = handler.body[0].kind.situation;
+
+    try std.testing.expectEqual(@as(usize, 2), sit.branches.len);
+
+    // First branch: :ok -> reply 1
+    try std.testing.expectEqualStrings("ok", sit.branches[0].pattern.?.kind.atom_lit.name);
+
+    // Second branch: _ (hole, no arrow, no body)
+    try std.testing.expect(sit.branches[1].pattern == null);
+    try std.testing.expectEqual(@as(usize, 0), sit.branches[1].body.len);
 }

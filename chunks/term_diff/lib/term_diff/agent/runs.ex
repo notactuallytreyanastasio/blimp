@@ -57,6 +57,21 @@ defmodule TermDiff.Agent.Runs do
     |> tap_ok(fn archived -> broadcast({:run_archived, archived}) end)
   end
 
+  @spec archive_stale_runs(integer()) :: {integer(), nil}
+  def archive_stale_runs(max_age_hours \\ 24) do
+    cutoff = DateTime.add(DateTime.utc_now(), -max_age_hours * 3600)
+
+    {count, _} =
+      Run
+      |> where([r], is_nil(r.archived_at))
+      |> where([r], r.updated_at < ^cutoff)
+      |> where([r], r.status not in ["running", "pending"])
+      |> Repo.update_all(set: [archived_at: DateTime.utc_now()])
+
+    if count > 0, do: broadcast({:runs_cleaned, count})
+    {count, nil}
+  end
+
   @doc """
   Returns the full run chain (oldest first) for a given run by walking
   up the parent_run_id chain. Used for stitching multi-turn conversations.

@@ -84,32 +84,5 @@ pub fn build(b: *std.Build) void {
         compile_run_cmd.addArgs(args);
     }
 
-    // -- TUI REPL executable (blimp-tui, links libvaxis) --
-    const vaxis_dep = b.dependency("vaxis", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const tui_exe = b.addExecutable(.{
-        .name = "blimp-tui",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tui_main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "blimp", .module = lib_mod },
-                .{ .name = "vaxis", .module = vaxis_dep.module("vaxis") },
-            },
-        }),
-    });
-    b.installArtifact(tui_exe);
-
-    // -- TUI run step --
-    const tui_run_step = b.step("tui", "Run the Blimp TUI REPL");
-    const tui_run_cmd = b.addRunArtifact(tui_exe);
-    tui_run_step.dependOn(&tui_run_cmd.step);
-    tui_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        tui_run_cmd.addArgs(args);
-    }
+    // TUI REPL is now in chunks/repl_tui (Rust/Ratatui)
 }

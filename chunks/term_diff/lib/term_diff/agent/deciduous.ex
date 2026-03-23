@@ -40,6 +40,78 @@ defmodule TermDiff.Agent.Deciduous do
   end
 
   @doc """
+  Fetch the decision tree starting from a root node.
+  Returns a map with node details and its children (recursively).
+  """
+  @spec fetch_tree(integer()) :: {:ok, map()} | {:error, String.t()}
+  def fetch_tree(root_node_id) do
+    case System.cmd("deciduous", ["show", to_string(root_node_id)], stderr_to_stdout: true) do
+      {output, 0} ->
+        tree = parse_tree_output(output, root_node_id)
+        {:ok, tree}
+
+      {output, _code} ->
+        Logger.warning("deciduous show failed: #{output}")
+        {:error, output}
+    end
+  end
+
+  defp parse_tree_output(output, root_id) do
+    lines = String.split(output, "\n", trim: true)
+
+    # Parse the node info
+    title = extract_field(lines, "Title:")
+    description = extract_field(lines, "Description:")
+    status = extract_field(lines, "Status:")
+    created = extract_field(lines, "Created:")
+
+    # Parse connections (children)
+    children = parse_connections(lines, root_id)
+
+    %{
+      id: root_id,
+      title: title,
+      description: description,
+      status: status,
+      created: created,
+      children: children
+    }
+  end
+
+  defp extract_field(lines, field_name) do
+    lines
+    |> Enum.find(&String.starts_with?(&1, field_name))
+    |> case do
+      nil -> ""
+      line -> String.trim(String.replace_prefix(line, field_name, ""))
+    end
+  end
+
+  defp parse_connections(lines, _root_id) do
+    # Find the "Outgoing" section
+    outgoing_idx = Enum.find_index(lines, &String.contains?(&1, "Outgoing"))
+
+    if outgoing_idx do
+      lines
+      |> Enum.drop(outgoing_idx + 1)
+      |> Enum.take_while(&String.starts_with?(&1, "    "))
+      |> Enum.map(&parse_connection_line/1)
+      |> Enum.reject(&is_nil/1)
+    else
+      []
+    end
+  end
+
+  defp parse_connection_line(line) do
+    case Regex.run(~r/#(\d+):\s+(.+)/, line) do
+      [_, id_str, title] ->
+        %{id: String.to_integer(id_str), title: String.trim(title)}
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
   Build the system prompt preamble for an agent, including its root node
   and info about other active agents.
   """

@@ -86,6 +86,13 @@ Hooks.KeyNav = {
 Hooks.PromptSubmit = PromptSubmit
 Hooks.AgentAutoScroll = AgentAutoScroll
 
+Hooks.AutoFocus = {
+  mounted() {
+    this.el.focus()
+    this.el.select()
+  }
+}
+
 Hooks.LineSelect = {
   mounted() {
     let dragging = false

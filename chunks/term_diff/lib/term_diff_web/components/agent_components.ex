@@ -51,6 +51,7 @@ defmodule TermDiffWeb.AgentComponents do
 
   attr :pane, :map, required: true
   attr :dark_mode, :boolean, default: false
+  attr :yolo_mode, :map, default: %{}
 
   def terminal_pane(assigns) do
     blocks =
@@ -59,7 +60,13 @@ defmodule TermDiffWeb.AgentComponents do
       |> EventProcessor.process_events()
 
     dark = assigns.dark_mode
-    assigns = assigns |> assign(:blocks, blocks) |> assign(:dark, dark)
+    yolo_mode_active = Map.get(assigns.yolo_mode, assigns.pane.run.id, false)
+
+    assigns =
+      assigns
+      |> assign(:blocks, blocks)
+      |> assign(:dark, dark)
+      |> assign(:yolo_mode_active, yolo_mode_active)
 
     ~H"""
     <div class={"h-full flex flex-col overflow-hidden #{if @dark, do: "bg-neutral-900", else: "bg-white"}"}>
@@ -68,12 +75,35 @@ defmodule TermDiffWeb.AgentComponents do
         <div class="flex items-center gap-2 min-w-0">
           <.status_dot status={@pane.run.status} />
           <span class="text-xs text-neutral-400">#{@pane.run.id}</span>
-          <span class={"text-xs truncate #{if @dark, do: "text-neutral-400", else: "text-neutral-500"}"}>{prompt_preview(@pane.run.prompt)}</span>
+          <span class={"text-xs truncate #{if @dark, do: "text-neutral-400", else: "text-neutral-500"}"}>
+            {prompt_preview(@pane.run.prompt)}
+          </span>
         </div>
         <div class="flex items-center gap-2 shrink-0">
           <span class={"text-[10px] px-1.5 py-0.5 rounded #{status_badge_class(@pane.run.status)}"}>
             {@pane.run.status}
           </span>
+          <button
+            phx-click="toggle_yolo_mode"
+            phx-value-id={@pane.run.id}
+            class={"text-[10px] px-1.5 py-0.5 rounded font-semibold #{if assigns[:yolo_mode_active], do: "bg-orange-600 text-white hover:bg-orange-700", else: "bg-neutral-600 text-neutral-200 hover:bg-neutral-500"}"}
+            title={
+              if assigns[:yolo_mode_active],
+                do: "YOLO mode ON - auto-approving all permissions",
+                else: "YOLO mode OFF - click to auto-approve permissions"
+            }
+          >
+            YOLO
+          </button>
+          <button
+            :if={@pane.run.deciduous_root}
+            phx-click="toggle_decision_tree"
+            phx-value-id={@pane.run.id}
+            class="text-[10px] px-1.5 py-0.5 rounded bg-purple-600 text-white hover:bg-purple-700"
+            title="View decision tree"
+          >
+            tree
+          </button>
           <button
             phx-click="close_pane"
             phx-value-id={@pane.run.id}
@@ -91,7 +121,10 @@ defmodule TermDiffWeb.AgentComponents do
         id={"pane-output-#{@pane.run.id}"}
         phx-hook="AgentAutoScroll"
       >
-        <div :if={@blocks == []} class={"text-xs italic #{if @dark, do: "text-neutral-600", else: "text-neutral-400"}"}>
+        <div
+          :if={@blocks == []}
+          class={"text-xs italic #{if @dark, do: "text-neutral-600", else: "text-neutral-400"}"}
+        >
           Waiting for output...
         </div>
         <.pane_block :for={block <- @blocks} block={block} dark={@dark} />
@@ -185,6 +218,63 @@ defmodule TermDiffWeb.AgentComponents do
     """
   end
 
+  # ── decision_tree_modal ─────────────────────────────────
+
+  attr :tree_data, :map, required: true
+  attr :run_id, :integer, required: true
+  attr :dark_mode, :boolean, default: false
+
+  def decision_tree_modal(assigns) do
+    ~H"""
+    <div
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      phx-click="close_decision_tree"
+    >
+      <div
+        class={"w-[600px] max-h-[80vh] rounded-lg shadow-xl overflow-hidden flex flex-col #{if @dark_mode, do: "bg-neutral-800 text-neutral-100", else: "bg-white text-neutral-900"}"}
+        phx-click-away="close_decision_tree"
+      >
+        <div class={"flex items-center justify-between px-4 py-3 border-b #{if @dark_mode, do: "border-neutral-700", else: "border-neutral-200"}"}>
+          <span class="text-sm font-semibold">Decision Tree - Run #{@run_id}</span>
+          <button
+            phx-click="close_decision_tree"
+            class="text-neutral-400 hover:text-neutral-200 text-sm"
+          >
+            x
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4">
+          <.tree_node node={@tree_data} dark_mode={@dark_mode} depth={0} />
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp tree_node(assigns) do
+    assigns = assign_new(assigns, :depth, fn -> 0 end)
+
+    ~H"""
+    <div style={"margin-left: #{@depth * 16}px"} class="mb-2">
+      <div class={"flex items-center gap-2 px-2 py-1.5 rounded text-xs #{if @dark_mode, do: "bg-neutral-700/50", else: "bg-neutral-100"}"}>
+        <span class="font-mono text-[10px] text-neutral-400">#{@node.id}</span>
+        <span class="font-medium">{@node.title}</span>
+        <span :if={@node[:status] && @node[:status] != ""} class="text-[10px] text-neutral-400">
+          {@node.status}
+        </span>
+      </div>
+      <div :if={@node[:children] && @node[:children] != []} class="mt-1">
+        <.tree_node
+          :for={child <- @node.children}
+          node={child}
+          dark_mode={@dark_mode}
+          depth={@depth + 1}
+        />
+      </div>
+    </div>
+    """
+  end
+
   # ── Private: pane block rendering (compact for splits) ──
 
   defp pane_block(%{block: %{type: :system}} = assigns) do
@@ -216,13 +306,24 @@ defmodule TermDiffWeb.AgentComponents do
     ~H"""
     <div class="border border-neutral-700 rounded overflow-hidden my-1">
       <div class="flex items-center gap-1.5 px-2 py-1 text-xs bg-neutral-800">
-        <span class="font-mono text-[10px] text-neutral-400 bg-neutral-700 px-1 py-0.5 rounded">{@block.tool_name}</span>
-        <span class="text-neutral-500 truncate flex-1 text-[10px] font-mono">{tool_summary(@block)}</span>
+        <span class="font-mono text-[10px] text-neutral-400 bg-neutral-700 px-1 py-0.5 rounded">
+          {@block.tool_name}
+        </span>
+        <span class="text-neutral-500 truncate flex-1 text-[10px] font-mono">
+          {tool_summary(@block)}
+        </span>
         <span :if={@block.result == nil} class="text-amber-400 text-[10px] animate-pulse">...</span>
-        <span :if={@block.result != nil && @block.is_error} class="text-red-400 text-[10px]">err</span>
-        <span :if={@block.result != nil && !@block.is_error} class="text-green-400 text-[10px]">ok</span>
+        <span :if={@block.result != nil && @block.is_error} class="text-red-400 text-[10px]">
+          err
+        </span>
+        <span :if={@block.result != nil && !@block.is_error} class="text-green-400 text-[10px]">
+          ok
+        </span>
       </div>
-      <div :if={@block.result} class="px-2 py-1 text-[10px] font-mono text-neutral-400 max-h-24 overflow-y-auto">
+      <div
+        :if={@block.result}
+        class="px-2 py-1 text-[10px] font-mono text-neutral-400 max-h-24 overflow-y-auto"
+      >
         <pre class="whitespace-pre-wrap break-all">{tool_result_content(@block)}</pre>
       </div>
     </div>
@@ -233,13 +334,24 @@ defmodule TermDiffWeb.AgentComponents do
     ~H"""
     <div class="border border-neutral-200 rounded overflow-hidden my-1">
       <div class="flex items-center gap-1.5 px-2 py-1 text-xs bg-neutral-50">
-        <span class="font-mono text-[10px] text-neutral-500 bg-neutral-200 px-1 py-0.5 rounded">{@block.tool_name}</span>
-        <span class="text-neutral-400 truncate flex-1 text-[10px] font-mono">{tool_summary(@block)}</span>
+        <span class="font-mono text-[10px] text-neutral-500 bg-neutral-200 px-1 py-0.5 rounded">
+          {@block.tool_name}
+        </span>
+        <span class="text-neutral-400 truncate flex-1 text-[10px] font-mono">
+          {tool_summary(@block)}
+        </span>
         <span :if={@block.result == nil} class="text-amber-500 text-[10px] animate-pulse">...</span>
-        <span :if={@block.result != nil && @block.is_error} class="text-red-500 text-[10px]">err</span>
-        <span :if={@block.result != nil && !@block.is_error} class="text-green-500 text-[10px]">ok</span>
+        <span :if={@block.result != nil && @block.is_error} class="text-red-500 text-[10px]">
+          err
+        </span>
+        <span :if={@block.result != nil && !@block.is_error} class="text-green-500 text-[10px]">
+          ok
+        </span>
       </div>
-      <div :if={@block.result} class="px-2 py-1 text-[10px] font-mono text-neutral-500 max-h-24 overflow-y-auto">
+      <div
+        :if={@block.result}
+        class="px-2 py-1 text-[10px] font-mono text-neutral-500 max-h-24 overflow-y-auto"
+      >
         <pre class="whitespace-pre-wrap break-all">{tool_result_content(@block)}</pre>
       </div>
     </div>
@@ -281,8 +393,12 @@ defmodule TermDiffWeb.AgentComponents do
     <div class="border border-amber-600/50 rounded overflow-hidden my-2 bg-amber-900/20">
       <div class="flex items-center gap-2 px-3 py-2 text-xs">
         <span class="text-amber-400 font-semibold">Permission</span>
-        <span class="font-mono text-[10px] text-neutral-400 bg-neutral-700 px-1 py-0.5 rounded">{@block.tool_name}</span>
-        <span class="text-neutral-500 truncate flex-1 text-[10px] font-mono">{tool_summary(@block)}</span>
+        <span class="font-mono text-[10px] text-neutral-400 bg-neutral-700 px-1 py-0.5 rounded">
+          {@block.tool_name}
+        </span>
+        <span class="text-neutral-500 truncate flex-1 text-[10px] font-mono">
+          {tool_summary(@block)}
+        </span>
       </div>
       <div class="flex gap-2 px-3 py-2 border-t border-amber-600/30">
         <button
@@ -311,8 +427,12 @@ defmodule TermDiffWeb.AgentComponents do
     <div class="border border-amber-300 rounded overflow-hidden my-2 bg-amber-50">
       <div class="flex items-center gap-2 px-3 py-2 text-xs">
         <span class="text-amber-600 font-semibold">Permission</span>
-        <span class="font-mono text-[10px] text-neutral-500 bg-neutral-200 px-1 py-0.5 rounded">{@block.tool_name}</span>
-        <span class="text-neutral-400 truncate flex-1 text-[10px] font-mono">{tool_summary(@block)}</span>
+        <span class="font-mono text-[10px] text-neutral-500 bg-neutral-200 px-1 py-0.5 rounded">
+          {@block.tool_name}
+        </span>
+        <span class="text-neutral-400 truncate flex-1 text-[10px] font-mono">
+          {tool_summary(@block)}
+        </span>
       </div>
       <div class="flex gap-2 px-3 py-2 border-t border-amber-200">
         <button
@@ -377,13 +497,20 @@ defmodule TermDiffWeb.AgentComponents do
     ~H"""
     <div class="border border-neutral-200 rounded-lg overflow-hidden">
       <div class="flex items-center gap-2 px-3 py-2 text-sm bg-neutral-50">
-        <span class="font-mono text-xs text-neutral-500 bg-neutral-200 px-1.5 py-0.5 rounded">{@block.tool_name}</span>
+        <span class="font-mono text-xs text-neutral-500 bg-neutral-200 px-1.5 py-0.5 rounded">
+          {@block.tool_name}
+        </span>
         <span class="text-neutral-400 truncate flex-1 text-xs font-mono">{tool_summary(@block)}</span>
         <span :if={@block.result == nil} class="text-amber-500 text-xs">running...</span>
         <span :if={@block.result != nil && @block.is_error} class="text-red-500 text-xs">error</span>
-        <span :if={@block.result != nil && !@block.is_error} class="text-green-500 text-xs">done</span>
+        <span :if={@block.result != nil && !@block.is_error} class="text-green-500 text-xs">
+          done
+        </span>
       </div>
-      <div :if={@block.result} class="px-3 py-2 text-xs font-mono text-neutral-600 max-h-48 overflow-y-auto bg-white">
+      <div
+        :if={@block.result}
+        class="px-3 py-2 text-xs font-mono text-neutral-600 max-h-48 overflow-y-auto bg-white"
+      >
         <pre class="whitespace-pre-wrap break-all">{tool_result_content(@block)}</pre>
       </div>
     </div>

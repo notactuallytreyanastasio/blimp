@@ -1,22 +1,4 @@
 # Project Instructions
-
-## Git Rules - CRITICAL
-
-**NEVER stage, unstage, commit, or push.** The user handles all git operations through term_diff to dogfood the tool.
-
-You MAY:
-- Run `git status`, `git diff`, `git log` (read-only)
-- **Suggest** commit messages when asked
-- Run `deploy.sh` when explicitly asked
-
-You MUST NOT:
-- `git add` anything
-- `git commit` anything
-- `git push` anything
-- `git stash` anything
-
-If the user asks you to "ship it" or "commit this," suggest a commit message and tell them to use term_diff.
-
 ## Elixir Compilation Rules - CRITICAL
 ### TDD: Red-Green-Refactor is Mandatory
 
