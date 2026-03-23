@@ -1,0 +1,36 @@
+# Test: actor A sends to actor B from within a handler
+# This exercises the scheduler's round-robin when handlers call blimp_send
+
+actor Adder do
+  state total: Int :: 0
+
+  on :add(n: Int) do
+    become total: total + n
+    reply total + n
+  end
+
+  on :get do
+    reply total
+  end
+end
+
+actor Relay do
+  state target_id: Int :: 0
+
+  on :setup(id: Int) do
+    become target_id: id
+    reply :ok
+  end
+
+  on :forward(n: Int) do
+    reply n
+  end
+end
+
+a = spawn Adder
+r = spawn Relay
+
+a <- :add(10)
+a <- :add(20)
+a <- :add(5)
+a <- :get

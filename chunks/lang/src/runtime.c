@@ -79,6 +79,13 @@ typedef struct {
     int param_count;
 } HandlerEntry;
 
+// Actor status
+typedef enum {
+    ACTOR_IDLE,       // No pending messages
+    ACTOR_RUNNABLE,   // Has messages, waiting for scheduler
+    ACTOR_RUNNING,    // Currently executing a handler
+} ActorStatus;
+
 // Actor instance
 typedef struct {
     void *state_ptr;
@@ -86,11 +93,41 @@ typedef struct {
     int handler_count;
     Mailbox mailbox;
     int id;
+    ActorStatus status;
+    int in_run_queue;
+    int is_processing;
 } Actor;
 
 // Global registry
 static Actor actors[MAX_ACTORS];
 static int actor_count = 0;
+static int current_actor_id = -1;
+
+// ── Run Queue (FIFO) ────────────────────────────────────
+
+#define RUN_QUEUE_CAPACITY 256
+
+static struct {
+    int ids[RUN_QUEUE_CAPACITY];
+    int head;
+    int tail;
+    int count;
+} run_queue = {0};
+
+static void run_queue_enqueue(int actor_id) {
+    if (run_queue.count >= RUN_QUEUE_CAPACITY) return;
+    run_queue.ids[run_queue.head] = actor_id;
+    run_queue.head = (run_queue.head + 1) % RUN_QUEUE_CAPACITY;
+    run_queue.count++;
+}
+
+static int run_queue_dequeue(void) {
+    if (run_queue.count == 0) return -1;
+    int id = run_queue.ids[run_queue.tail];
+    run_queue.tail = (run_queue.tail + 1) % RUN_QUEUE_CAPACITY;
+    run_queue.count--;
+    return id;
+}
 
 // ── Internal: process one message ────────────────────────
 
@@ -180,6 +217,9 @@ int blimp_register_actor(void *state_ptr) {
     actors[id].handler_count = 0;
     memset(&actors[id].mailbox, 0, sizeof(Mailbox));
     actors[id].id = id;
+    actors[id].status = ACTOR_IDLE;
+    actors[id].in_run_queue = 0;
+    actors[id].is_processing = 0;
     return id;
 }
 
@@ -191,18 +231,68 @@ void blimp_set_handlers(int actor_id, void *handler_table, int count) {
     actors[actor_id].handler_count = count;
 }
 
-// Send a message and wait for the reply (synchronous send-and-receive).
+// ── Scheduler ────────────────────────────────────────────
+
+// One round-robin pass: process one message per runnable actor.
+// Returns number of messages processed.
+static int scheduler_step(void) {
+    int processed = 0;
+    int queue_size = run_queue.count;
+
+    for (int i = 0; i < queue_size; i++) {
+        int aid = run_queue_dequeue();
+        if (aid < 0) break;
+
+        Actor *a = &actors[aid];
+
+        // Skip actors that are already executing a handler
+        // (their handler called blimp_send which re-entered the scheduler)
+        if (a->is_processing) {
+            // Put it back, it's still runnable
+            run_queue_enqueue(aid);
+            a->in_run_queue = 1;
+            continue;
+        }
+
+        Message *msg = mailbox_peek(&a->mailbox);
+        if (msg && !msg->reply_ready) {
+            a->status = ACTOR_RUNNING;
+            a->is_processing = 1;
+            int prev_actor = current_actor_id;
+            current_actor_id = aid;
+
+            long long result = dispatch_message(a, msg);
+            msg->reply_value = result;
+            msg->reply_ready = 1;
+            mailbox_dequeue(&a->mailbox);
+
+            current_actor_id = prev_actor;
+            a->is_processing = 0;
+            a->status = ACTOR_IDLE;
+            processed++;
+        }
+
+        // Re-enqueue if still has messages
+        if (a->mailbox.count > 0) {
+            run_queue_enqueue(aid);
+            a->in_run_queue = 1;
+            a->status = ACTOR_RUNNABLE;
+        } else {
+            a->in_run_queue = 0;
+        }
+    }
+
+    return processed;
+}
+
+// Send a message and wait for the reply.
 // This is what `target <- :msg(args)` compiles to.
 //
 // The flow:
 //   1. Enqueue message into target's mailbox
-//   2. Process the target's mailbox (run the handler)
-//   3. Return the reply value
-//
-// In a future multi-threaded runtime, step 2 would be done by the
-// scheduler on the target's thread, and the sender would spin/park
-// on reply_ready. For now, we process inline to avoid deadlocks
-// on a single thread.
+//   2. If self-send, process inline (avoid deadlock)
+//   3. Otherwise, pump the scheduler round-robin until reply is ready
+//   4. Return the reply value
 long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long *args) {
     Actor *actor = &actors[actor_id];
 
@@ -216,17 +306,36 @@ long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long
         msg->args[i] = args[i];
     }
 
-    // Process immediately (single-threaded scheduler)
-    Message *pending = mailbox_peek(&actor->mailbox);
-    if (pending) {
-        long long result = dispatch_message(actor, pending);
-        pending->reply_value = result;
-        pending->reply_ready = 1;
+    // Self-send: process inline to avoid deadlock
+    // (the scheduler would skip us because is_processing == 1)
+    if (actor_id == current_actor_id) {
+        long long result = dispatch_message(actor, msg);
+        msg->reply_value = result;
+        msg->reply_ready = 1;
         mailbox_dequeue(&actor->mailbox);
         return result;
     }
 
-    return 0;
+    // Mark target as runnable
+    if (actor->status == ACTOR_IDLE) {
+        actor->status = ACTOR_RUNNABLE;
+    }
+    if (!actor->in_run_queue) {
+        run_queue_enqueue(actor_id);
+        actor->in_run_queue = 1;
+    }
+
+    // Pump the scheduler until our message gets a reply
+    while (!msg->reply_ready) {
+        int progress = scheduler_step();
+        if (progress == 0 && !msg->reply_ready) {
+            fprintf(stderr, "blimp: deadlock - actor %d waiting for reply from actor %d\n",
+                    current_actor_id, actor_id);
+            return 0;
+        }
+    }
+
+    return msg->reply_value;
 }
 
 void *blimp_get_state(int actor_id) {
@@ -239,20 +348,19 @@ int blimp_actor_count(void) {
 
 // Scheduler: drain all pending messages across all actors.
 // Called at the end of main() to process any remaining async work.
-// Round-robin: process one message per actor per pass until all empty.
 void blimp_scheduler_run(void) {
-    int active = 1;
-    while (active) {
-        active = 0;
-        for (int i = 0; i < actor_count; i++) {
-            Message *msg = mailbox_peek(&actors[i].mailbox);
-            if (msg && !msg->reply_ready) {
-                long long result = dispatch_message(&actors[i], msg);
-                msg->reply_value = result;
-                msg->reply_ready = 1;
-                mailbox_dequeue(&actors[i].mailbox);
-                active = 1;
-            }
+    // Seed run queue with any actors that have pending messages
+    for (int i = 0; i < actor_count; i++) {
+        if (actors[i].mailbox.count > 0 && !actors[i].in_run_queue) {
+            run_queue_enqueue(i);
+            actors[i].in_run_queue = 1;
+            actors[i].status = ACTOR_RUNNABLE;
         }
+    }
+
+    // Drain until all quiet
+    while (run_queue.count > 0) {
+        int processed = scheduler_step();
+        if (processed == 0) break;
     }
 }

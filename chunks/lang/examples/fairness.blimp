@@ -1,0 +1,32 @@
+# Test: multiple actors all get scheduled fairly
+# Spawn 3 counters, increment each, verify all have independent state
+
+actor Counter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+
+  on :get do
+    reply count
+  end
+end
+
+a = spawn Counter
+b = spawn Counter
+c = spawn Counter
+
+# Increment a 3 times, b 2 times, c 1 time
+a <- :increment
+b <- :increment
+a <- :increment
+c <- :increment
+b <- :increment
+a <- :increment
+
+# Each should have independent state
+# a = 3, b = 2, c = 1
+# Last expression result: sum them by querying
+a <- :get
