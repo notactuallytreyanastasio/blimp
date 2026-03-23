@@ -18,7 +18,11 @@ defmodule TermDiffWeb.DiffLiveTest do
     System.cmd("git", ["commit", "-m", "initial commit with alpha and beta"], cd: tmp_dir)
 
     # Create unstaged changes in alpha
-    File.write!(Path.join(tmp_dir, "alpha.ex"), "defmodule Alpha do\n  def hello, do: :world\nend")
+    File.write!(
+      Path.join(tmp_dir, "alpha.ex"),
+      "defmodule Alpha do\n  def hello, do: :world\nend"
+    )
+
     # Create a new untracked file
     File.write!(Path.join(tmp_dir, "gamma.ex"), "defmodule Gamma, do: nil")
 
@@ -117,7 +121,8 @@ defmodule TermDiffWeb.DiffLiveTest do
       html = render_keydown(view, "keydown", %{"key" => "s"})
 
       # Should show S indicator for staged file
-      assert html =~ ">S<"
+      assert html =~ "font-semibold w-3"
+      assert html =~ ~r/font-semibold w-3">\s*S\s*<\/span>/
     end
 
     test "s then u stages then unstages", %{conn: conn, repo: repo} do

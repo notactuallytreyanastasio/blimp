@@ -48,7 +48,9 @@ defmodule TermDiffWeb.AgentRunLive do
       <div class="flex flex-1 overflow-hidden">
         <%!-- Left: metadata --%>
         <div class="w-80 border-r border-neutral-200 overflow-y-auto p-4 bg-neutral-50 shrink-0">
-          <a href="/agents" class="text-blue-600 text-xs hover:underline mb-4 block">Back to Agents</a>
+          <a href="/agents" class="text-blue-600 text-xs hover:underline mb-4 block">
+            Back to Agents
+          </a>
 
           <h2 class="text-lg font-semibold text-neutral-800 mb-4">Run #{@run.id}</h2>
 
@@ -57,7 +59,11 @@ defmodule TermDiffWeb.AgentRunLive do
             <.meta_row label="Agent" value={@run.agent_type} />
             <.meta_row :if={@run.model} label="Model" value={@run.model} />
             <.meta_row :if={@run.exit_code} label="Exit code" value={to_string(@run.exit_code)} />
-            <.meta_row :if={@run.total_tokens > 0} label="Tokens" value={to_string(@run.total_tokens)} />
+            <.meta_row
+              :if={@run.total_tokens > 0}
+              label="Tokens"
+              value={to_string(@run.total_tokens)}
+            />
 
             <div>
               <div class="text-xs text-neutral-400 font-semibold uppercase mb-1">Prompt</div>

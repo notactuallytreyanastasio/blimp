@@ -5,17 +5,17 @@ defmodule TermDiff.Commentary.ParserTest do
   alias TermDiff.Commentary.{Annotation, ReviewResult}
 
   @valid_json Jason.encode!(%{
-    "summary" => "Added a new module",
-    "annotations" => [
-      %{
-        "file" => "lib/foo.ex",
-        "start_line" => 10,
-        "end_line" => 12,
-        "comment" => "Missing error handling",
-        "severity" => "warning"
-      }
-    ]
-  })
+                "summary" => "Added a new module",
+                "annotations" => [
+                  %{
+                    "file" => "lib/foo.ex",
+                    "start_line" => 10,
+                    "end_line" => 12,
+                    "comment" => "Missing error handling",
+                    "severity" => "warning"
+                  }
+                ]
+              })
 
   describe "parse_response/1" do
     test "parses valid JSON into ReviewResult" do
@@ -36,13 +36,26 @@ defmodule TermDiff.Commentary.ParserTest do
     end
 
     test "annotations get unique IDs" do
-      json = Jason.encode!(%{
-        "summary" => "test",
-        "annotations" => [
-          %{"file" => "a.ex", "start_line" => 1, "end_line" => 1, "comment" => "x", "severity" => "info"},
-          %{"file" => "b.ex", "start_line" => 2, "end_line" => 2, "comment" => "y", "severity" => "info"}
-        ]
-      })
+      json =
+        Jason.encode!(%{
+          "summary" => "test",
+          "annotations" => [
+            %{
+              "file" => "a.ex",
+              "start_line" => 1,
+              "end_line" => 1,
+              "comment" => "x",
+              "severity" => "info"
+            },
+            %{
+              "file" => "b.ex",
+              "start_line" => 2,
+              "end_line" => 2,
+              "comment" => "y",
+              "severity" => "info"
+            }
+          ]
+        })
 
       {:ok, result} = Parser.parse_response(json)
       ids = Enum.map(result.annotations, & &1.id)

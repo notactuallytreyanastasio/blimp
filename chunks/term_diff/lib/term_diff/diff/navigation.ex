@@ -133,7 +133,10 @@ defmodule TermDiff.Diff.Navigation do
 
   @spec toggle_log(t()) :: t()
   defp toggle_log(%{focus: :log_view} = nav), do: %{nav | focus: :file_list, log_index: 0}
-  defp toggle_log(%{focus: :log_detail} = nav), do: %{nav | focus: :file_list, log_index: 0, selected_commit: nil}
+
+  defp toggle_log(%{focus: :log_detail} = nav),
+    do: %{nav | focus: :file_list, log_index: 0, selected_commit: nil}
+
   defp toggle_log(nav), do: %{nav | focus: :log_view, log_index: 0}
 
   @spec open_selected(t()) :: t()
@@ -145,16 +148,20 @@ defmodule TermDiff.Diff.Navigation do
 
   @spec stage_selected(t()) :: t()
   defp stage_selected(%{selected_file: nil} = nav), do: nav
+
   defp stage_selected(%{focus: focus} = nav) when focus in [:file_list, :diff_view] do
     %{nav | stage_file: nav.selected_file}
   end
+
   defp stage_selected(nav), do: nav
 
   @spec unstage_selected(t()) :: t()
   defp unstage_selected(%{selected_file: nil} = nav), do: nav
+
   defp unstage_selected(%{focus: focus} = nav) when focus in [:file_list, :diff_view] do
     %{nav | unstage_file: nav.selected_file}
   end
+
   defp unstage_selected(nav), do: nav
 
   @spec clear_open_file(t()) :: t()

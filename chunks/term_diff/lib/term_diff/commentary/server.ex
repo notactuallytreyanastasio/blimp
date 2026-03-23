@@ -66,7 +66,9 @@ defmodule TermDiff.Commentary.Server do
         )
 
       ref = Process.monitor(pid)
-      {:noreply, %{state | current_task_ref: ref, current_task_pid: pid, last_diff_hash: diff_hash}}
+
+      {:noreply,
+       %{state | current_task_ref: ref, current_task_pid: pid, last_diff_hash: diff_hash}}
     end
   end
 

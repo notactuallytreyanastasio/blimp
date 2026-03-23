@@ -67,7 +67,6 @@ defmodule TermDiff.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
-
       {:file_system, "~> 1.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
@@ -93,7 +92,13 @@ defmodule TermDiff.MixProject do
         "esbuild term_diff --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "credo --strict", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "credo --strict",
+        "deps.unlock --unused",
+        "format",
+        "test"
+      ]
     ]
   end
 end

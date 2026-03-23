@@ -201,6 +201,7 @@ defmodule TermDiffWeb.Agent.EventProcessor do
   def append_event(%{"type" => "message_start"}, blocks), do: blocks
   def append_event(%{"type" => "message_stop"}, blocks), do: blocks
   def append_event(%{"type" => "rate_limit_event"}, blocks), do: blocks
+
   def append_event(%{"type" => "permission_request"} = event, blocks) do
     tool_use_id = Map.get(event, "tool_use_id", "perm-#{System.unique_integer([:positive])}")
 

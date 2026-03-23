@@ -16,7 +16,13 @@ defmodule TermDiff.Git.StatusTest do
     end
 
     test "parses untracked file" do
-      assert [%FileEntry{path: "tmp/debug.log", staged_status: :untracked, unstaged_status: :untracked}] =
+      assert [
+               %FileEntry{
+                 path: "tmp/debug.log",
+                 staged_status: :untracked,
+                 unstaged_status: :untracked
+               }
+             ] =
                Status.parse("?? tmp/debug.log")
     end
 
@@ -26,7 +32,13 @@ defmodule TermDiff.Git.StatusTest do
     end
 
     test "parses both staged and unstaged modifications" do
-      assert [%FileEntry{path: "lib/app.ex", staged_status: :modified, unstaged_status: :modified}] =
+      assert [
+               %FileEntry{
+                 path: "lib/app.ex",
+                 staged_status: :modified,
+                 unstaged_status: :modified
+               }
+             ] =
                Status.parse("MM lib/app.ex")
     end
 

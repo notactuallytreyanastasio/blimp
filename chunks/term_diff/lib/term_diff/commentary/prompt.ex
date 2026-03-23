@@ -5,26 +5,29 @@ defmodule TermDiff.Commentary.Prompt do
   """
 
   @review_schema Jason.encode!(%{
-    "type" => "object",
-    "required" => ["summary", "annotations"],
-    "properties" => %{
-      "summary" => %{"type" => "string"},
-      "annotations" => %{
-        "type" => "array",
-        "items" => %{
-          "type" => "object",
-          "required" => ["file", "start_line", "end_line", "comment", "severity"],
-          "properties" => %{
-            "file" => %{"type" => "string"},
-            "start_line" => %{"type" => "integer"},
-            "end_line" => %{"type" => "integer"},
-            "comment" => %{"type" => "string"},
-            "severity" => %{"type" => "string", "enum" => ["info", "warning", "issue"]}
-          }
-        }
-      }
-    }
-  })
+                   "type" => "object",
+                   "required" => ["summary", "annotations"],
+                   "properties" => %{
+                     "summary" => %{"type" => "string"},
+                     "annotations" => %{
+                       "type" => "array",
+                       "items" => %{
+                         "type" => "object",
+                         "required" => ["file", "start_line", "end_line", "comment", "severity"],
+                         "properties" => %{
+                           "file" => %{"type" => "string"},
+                           "start_line" => %{"type" => "integer"},
+                           "end_line" => %{"type" => "integer"},
+                           "comment" => %{"type" => "string"},
+                           "severity" => %{
+                             "type" => "string",
+                             "enum" => ["info", "warning", "issue"]
+                           }
+                         }
+                       }
+                     }
+                   }
+                 })
 
   @spec json_schema() :: String.t()
   def json_schema, do: @review_schema

@@ -118,7 +118,8 @@ defmodule TermDiffWeb.ReplLive do
     {lines, remaining} = split_lines(combined)
 
     {history, state_vars} =
-      Enum.reduce(lines, {socket.assigns.history, socket.assigns.state_vars}, fn line, {hist, vars} ->
+      Enum.reduce(lines, {socket.assigns.history, socket.assigns.state_vars}, fn line,
+                                                                                 {hist, vars} ->
         parse_repl_line(line, hist, vars)
       end)
 
@@ -162,7 +163,10 @@ defmodule TermDiffWeb.ReplLive do
 
       assign(socket, :port, port)
     else
-      history = [%{type: :error, text: "blimp binary not found. Build with: cd chunks/lang && zig build"}]
+      history = [
+        %{type: :error, text: "blimp binary not found. Build with: cd chunks/lang && zig build"}
+      ]
+
       assign(socket, :history, history)
     end
   end
@@ -191,15 +195,22 @@ defmodule TermDiffWeb.ReplLive do
   defp parse_repl_line(line, history, state_vars) do
     cond do
       # Skip prompt lines
-      String.starts_with?(line, "blimp> ") -> {history, state_vars}
-      String.starts_with?(line, "blimp>") -> {history, state_vars}
+      String.starts_with?(line, "blimp> ") ->
+        {history, state_vars}
+
+      String.starts_with?(line, "blimp>") ->
+        {history, state_vars}
 
       # Skip banner
-      String.starts_with?(line, "Blimp REPL") -> {history, state_vars}
+      String.starts_with?(line, "Blimp REPL") ->
+        {history, state_vars}
 
       # State sidebar: header/footer
-      String.contains?(line, "┌─ state") -> {history, state_vars}
-      String.contains?(line, "└─") -> {history, state_vars}
+      String.contains?(line, "┌─ state") ->
+        {history, state_vars}
+
+      String.contains?(line, "└─") ->
+        {history, state_vars}
 
       # State sidebar: variable line "  │ name = value"
       String.contains?(line, "│") ->

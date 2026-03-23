@@ -9,7 +9,8 @@ defmodule TermDiff.Commentary.Supervisor do
 
   @impl true
   def init(opts) do
-    repo_path = Keyword.get(opts, :repo_path, Application.get_env(:term_diff, :repo_path, File.cwd!()))
+    repo_path =
+      Keyword.get(opts, :repo_path, Application.get_env(:term_diff, :repo_path, File.cwd!()))
 
     children = [
       TermDiff.Commentary.Store,

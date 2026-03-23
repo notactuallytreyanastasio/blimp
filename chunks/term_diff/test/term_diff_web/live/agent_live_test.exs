@@ -32,8 +32,11 @@ defmodule TermDiffWeb.AgentLiveTest do
     end
 
     test "opens multiple panes", %{conn: conn} do
-      {:ok, run1} = Runs.create_run(%{agent_type: "claude-code", prompt: "first", status: "succeeded"})
-      {:ok, run2} = Runs.create_run(%{agent_type: "claude-code", prompt: "second", status: "succeeded"})
+      {:ok, run1} =
+        Runs.create_run(%{agent_type: "claude-code", prompt: "first", status: "succeeded"})
+
+      {:ok, run2} =
+        Runs.create_run(%{agent_type: "claude-code", prompt: "second", status: "succeeded"})
 
       {:ok, _view, html} = live(conn, "/agents?panes=#{run1.id},#{run2.id}")
 

@@ -245,8 +245,11 @@ defmodule TermDiff.Agent.Runner.ClaudeCode do
 
     app_root =
       case File.read_link(priv) do
-        {:ok, target} -> priv |> Path.dirname() |> Path.join(target) |> Path.expand() |> Path.dirname()
-        {:error, _} -> Path.dirname(priv)
+        {:ok, target} ->
+          priv |> Path.dirname() |> Path.join(target) |> Path.expand() |> Path.dirname()
+
+        {:error, _} ->
+          Path.dirname(priv)
       end
 
     Path.join(app_root, "scripts/claude-agent-wrapper.mjs")

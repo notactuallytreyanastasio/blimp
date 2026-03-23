@@ -71,6 +71,7 @@ defmodule TermDiff.Diff.FileState do
   @primary_key false
   embedded_schema do
     field :path, :string
+
     field :status, Ecto.Enum,
       values: [
         :untracked,
@@ -94,7 +95,8 @@ defmodule TermDiff.Diff.FileState do
           | :staged_deleted
           | :staged_renamed
 
-  @type command :: {:add, String.t()} | {:rm_cached, String.t()} | {:restore_staged, String.t()} | :noop
+  @type command ::
+          {:add, String.t()} | {:rm_cached, String.t()} | {:restore_staged, String.t()} | :noop
 
   @type t :: %__MODULE__{path: String.t(), status: status()}
 
@@ -108,7 +110,8 @@ defmodule TermDiff.Diff.FileState do
   end
 
   @spec stage_command(t()) :: command()
-  def stage_command(%{status: status, path: path}) when status in [:untracked, :unstaged_modified, :unstaged_deleted, :partial_modified] do
+  def stage_command(%{status: status, path: path})
+      when status in [:untracked, :unstaged_modified, :unstaged_deleted, :partial_modified] do
     {:add, path}
   end
 
@@ -117,17 +120,20 @@ defmodule TermDiff.Diff.FileState do
   @spec unstage_command(t()) :: command()
   def unstage_command(%{status: :staged_new, path: path}), do: {:rm_cached, path}
 
-  def unstage_command(%{status: status, path: path}) when status in [:staged_modified, :staged_deleted, :staged_renamed, :partial_modified] do
+  def unstage_command(%{status: status, path: path})
+      when status in [:staged_modified, :staged_deleted, :staged_renamed, :partial_modified] do
     {:restore_staged, path}
   end
 
   def unstage_command(_), do: :noop
 
   @spec stageable?(t()) :: boolean()
-  def stageable?(%{status: s}), do: s in [:untracked, :unstaged_modified, :unstaged_deleted, :partial_modified]
+  def stageable?(%{status: s}),
+    do: s in [:untracked, :unstaged_modified, :unstaged_deleted, :partial_modified]
 
   @spec unstageable?(t()) :: boolean()
-  def unstageable?(%{status: s}), do: s in [:staged_new, :staged_modified, :staged_deleted, :staged_renamed, :partial_modified]
+  def unstageable?(%{status: s}),
+    do: s in [:staged_new, :staged_modified, :staged_deleted, :staged_renamed, :partial_modified]
 
   # ── Porcelain parsing ──
 

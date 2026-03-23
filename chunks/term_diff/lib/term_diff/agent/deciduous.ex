@@ -106,6 +106,7 @@ defmodule TermDiff.Agent.Deciduous do
     case Regex.run(~r/#(\d+):\s+(.+)/, line) do
       [_, id_str, title] ->
         %{id: String.to_integer(id_str), title: String.trim(title)}
+
       _ ->
         nil
     end

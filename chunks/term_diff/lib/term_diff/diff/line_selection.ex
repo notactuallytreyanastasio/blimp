@@ -12,7 +12,12 @@ defmodule TermDiff.Diff.LineSelection do
 
   @spec start(t(), String.t(), non_neg_integer()) :: t()
   def start(_sel, file_path, line_number) do
-    %__MODULE__{file_path: file_path, anchor_line: line_number, focus_line: line_number, active: true}
+    %__MODULE__{
+      file_path: file_path,
+      anchor_line: line_number,
+      focus_line: line_number,
+      active: true
+    }
   end
 
   @spec extend(t(), non_neg_integer()) :: t()

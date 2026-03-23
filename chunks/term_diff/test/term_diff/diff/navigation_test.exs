@@ -100,7 +100,6 @@ defmodule TermDiff.Diff.NavigationTest do
       result = Navigation.handle_key(nav, "u")
       assert result.unstage_file == nil
     end
-
   end
 
   describe "sync_to_files/2" do

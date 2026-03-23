@@ -43,13 +43,27 @@ defmodule TermDiffWeb.DiffLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div id="term-diff" phx-hook="KeyNav" class="h-screen flex flex-col font-mono text-[13px] leading-snug bg-white text-neutral-900">
+    <div
+      id="term-diff"
+      phx-hook="KeyNav"
+      class="h-screen flex flex-col font-mono text-[13px] leading-snug bg-white text-neutral-900"
+    >
       <AgentComponents.nav_bar active_page={:diffs} />
-      <.status_bar repo_state={@repo_state} nav={@nav} repo_path={@repo_path} commentary_status={@commentary_status} />
+      <.status_bar
+        repo_state={@repo_state}
+        nav={@nav}
+        repo_path={@repo_path}
+        commentary_status={@commentary_status}
+      />
       <.keybinding_bar nav={@nav} />
 
       <div class="flex flex-1 overflow-hidden">
-        <.commit_layout :if={CommitState.active?(@commit)} commit={@commit} repo_state={@repo_state} amend_diff={@amend_diff} />
+        <.commit_layout
+          :if={CommitState.active?(@commit)}
+          commit={@commit}
+          repo_state={@repo_state}
+          amend_diff={@amend_diff}
+        />
         <.log_layout
           :if={!CommitState.active?(@commit) && @nav.focus in [:log_view, :log_detail]}
           nav={@nav}
@@ -124,7 +138,8 @@ defmodule TermDiffWeb.DiffLive do
   def handle_event("keydown", %{"key" => "Escape"}, socket) do
     cond do
       socket.assigns.line_selection.active ->
-        {:noreply, assign(socket, :line_selection, LineSelection.clear(socket.assigns.line_selection))}
+        {:noreply,
+         assign(socket, :line_selection, LineSelection.clear(socket.assigns.line_selection))}
 
       CommitState.active?(socket.assigns.commit) ->
         socket =
@@ -140,7 +155,8 @@ defmodule TermDiffWeb.DiffLive do
   end
 
   @impl true
-  def handle_event("keydown", _params, socket) when socket.assigns.commit.phase in [:editing, :submitting] do
+  def handle_event("keydown", _params, socket)
+      when socket.assigns.commit.phase in [:editing, :submitting] do
     {:noreply, socket}
   end
 
@@ -233,7 +249,8 @@ defmodule TermDiffWeb.DiffLive do
 
   @impl true
   def handle_event("clear_selection", _params, socket) do
-    {:noreply, assign(socket, :line_selection, LineSelection.clear(socket.assigns.line_selection))}
+    {:noreply,
+     assign(socket, :line_selection, LineSelection.clear(socket.assigns.line_selection))}
   end
 
   @impl true
@@ -446,7 +463,10 @@ defmodule TermDiffWeb.DiffLive do
 
       nav.focus in [:file_list, :diff_view] ->
         selected_file = select_file_for_nav(socket.assigns.repo_state.files, nav)
-        selected_diff = if selected_file, do: Map.get(socket.assigns.repo_state.diffs, selected_file)
+
+        selected_diff =
+          if selected_file, do: Map.get(socket.assigns.repo_state.diffs, selected_file)
+
         hunk_count = if selected_diff, do: length(selected_diff.hunks), else: 0
         nav = %{nav | selected_file: selected_file, hunk_count: hunk_count}
 
@@ -701,7 +721,11 @@ defmodule TermDiffWeb.DiffLive do
         <div class="text-xs text-neutral-500 mb-2 font-semibold">
           {if @commit.mode == :amend, do: "AMEND COMMIT", else: "COMMIT MESSAGE"}
         </div>
-        <form phx-submit="submit_commit" phx-change="update_commit_message" class="flex flex-col flex-1">
+        <form
+          phx-submit="submit_commit"
+          phx-change="update_commit_message"
+          class="flex flex-col flex-1"
+        >
           <textarea
             name="message"
             placeholder="First line: concise summary&#10;&#10;Body: explain WHY, not just WHAT changed."
@@ -713,10 +737,17 @@ defmodule TermDiffWeb.DiffLive do
               <span>{length(@repo_state.files)} files</span>
             </div>
             <div class="flex gap-2">
-              <button type="button" phx-click="cancel_commit" class="px-3 py-1 text-xs border border-neutral-300 rounded hover:bg-neutral-100">
+              <button
+                type="button"
+                phx-click="cancel_commit"
+                class="px-3 py-1 text-xs border border-neutral-300 rounded hover:bg-neutral-100"
+              >
                 Cancel (Esc)
               </button>
-              <button type="submit" class="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">
+              <button
+                type="submit"
+                class="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+              >
                 {if @commit.mode == :amend, do: "Amend", else: "Commit"}
               </button>
             </div>
@@ -729,10 +760,16 @@ defmodule TermDiffWeb.DiffLive do
           <div :for={file_diff <- @amend_diff} class="mb-4">
             <div class="text-xs text-neutral-600 font-semibold mb-1">{file_diff.path}</div>
             <div :for={hunk <- file_diff.hunks} class="mb-2">
-              <div class="px-2 py-0.5 text-xs bg-blue-50 text-blue-700 border-y border-neutral-200">{hunk.header}</div>
+              <div class="px-2 py-0.5 text-xs bg-blue-50 text-blue-700 border-y border-neutral-200">
+                {hunk.header}
+              </div>
               <div :for={line <- hunk.lines} class={"flex text-[12px] #{amend_line_class(line)}"}>
-                <span class="w-6 text-right pr-1 text-neutral-300 select-none shrink-0">{line.old_line_number || ""}</span>
-                <span class="w-6 text-right pr-1 text-neutral-300 select-none shrink-0">{line.new_line_number || ""}</span>
+                <span class="w-6 text-right pr-1 text-neutral-300 select-none shrink-0">
+                  {line.old_line_number || ""}
+                </span>
+                <span class="w-6 text-right pr-1 text-neutral-300 select-none shrink-0">
+                  {line.new_line_number || ""}
+                </span>
                 <span class="px-1 whitespace-pre flex-1">{line_prefix(line.type)}{line.content}</span>
               </div>
             </div>
@@ -741,8 +778,15 @@ defmodule TermDiffWeb.DiffLive do
         <div :if={@commit.mode != :amend || @amend_diff == []}>
           <div class="text-xs text-neutral-500 mb-2 font-semibold">STAGED CHANGES</div>
           <div :for={file <- @repo_state.files} class="text-[12px] py-0.5">
-            <span :if={file.staged_status && file.staged_status != :untracked} class={"font-semibold #{status_color(file.staged_status)}"}>{status_char(file.staged_status)}</span>
-            <span :if={file.staged_status && file.staged_status != :untracked} class="ml-2">{file.path}</span>
+            <span
+              :if={file.staged_status && file.staged_status != :untracked}
+              class={"font-semibold #{status_color(file.staged_status)}"}
+            >
+              {status_char(file.staged_status)}
+            </span>
+            <span :if={file.staged_status && file.staged_status != :untracked} class="ml-2">
+              {file.path}
+            </span>
           </div>
         </div>
       </div>
@@ -755,8 +799,17 @@ defmodule TermDiffWeb.DiffLive do
     <div class={"w-80 border-r border-neutral-200 overflow-y-auto p-2 shrink-0 #{pane_glow(@nav.focus == :file_list)}"}>
       <.file_list files={@repo_state.files} nav={@nav} diffs={@repo_state.diffs} />
     </div>
-    <div class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :diff_view)}"} id="diff-pane" phx-hook="AutoScroll">
-      <.diff_pane diff={@selected_diff} nav={@nav} expanded_comments={@expanded_comments} line_selection={@line_selection} />
+    <div
+      class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :diff_view)}"}
+      id="diff-pane"
+      phx-hook="AutoScroll"
+    >
+      <.diff_pane
+        diff={@selected_diff}
+        nav={@nav}
+        expanded_comments={@expanded_comments}
+        line_selection={@line_selection}
+      />
     </div>
     """
   end
@@ -766,16 +819,26 @@ defmodule TermDiffWeb.DiffLive do
     <div :if={@nav.focus == :log_view} class={"flex-1 overflow-y-auto p-2 #{pane_glow(true)}"}>
       <.log_list entries={@log_entries} nav={@nav} />
     </div>
-    <div :if={@nav.focus != :log_view} class={"w-1/2 border-r border-neutral-200 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"}>
+    <div
+      :if={@nav.focus != :log_view}
+      class={"w-1/2 border-r border-neutral-200 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"}
+    >
       <.commit_message detail={@commit_detail} />
     </div>
-    <div :if={@nav.focus != :log_view} class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"} id="diff-pane" phx-hook="AutoScroll">
+    <div
+      :if={@nav.focus != :log_view}
+      class={"flex-1 overflow-y-auto p-2 #{pane_glow(@nav.focus == :log_detail)}"}
+      id="diff-pane"
+      phx-hook="AutoScroll"
+    >
       <.diff_pane diff={@commit_diff} nav={@nav} line_selection={%LineSelection{}} />
     </div>
     """
   end
 
-  defp pane_glow(true), do: "ring-2 ring-green-400/60 ring-inset shadow-[inset_0_0_8px_rgba(74,222,128,0.2)]"
+  defp pane_glow(true),
+    do: "ring-2 ring-green-400/60 ring-inset shadow-[inset_0_0_8px_rgba(74,222,128,0.2)]"
+
   defp pane_glow(false), do: ""
 
   # ── UI Components ──
@@ -789,11 +852,18 @@ defmodule TermDiffWeb.DiffLive do
         <span class="text-neutral-300 truncate max-w-xs">{@repo_path}</span>
       </div>
       <div class="flex gap-4">
-        <span :if={@commentary_status == :reviewing} class="text-amber-600 font-semibold animate-pulse">REVIEWING</span>
+        <span
+          :if={@commentary_status == :reviewing}
+          class="text-amber-600 font-semibold animate-pulse"
+        >
+          REVIEWING
+        </span>
         <span :if={@commentary_status == :ready} class="text-blue-600 font-semibold">AI</span>
         <span :if={@commentary_status == :error} class="text-red-500 font-semibold">AI ERR</span>
         <span :if={@nav.following} class="text-blue-600 font-semibold">FOLLOWING</span>
-        <span :if={@nav.focus in [:log_view, :log_detail]} class="text-purple-600 font-semibold">LOG</span>
+        <span :if={@nav.focus in [:log_view, :log_detail]} class="text-purple-600 font-semibold">
+          LOG
+        </span>
       </div>
     </div>
     """
@@ -827,8 +897,15 @@ defmodule TermDiffWeb.DiffLive do
       data-selected={if idx == @nav.file_index && @nav.focus == :file_list, do: "true"}
       class={"flex items-center gap-2 px-1 py-0.5 cursor-pointer hover:bg-neutral-50 relative #{file_row_class(idx, @nav)}"}
     >
-      <span class={"w-4 text-center font-semibold #{status_color(file.unstaged_status || file.staged_status)}"}>{status_char(file.unstaged_status || file.staged_status)}</span>
-      <span :if={file.staged_status && file.staged_status != :untracked} class="text-green-600 text-[10px] font-semibold w-3">S</span>
+      <span class={"w-4 text-center font-semibold #{status_color(file.unstaged_status || file.staged_status)}"}>
+        {status_char(file.unstaged_status || file.staged_status)}
+      </span>
+      <span
+        :if={file.staged_status && file.staged_status != :untracked}
+        class="text-green-600 text-[10px] font-semibold w-3"
+      >
+        S
+      </span>
       <span :if={!file.staged_status || file.staged_status == :untracked} class="w-3"></span>
       <span class="truncate" title={file.path}>{file.path}</span>
       <span :if={diff = @diffs[file.path]} class="ml-auto text-xs text-neutral-400">
@@ -878,29 +955,40 @@ defmodule TermDiffWeb.DiffLive do
       <div :if={@diff.binary} class="text-neutral-400 px-1">Binary file</div>
       <div :for={{hunk, idx} <- Enum.with_index(@diff.hunks)} class="mb-4">
         <div
-          data-selected={if @nav.focus in [:diff_view, :log_detail] && idx == @nav.hunk_index, do: "true"}
+          data-selected={
+            if @nav.focus in [:diff_view, :log_detail] && idx == @nav.hunk_index, do: "true"
+          }
           class={"px-2 py-1 text-xs border-y border-neutral-200 #{if (@nav.focus == :diff_view || @nav.focus == :log_detail) && idx == @nav.hunk_index, do: "bg-blue-400/5 ring-1 ring-blue-400/40 text-blue-700", else: "bg-blue-50 text-blue-700"}"}
         >
           {hunk.header}
         </div>
         <div :for={line <- hunk.lines}>
           <% line_num = line.new_line_number || line.old_line_number %>
-          <% line_annotations = if line.new_line_number, do: annotations_for_line(@diff.path, line.new_line_number), else: [] %>
+          <% line_annotations =
+            if line.new_line_number,
+              do: annotations_for_line(@diff.path, line.new_line_number),
+              else: [] %>
           <% selected = LineSelection.line_selected?(@line_selection, line_num) %>
           <div
             class={"flex cursor-pointer #{if selected, do: "bg-blue-100 ring-1 ring-blue-300", else: line_class(line, hunk)}"}
             data-line-num={line_num}
             data-file={@diff.path}
           >
-            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">{line.old_line_number || ""}</span>
-            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">{line.new_line_number || ""}</span>
+            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">
+              {line.old_line_number || ""}
+            </span>
+            <span class="w-8 text-right pr-2 text-neutral-300 select-none shrink-0">
+              {line.new_line_number || ""}
+            </span>
             <span
               :if={line_annotations != []}
               phx-click="toggle_comment"
               phx-value-id={hd(line_annotations).id}
               class={"w-4 text-center cursor-pointer shrink-0 #{severity_color_dot(hd(line_annotations).severity)}"}
               title={hd(line_annotations).comment}
-            >{severity_icon(hd(line_annotations).severity)}</span>
+            >
+              {severity_icon(hd(line_annotations).severity)}
+            </span>
             <span :if={line_annotations == []} class="w-4 shrink-0"></span>
             <span class="px-1 whitespace-pre flex-1">{line_prefix(line.type)}{line.content}</span>
           </div>
@@ -960,7 +1048,8 @@ defmodule TermDiffWeb.DiffLive do
   defp amend_line_class(_), do: ""
 
   defp line_class(line, hunk) do
-    hot? = hunk.highlighted_at && DateTime.diff(DateTime.utc_now(), hunk.highlighted_at, :second) < 3
+    hot? =
+      hunk.highlighted_at && DateTime.diff(DateTime.utc_now(), hunk.highlighted_at, :second) < 3
 
     case {line.type, hot?} do
       {:addition, true} -> "bg-green-200"

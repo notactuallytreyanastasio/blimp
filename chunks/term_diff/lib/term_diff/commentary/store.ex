@@ -110,7 +110,11 @@ defmodule TermDiff.Commentary.Store do
     end
 
     :ets.insert(table, {:review_summary, review.summary})
-    :ets.insert(table, {:review_meta, %{status: :idle, diff_hash: review.diff_hash, started_at: nil}})
+
+    :ets.insert(
+      table,
+      {:review_meta, %{status: :idle, diff_hash: review.diff_hash, started_at: nil}}
+    )
 
     {:reply, :ok, state}
   end
@@ -118,6 +122,7 @@ defmodule TermDiff.Commentary.Store do
   @impl true
   def handle_call(:mark_reviewing, _from, %{table: table} = state) do
     update_meta(table, fn meta -> %{meta | status: :reviewing, started_at: DateTime.utc_now()} end)
+
     {:reply, :ok, state}
   end
 

@@ -124,13 +124,21 @@ defmodule TermDiff.Git.Diff do
   end
 
   defp parse_diff_line(" " <> content, old_ln, new_ln) do
-    {%DiffLine{type: :context, content: content, old_line_number: old_ln, new_line_number: new_ln},
-     old_ln + 1, new_ln + 1}
+    {%DiffLine{
+       type: :context,
+       content: content,
+       old_line_number: old_ln,
+       new_line_number: new_ln
+     }, old_ln + 1, new_ln + 1}
   end
 
   defp parse_diff_line(content, old_ln, new_ln) do
-    {%DiffLine{type: :context, content: content, old_line_number: old_ln, new_line_number: new_ln},
-     old_ln + 1, new_ln + 1}
+    {%DiffLine{
+       type: :context,
+       content: content,
+       old_line_number: old_ln,
+       new_line_number: new_ln
+     }, old_ln + 1, new_ln + 1}
   end
 
   @spec count_changes([Hunk.t()]) :: {non_neg_integer(), non_neg_integer()}

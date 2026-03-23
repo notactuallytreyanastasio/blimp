@@ -28,10 +28,14 @@ defmodule TermDiff.AI.Claude do
     json_schema = Keyword.get(opts, :json_schema)
 
     args = [
-      "-p", prompt,
-      "--output-format", "json",
-      "--allowedTools", allowed_tools,
-      "--permission-mode", "plan"
+      "-p",
+      prompt,
+      "--output-format",
+      "json",
+      "--allowedTools",
+      allowed_tools,
+      "--permission-mode",
+      "plan"
     ]
 
     args = if system_prompt, do: args ++ ["--system-prompt", system_prompt], else: args
