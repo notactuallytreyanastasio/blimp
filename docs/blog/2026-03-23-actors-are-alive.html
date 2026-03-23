@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Actors Are Alive</title>
+
+<meta name="description" content="Since the grammar post: a diff viewer, a multiplexer running AI agents side by side, a REPL, actors that spawn and talk, Elm-style errors, and LLVM compilation to native code. Here's everything.">
+<meta name="author" content="Bobby Grayson">
+
+<meta property="og:type" content="article">
+<meta property="og:title" content="Actors Are Alive">
+<meta property="og:description" content="Since the grammar post: a diff viewer, a multiplexer running AI agents side by side, a REPL, actors that spawn and talk, Elm-style errors, and LLVM compilation to native code. Here's everything.">
+<meta property="og:url" content="https://blimp.bobbby.online/blog/2026-03-23-actors-are-alive.html">
+<meta property="og:site_name" content="Blimp Design Journal">
+
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Actors Are Alive">
+<meta name="twitter:description" content="Since the grammar post: a diff viewer, a multiplexer running AI agents side by side, a REPL, actors that spawn and talk, Elm-style errors, and LLVM compilation to native code.">
+
+<link rel="stylesheet" href="style.css">
+<style>
+/* tl;dr toggle */
+.tldr-toggle {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: #0066cc;
+  cursor: pointer;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  margin-bottom: 2rem;
+  user-select: none;
+}
+
+.tldr-toggle:hover {
+  background: #f0f0f0;
+}
+
+.tldr-toggle.active {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0066cc;
+}
+
+.section-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 2rem;
+  margin-top: 3rem;
+  margin-bottom: 1rem;
+}
+
+.section-header h2 {
+  margin: 0;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.tldr-bubble {
+  display: none;
+  position: relative;
+  background: #e9e9eb;
+  color: #000;
+  padding: 0.75rem 1rem;
+  border-radius: 18px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  max-width: 55ch;
+  flex-shrink: 1;
+  margin-left: 0.5rem;
+}
+
+.tldr-bubble::before {
+  content: '';
+  position: absolute;
+  left: -30px;
+  top: 0.85rem;
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-right: 30px solid #e9e9eb;
+}
+
+.section-content {
+  overflow: hidden;
+  max-height: 5000px;
+  transition: max-height 0.5s ease, opacity 0.4s ease;
+  opacity: 1;
+}
+
+body.tldr-mode .section-content {
+  max-height: 0;
+  opacity: 0;
+}
+
+body.tldr-mode {
+  max-width: 100%;
+  padding-left: 4rem;
+  padding-right: 4rem;
+}
+
+body.tldr-mode .tldr-bubble {
+  display: block;
+  animation: bubbleFadeIn 0.4s ease 0.3s both;
+}
+
+@keyframes bubbleFadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="index.html">blimp / design journal</a></div>
+
+<h1>Actors Are Alive</h1>
+<div class="post-date">March 23, 2026</div>
+
+<div class="tldr-toggle" onclick="document.body.classList.toggle('tldr-mode'); this.classList.toggle('active');">tl;dr</div>
+
+<!-- ============================================================ -->
+<!-- Since the Grammar                                            -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Since the Grammar</h2>
+<div class="tldr-bubble">Last post was the grammar: actors, typed state, pipes, message sends, guards, Holes, situations, bubbles. The parser was real but nothing ran. Since then we built a diff viewer, a multiplexer for AI agents, a tree-walking interpreter, a full actor runtime, Elm-style errors, and an LLVM compiler. The tools came first, then the language caught up.</div>
+</div>
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>Last time we walked through every piece of the Blimp grammar. Actors, typed state, pipes, message sends, guards, Holes, situations, bubbles. The parser was real, it could chew through stuff like this.</p>
+<p>But that was it. You could parse it into an AST and stare at a tree. Nothing ran, nothing evaluated, nothing compiled.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Counter</span> <span class="kw">do</span>
+  <span class="kw">state</span> count: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:increment</span> <span class="kw">do</span>
+    <span class="kw">become</span> count: count + <span class="nr">1</span>
+    <span class="kw">reply</span> count + <span class="nr">1</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+</div>
+</div>
+
+<div class="split-pair">
+<div class="split-prose">
+<p>So we kept going. Naturally, working on this language the way I am, and moving so quickly, viewing diffs became the key piece of the work more than being in an editor. Viewing these diffs and commenting on them to influence code was done much more than hand crafting, and that needs to feel better than what we've got right now. So before we could make the language do anything, we needed a way to watch the work happen.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- The Diff Viewer                                              -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>The Diff Viewer</h2>
+<div class="tldr-bubble">Magit in a browser. Phoenix LiveView watching .git/index, keyboard-driven (j/k/Tab/Enter/s/u/l). Navigation backed by a pure functional state machine that returns signals. No syntax highlighting in diffs yet (dumb). Line selection lets you highlight code and send an agent off to fix it.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>The goal is Magit in a browser. We're not there yet, but we're getting closer.</p>
+<p>It's a Phoenix LiveView app that watches <code>.git/index</code> and refs, picks up changes in real time, and renders diffs. Two panes: file list on the left, diff on the right. Everything keyboard-driven. <code>j</code>/<code>k</code> to move, <code>Tab</code> to switch panes, <code>Enter</code> to expand a file, <code>s</code> to stage, <code>u</code> to unstage, <code>l</code> to open the git log. The active pane gets a green glow, the selected item gets a blue highlight.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<img src="img/diff-viewer-bank-blimp.png" alt="The diff viewer showing a bank.blimp example with file list on the left and diff on the right" style="max-width:100%; border:1px solid #ddd; border-radius:3px;">
+</div>
+</div>
+
+</div>
+
+<div class="section-content">
+
+<p>The interesting engineering is the navigation state machine. Early on we had the keyboard handling mixed into the LiveView, and it was a mess. Every new keybinding meant touching the same giant <code>handle_event</code> function, and the interactions between focus states and pane switching got tangled fast. Browser <code>Tab</code> kept fighting with LiveView's keydown handling until we wrote a JS hook that prevents default on the keys we care about.</p>
+
+<p>So we ripped all that out and built a pure functional state machine. It takes a key event and the current focus state, returns the new state plus a list of signals like <code>{:stage_file, path}</code> or <code>{:open_file, path}</code>. The LiveView converts those signals into actual git commands and DOM updates. There are no side effects in the state machine, fully tested, easy to reason about. The functional core does the thinking, the imperative shell does the doing.</p>
+
+<p>The thing it still doesn't have is syntax highlighting in the diffs, which is dumb. You're looking at code all day and the diffs are just plain green and red lines. That's on the list.</p>
+
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>The thing it does have that's cool is line selection. You can highlight a line or a range of lines in a diff, write some commentary about what you want changed, and send an agent off to do the work. The agent spawns in the multiplexer (more on that next) and you watch it go while you keep reviewing other diffs. That feedback loop, of looking at code and being able to just point at something and say "fix this", is the whole point.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<img src="img/line-selection-agent.png" alt="Line selection dialog showing selected lines and a prompt to send to an agent" style="max-width:100%; border:1px solid #ddd; border-radius:3px;">
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- The Multiplexer                                              -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>The Multiplexer</h2>
+<div class="tldr-bubble">Runs up to five Claude sessions simultaneously, streaming output in real time. Orchestrator GenServer manages lifecycle, retries, stall detection. Agents spawned via Erlang Port parsing NDJSON. Permission requests show up as Allow/Deny inline. Every agent gets a deciduous decision graph node. Living memory that outlives the agent.</div>
+</div>
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>The diff viewer shows you what changed. The multiplexer shows you who's changing it.</p>
+<p>It runs up to five Claude sessions simultaneously, each in its own pane, streaming output in real time. You click some lines in the diff viewer, write a comment like "this error handling is wrong, use bubbles instead", and an agent spawns. It shows up in the multiplexer and starts working while you go back to reviewing other files.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<img src="img/multiplexer-agents.png" alt="The multiplexer running three agents side by side with streaming output and tool use" style="max-width:100%; border:1px solid #ddd; border-radius:3px;">
+</div>
+</div>
+
+</div>
+
+<div class="section-content">
+
+<p>The orchestrator behind it is a GenServer that manages the whole lifecycle. It enforces max concurrent slots, queues runs when you're at capacity, detects stalled agents that stop producing events, and retries failed runs with exponential backoff. Each agent is a <code>claude</code> CLI process spawned via Erlang Port, parsing NDJSON events as they stream in. When an agent needs permission to run a tool, like editing a file or running a test, the request shows up as Allow/Deny buttons inline in the output. You don't leave the browser.</p>
+
+<p>The part I think is genuinely interesting is the deciduous integration. Every agent that spawns gets a root node in the decision graph. The agent's system prompt tells it to log its reasoning as it works: goals, options, decisions, actions, outcomes. When the agent finishes or dies, its decision subtree stays in the graph. A new agent can look at what the dead one was thinking and pick up where it left off. Active agents can see what other agents are working on and which files they're touching.</p>
+
+<p>We talked about this in the first post, how each agent would have a deciduous tree and the trees could merge and diverge. It's not hypothetical anymore. The agents have living memory. It's rough and early but it works.</p>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Actors Come Alive                                            -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Actors Come Alive</h2>
+<div class="tldr-bubble">Tree-walking interpreter evaluates everything the parser produces. Actor definitions are templates, spawn creates instances with refs. Message send with &lt;-, become transitions state, guards dispatch by condition. State machines fall out for free. The Hole operator lets agents fill gaps in your code. The comment after a Hole is the prompt.</div>
+</div>
+
+<div class="section-content">
+
+<p>So, tooling exists. I guess the next step is the language.</p>
+
+<p>Last post we walked through what actors look like syntactically. Now they actually do things. The evaluator is a tree-walking interpreter, the simplest thing that could work. You hand it an AST node, it walks the tree recursively and produces a value. No bytecode, no intermediate representation, just "look at this node, evaluate its children, combine them."</p>
+
+<p>It handles everything the parser can produce: arithmetic with proper precedence, strings, atoms, booleans, nil, lists with the cons operator, tuples, maps, variable assignment, pipes with <code>_</code> placeholder, <code>orelse</code> for nil fallback, <code>situation</code> and <code>case</code> branching, dot access on maps. Nine builtins: <code>length</code>, <code>max</code>, <code>min</code>, <code>append</code>, <code>reverse</code>, <code>lookup</code>, <code>put</code>, <code>keys</code>, <code>now</code>. Not many, but that's on purpose. The standard library in Blimp will be actors, not a big bag of functions. <code>System.IO</code>, <code>System.Math</code>, <code>System.String</code>. Everything is an actor.</p>
+
+<p>But the real thing is that actors are alive now.</p>
+
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>When you write <code>actor Counter do ... end</code>, the evaluator registers a template. It's a blueprint, not an instance. You call <code>spawn Counter</code> and the runtime creates an instance with its own state, assigns it a ref, and puts it in the global registry. That ref is how you talk to it.</p>
+<p>Two instances, completely independent state. <code>c1</code> has been incremented twice, <code>c2</code> once. They're lightweight refs like Erlang PIDs. <code>become</code> updates the state for the next message, not the current scope. That's real actor semantics, not a simulation.</p>
+<p>You can override state at spawn time too. <code>spawn Counter(count: 100)</code> creates a counter starting at 100. No constructor patterns, no factory methods. The defaults in the template are just defaults.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Counter</span> <span class="kw">do</span>
+  <span class="kw">state</span> count: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:increment</span> <span class="kw">do</span>
+    <span class="kw">become</span> count: count + <span class="nr">1</span>
+    <span class="kw">reply</span> count + <span class="nr">1</span>
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:get</span> <span class="kw">do</span>
+    <span class="kw">reply</span> count
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+c1 = <span class="kw">spawn</span> <span class="fn">Counter</span>
+c2 = <span class="kw">spawn</span> <span class="fn">Counter</span>
+
+c1 <span class="op">&lt;-</span> <span class="st">:increment</span>   <span class="cm"># => 1</span>
+c1 <span class="op">&lt;-</span> <span class="st">:increment</span>   <span class="cm"># => 2</span>
+c2 <span class="op">&lt;-</span> <span class="st">:increment</span>   <span class="cm"># => 1</span>
+c1 <span class="op">&lt;-</span> <span class="st">:get</span>          <span class="cm"># => 2</span>
+c2 <span class="op">&lt;-</span> <span class="st">:get</span>          <span class="cm"># => 1</span></code></pre>
+</div>
+</div>
+
+<div class="split-pair">
+<div class="split-prose">
+<p>State machines fall out of this for free. No state machine library, no framework. An actor with one state field and a <code>situation</code> that cycles through values. That's a state machine.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Light</span> <span class="kw">do</span>
+  <span class="kw">state</span> color: <span class="fn">Atom</span> <span class="op">::</span> <span class="st">:red</span>
+
+  <span class="kw">on</span> <span class="st">:next</span> <span class="kw">do</span>
+    <span class="kw">situation</span> color <span class="kw">do</span>
+      <span class="st">:red</span> <span class="op">-></span> <span class="kw">become</span> color: <span class="st">:green</span>
+      <span class="st">:green</span> <span class="op">-></span> <span class="kw">become</span> color: <span class="st">:yellow</span>
+      <span class="st">:yellow</span> <span class="op">-></span> <span class="kw">become</span> color: <span class="st">:red</span>
+    <span class="kw">end</span>
+    <span class="kw">reply</span> color
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+l = <span class="kw">spawn</span> <span class="fn">Light</span>
+l <span class="op">&lt;-</span> <span class="st">:next</span>    <span class="cm"># => :green</span>
+l <span class="op">&lt;-</span> <span class="st">:next</span>    <span class="cm"># => :yellow</span>
+l <span class="op">&lt;-</span> <span class="st">:next</span>    <span class="cm"># => :red</span></code></pre>
+</div>
+</div>
+
+<div class="split-pair">
+<div class="split-prose">
+<p>Guards give you multi-clause dispatch. Two handlers for <code>:withdraw</code>, different guards. The runtime tries them in order and picks the first match. No nested <code>if</code> inside <code>case</code> inside the handler body. Just separate handlers with clear conditions.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Account</span> <span class="kw">do</span>
+  <span class="kw">state</span> balance: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:deposit</span>(amount: <span class="fn">Int</span>)
+      <span class="kw">when</span> amount > <span class="nr">0</span> <span class="kw">do</span>
+    <span class="kw">become</span> balance: balance + amount
+    <span class="kw">reply</span> balance + amount
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:withdraw</span>(amount: <span class="fn">Int</span>)
+      <span class="kw">when</span> amount > <span class="nr">0</span> <span class="kw">do</span>
+    <span class="kw">become</span> balance: balance - amount
+    <span class="kw">reply</span> balance - amount
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:withdraw</span>(amount: <span class="fn">Int</span>)
+      <span class="kw">when</span> amount &lt;= <span class="nr">0</span> <span class="kw">do</span>
+    <span class="kw">reply</span> <span class="st">:error</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+</div>
+</div>
+
+<div class="split-pair">
+<div class="split-prose">
+<p>And the <code>_</code> Hole operator works in <code>situation</code> branches. You write the branches you know and the agent fills the rest. The comment after a Hole is a directive to the agent, not a note to yourself.</p>
+<p>The agent sees that Hole in the AST, reads the comment, and gets to work figuring out what should go there. You don't leave your code to write a prompt. The Hole is the prompt.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">on</span> <span class="st">:charge</span>(payment: <span class="fn">Payment</span>)
+    <span class="kw">bubbles</span>(<span class="fn">CascadeBubble</span>) <span class="kw">do</span>
+  <span class="kw">situation</span> validate(payment) <span class="kw">do</span>
+    <span class="st">:valid</span> <span class="op">-></span>
+      receipt = items
+        <span class="op">|></span> calculate_tax(_, region)
+        <span class="op">|></span> finalize(_, payment)
+      <span class="kw">become</span> items: [], total: <span class="nr">0.0</span>
+      <span class="kw">reply</span> receipt
+    _ <span class="cm"># Hole: handle invalid payment,
+      # begin by researching documentation
+      # on transaction failure</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Errors That Help                                             -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Errors That Help</h2>
+<div class="tldr-bubble">Six Elm-style error types. UNDEFINED VARIABLE lists what's in scope. UNKNOWN FUNCTION lists builtins. TYPE MISMATCH shows both types. NO MATCHING HANDLER names the actor and message. Implementation is one struct with a format method. Studying Elm and Elixir compilers to keep making it better.</div>
+</div>
+
+<div class="section-content">
+<p>The Elm compiler set the bar for error messages and I wanted to go for it. Every error tells you what went wrong, shows you the line that caused it, and tells you what's available so you can fix it.</p>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>Six error types, all with this format. <strong>UNDEFINED VARIABLE</strong> lists what's in scope so you can spot the typo. <strong>TYPE MISMATCH</strong> shows both types so you know what you have vs what was expected. <strong>DIVISION BY ZERO</strong> because yeah. <strong>UNKNOWN FUNCTION</strong> lists the available builtins. <strong>NOT AVAILABLE IN REPL</strong> nudges you toward expressions the REPL can evaluate. <strong>NO MATCHING HANDLER</strong> names the actor and the message that didn't match, which is huge for debugging actor communication because you immediately know "oh, I sent <code>:incremnt</code> instead of <code>:increment</code>."</p>
+<p>The implementation is stupid simple. A struct with a title, an optional source line, an optional column for the caret, a message, and an optional hint. One format method that writes colored output on TTYs and plain text when piped. Zig makes this really clean because <code>anytype</code> writers mean you don't care where the output goes.</p>
+<p>I am going to basically be studying the Elm and Elixir compilers to rip off how to keep making this better.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="st">blimp></span> bonk + <span class="nr">1</span>
+
+<span class="cm">-- UNDEFINED VARIABLE ----------------------------</span>
+
+  bonk + <span class="nr">1</span>
+  I can't find a variable called `bonk`.
+
+  Variables in scope:
+      x = <span class="nr">42</span>
+      y = [<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>]</code></pre>
+
+<pre><code><span class="st">blimp></span> foobar(<span class="nr">42</span>)
+
+<span class="cm">-- UNKNOWN FUNCTION ------------------------------</span>
+
+  foobar(<span class="nr">42</span>)
+  I don't know a function called `foobar`.
+
+  Built-in functions:
+      length, max, min, append, reverse,
+      lookup, put, keys, now</code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Compiled to Native                                           -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Compiled to Native</h2>
+<div class="tldr-bubble">Separate compiler generates LLVM IR via Zig's @cImport of llvm-c/Core.h. Actors compile to state structs + handler functions + handler tables. C runtime (~260 lines) provides actor registry, mailboxes, message dispatch, round-robin scheduler. Deliberately dumb right now. Grows into the real runtime later.</div>
+</div>
+
+<div class="section-content">
+<p>Separate from the REPL there's a compiler. <code>blimp-compile hello.blimp -o hello</code> takes source, runs it through the same parser, and instead of evaluating the tree it generates LLVM IR.</p>
+<p>Zig's <code>@cImport</code> makes this surprisingly pleasant. You import <code>llvm-c/Core.h</code> and you're calling LLVM functions directly from Zig with full type safety. No FFI bindings to generate, no wrapper libraries. Just <code>@cImport</code> and go.</p>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>Every expression type compiles: literals become LLVM constants, binary ops become add/sub/mul/div instructions, variables are allocas, pipes compile by substituting <code>_</code>, <code>situation</code> and <code>case</code> become conditional branches.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code>$ cat hello.blimp
+<span class="nr">1</span> + <span class="nr">2</span> * <span class="nr">3</span>
+
+$ blimp-compile hello.blimp --run
+<span class="nr">7</span>
+
+$ blimp-compile hello.blimp --dump-ir
+<span class="cm">; ModuleID = 'blimp_module'</span>
+define i64 @main() {
+entry:
+  ret i64 <span class="nr">7</span>
+}</code></pre>
+</div>
+</div>
+
+<div class="split-pair">
+<div class="split-prose">
+<p>But the fun part is actors. An actor definition compiles to three things: a state struct type (each <code>state</code> field becomes a struct member), handler functions (each <code>on</code> block becomes an LLVM function that takes a pointer to the state struct), and a handler table mapping atom IDs to function pointers. <code>spawn</code> allocates the struct, initializes defaults, registers with the runtime, builds the table. <code>&lt;-</code> compiles to a runtime call that looks up the handler by atom ID, tries each clause's guard, and calls the first match. <code>become</code> writes to the struct via GEP. <code>reply</code> builds a <code>{i1, i64}</code> return pair, the i1 being "has reply" and the i64 being the value.</p>
+<p>The compiler links against a tiny C runtime, about 260 lines, that provides what LLVM IR can't do alone: a global actor registry, handler table management, a mailbox per actor (ring buffer, capacity 256), message dispatch with multi-clause guard support, synchronous send, and a round-robin scheduler that drains pending messages.</p>
+<p>It's deliberately dumb right now. Fixed-size array of actor pointers, a round-robin loop, no preemption. The whole point is that this grows into the real actor runtime later, with per-actor memory arenas, Perceus reference counting, and preemptive scheduling. But you start with the dumbest thing that works and iterate.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code>$ cat counter.blimp
+<span class="kw">actor</span> <span class="fn">Counter</span> <span class="kw">do</span>
+  <span class="kw">state</span> count: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:increment</span> <span class="kw">do</span>
+    <span class="kw">become</span> count: count + <span class="nr">1</span>
+    <span class="kw">reply</span> count + <span class="nr">1</span>
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:get</span> <span class="kw">do</span>
+    <span class="kw">reply</span> count
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+c = <span class="kw">spawn</span> <span class="fn">Counter</span>
+c <span class="op">&lt;-</span> <span class="st">:increment</span>
+c <span class="op">&lt;-</span> <span class="st">:increment</span>
+c <span class="op">&lt;-</span> <span class="st">:increment</span>
+c <span class="op">&lt;-</span> <span class="st">:get</span>
+
+$ blimp-compile counter.blimp --run
+<span class="nr">3</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- The REPL                                                     -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>The REPL</h2>
+<div class="tldr-bubble">Auto-detects TTY. TUI mode: session on left, live state sidebar on right showing every variable and actor ref. --introspect flag dumps JSON so the Phoenix REPL explorer can consume it. Started a libvaxis TUI with TEA architecture, vim modes, syntax highlighting. Still in progress.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>The REPL auto-detects whether you're on a TTY. If you are, you get TUI mode: your session on the left, live state sidebar on the right. Every variable you define, every actor you spawn, shows up on the right immediately. If you're piped or not on a terminal, you get clean plain-text output.</p>
+<p>There's also an <code>--introspect</code> flag that switches the output to JSON. Instead of pretty-printing results, the evaluator dumps its whole state: variables, actor refs, the last expression result, errors. This is how the web tools consume the language. The Phoenix app has a REPL explorer at <code>/repl</code> that runs <code>blimp file.blimp --introspect</code> and renders the JSON in the browser. The language has an API from day one, not because we planned it that way, but because the web tooling needed to talk to the evaluator and JSON was the obvious move.</p>
+<p>We also started on a TUI REPL with libvaxis, a proper terminal UI framework for Zig. TEA architecture for state management, vim modes (normal/insert/command), syntax highlighting, tab completion. The current raw ANSI version works but the libvaxis version is going to feel like an actual editor. That's still in progress.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<img src="img/repl-actors-state.png" alt="The REPL with session on the left and state sidebar on the right showing variables, actor templates, refs, and instance state" style="max-width:100%; border:1px solid #ddd; border-radius:3px;">
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- The Tools Build the Tools                                    -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>The Tools Build the Tools</h2>
+<div class="tldr-bubble">We use the diff viewer to build the language. The multiplexer spawns agents that write the Zig files. The language has a JSON API the Phoenix app consumes. The web tooling that builds the language is also a consumer of the language. It's turtles all the way down.</div>
+</div>
+<div class="section-content">
+
+<p>I keep coming back to this. We use the diff viewer to stage and commit the Zig files that make up the language. The multiplexer spawns agents that write those Zig files while we watch the diffs update. The decision graph tracks every design choice we make along the way. And the language has a JSON introspection API that the Phoenix app consumes to provide a web REPL.</p>
+
+<p>So the web tooling that helps build the language is also a consumer of the language. When we start writing Blimp's standard library, agents in the multiplexer will be writing Blimp code, using tools written in Elixir, consuming output from a Zig compiler, all visible through a LiveView that shows you the diffs in real time.</p>
+
+<p>The first post said "we're building the tool that builds the language that defines the tool." That sounded like a cool thing to say at the time. But it's actually what's happening now and I think that's pretty neat. Every improvement to the diff viewer makes it easier to build the language. Every improvement to the language brings us closer to the point where the tools can be expressed in Blimp. It has a lot of nuance and power to be able to build another thing that lets us build more things using the thing, right? I love meta shit.</p>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- What We Haven't Figured Out Yet                              -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>What We Haven't Figured Out Yet</h2>
+<div class="tldr-bubble">Pattern matching in handlers. The scheduler (cooperative vs preemptive in WASM). Variable rebinding. Closures and higher-order functions. The Blimp IR (SSA between AST and LLVM). The canvas: what does it look like to paint a running program?</div>
+</div>
+<div class="section-content">
+
+<p>Pattern matching in handlers. Right now <code>on :add(item: Item)</code> just binds <code>item</code>. We want destructuring like <code>on :add(%{price: price, name: name}: Item)</code> but haven't nailed how patterns and types coexist in the syntax.</p>
+
+<p>The scheduler. No shared memory means we need green threads in WASM. The BEAM does preemptive scheduling with reduction counting. We'll probably start with cooperative yields at message receive points and see how far that gets us.</p>
+
+<p>Variable rebinding. <code>x = 52</code> then <code>x = 8</code>. Should that be an error? Immutability says yes, but REPL ergonomics say maybe not. We might end up with error in files but allowed in the REPL, or just a warning. Haven't decided.</p>
+
+<p>Closures and higher-order functions. We don't have <code>fn</code> expressions yet. You can pipe, you can send messages, you can call builtins. But you can't pass a function as an argument. This matters for things like <code>map</code> and <code>filter</code> on lists, and we need to figure out if those are builtins, actor messages, or something else.</p>
+
+<p>The Blimp IR. Right now the compiler goes straight from AST to LLVM IR. That works for expressions and simple actors, but we need our own SSA-based intermediate representation for optimization passes, Perceus reference counting insertion, and eventually WASM output.</p>
+
+<p>And the canvas. What does it look like to paint a running program? Actors are geometric, messages are lines between them, state transitions are visual. Where there's a Hole, maybe there's randomness, fractals, noise. It's the thing that excites me the most and the thing I know the least about how to build.</p>
+
+<p>None of this is settled. But the actors are alive, and that feels pretty good.</p>
+
+</div>
+
+<script>
+(function() {
+  // Mobile code toggles
+  var mq = window.matchMedia('(max-width: 900px)');
+  function setup(e) {
+    var sides = document.querySelectorAll('.split-side');
+    document.querySelectorAll('.code-toggle').forEach(function(t) { t.remove(); });
+    sides.forEach(function(side) {
+      side.classList.remove('is-open');
+    });
+    if (!e.matches) return;
+    sides.forEach(function(side) {
+      var toggle = document.createElement('div');
+      toggle.className = 'code-toggle';
+      toggle.innerHTML = '<span class="chevron">&#9654;</span> <span class="code-icon">&lt;/&gt;</span> code';
+      toggle.addEventListener('click', function() {
+        var open = side.classList.toggle('is-open');
+        toggle.classList.toggle('is-open', open);
+      });
+      side.parentNode.insertBefore(toggle, side);
+    });
+  }
+  mq.addEventListener('change', setup);
+  setup(mq);
+
+  // Image lightbox
+  var overlay = document.createElement('div');
+  overlay.className = 'lightbox-overlay';
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', function() {
+    overlay.classList.remove('is-open');
+    overlay.innerHTML = '';
+  });
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && overlay.classList.contains('is-open')) {
+      overlay.classList.remove('is-open');
+      overlay.innerHTML = '';
+    }
+  });
+
+  document.querySelectorAll('.split-side img, .section-content > img').forEach(function(img) {
+    img.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var full = document.createElement('img');
+      full.src = img.src;
+      full.alt = img.alt;
+      overlay.innerHTML = '';
+      overlay.appendChild(full);
+      overlay.classList.add('is-open');
+    });
+  });
+})();
+</script>
+</body>
+</html>

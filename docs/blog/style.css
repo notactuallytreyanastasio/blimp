@@ -430,3 +430,41 @@ hr {
   background: #b3d4fc;
   color: #000;
 }
+
+/* Image lightbox modal */
+.lightbox-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 9999;
+  cursor: zoom-out;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.lightbox-overlay.is-open {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.lightbox-overlay img {
+  max-width: calc(100vw - 4rem);
+  max-height: calc(100vh - 4rem);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 4px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Make clickable images show pointer */
+.split-side img,
+.section-content > img {
+  cursor: zoom-in;
+}
