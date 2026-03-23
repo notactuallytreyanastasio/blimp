@@ -36,6 +36,12 @@ struct StateVar {
     value: String,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RightPanel {
+    State,
+    IR,
+}
+
 /// All application state.
 struct App {
     /// Current input buffer (what the user is typing).
@@ -66,6 +72,14 @@ struct App {
     child_stdin: Option<std::process::ChildStdin>,
     /// Handle to the child process itself.
     child: Option<Child>,
+    /// Which panel is shown on the right.
+    right_panel: RightPanel,
+    /// LLVM IR text (updated after each input).
+    llvm_ir: String,
+    /// Accumulated source for IR compilation.
+    source_buf: String,
+    /// Path to blimp-compile binary.
+    compile_bin: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +132,37 @@ fn find_blimp_binary() -> Option<PathBuf> {
 
     // 4. blimp in PATH
     if let Ok(output) = Command::new("which").arg("blimp").output() {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                return Some(PathBuf::from(path_str));
+            }
+        }
+    }
+
+    None
+}
+
+fn find_compile_binary() -> Option<PathBuf> {
+    if let Ok(p) = env::var("BLIMP_COMPILE_PATH") {
+        let path = PathBuf::from(&p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // Look relative to blimp binary
+    if let Some(blimp) = find_blimp_binary() {
+        if let Some(dir) = blimp.parent() {
+            let candidate = dir.join("blimp-compile");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // In PATH
+    if let Ok(output) = Command::new("which").arg("blimp-compile").output() {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path_str.is_empty() {
@@ -267,6 +312,52 @@ fn parse_output_line(line: &str, state_vars: &mut Vec<StateVar>, history: &mut V
 }
 
 // ---------------------------------------------------------------------------
+// IR compilation
+// ---------------------------------------------------------------------------
+
+fn compile_to_ir(compile_bin: &PathBuf, source: &str) -> String {
+    use std::io::Write as IoWrite;
+
+    // Write source to temp file
+    let tmp_path = "/tmp/_blimp_ir_preview.blimp";
+    if let Ok(mut f) = std::fs::File::create(tmp_path) {
+        let _ = f.write_all(source.as_bytes());
+    } else {
+        return "Error: could not write temp file".to_string();
+    }
+
+    // Run blimp-compile --dump-ir (IR goes to stderr)
+    match Command::new(compile_bin)
+        .arg(tmp_path)
+        .arg("--dump-ir")
+        .arg("-o")
+        .arg("/tmp/_blimp_ir_preview_out")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            // IR is on stderr (LLVMDumpModule writes there)
+            if !stderr.is_empty() {
+                // Filter out the "Compiled:" line
+                stderr
+                    .lines()
+                    .filter(|l| !l.starts_with("Compiled:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                "(no IR generated)".to_string()
+            }
+        }
+        Err(e) => format!("Compile error: {}", e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Block depth tracking for multi-line
 // ---------------------------------------------------------------------------
 
@@ -305,20 +396,24 @@ fn render(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &App) -> i
         let content_area = outer[0];
         let status_area = outer[1];
 
-        // Split content into left (REPL) and right (STATE)
+        // Split content into left (REPL) and right (STATE/IR)
+        let right_pct = if app.right_panel == RightPanel::IR { 50 } else { 25 };
         let panels = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
+            .constraints([Constraint::Percentage(100 - right_pct), Constraint::Percentage(right_pct)])
             .split(content_area);
 
         let repl_area = panels[0];
-        let state_area = panels[1];
+        let right_area = panels[1];
 
         // ----- REPL Panel -----
         render_repl(f, app, repl_area);
 
-        // ----- STATE Panel -----
-        render_state(f, app, state_area);
+        // ----- Right Panel -----
+        match app.right_panel {
+            RightPanel::State => render_state(f, app, right_area),
+            RightPanel::IR => render_ir(f, app, right_area),
+        }
 
         // ----- Status Bar -----
         render_status(f, app, status_area);
@@ -453,8 +548,68 @@ fn render_state(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(para, inner);
 }
 
+fn render_ir(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" LLVM IR ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height < 1 || inner.width < 4 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    for text_line in app.llvm_ir.lines() {
+        // Syntax highlight: keywords in cyan, comments in gray, types in yellow
+        let styled = if text_line.trim_start().starts_with(';') {
+            Line::from(Span::styled(
+                text_line.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else if text_line.contains("define ") || text_line.contains("declare ") {
+            Line::from(Span::styled(
+                text_line.to_string(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))
+        } else if text_line.starts_with('%') || text_line.starts_with('@') {
+            Line::from(Span::styled(
+                text_line.to_string(),
+                Style::default().fg(Color::Yellow),
+            ))
+        } else if text_line.trim_start().starts_with("ret ") || text_line.trim_start().starts_with("br ") || text_line.trim_start().starts_with("call ") {
+            Line::from(Span::styled(
+                text_line.to_string(),
+                Style::default().fg(Color::Green),
+            ))
+        } else {
+            Line::from(Span::styled(
+                text_line.to_string(),
+                Style::default().fg(Color::White),
+            ))
+        };
+        lines.push(styled);
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(type code to see IR)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
+}
+
 fn render_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let var_count = app.state_vars.len();
+    let panel_name = match app.right_panel {
+        RightPanel::State => "STATE",
+        RightPanel::IR => "LLVM IR",
+    };
 
     let status_line = Line::from(vec![
         Span::styled(
@@ -465,7 +620,7 @@ fn render_status(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  {} vars | Up/Down: history | Ctrl-C: quit ", var_count),
+            format!("  {} vars | Tab: {} | Up/Down: history | Ctrl-C: quit ", var_count, panel_name),
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -520,8 +675,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             browse_history_down(app);
         }
         KeyCode::Tab => {
-            app.input.insert_str(app.cursor, "  ");
-            app.cursor += 2;
+            // Toggle right panel
+            app.right_panel = match app.right_panel {
+                RightPanel::State => RightPanel::IR,
+                RightPanel::IR => RightPanel::State,
+            };
         }
         KeyCode::Char(c) => {
             app.input.insert(app.cursor, c);
@@ -583,6 +741,16 @@ fn send_to_blimp(app: &mut App, input: &str) {
     if let Some(ref mut stdin) = app.child_stdin {
         let _ = writeln!(stdin, "{}", input);
         let _ = stdin.flush();
+    }
+
+    // Accumulate source and compile IR in background
+    if !app.source_buf.is_empty() {
+        app.source_buf.push('\n');
+    }
+    app.source_buf.push_str(input);
+
+    if let Some(ref bin) = app.compile_bin {
+        app.llvm_ir = compile_to_ir(bin, &app.source_buf);
     }
 }
 
@@ -654,6 +822,8 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let compile_bin = find_compile_binary();
+
     let mut app = App {
         input: String::new(),
         cursor: 0,
@@ -669,6 +839,10 @@ fn main() -> io::Result<()> {
         rx,
         child_stdin,
         child: Some(child),
+        right_panel: RightPanel::State,
+        llvm_ir: String::new(),
+        source_buf: String::new(),
+        compile_bin,
     };
 
     // Main event loop
