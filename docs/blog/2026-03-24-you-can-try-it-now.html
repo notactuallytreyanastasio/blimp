@@ -454,7 +454,7 @@ result = <span class="op">...</span>nums, double
 <div style="border-top:1px solid #e0e0e0;margin-top:3rem;padding-top:1.5rem;">
 <h2 style="font-size:0.85rem;color:#999;font-weight:400;margin-bottom:0.5rem;text-align:center;letter-spacing:0.05em;">try blimp</h2>
 <div style="padding:0.4rem 1rem;background:#0e0e1a;border-radius:8px 8px 0 0;">
-<button class="blimp-try-btn" onclick="if(typeof demoPost4==='function')demoPost4()" style="font-size:0.75rem;padding:0.2rem 0.75rem;">Demo</button>
+<a class="blimp-try-btn" href="playground.html" style="font-size:0.75rem;padding:0.2rem 0.75rem;text-decoration:none;">Open Playground with Demo</a>
 </div>
 <div id="post-repl" style="height:500px;overflow:hidden;border-radius:0 0 8px 8px;"></div>
 </div>
@@ -513,36 +513,10 @@ result = <span class="op">...</span>nums, double
     });
   });
 })();
-
-// Demo function for post 4
-function demoPost4() {
-  if (typeof BlimpRepl === 'undefined' || !BlimpRepl.type) {
-    setTimeout(demoPost4, 500);
-    return;
-  }
-
-  var code = `actor Counter do
-  state count: Int :: 0
-  on :increment do
-    become count: count + 1
-    reply count + 1
-  end
-  on :get do
-    reply count
-  end
-end
-
-c1 = spawn Counter
-c2 = spawn Counter
-c1 <- :increment
-c1 <- :increment
-c2 <- :increment
-c1 <- :get
-c2 <- :get`;
-
-  BlimpRepl.type(code, 40);
-}
 </script>
 <script src="repl/blimp-repl.js"></script>
+<script>
+BlimpRepl.embed('#post-repl');
+</script>
 </body>
 </html>
