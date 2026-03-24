@@ -1,0 +1,7 @@
+# Error: Typo in builtin function name
+# Shows: "Did you mean?" for closest builtin match
+
+items = [1, 2, 3, 4, 5]
+
+# Typo: 'lenght' instead of 'length'
+lenght(items)

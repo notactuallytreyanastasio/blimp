@@ -1,0 +1,5 @@
+# Error: Using === from JavaScript
+# Shows: "Blimp does not have === like JavaScript. Use =="
+
+x = 42
+x === 42

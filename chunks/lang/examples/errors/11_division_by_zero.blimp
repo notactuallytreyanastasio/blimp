@@ -1,0 +1,5 @@
+# Error: Division by zero
+# Shows: "You're dividing by zero, which isn't defined."
+
+x = 42
+x / 0

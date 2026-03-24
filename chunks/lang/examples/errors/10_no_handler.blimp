@@ -1,0 +1,13 @@
+# Error: Sending a message an actor doesn't handle
+# Shows: "I tried to send :foo but it doesn't know how to handle it"
+
+actor Counter do
+  state count: Int :: 0
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+end
+
+c = spawn Counter
+c <- :decrement

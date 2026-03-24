@@ -1,0 +1,6 @@
+# Error: Using var/let/const from JS
+# Shows: "Just assign directly: x = 42"
+
+var x = 5
+let y = 10
+const z = 15

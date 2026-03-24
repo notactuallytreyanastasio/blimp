@@ -1,0 +1,5 @@
+# Error: Using 'if' from other languages
+# Shows: "Use situation for branching"
+
+x = 5
+if x > 3

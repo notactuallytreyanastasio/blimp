@@ -1,0 +1,6 @@
+# Error: Using 'return' from other languages
+# Shows: "Blimp doesn't use return. Last expression is the value."
+
+def add(a, b) do
+  return a + b
+end

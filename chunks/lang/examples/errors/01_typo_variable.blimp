@@ -1,0 +1,8 @@
+# Error: Typo in variable name
+# Shows: "Did you mean?" with edit distance suggestion
+
+name = "bobby"
+age = 33
+
+# Typo: 'nme' instead of 'name'
+nme

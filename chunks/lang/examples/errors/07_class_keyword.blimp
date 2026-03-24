@@ -1,0 +1,4 @@
+# Error: Using 'class' from OOP languages
+# Shows: "Use actors instead"
+
+class User

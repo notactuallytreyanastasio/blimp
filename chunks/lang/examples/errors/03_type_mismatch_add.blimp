@@ -1,0 +1,8 @@
+# Error: Type mismatch with + operator
+# Shows: Operator-specific advice (use ++ for strings/lists)
+
+name = "hello"
+count = 42
+
+# Can't add string + int
+name + count
