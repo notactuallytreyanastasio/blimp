@@ -293,8 +293,8 @@ fn countDepthChange(line: []const u8) i32 {
         }
         // Check for "do" keyword at word boundary
         if (i + 2 <= line.len and std.mem.eql(u8, line[i .. i + 2], "do")) {
-            const before_ok = (i == 0) or (line[i - 1] == ' ' or line[i - 1] == '\t' or line[i - 1] == '\n' or line[i - 1] == ')');
-            const after_ok = (i + 2 >= line.len) or (line[i + 2] == ' ' or line[i + 2] == '\t' or line[i + 2] == '\n' or line[i + 2] == '\r');
+            const before_ok = (i == 0) or (!std.ascii.isAlphanumeric(line[i - 1]) and line[i - 1] != '_');
+            const after_ok = (i + 2 >= line.len) or (!std.ascii.isAlphanumeric(line[i + 2]) and line[i + 2] != '_');
             if (before_ok and after_ok) {
                 delta += 1;
                 i += 2;
@@ -303,8 +303,8 @@ fn countDepthChange(line: []const u8) i32 {
         }
         // Check for "end" keyword at word boundary
         if (i + 3 <= line.len and std.mem.eql(u8, line[i .. i + 3], "end")) {
-            const before_ok = (i == 0) or (line[i - 1] == ' ' or line[i - 1] == '\t' or line[i - 1] == '\n');
-            const after_ok = (i + 3 >= line.len) or (line[i + 3] == ' ' or line[i + 3] == '\t' or line[i + 3] == '\n' or line[i + 3] == '\r' or line[i + 3] == ')' or line[i + 3] == ',');
+            const before_ok = (i == 0) or (!std.ascii.isAlphanumeric(line[i - 1]) and line[i - 1] != '_');
+            const after_ok = (i + 3 >= line.len) or (!std.ascii.isAlphanumeric(line[i + 3]) and line[i + 3] != '_');
             if (before_ok and after_ok) {
                 delta -= 1;
                 i += 3;
