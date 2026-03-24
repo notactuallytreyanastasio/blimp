@@ -151,6 +151,14 @@ fn writeJsonEscaped(w: anytype, val: *const Value) void {
             }
             w.writeAll("}") catch {};
         },
+        .closure => |c| {
+            w.writeAll("fn(") catch {};
+            for (c.params, 0..) |p, i| {
+                if (i > 0) w.writeAll(", ") catch {};
+                w.writeAll(p) catch {};
+            }
+            w.writeAll(") do ... end") catch {};
+        },
     }
 }
 

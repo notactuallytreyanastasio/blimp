@@ -183,7 +183,18 @@ class BlimpCanvas {
 
     var bx = this.w * 0.12, by = this.h * 0.5;
 
-    // Rays (behind everything)
+    // REPL blob
+    this._drawBlob(bx, by, now);
+
+    // Actor hexagons
+    for (var node of this.nodes) {
+      var age = (now - node.birthT) / 400;
+      node.scale = Math.min(age, 1);
+      node.scale = 1 - Math.pow(1 - node.scale, 3); // easeOut
+      this._drawHex(node, now);
+    }
+
+    // Rays on top of everything
     for (var i = this.rays.length - 1; i >= 0; i--) {
       var ray = this.rays[i];
       var t = (now - ray.t0) / 1200;
@@ -191,18 +202,6 @@ class BlimpCanvas {
       var target = this.nodes.find(n => n.id === ray.toId);
       if (!target) { this.rays.splice(i, 1); continue; }
       this._drawRay(bx, by, target.x, target.y, t, ray.color, ray.label);
-    }
-
-    // REPL blob
-    this._drawBlob(bx, by, now);
-
-    // Actor hexagons
-    for (var node of this.nodes) {
-      // Animate scale in
-      var age = (now - node.birthT) / 400;
-      node.scale = Math.min(age, 1);
-      node.scale = 1 - Math.pow(1 - node.scale, 3); // easeOut
-      this._drawHex(node, now);
     }
   }
 

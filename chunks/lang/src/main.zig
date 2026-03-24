@@ -304,7 +304,7 @@ fn countDepthChange(line: []const u8) i32 {
         // Check for "end" keyword at word boundary
         if (i + 3 <= line.len and std.mem.eql(u8, line[i .. i + 3], "end")) {
             const before_ok = (i == 0) or (line[i - 1] == ' ' or line[i - 1] == '\t' or line[i - 1] == '\n');
-            const after_ok = (i + 3 >= line.len) or (line[i + 3] == ' ' or line[i + 3] == '\t' or line[i + 3] == '\n' or line[i + 3] == '\r');
+            const after_ok = (i + 3 >= line.len) or (line[i + 3] == ' ' or line[i + 3] == '\t' or line[i + 3] == '\n' or line[i + 3] == '\r' or line[i + 3] == ')' or line[i + 3] == ',');
             if (before_ok and after_ok) {
                 delta -= 1;
                 i += 3;
