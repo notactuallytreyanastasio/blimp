@@ -198,6 +198,9 @@ pub const Evaluator = struct {
             // Bubble (failure propagation)
             .bubble_stmt => |bs| return self.evalBubble(bs),
 
+            // Range (not used directly, ranges are via range() builtin)
+            .range_expr => return error.UnsupportedOperation,
+
             // For loop
             .for_expr => |fe| return self.evalForExpr(fe),
 

@@ -48,6 +48,7 @@ pub const Node = struct {
         call_expr: CallExpr,
         def_stmt: DefStmt,
         bubble_stmt: BubbleStmt,
+        range_expr: RangeExpr,
         for_expr: ForExpr,
         spread_map: SpreadExpr,   // ...list, fn -> map
         spread_each: SpreadExpr,  // ..list, fn -> each
@@ -207,6 +208,12 @@ pub const Node = struct {
     pub const SpawnExpr = struct {
         actor_name: []const u8,
         overrides: []const KeyValue,
+    };
+
+    /// Range expression: 1..10
+    pub const RangeExpr = struct {
+        start: *const Node,
+        end_val: *const Node,
     };
 
     /// Bubble statement: bubble or bubble reason: "msg"

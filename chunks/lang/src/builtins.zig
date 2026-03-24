@@ -47,6 +47,10 @@ pub const BuiltinRegistry = struct {
         reg.register("slice", &builtinSlice);
         reg.register("upcase", &builtinUpcase);
         reg.register("downcase", &builtinDowncase);
+        reg.register("range", &builtinRange);
+        reg.register("head", &builtinHead);
+        reg.register("tail", &builtinTail);
+        reg.register("sort", &builtinSort);
         return reg;
     }
 
@@ -406,6 +410,82 @@ fn builtinDowncase(allocator: std.mem.Allocator, args: []const *const Value) Eva
     }
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .string = buf };
+    return result;
+}
+
+// ── Collection builtins ─────────────────────────────────
+
+/// range(1, 5) => [1, 2, 3, 4, 5]
+fn builtinRange(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .integer or args[1].* != .integer) return error.TypeError;
+    const start = args[0].integer;
+    const end_val = args[1].integer;
+    const len: usize = if (end_val >= start) @intCast(end_val - start + 1) else 0;
+
+    var items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
+    var i: usize = 0;
+    var n = start;
+    while (n <= end_val) : (n += 1) {
+        const v = allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .integer = n };
+        items[i] = v;
+        i += 1;
+    }
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = items };
+    return result;
+}
+
+/// head([1, 2, 3]) => 1
+fn builtinHead(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    if (args[0].list.len == 0) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+    return args[0].list[0];
+}
+
+/// tail([1, 2, 3]) => [2, 3]
+fn builtinTail(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    if (args[0].list.len <= 1) {
+        result.* = Value{ .list = &.{} };
+    } else {
+        result.* = Value{ .list = args[0].list[1..] };
+    }
+    return result;
+}
+
+/// sort([3, 1, 2]) => [1, 2, 3]
+fn builtinSort(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    const src = args[0].list;
+    var items = allocator.alloc(*const Value, src.len) catch return error.OutOfMemory;
+    @memcpy(items, src);
+
+    // Simple insertion sort on integers
+    var i: usize = 1;
+    while (i < items.len) : (i += 1) {
+        var j = i;
+        while (j > 0) {
+            const a_val = if (items[j - 1].* == .integer) items[j - 1].integer else @as(i64, 0);
+            const b_val = if (items[j].* == .integer) items[j].integer else @as(i64, 0);
+            if (a_val > b_val) {
+                const tmp = items[j - 1];
+                items[j - 1] = items[j];
+                items[j] = tmp;
+            }
+            j -= 1;
+        }
+    }
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = items };
     return result;
 }
 
