@@ -957,10 +957,13 @@ pub const Parser = struct {
     fn parseListLit(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
         self.advance(); // skip [
+        self.skipNewlines();
         var elements: std.ArrayList(Node) = .empty;
         var tail: ?*Node = null;
 
         while (self.current.kind != .rbracket and self.current.kind != .eof) {
+            self.skipNewlines();
+            if (self.current.kind == .rbracket) break;
             const elem = try self.parseExpression();
             elements.append(self.allocator, elem) catch return error.OutOfMemory;
 
@@ -974,6 +977,7 @@ pub const Parser = struct {
                 break;
             }
             if (self.current.kind == .comma) self.advance();
+            self.skipNewlines();
         }
         try self.expect(.rbracket);
         return Node{
@@ -988,11 +992,15 @@ pub const Parser = struct {
     fn parseTupleLit(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
         self.advance(); // skip {
+        self.skipNewlines();
         var elements: std.ArrayList(Node) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            self.skipNewlines();
+            if (self.current.kind == .rbrace) break;
             const elem = try self.parseExpression();
             elements.append(self.allocator, elem) catch return error.OutOfMemory;
             if (self.current.kind == .comma) self.advance();
+            self.skipNewlines();
         }
         try self.expect(.rbrace);
         return Node{

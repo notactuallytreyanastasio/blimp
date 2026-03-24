@@ -55,6 +55,13 @@ pub const BuiltinRegistry = struct {
         reg.register("values", &builtinValues);
         reg.register("type_of", &builtinTypeOf);
         reg.register("print", &builtinPrint);
+        reg.register("rem", &builtinRem);
+        reg.register("abs", &builtinAbs);
+        reg.register("nil?", &builtinIsNil);
+        reg.register("elem", &builtinElem);
+        reg.register("floor", &builtinFloor);
+        reg.register("ceil", &builtinCeil);
+        reg.register("round", &builtinRound);
         return reg;
     }
 
@@ -575,6 +582,100 @@ fn builtinPrint(_: std.mem.Allocator, args: []const *const Value) EvalError!*con
         stdout.writeAll("\n") catch {};
     }
     return args[0]; // return the value (identity)
+}
+
+// ── Math and utility builtins ───────────────────────────
+
+/// rem(10, 3) => 1 (integer remainder)
+fn builtinRem(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .integer or args[1].* != .integer) return error.TypeError;
+    if (args[1].integer == 0) return error.DivisionByZero;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .integer = @rem(args[0].integer, args[1].integer) };
+    return result;
+}
+
+/// abs(-5) => 5
+fn builtinAbs(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    switch (args[0].*) {
+        .integer => |n| result.* = Value{ .integer = if (n < 0) -n else n },
+        .float => |f| result.* = Value{ .float = if (f < 0) -f else f },
+        else => return error.TypeError,
+    }
+    return result;
+}
+
+/// nil?(nil) => true, nil?(42) => false
+fn builtinIsNil(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .boolean = args[0].* == .nil };
+    return result;
+}
+
+/// elem({10, 20, 30}, 1) => 20 (0-indexed tuple access)
+fn builtinElem(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[1].* != .integer) return error.TypeError;
+    const idx: usize = @intCast(@max(args[1].integer, 0));
+    switch (args[0].*) {
+        .tuple => |items| {
+            if (idx >= items.len) {
+                const result = allocator.create(Value) catch return error.OutOfMemory;
+                result.* = .nil;
+                return result;
+            }
+            return items[idx];
+        },
+        .list => |items| {
+            if (idx >= items.len) {
+                const result = allocator.create(Value) catch return error.OutOfMemory;
+                result.* = .nil;
+                return result;
+            }
+            return items[idx];
+        },
+        else => return error.TypeError,
+    }
+}
+
+/// floor(3.7) => 3
+fn builtinFloor(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    switch (args[0].*) {
+        .float => |f| result.* = Value{ .integer = @intFromFloat(@floor(f)) },
+        .integer => return args[0],
+        else => return error.TypeError,
+    }
+    return result;
+}
+
+/// ceil(3.2) => 4
+fn builtinCeil(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    switch (args[0].*) {
+        .float => |f| result.* = Value{ .integer = @intFromFloat(@ceil(f)) },
+        .integer => return args[0],
+        else => return error.TypeError,
+    }
+    return result;
+}
+
+/// round(3.5) => 4
+fn builtinRound(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    switch (args[0].*) {
+        .float => |f| result.* = Value{ .integer = @intFromFloat(@round(f)) },
+        .integer => return args[0],
+        else => return error.TypeError,
+    }
+    return result;
 }
 
 // ============================================================

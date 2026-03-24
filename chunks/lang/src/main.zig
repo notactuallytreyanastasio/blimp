@@ -280,17 +280,32 @@ fn printInline(writer: *std.io.Writer, node: ast.Node) void {
     }
 }
 
-/// Count the net depth change from `do` and `end` keywords in a line.
-/// Uses simple word-boundary checking.
+/// Count the net depth change from `do`/`end` keywords and brackets in a line.
 fn countDepthChange(line: []const u8) i32 {
     var delta: i32 = 0;
     var i: usize = 0;
     while (i < line.len) {
+        const c = line[i];
+        // Brackets, parens, braces all contribute to depth
+        if (c == '[' or c == '(' or c == '{') { delta += 1; i += 1; continue; }
+        if (c == ']' or c == ')' or c == '}') { delta -= 1; i += 1; continue; }
         // Skip whitespace
-        if (line[i] == ' ' or line[i] == '\t' or line[i] == '\n' or line[i] == '\r') {
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
             i += 1;
             continue;
         }
+        // Skip strings (don't count brackets inside strings)
+        if (c == '"') {
+            i += 1;
+            while (i < line.len and line[i] != '"') {
+                if (line[i] == '\\') i += 1; // skip escaped char
+                i += 1;
+            }
+            if (i < line.len) i += 1; // skip closing "
+            continue;
+        }
+        // Skip comments
+        if (c == '#') break;
         // Check for "do" keyword at word boundary
         if (i + 2 <= line.len and std.mem.eql(u8, line[i .. i + 2], "do")) {
             const before_ok = (i == 0) or (!std.ascii.isAlphanumeric(line[i - 1]) and line[i - 1] != '_');
@@ -311,8 +326,10 @@ fn countDepthChange(line: []const u8) i32 {
                 continue;
             }
         }
-        // Skip to next whitespace (move past current word)
-        while (i < line.len and line[i] != ' ' and line[i] != '\t' and line[i] != '\n' and line[i] != '\r') {
+        // Skip to next whitespace or bracket (move past current word)
+        while (i < line.len and line[i] != ' ' and line[i] != '\t' and line[i] != '\n' and line[i] != '\r' and
+            line[i] != '[' and line[i] != ']' and line[i] != '(' and line[i] != ')' and line[i] != '{' and line[i] != '}')
+        {
             i += 1;
         }
     }
