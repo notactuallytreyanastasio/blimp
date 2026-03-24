@@ -954,6 +954,9 @@ pub const Codegen = struct {
             c.LLVMFunctionType(self.void_type, &push_param_types, 2, 0),
             push_fn, &push_args, 2, "");
 
+        // RC: dec the wrapped value (list_push already inc'd it)
+        self.emitRcDec(wrapped);
+
         // i++
         const next_i = c.LLVMBuildAdd(self.builder, i_val, c.LLVMConstInt(self.i32_type, 1, 0), "next_i");
         _ = c.LLVMBuildStore(self.builder, next_i, i_alloca);
@@ -961,7 +964,7 @@ pub const Codegen = struct {
 
         // End
         c.LLVMPositionBuilderAtEnd(self.builder, end_bb);
-        return .{ .val = result_list, .tag = .tagged_val }; // tagged as int for now, print_val handles it
+        return .{ .val = result_list, .tag = .tagged_val };
     }
 
     fn compileSpreadMap(self: *Codegen, se: ast.Node.SpreadExpr) CodegenError!TaggedVal {
@@ -1018,6 +1021,9 @@ pub const Codegen = struct {
             _ = c.LLVMBuildCall2(self.builder,
                 c.LLVMFunctionType(self.void_type, &push_pt, 2, 0),
                 push_fn, &push_args, 2, "");
+
+            // RC: dec local ref (list_push already inc'd)
+            self.emitRcDec(wrapped);
         }
 
         return .{ .val = list, .tag = .tagged_val };
@@ -1094,6 +1100,24 @@ pub const Codegen = struct {
             closure_fn, &closure_args, 4, "closure");
 
         return .{ .val = closure, .tag = .tagged_val };
+    }
+
+    // ── Perceus RC helpers ────────────────────────────────
+
+    fn emitRcInc(self: *Codegen, val: c.LLVMValueRef) void {
+        const f = self.getRuntimeFn("blimp_rc_inc", &.{self.ptr_type}, self.void_type);
+        var params = [_]c.LLVMTypeRef{self.ptr_type};
+        var args = [_]c.LLVMValueRef{val};
+        _ = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.void_type, &params, 1, 0), f, &args, 1, "");
+    }
+
+    fn emitRcDec(self: *Codegen, val: c.LLVMValueRef) void {
+        const f = self.getRuntimeFn("blimp_rc_dec", &.{self.ptr_type}, self.void_type);
+        var params = [_]c.LLVMTypeRef{self.ptr_type};
+        var args = [_]c.LLVMValueRef{val};
+        _ = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.void_type, &params, 1, 0), f, &args, 1, "");
     }
 
     fn emitHandlerTable(self: *Codegen, actor: *const ActorDescriptor, actor_id: c.LLVMValueRef) void {

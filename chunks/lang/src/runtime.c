@@ -22,6 +22,7 @@ typedef enum {
 
 typedef struct BlimpVal BlimpVal;
 typedef struct BlimpVal {
+    int rc; // Perceus reference count
     ValTag tag;
     union {
         long long integer;
@@ -36,10 +37,16 @@ typedef struct BlimpVal {
     };
 } BlimpVal;
 
+// Forward declarations for RC
+void blimp_rc_inc(BlimpVal *v);
+void blimp_rc_dec(BlimpVal *v);
+BlimpVal *blimp_rc_reuse(BlimpVal *v);
+
 // ── Value constructors ──────────────────────────────────
 
 BlimpVal *blimp_val_int(long long n) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_INT;
     v->integer = n;
     return v;
@@ -47,6 +54,7 @@ BlimpVal *blimp_val_int(long long n) {
 
 BlimpVal *blimp_val_float(double f) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_FLOAT;
     v->float_val = f;
     return v;
@@ -54,6 +62,7 @@ BlimpVal *blimp_val_float(double f) {
 
 BlimpVal *blimp_val_string(const char *s) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_STRING;
     v->string = strdup(s);
     return v;
@@ -61,6 +70,7 @@ BlimpVal *blimp_val_string(const char *s) {
 
 BlimpVal *blimp_val_atom(int atom_id) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_ATOM;
     v->atom_id = atom_id;
     return v;
@@ -68,6 +78,7 @@ BlimpVal *blimp_val_atom(int atom_id) {
 
 BlimpVal *blimp_val_bool(int b) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_BOOL;
     v->bool_val = b;
     return v;
@@ -75,12 +86,14 @@ BlimpVal *blimp_val_bool(int b) {
 
 BlimpVal *blimp_val_nil(void) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_NIL;
     return v;
 }
 
 BlimpVal *blimp_val_list(int initial_cap) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_LIST;
     v->list.len = 0;
     v->list.cap = initial_cap > 0 ? initial_cap : 4;
@@ -90,6 +103,7 @@ BlimpVal *blimp_val_list(int initial_cap) {
 
 BlimpVal *blimp_val_actor_ref(int actor_id) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_ACTOR_REF;
     v->actor_id = actor_id;
     return v;
@@ -97,6 +111,7 @@ BlimpVal *blimp_val_actor_ref(int actor_id) {
 
 BlimpVal *blimp_val_closure(void *func_ptr, int param_count, BlimpVal **env, int env_len) {
     BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
     v->tag = VAL_CLOSURE;
     v->closure.func_ptr = func_ptr;
     v->closure.param_count = param_count;
@@ -113,6 +128,7 @@ void blimp_list_push(BlimpVal *list, BlimpVal *item) {
         list->list.cap *= 2;
         list->list.items = (BlimpVal **)realloc(list->list.items, sizeof(BlimpVal *) * list->list.cap);
     }
+    blimp_rc_inc(item); // list now owns a reference
     list->list.items[list->list.len++] = item;
 }
 
@@ -193,6 +209,55 @@ double blimp_val_to_float(BlimpVal *v) {
     if (v->tag == VAL_FLOAT) return v->float_val;
     if (v->tag == VAL_INT) return (double)v->integer;
     return 0.0;
+}
+
+// ── Perceus Reference Counting ───────────────────────────
+
+void blimp_rc_inc(BlimpVal *v) {
+    if (v) v->rc++;
+}
+
+void blimp_rc_dec(BlimpVal *v) {
+    if (!v) return;
+    v->rc--;
+    if (v->rc > 0) return;
+
+    // Refcount hit zero: free this value and recursively dec children
+    switch (v->tag) {
+        case VAL_STRING:
+            free(v->string);
+            break;
+        case VAL_LIST:
+            for (int i = 0; i < v->list.len; i++) {
+                blimp_rc_dec(v->list.items[i]);
+            }
+            free(v->list.items);
+            break;
+        case VAL_MAP:
+            for (int i = 0; i < v->map.len; i++) {
+                free(v->map.keys[i]);
+                blimp_rc_dec(v->map.vals[i]);
+            }
+            free(v->map.keys);
+            free(v->map.vals);
+            break;
+        case VAL_CLOSURE:
+            for (int i = 0; i < v->closure.env_len; i++) {
+                blimp_rc_dec(v->closure.env[i]);
+            }
+            if (v->closure.env) free(v->closure.env);
+            break;
+        default:
+            break; // int, float, bool, nil, atom, actor_ref: no children
+    }
+    free(v);
+}
+
+// Perceus reuse: if rc == 1 (unique owner), return the same pointer
+// for in-place mutation. Otherwise return NULL (caller must allocate new).
+BlimpVal *blimp_rc_reuse(BlimpVal *v) {
+    if (v && v->rc == 1) return v;
+    return NULL;
 }
 
 // ── Tagged value printing ───────────────────────────────
