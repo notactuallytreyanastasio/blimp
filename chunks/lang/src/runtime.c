@@ -178,6 +178,23 @@ BlimpVal *blimp_list_reduce(BlimpVal *list, BlimpVal *init, BlimpVal *closure) {
     return acc;
 }
 
+// ── Value extraction ────────────────────────────────────
+
+long long blimp_val_to_int(BlimpVal *v) {
+    if (!v) return 0;
+    if (v->tag == VAL_INT) return v->integer;
+    if (v->tag == VAL_BOOL) return v->bool_val;
+    if (v->tag == VAL_FLOAT) return (long long)v->float_val;
+    return 0;
+}
+
+double blimp_val_to_float(BlimpVal *v) {
+    if (!v) return 0.0;
+    if (v->tag == VAL_FLOAT) return v->float_val;
+    if (v->tag == VAL_INT) return (double)v->integer;
+    return 0.0;
+}
+
 // ── Tagged value printing ───────────────────────────────
 
 void blimp_print_val(BlimpVal *v) {

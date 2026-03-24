@@ -203,7 +203,7 @@ pub const Codegen = struct {
     // ── Expression compilation ───────────────────────────────
 
     /// Tag enum to track what type an LLVM value represents.
-    const ValTag = enum { int, float, boolean, string, atom, nil, actor_ref };
+    const ValTag = enum { int, float, boolean, string, atom, nil, actor_ref, tagged_val };
 
     const TaggedVal = struct {
         val: c.LLVMValueRef,
@@ -241,6 +241,8 @@ pub const Codegen = struct {
             .for_expr => |fe| self.compileFor(fe),
             .spread_map => |se| self.compileSpreadMap(se),
             .spread_each => |se| self.compileSpreadEach(se),
+            .list_lit => |ll| self.compileListLit(ll),
+            .fn_expr => |fe| self.compileFnExpr(fe),
             else => CodegenError.UnsupportedNode,
         };
     }
@@ -263,7 +265,7 @@ pub const Codegen = struct {
         return switch (tag) {
             .int, .boolean, .nil, .actor_ref => self.i64_type,
             .float => self.f64_type,
-            .string => self.ptr_type,
+            .string, .tagged_val => self.ptr_type,
             .atom => self.i32_type,
         };
     }
@@ -858,34 +860,240 @@ pub const Codegen = struct {
         return .{ .val = id_i64, .tag = .actor_ref };
     }
 
-    // ── New feature codegen ──────────────────────────────
+    // ── New feature codegen (tagged value path) ──────────
 
     fn compileSelfRef(self: *Codegen) CodegenError!TaggedVal {
-        // self resolves to the current actor's ID, stored as a global during spawn
-        // For now we use blimp_actor_count() - 1 as a placeholder within handler context
-        _ = self;
-        return CodegenError.UnsupportedNode; // TODO: wire up actor ID in handler context
+        // Get current actor count - 1 (the last spawned actor in current handler context)
+        const count_fn = self.getRuntimeFn("blimp_actor_count", &.{}, self.i32_type);
+        const count = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.i32_type, null, 0, 0), count_fn, null, 0, "acount");
+        const one = c.LLVMConstInt(self.i32_type, 1, 0);
+        const id = c.LLVMBuildSub(self.builder, count, one, "self_id");
+        // Widen to i64 for actor_ref
+        const id64 = c.LLVMBuildZExt(self.builder, id, self.i64_type, "self_id64");
+        return .{ .val = id64, .tag = .actor_ref };
     }
 
     fn compileFor(self: *Codegen, fe: ast.Node.ForExpr) CodegenError!TaggedVal {
-        // For loops: evaluate iterable, iterate with a counter
-        // For now, compile as inline unrolled calls since we don't have
-        // list length at compile time. Use runtime list iteration.
-        _ = self;
-        _ = fe;
-        return CodegenError.UnsupportedNode; // TODO: needs runtime list iteration support
+        // Compile iterable
+        const list_tv = try self.compileExpr(fe.iterable.*);
+
+        // Create runtime list for results
+        const make_list_fn = self.getRuntimeFn("blimp_val_list", &.{self.i32_type}, self.ptr_type);
+        const init_cap = c.LLVMConstInt(self.i32_type, 16, 0);
+        var make_args = [_]c.LLVMValueRef{init_cap};
+        var make_param_types = [_]c.LLVMTypeRef{self.i32_type};
+        const result_list = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.ptr_type, &make_param_types, 1, 0),
+            make_list_fn, &make_args, 1, "result_list");
+
+        // Get list length
+        const len_fn = self.getRuntimeFn("blimp_list_len", &.{self.ptr_type}, self.i32_type);
+        var len_args = [_]c.LLVMValueRef{list_tv.val};
+        var len_param_types = [_]c.LLVMTypeRef{self.ptr_type};
+        const len = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.i32_type, &len_param_types, 1, 0),
+            len_fn, &len_args, 1, "list_len");
+
+        // Loop: for i = 0; i < len; i++
+        const cur_fn = self.current_fn orelse return CodegenError.LLVMError;
+        const loop_bb = c.LLVMAppendBasicBlock(cur_fn, "for_loop");
+        const body_bb = c.LLVMAppendBasicBlock(cur_fn, "for_body");
+        const end_bb = c.LLVMAppendBasicBlock(cur_fn, "for_end");
+
+        // i = 0
+        const i_alloca = c.LLVMBuildAlloca(self.builder, self.i32_type, "i");
+        _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(self.i32_type, 0, 0), i_alloca);
+        _ = c.LLVMBuildBr(self.builder, loop_bb);
+
+        // Loop header: check i < len
+        c.LLVMPositionBuilderAtEnd(self.builder, loop_bb);
+        const i_val = c.LLVMBuildLoad2(self.builder, self.i32_type, i_alloca, "i");
+        const cond = c.LLVMBuildICmp(self.builder, c.LLVMIntSLT, i_val, len, "cmp");
+        _ = c.LLVMBuildCondBr(self.builder, cond, body_bb, end_bb);
+
+        // Body: get element, bind var, compile body, push result
+        c.LLVMPositionBuilderAtEnd(self.builder, body_bb);
+        const get_fn = self.getRuntimeFn("blimp_list_get", &.{ self.ptr_type, self.i32_type }, self.ptr_type);
+        var get_args = [_]c.LLVMValueRef{ list_tv.val, i_val };
+        var get_param_types = [_]c.LLVMTypeRef{ self.ptr_type, self.i32_type };
+        const elem = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.ptr_type, &get_param_types, 2, 0),
+            get_fn, &get_args, 2, "elem");
+
+        // Unwrap the BlimpVal* to i64 for use in expressions
+        const unwrap_fn = self.getRuntimeFn("blimp_val_to_int", &.{self.ptr_type}, self.i64_type);
+        var unwrap_args = [_]c.LLVMValueRef{elem};
+        var unwrap_pt = [_]c.LLVMTypeRef{self.ptr_type};
+        const unwrapped = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.i64_type, &unwrap_pt, 1, 0),
+            unwrap_fn, &unwrap_args, 1, "unwrapped");
+
+        // Bind loop variable as i64
+        const var_alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(fe.var_name));
+        _ = c.LLVMBuildStore(self.builder, unwrapped, var_alloca);
+        self.scope.put(self.allocator, .{ .name = fe.var_name, .alloca = var_alloca, .tag = .int, .llvm_type = self.i64_type });
+
+        // Compile body
+        var last_tv: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        for (fe.body) |stmt| {
+            last_tv = try self.compileExpr(stmt);
+        }
+
+        // Wrap result as BlimpVal and push to result list
+        const wrap_fn = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
+        var wrap_args = [_]c.LLVMValueRef{last_tv.val};
+        var wrap_param_types = [_]c.LLVMTypeRef{self.i64_type};
+        const wrapped = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.ptr_type, &wrap_param_types, 1, 0),
+            wrap_fn, &wrap_args, 1, "wrapped");
+
+        const push_fn = self.getRuntimeFn("blimp_list_push", &.{ self.ptr_type, self.ptr_type }, self.void_type);
+        var push_args = [_]c.LLVMValueRef{ result_list, wrapped };
+        var push_param_types = [_]c.LLVMTypeRef{ self.ptr_type, self.ptr_type };
+        _ = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.void_type, &push_param_types, 2, 0),
+            push_fn, &push_args, 2, "");
+
+        // i++
+        const next_i = c.LLVMBuildAdd(self.builder, i_val, c.LLVMConstInt(self.i32_type, 1, 0), "next_i");
+        _ = c.LLVMBuildStore(self.builder, next_i, i_alloca);
+        _ = c.LLVMBuildBr(self.builder, loop_bb);
+
+        // End
+        c.LLVMPositionBuilderAtEnd(self.builder, end_bb);
+        return .{ .val = result_list, .tag = .tagged_val }; // tagged as int for now, print_val handles it
     }
 
     fn compileSpreadMap(self: *Codegen, se: ast.Node.SpreadExpr) CodegenError!TaggedVal {
-        _ = self;
-        _ = se;
-        return CodegenError.UnsupportedNode; // TODO: needs closure + list iteration in codegen
+        const list_tv = try self.compileExpr(se.iterable.*);
+        const fn_tv = try self.compileExpr(se.func.*);
+        const map_fn = self.getRuntimeFn("blimp_list_map", &.{ self.ptr_type, self.ptr_type }, self.ptr_type);
+        var args = [_]c.LLVMValueRef{ list_tv.val, fn_tv.val };
+        var param_types = [_]c.LLVMTypeRef{ self.ptr_type, self.ptr_type };
+        const result = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.ptr_type, &param_types, 2, 0),
+            map_fn, &args, 2, "mapped");
+        return .{ .val = result, .tag = .tagged_val };
     }
 
     fn compileSpreadEach(self: *Codegen, se: ast.Node.SpreadExpr) CodegenError!TaggedVal {
-        _ = self;
-        _ = se;
-        return CodegenError.UnsupportedNode; // TODO: needs closure + list iteration in codegen
+        const list_tv = try self.compileExpr(se.iterable.*);
+        const fn_tv = try self.compileExpr(se.func.*);
+        const each_fn = self.getRuntimeFn("blimp_list_each", &.{ self.ptr_type, self.ptr_type }, self.void_type);
+        var each_args = [_]c.LLVMValueRef{ list_tv.val, fn_tv.val };
+        var each_param_types = [_]c.LLVMTypeRef{ self.ptr_type, self.ptr_type };
+        _ = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.void_type, &each_param_types, 2, 0),
+            each_fn, &each_args, 2, "");
+        // Return :ok atom
+        const ok_id = self.atoms.intern(self.allocator, "ok");
+        return .{ .val = c.LLVMConstInt(self.i64_type, ok_id, 0), .tag = .atom };
+    }
+
+    fn compileListLit(self: *Codegen, ll: ast.Node.ListLit) CodegenError!TaggedVal {
+        // Create list: blimp_val_list(cap)
+        const make_fn = self.getRuntimeFn("blimp_val_list", &.{self.i32_type}, self.ptr_type);
+        const cap = c.LLVMConstInt(self.i32_type, @intCast(ll.elements.len), 0);
+        var make_args = [_]c.LLVMValueRef{cap};
+        var make_pt = [_]c.LLVMTypeRef{self.i32_type};
+        const list = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.ptr_type, &make_pt, 1, 0),
+            make_fn, &make_args, 1, "list");
+
+        // Push each element
+        const push_fn = self.getRuntimeFn("blimp_list_push", &.{ self.ptr_type, self.ptr_type }, self.void_type);
+        const wrap_int_fn = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
+
+        for (ll.elements) |elem| {
+            const tv = try self.compileExpr(elem);
+            // Wrap the i64 value as a BlimpVal
+            var wrap_args = [_]c.LLVMValueRef{tv.val};
+            var wrap_pt = [_]c.LLVMTypeRef{self.i64_type};
+            const wrapped = c.LLVMBuildCall2(self.builder,
+                c.LLVMFunctionType(self.ptr_type, &wrap_pt, 1, 0),
+                wrap_int_fn, &wrap_args, 1, "elem_val");
+
+            var push_args = [_]c.LLVMValueRef{ list, wrapped };
+            var push_pt = [_]c.LLVMTypeRef{ self.ptr_type, self.ptr_type };
+            _ = c.LLVMBuildCall2(self.builder,
+                c.LLVMFunctionType(self.void_type, &push_pt, 2, 0),
+                push_fn, &push_args, 2, "");
+        }
+
+        return .{ .val = list, .tag = .tagged_val };
+    }
+
+    fn compileFnExpr(self: *Codegen, fe: ast.Node.FnExpr) CodegenError!TaggedVal {
+        // Create an LLVM function for the closure body
+        const cur_fn = self.current_fn;
+        const saved_scope = self.scope;
+        self.scope = .{};
+
+        // Function type: BlimpVal*(BlimpVal*, ...) for each param
+        const param_count: u32 = @intCast(fe.params.len);
+        var param_types = self.allocator.alloc(c.LLVMTypeRef, param_count) catch return CodegenError.LLVMError;
+        for (0..param_count) |i| {
+            param_types[i] = self.ptr_type; // BlimpVal*
+        }
+        const fn_type = c.LLVMFunctionType(self.ptr_type, param_types.ptr, param_count, 0);
+        const func = c.LLVMAddFunction(self.module, self.zname("blimp_closure"), fn_type);
+
+        const entry_bb = c.LLVMAppendBasicBlock(func, "entry");
+        c.LLVMPositionBuilderAtEnd(self.builder, entry_bb);
+        self.current_fn = func;
+
+        // Bind params: unwrap BlimpVal* to i64 for use in expressions
+        const unwrap_fn = self.getRuntimeFn("blimp_val_to_int", &.{self.ptr_type}, self.i64_type);
+        for (fe.params, 0..) |param_name, i| {
+            var unwrap_args = [_]c.LLVMValueRef{c.LLVMGetParam(func, @intCast(i))};
+            var unwrap_pt = [_]c.LLVMTypeRef{self.ptr_type};
+            const unwrapped = c.LLVMBuildCall2(self.builder,
+                c.LLVMFunctionType(self.i64_type, &unwrap_pt, 1, 0),
+                unwrap_fn, &unwrap_args, 1, "unwrapped");
+            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param_name));
+            _ = c.LLVMBuildStore(self.builder, unwrapped, alloca);
+            self.scope.put(self.allocator, .{ .name = param_name, .alloca = alloca, .tag = .int, .llvm_type = self.i64_type });
+        }
+
+        // Compile body
+        var last_tv: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        for (fe.body) |stmt| {
+            last_tv = try self.compileExpr(stmt);
+        }
+
+        // Wrap result as BlimpVal if it's an i64
+        const wrap_fn = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
+        var wrap_args = [_]c.LLVMValueRef{last_tv.val};
+        var wrap_pt = [_]c.LLVMTypeRef{self.i64_type};
+        const wrapped = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.ptr_type, &wrap_pt, 1, 0),
+            wrap_fn, &wrap_args, 1, "fn_result");
+        _ = c.LLVMBuildRet(self.builder, wrapped);
+
+        // Restore context
+        self.current_fn = cur_fn;
+        self.scope = saved_scope;
+
+        // Position builder back in the calling function
+        if (cur_fn) |f| {
+            const last_bb = c.LLVMGetLastBasicBlock(f);
+            c.LLVMPositionBuilderAtEnd(self.builder, last_bb);
+        }
+
+        // Create closure value: blimp_val_closure(func_ptr, param_count, null, 0)
+        const closure_fn = self.getRuntimeFn("blimp_val_closure", &.{ self.ptr_type, self.i32_type, self.ptr_type, self.i32_type }, self.ptr_type);
+        var closure_args = [_]c.LLVMValueRef{
+            func,
+            c.LLVMConstInt(self.i32_type, param_count, 0),
+            c.LLVMConstNull(self.ptr_type), // no captured env yet
+            c.LLVMConstInt(self.i32_type, 0, 0),
+        };
+        var closure_pt = [_]c.LLVMTypeRef{ self.ptr_type, self.i32_type, self.ptr_type, self.i32_type };
+        const closure = c.LLVMBuildCall2(self.builder,
+            c.LLVMFunctionType(self.ptr_type, &closure_pt, 4, 0),
+            closure_fn, &closure_args, 4, "closure");
+
+        return .{ .val = closure, .tag = .tagged_val };
     }
 
     fn emitHandlerTable(self: *Codegen, actor: *const ActorDescriptor, actor_id: c.LLVMValueRef) void {
@@ -1257,6 +1465,14 @@ pub const Codegen = struct {
                 // Print actor ref as its ID
                 const f = self.getPrintInt();
                 var params = [_]c.LLVMTypeRef{self.i64_type};
+                const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
+                var args = [_]c.LLVMValueRef{tv.val};
+                _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
+            },
+            .tagged_val => {
+                // Print via runtime: blimp_print_val(BlimpVal*)
+                const f = self.getRuntimeFn("blimp_print_val", &.{self.ptr_type}, self.void_type);
+                var params = [_]c.LLVMTypeRef{self.ptr_type};
                 const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
                 var args = [_]c.LLVMValueRef{tv.val};
                 _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
