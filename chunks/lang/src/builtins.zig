@@ -51,6 +51,10 @@ pub const BuiltinRegistry = struct {
         reg.register("head", &builtinHead);
         reg.register("tail", &builtinTail);
         reg.register("sort", &builtinSort);
+        reg.register("merge", &builtinMerge);
+        reg.register("values", &builtinValues);
+        reg.register("type_of", &builtinTypeOf);
+        reg.register("print", &builtinPrint);
         return reg;
     }
 
@@ -487,6 +491,90 @@ fn builtinSort(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .list = items };
     return result;
+}
+
+// ── Map and utility builtins ────────────────────────────
+
+/// merge(%{a: 1}, %{b: 2}) => %{a: 1, b: 2}
+fn builtinMerge(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .map or args[1].* != .map) return error.TypeError;
+    const a = args[0].map;
+    const b = args[1].map;
+
+    // Start with all entries from a, then add/overwrite from b
+    var entries: std.ArrayList(Value.MapEntry) = .{ .items = &.{}, .capacity = 0 };
+    for (a) |entry| {
+        entries.append(allocator, entry) catch return error.OutOfMemory;
+    }
+    for (b) |new_entry| {
+        var found = false;
+        for (entries.items) |*existing| {
+            if (std.mem.eql(u8, existing.key, new_entry.key)) {
+                existing.val = new_entry.val;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            entries.append(allocator, new_entry) catch return error.OutOfMemory;
+        }
+    }
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .map = entries.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+/// values(%{a: 1, b: 2}) => [1, 2]
+fn builtinValues(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .map) return error.TypeError;
+    const entries = args[0].map;
+    var items = allocator.alloc(*const Value, entries.len) catch return error.OutOfMemory;
+    for (entries, 0..) |entry, i| {
+        items[i] = entry.val;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = items };
+    return result;
+}
+
+/// type_of(42) => :integer, type_of("hi") => :string, etc.
+fn builtinTypeOf(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    const type_name: []const u8 = switch (args[0].*) {
+        .integer => "integer",
+        .float => "float",
+        .string => "string",
+        .atom => "atom",
+        .boolean => "boolean",
+        .nil => "nil",
+        .hole => "hole",
+        .list => "list",
+        .tuple => "tuple",
+        .map => "map",
+        .actor_ref => "actor_ref",
+        .closure => "closure",
+    };
+    result.* = Value{ .atom = type_name };
+    return result;
+}
+
+/// print(value) => prints to stdout, returns the value (identity)
+fn builtinPrint(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    // Write to a buffer and print
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    args[0].format(fbs.writer());
+    const builtin = @import("builtin");
+    if (builtin.target.cpu.arch != .wasm32) {
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll(fbs.getWritten()) catch {};
+        stdout.writeAll("\n") catch {};
+    }
+    return args[0]; // return the value (identity)
 }
 
 // ============================================================
