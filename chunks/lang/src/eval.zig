@@ -180,6 +180,16 @@ pub const Evaluator = struct {
 
             // Calling an expression as a function
             .call_expr => |ce| return self.evalCallExpr(ce),
+
+            // For loop
+            .for_expr => |fe| return self.evalForExpr(fe),
+
+            // Spread: ...list, fn (map) and ..list, fn (each)
+            .spread_map => |se| return self.evalSpreadMap(se),
+            .spread_each => |se| return self.evalSpreadEach(se),
+
+            // Self reference inside a handler
+            .self_ref => return self.evalSelfRef(),
         }
     }
 
@@ -253,6 +263,70 @@ pub const Evaluator = struct {
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
         v.* = Value{ .actor_ref = ref };
         return v;
+    }
+
+    fn evalForExpr(self: *Evaluator, fe: ast.Node.ForExpr) EvalError!*const Value {
+        const iterable = try self.eval(fe.iterable.*);
+        if (iterable.* != .list) return error.TypeError;
+
+        var results: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
+        for (iterable.list) |item| {
+            self.env.pushScope();
+            self.env.define(fe.var_name, item);
+            var last: *const Value = undefined;
+            var has = false;
+            for (fe.body) |stmt| {
+                last = try self.eval(stmt);
+                has = true;
+            }
+            self.env.popScope();
+            if (has) results.append(self.allocator, last) catch return error.OutOfMemory;
+        }
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .list = results.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
+        return v;
+    }
+
+    fn evalSpreadMap(self: *Evaluator, se: ast.Node.SpreadExpr) EvalError!*const Value {
+        const iterable = try self.eval(se.iterable.*);
+        const func = try self.eval(se.func.*);
+        if (iterable.* != .list) return error.TypeError;
+
+        var results = self.allocator.alloc(*const Value, iterable.list.len) catch return error.OutOfMemory;
+        for (iterable.list, 0..) |item, i| {
+            results[i] = try self.callClosureWithValues(func, &.{item});
+        }
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .list = results };
+        return v;
+    }
+
+    fn evalSpreadEach(self: *Evaluator, se: ast.Node.SpreadExpr) EvalError!*const Value {
+        const iterable = try self.eval(se.iterable.*);
+        const func = try self.eval(se.func.*);
+        if (iterable.* != .list) return error.TypeError;
+
+        for (iterable.list) |item| {
+            _ = try self.callClosureWithValues(func, &.{item});
+        }
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .atom = "ok" };
+        return v;
+    }
+
+    fn evalSelfRef(self: *Evaluator) EvalError!*const Value {
+        if (self.actor_ctx) |ctx| {
+            const v = self.allocator.create(Value) catch return error.OutOfMemory;
+            v.* = Value{ .actor_ref = ctx.entry.ref };
+            return v;
+        }
+        self.last_error = BlimpError{
+            .title = "SELF OUTSIDE HANDLER",
+            .source_line = self.source,
+            .message = "`self` can only be used inside an actor handler.",
+            .hint = null,
+        };
+        return error.NotSupported;
     }
 
     fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {

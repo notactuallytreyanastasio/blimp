@@ -46,6 +46,10 @@ pub const Node = struct {
         spawn_expr: SpawnExpr,
         fn_expr: FnExpr,
         call_expr: CallExpr,
+        for_expr: ForExpr,
+        spread_map: SpreadExpr,   // ...list, fn -> map
+        spread_each: SpreadExpr,  // ..list, fn -> each
+        self_ref: void,
     };
 
     pub const ActorDef = struct {
@@ -201,6 +205,19 @@ pub const Node = struct {
     pub const SpawnExpr = struct {
         actor_name: []const u8,
         overrides: []const KeyValue,
+    };
+
+    /// For loop: for x in list do ... end
+    pub const ForExpr = struct {
+        var_name: []const u8,
+        iterable: *const Node,
+        body: []const Node,
+    };
+
+    /// Spread expression: ...list, fn (map) or ..list, fn (each)
+    pub const SpreadExpr = struct {
+        iterable: *const Node,
+        func: *const Node,
     };
 
     /// Anonymous function: fn(x, y) do ... end

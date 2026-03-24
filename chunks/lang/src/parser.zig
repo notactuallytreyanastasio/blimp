@@ -665,6 +665,13 @@ pub const Parser = struct {
             },
             .kw_spawn => return self.parseSpawnExpr(),
             .kw_fn => return self.parseFnExpr(),
+            .kw_for => return self.parseForExpr(),
+            .kw_self => {
+                self.advance();
+                return Node{ .kind = .{ .self_ref = {} }, .loc = loc };
+            },
+            .dot_dot_dot => return self.parseSpread(.spread_map),
+            .dot_dot => return self.parseSpread(.spread_each),
             .lbracket => return self.parseListLit(),
             .lbrace => return self.parseTupleLit(),
             .percent => return self.parseMapLit(),
@@ -714,6 +721,66 @@ pub const Parser = struct {
     }
 
     /// Parse: fn(x, y) do ... end
+    /// Parse: for x in list do ... end
+    fn parseForExpr(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_for);
+
+        if (self.current.kind != .identifier) return error.UnexpectedToken;
+        const var_name = self.current.lexeme;
+        self.advance();
+
+        try self.expect(.kw_in);
+        const iterable = try self.parseExpression();
+        const iter_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+        iter_ptr.* = iterable;
+
+        self.skipNewlines();
+        try self.expect(.kw_do);
+        self.skipNewlines();
+
+        var body: std.ArrayList(Node) = .empty;
+        while (self.current.kind != .kw_end and self.current.kind != .eof) {
+            const stmt = try self.parseExpressionStatement();
+            body.append(self.allocator, stmt) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+        try self.expect(.kw_end);
+
+        return Node{
+            .kind = .{ .for_expr = .{
+                .var_name = var_name,
+                .iterable = iter_ptr,
+                .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            } },
+            .loc = loc,
+        };
+    }
+
+    /// Parse: ...list, fn  or  ..list, fn
+    fn parseSpread(self: *Parser, comptime kind: std.meta.Tag(Node.Kind)) ParseError!Node {
+        const loc = self.currentLoc();
+        self.advance(); // skip .. or ...
+
+        const iterable = try self.parseExpression();
+        const iter_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+        iter_ptr.* = iterable;
+
+        try self.expect(.comma);
+
+        const func = try self.parseExpression();
+        const func_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+        func_ptr.* = func;
+
+        return Node{
+            .kind = @unionInit(Node.Kind, @tagName(kind), .{
+                .iterable = iter_ptr,
+                .func = func_ptr,
+            }),
+            .loc = loc,
+        };
+    }
+
     fn parseFnExpr(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
         try self.expect(.kw_fn);

@@ -36,6 +36,11 @@ pub const Token = struct {
         kw_case,
         kw_orelse,
         kw_spawn,
+        kw_self,
+        kw_for,
+        kw_in,
+        dot_dot,    // .. (each)
+        dot_dot_dot, // ... (map)
 
         // Operators
         plus,
@@ -95,6 +100,9 @@ pub const Token = struct {
             .{ "case", .kw_case },
             .{ "orelse", .kw_orelse },
             .{ "spawn", .kw_spawn },
+            .{ "self", .kw_self },
+            .{ "for", .kw_for },
+            .{ "in", .kw_in },
             .{ "true", .true_lit },
             .{ "false", .false_lit },
             .{ "nil", .nil_lit },

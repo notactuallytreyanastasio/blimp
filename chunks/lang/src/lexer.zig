@@ -212,7 +212,17 @@ pub const Lexer = struct {
             '>' => .gt,
             '!' => .bang,
             '|' => .pipe,
-            '.' => .dot,
+            '.' => {
+                if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                    self.pos += 1;
+                    if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                        self.pos += 1;
+                        return self.makeToken(.dot_dot_dot, "...");
+                    }
+                    return self.makeToken(.dot_dot, "..");
+                }
+                return self.makeToken(.dot, ".");
+            },
             '(' => .lparen,
             ')' => .rparen,
             '{' => .lbrace,
