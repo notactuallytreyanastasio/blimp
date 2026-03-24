@@ -1115,10 +1115,85 @@ pub const Evaluator = struct {
             },
             .identifier => |id| {
                 // Pipe into bare function name: items |> length
+                // Check for closure first
+                if (self.env.lookup(id.name)) |val| {
+                    if (val.* == .closure) {
+                        return self.callClosureWithValues(val, &.{left_val});
+                    }
+                }
                 const func = self.builtins.get(id.name) orelse return error.UndefinedVariable;
                 const args = self.allocator.alloc(*const Value, 1) catch return error.OutOfMemory;
                 args[0] = left_val;
                 return func(self.allocator, args);
+            },
+            .message_send => |ms| {
+                // Pipe into message send: val |> actor <- :msg(_)
+                // Substitute _ holes in the message args with the piped value
+                const target_val = try self.eval(ms.target.*);
+                switch (target_val.*) {
+                    .actor_ref => |ref| {
+                        const entry = self.registry.getInstance(ref) orelse return error.TypeError;
+
+                        // Build args with hole substitution
+                        var arg_vals: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
+                        for (ms.args) |arg| {
+                            if (arg.kind == .hole) {
+                                arg_vals.append(self.allocator, left_val) catch return error.OutOfMemory;
+                            } else {
+                                arg_vals.append(self.allocator, try self.eval(arg)) catch return error.OutOfMemory;
+                            }
+                        }
+
+                        // If no args had holes, add piped value as first arg
+                        if (ms.args.len == 0) {
+                            // No-arg message: val |> actor <- :msg (piped value unused, just send)
+                        }
+
+                        // Find matching handler and execute
+                        for (entry.handlers) |handler| {
+                            if (!std.mem.eql(u8, handler.name, ms.message)) continue;
+                            if (handler.params.len != arg_vals.items.len) continue;
+
+                            self.env.pushScope();
+                            for (handler.params, 0..) |param, i| {
+                                self.env.define(param.name, arg_vals.items[i]);
+                            }
+                            for (entry.state_fields) |field| {
+                                self.env.define(field.key, field.val);
+                            }
+
+                            var ctx = ActorContext{
+                                .entry = entry,
+                                .reply_value = null,
+                                .bubble_strategy = handler.bubble_strategy,
+                            };
+                            const prev_ctx = self.actor_ctx;
+                            self.actor_ctx = &ctx;
+
+                            var last_val: *const Value = undefined;
+                            var has_val = false;
+                            for (handler.body) |stmt| {
+                                last_val = self.eval(stmt) catch |err| {
+                                    self.actor_ctx = prev_ctx;
+                                    self.env.popScope();
+                                    return err;
+                                };
+                                has_val = true;
+                            }
+
+                            self.actor_ctx = prev_ctx;
+                            self.env.popScope();
+
+                            if (ctx.reply_value) |rv| return rv;
+                            if (has_val) return last_val;
+                            const nil = self.allocator.create(Value) catch return error.OutOfMemory;
+                            nil.* = .nil;
+                            return nil;
+                        }
+                        return error.TypeError; // no matching handler
+                    },
+                    else => return error.TypeError,
+                }
             },
             else => return error.UnsupportedOperation,
         }
