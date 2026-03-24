@@ -62,6 +62,13 @@ pub const BuiltinRegistry = struct {
         reg.register("floor", &builtinFloor);
         reg.register("ceil", &builtinCeil);
         reg.register("round", &builtinRound);
+        reg.register("not", &builtinNot);
+        reg.register("size", &builtinSize);
+        reg.register("empty?", &builtinIsEmpty);
+        reg.register("flat", &builtinFlat);
+        reg.register("zip", &builtinZip);
+        reg.register("uniq", &builtinUniq);
+        reg.register("sum", &builtinSum);
         return reg;
     }
 
@@ -675,6 +682,101 @@ fn builtinRound(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
         .integer => return args[0],
         else => return error.TypeError,
     }
+    return result;
+}
+
+// ── Logic and collection builtins ───────────────────────
+
+/// not(true) => false
+fn builtinNot(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .boolean = !args[0].truthy() };
+    return result;
+}
+
+/// size(collection) => length (alias for length)
+fn builtinSize(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return builtinLength(allocator, args);
+}
+
+/// empty?([]) => true, empty?([1]) => false
+fn builtinIsEmpty(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .boolean = switch (args[0].*) {
+        .list => |items| items.len == 0,
+        .map => |entries| entries.len == 0,
+        .string => |s| s.len == 0,
+        .nil => true,
+        else => false,
+    } };
+    return result;
+}
+
+/// flat([[1,2],[3,4]]) => [1,2,3,4]
+fn builtinFlat(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    var items: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
+    for (args[0].list) |item| {
+        if (item.* == .list) {
+            for (item.list) |inner| {
+                items.append(allocator, inner) catch return error.OutOfMemory;
+            }
+        } else {
+            items.append(allocator, item) catch return error.OutOfMemory;
+        }
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = items.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+/// zip([1,2,3], [:a,:b,:c]) => [{1,:a},{2,:b},{3,:c}]
+fn builtinZip(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .list or args[1].* != .list) return error.TypeError;
+    const a = args[0].list;
+    const b = args[1].list;
+    const len = @min(a.len, b.len);
+    var items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
+    for (0..len) |i| {
+        const pair = allocator.alloc(*const Value, 2) catch return error.OutOfMemory;
+        pair[0] = a[i];
+        pair[1] = b[i];
+        const tuple_val = allocator.create(Value) catch return error.OutOfMemory;
+        tuple_val.* = Value{ .tuple = pair };
+        items[i] = tuple_val;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = items };
+    return result;
+}
+
+/// uniq([1,2,1,3,2]) => [1,2,3]
+fn builtinUniq(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    var items: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
+    for (args[0].list) |item| {
+        var found = false;
+        for (items.items) |existing| {
+            if (existing.eql(item.*)) { found = true; break; }
+        }
+        if (!found) items.append(allocator, item) catch return error.OutOfMemory;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = items.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+/// sum([1,2,3]) => 6
+fn builtinSum(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    var total: i64 = 0;
+    for (args[0].list) |item| {
+        if (item.* == .integer) total += item.integer;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .integer = total };
     return result;
 }
 
