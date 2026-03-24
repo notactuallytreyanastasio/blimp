@@ -85,5 +85,27 @@ pub fn build(b: *std.Build) void {
         compile_run_cmd.addArgs(args);
     }
 
+    // -- WASM build (browser REPL) --
+    const wasm_step = b.step("wasm", "Build Blimp interpreter as WASM module");
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const wasm = b.addExecutable(.{
+        .name = "blimp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm_api.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    wasm.rdynamic = true;
+    wasm.entry = .disabled;
+
+    const install_wasm = b.addInstallArtifact(wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+    wasm_step.dependOn(&install_wasm.step);
+
     // TUI REPL is now in chunks/repl_tui (Rust/Ratatui)
 }

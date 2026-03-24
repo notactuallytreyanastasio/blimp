@@ -1,0 +1,27 @@
+<script src="blimp.js"></script>
+<script>
+(async function() {
+  var b = new Blimp();
+  await b.init('blimp.wasm');
+  
+  b.eval('actor Counter do\n  state count: Int :: 0\n  on :increment do\n    become count: count + 1\n    reply count + 1\n  end\nend');
+  console.log('after actor def:', JSON.stringify(b.getState()));
+  
+  b.eval('a = spawn Counter');
+  console.log('after spawn a:', JSON.stringify(b.getState()));
+  
+  b.eval('b = spawn Counter');
+  console.log('after spawn b:', JSON.stringify(b.getState()));
+  
+  b.eval('c = spawn Counter');
+  console.log('after spawn c:', JSON.stringify(b.getState()));
+  
+  b.eval('a <- :increment');
+  console.log('after a incr:', JSON.stringify(b.getState()));
+  
+  b.eval('a <- :increment');
+  console.log('after a incr2:', JSON.stringify(b.getState()));
+  
+  document.body.textContent = 'Check console';
+})();
+</script>

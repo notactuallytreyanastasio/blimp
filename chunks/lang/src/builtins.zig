@@ -208,7 +208,11 @@ fn builtinKeys(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
 
 fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
-    const timestamp = std.time.timestamp();
+    const builtin = @import("builtin");
+    const timestamp: i64 = if (builtin.target.cpu.arch == .wasm32)
+        0 // TODO: import JS Date.now() via extern
+    else
+        std.time.timestamp();
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = timestamp };
     return result;
