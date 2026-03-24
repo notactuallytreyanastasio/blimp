@@ -1,0 +1,16 @@
+# Actor spawn + message benchmark
+# Spawn 1000 counters and increment each once
+
+actor Counter do
+  state count: Int :: 0
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+end
+
+# Spawn and send
+for i in range(1, 100) do
+  c = spawn Counter
+  c <- :increment
+end

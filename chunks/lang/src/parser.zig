@@ -285,6 +285,43 @@ pub const Parser = struct {
         };
     }
 
+    /// Check if current position looks like the start of a new branch (pattern ->)
+    fn peekIsBranchStart(self: *Parser) bool {
+        // Save position
+        const saved_pos = self.lexer.pos;
+        const saved_line = self.lexer.line;
+        const saved_col = self.lexer.col;
+        const saved_current = self.current;
+
+        // Try to parse an expression then check for ->
+        // Simple heuristic: skip one token, check if next is ->
+        const tok = self.current.kind;
+        if (tok == .integer or tok == .identifier or tok == .atom or
+            tok == .string or tok == .true_lit or tok == .false_lit or
+            tok == .nil_lit or tok == .upper_identifier or tok == .hole or
+            tok == .lbracket or tok == .percent or tok == .lbrace)
+        {
+            self.advance();
+            // Skip optional guard: when expr
+            if (self.current.kind == .kw_when) {
+                // Definitely a branch start
+                self.lexer.pos = saved_pos;
+                self.lexer.line = saved_line;
+                self.lexer.col = saved_col;
+                self.current = saved_current;
+                return true;
+            }
+            const is_arrow = self.current.kind == .arrow;
+            // Restore
+            self.lexer.pos = saved_pos;
+            self.lexer.line = saved_line;
+            self.lexer.col = saved_col;
+            self.current = saved_current;
+            return is_arrow;
+        }
+        return false;
+    }
+
     /// Parse: situation expr do pattern -> body ... _ -> body ... end
     fn parseSituation(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
@@ -376,9 +413,21 @@ pub const Parser = struct {
             self.current.kind != .hole and
             self.current.kind != .atom)
         {
-            // If we see a newline, skip it and check if the next token starts a new branch
+            // If we see a newline, check if the next line starts a new branch pattern
             if (self.current.kind == .newline) {
                 self.skipNewlines();
+                if (self.current.kind == .kw_end or self.current.kind == .eof) break;
+                // Any of these at the start of a new line could be a branch pattern
+                if (self.current.kind == .integer or
+                    self.current.kind == .string or
+                    self.current.kind == .true_lit or
+                    self.current.kind == .false_lit or
+                    self.current.kind == .nil_lit or
+                    self.current.kind == .lbracket or
+                    self.current.kind == .percent or
+                    self.current.kind == .lbrace or
+                    self.current.kind == .hole or
+                    self.current.kind == .atom) break;
                 continue;
             }
             const stmt = try self.parseHandlerBody();
@@ -429,13 +478,7 @@ pub const Parser = struct {
     /// Also handles situation/case as top-level statements.
     pub fn parseStatementPublic(self: *Parser) ParseError!Node {
         self.skipNewlines();
-        if (self.current.kind == .kw_situation) {
-            return self.parseSituation();
-        }
-        if (self.current.kind == .kw_case) {
-            return self.parseCase();
-        }
-        return self.parseExpressionStatement();
+        return self.parseTopLevel();
     }
 
     // ============================================================
@@ -773,7 +816,7 @@ pub const Parser = struct {
 
         var body: std.ArrayList(Node) = .empty;
         while (self.current.kind != .kw_end and self.current.kind != .eof) {
-            const stmt = try self.parseExpressionStatement();
+            const stmt = try self.parseTopLevel();
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
             self.skipNewlines();
         }
@@ -839,7 +882,7 @@ pub const Parser = struct {
 
         var body: std.ArrayList(Node) = .empty;
         while (self.current.kind != .kw_end and self.current.kind != .eof) {
-            const stmt = try self.parseExpressionStatement();
+            const stmt = try self.parseTopLevel();
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
             self.skipNewlines();
         }
@@ -877,7 +920,7 @@ pub const Parser = struct {
 
         var body: std.ArrayList(Node) = .empty;
         while (self.current.kind != .kw_end and self.current.kind != .eof) {
-            const stmt = try self.parseExpressionStatement();
+            const stmt = try self.parseTopLevel();
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
             self.skipNewlines();
         }

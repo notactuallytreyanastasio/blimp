@@ -1,0 +1,12 @@
+# Fibonacci benchmark - recursive fib(30)
+# Tests raw expression evaluation speed
+
+def fib(n) do
+  situation n do
+    0 -> 0
+    1 -> 1
+    _ -> fib(n - 1) + fib(n - 2)
+  end
+end
+
+fib(30)

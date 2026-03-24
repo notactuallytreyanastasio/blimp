@@ -1,0 +1,36 @@
+# Ring benchmark - 10 actors passing a message 100 times around
+# Tests message passing throughput
+
+actor Node do
+  state next_id: Int :: 0
+  state hops: Int :: 0
+
+  on :set_next(id) do
+    become next_id: id
+    reply :ok
+  end
+
+  on :pass(token) do
+    become hops: hops + 1
+    reply token + 1
+  end
+
+  on :get_hops do
+    reply hops
+  end
+end
+
+# Create 10 nodes
+nodes = for i in range(1, 10) do
+  spawn Node
+end
+
+# Pass a token around: each node increments and we track total
+total = 0
+for round in range(1, 100) do
+  for node in nodes do
+    total = node <- :pass(total)
+  end
+end
+
+total

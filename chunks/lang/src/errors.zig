@@ -249,7 +249,7 @@ pub fn alreadyDefined(name: []const u8, source: []const u8) BlimpError {
 pub fn parseError(source: []const u8) BlimpError {
     // Check for common keyword-as-variable mistakes
     // Note: "actor" is now supported in the REPL via multi-line input
-    const keywords = [_][]const u8{ "state", "on", "become", "reply", "do", "end", "when", "bubbles", "situation", "case", "orelse", "def" };
+    const keywords = [_][]const u8{ "state", "on", "become", "reply", "when", "bubbles" };
     for (keywords) |kw| {
         if (std.mem.startsWith(u8, source, kw)) {
             return notSupportedInRepl(kw, source);
