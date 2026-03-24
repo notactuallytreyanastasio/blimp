@@ -155,9 +155,18 @@ fn writeJsonEscaped(w: anytype, val: *const Value) void {
             w.writeAll("fn(") catch {};
             for (c.params, 0..) |p, i| {
                 if (i > 0) w.writeAll(", ") catch {};
-                w.writeAll(p) catch {};
+                w.writeAll(p.name) catch {};
+                if (p.type_name) |t| {
+                    w.writeAll(": ") catch {};
+                    w.writeAll(t) catch {};
+                }
             }
-            w.writeAll(") do ... end") catch {};
+            w.writeAll(")") catch {};
+            if (c.return_type) |rt| {
+                w.writeAll(" -> ") catch {};
+                w.writeAll(rt) catch {};
+            }
+            w.writeAll(" do ... end") catch {};
         },
     }
 }
@@ -257,6 +266,56 @@ export fn blimp_reset() void {
     error_len = 0;
     state_len = 0;
     last_status = 0;
+}
+
+// ── Completion ──────────────────────────────────────────
+
+var complete_buf: [32768]u8 = undefined;
+var complete_len: u32 = 0;
+
+/// Get completions for a prefix string. Returns JSON array.
+export fn blimp_complete(prefix_ptr: [*]const u8, prefix_len: u32) u32 {
+    const eval = &(evaluator orelse return 0);
+    const prefix = prefix_ptr[0..prefix_len];
+
+    const CompletionEngine = @import("complete.zig").CompletionEngine;
+    var engine = CompletionEngine.init(allocator);
+    const completions = engine.complete(prefix, eval);
+
+    var fbs = std.io.fixedBufferStream(&complete_buf);
+    const w = fbs.writer();
+    w.writeAll("[") catch {};
+    const max_results = @min(completions.len, 10);
+    for (completions[0..max_results], 0..) |comp, i| {
+        if (i > 0) w.writeAll(",") catch {};
+        w.writeAll("{\"label\":\"") catch {};
+        w.writeAll(comp.label) catch {};
+        w.writeAll("\",\"insert\":\"") catch {};
+        w.writeAll(comp.insert) catch {};
+        w.writeAll("\",\"kind\":\"") catch {};
+        const kind_name: []const u8 = switch (comp.kind) {
+            .variable => "variable",
+            .function => "function",
+            .builtin => "builtin",
+            .actor_template => "actor",
+            .actor_handler => "handler",
+            .keyword => "keyword",
+        };
+        w.writeAll(kind_name) catch {};
+        w.writeAll("\"}") catch {};
+    }
+    w.writeAll("]") catch {};
+
+    complete_len = @intCast(fbs.pos);
+    return complete_len;
+}
+
+export fn blimp_get_complete_ptr() [*]const u8 {
+    return &complete_buf;
+}
+
+export fn blimp_get_complete_len() u32 {
+    return complete_len;
 }
 
 /// Allocate memory in WASM linear memory (for JS to write source strings).

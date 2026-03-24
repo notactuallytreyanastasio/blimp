@@ -1,0 +1,34 @@
+<script src="blimp.js"></script>
+<script>
+(async function() {
+  var b = new Blimp();
+  await b.init('blimp.wasm');
+
+  // Set up some state
+  b.eval('x = 42');
+  b.eval('name = "bobby"');
+  b.eval('items = [1, 2, 3]');
+  b.eval('actor Counter do\n  state count: Int :: 0\n  on :increment do\n    become count: count + 1\n    reply count + 1\n  end\nend');
+  b.eval('c = spawn Counter');
+  b.eval('def add(a: Int, b: Int) -> Int do a + b end');
+  b.eval('def greet(c: Counter) -> String do "hello" end');
+
+  // Test completions
+  console.log('Completions for "a":');
+  console.log(JSON.stringify(b.complete('a'), null, 2));
+
+  console.log('Completions for "gr":');
+  console.log(JSON.stringify(b.complete('gr'), null, 2));
+
+  console.log('Completions for "len":');
+  console.log(JSON.stringify(b.complete('len'), null, 2));
+
+  console.log('Completions for "c":');
+  console.log(JSON.stringify(b.complete('c'), null, 2));
+
+  console.log('Completions for "Counter":');
+  console.log(JSON.stringify(b.complete('Counter'), null, 2));
+
+  document.body.textContent = 'Check console for completion results';
+})();
+</script>
