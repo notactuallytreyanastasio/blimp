@@ -752,6 +752,11 @@ pub const Evaluator = struct {
         return val;
     }
 
+    fn typeError(self: *Evaluator, left: *const Value, right: *const Value, op_str: []const u8) EvalError {
+        self.last_error = errors.typeMismatchDetailed(left.typeName(), right.typeName(), op_str, self.source);
+        return error.TypeError;
+    }
+
     fn evalBinaryOp(self: *Evaluator, op: ast.Node.BinaryOp) EvalError!*const Value {
         const left = try self.eval(op.left.*);
         const right = try self.eval(op.right.*);
@@ -790,9 +795,9 @@ pub const Evaluator = struct {
                             result.* = Value{ .string = new_str };
                             return result;
                         },
-                        else => return error.TypeError,
+                        else => return self.typeError(left, right, "+"),
                     },
-                    else => return error.TypeError,
+                    else => return self.typeError(left, right, "+"),
                 }
             },
             .concat => {

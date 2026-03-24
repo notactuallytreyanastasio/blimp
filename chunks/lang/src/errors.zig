@@ -8,7 +8,9 @@ pub const BlimpError = struct {
     source_line: ?[]const u8 = null,
     line: ?u32 = null,
     col: ?u32 = null,
-    message: []const u8,
+    col_end: ?u32 = null, // end column for region underline
+    message: []const u8, // shown BEFORE the code snippet
+    post_message: ?[]const u8 = null, // shown AFTER the code snippet
     hint: ?[]const u8 = null,
 
     /// Format the error in Elm style to the given writer.
@@ -17,7 +19,6 @@ pub const BlimpError = struct {
         writer.writeAll("\n\x1b[36m-- ") catch {};
         writer.writeAll(self.title) catch {};
         writer.writeAll(" ") catch {};
-        // Fill with dashes
         const title_len = self.title.len + 4;
         const dash_count = if (title_len < 50) 50 - title_len else 5;
         for (0..dash_count) |_| {
@@ -25,7 +26,12 @@ pub const BlimpError = struct {
         }
         writer.writeAll("\x1b[0m\n\n") catch {};
 
-        // Source line with line number gutter
+        // Pre-message (explanation BEFORE the code)
+        writer.writeAll("  ") catch {};
+        writer.writeAll(self.message) catch {};
+        writer.writeAll("\n\n") catch {};
+
+        // Source line with line number gutter + region underline
         if (self.source_line) |src| {
             if (self.line) |ln| {
                 writer.print("\x1b[90m{d}|\x1b[0m ", .{ln}) catch {};
@@ -37,23 +43,34 @@ pub const BlimpError = struct {
             writer.writeAll("\x1b[0m\n") catch {};
 
             if (self.col) |c| {
-                // Underline region with ^^^^
                 const gutter = if (self.line != null) @as(usize, 4) else @as(usize, 2);
                 for (0..c + gutter) |_| {
                     writer.writeAll(" ") catch {};
                 }
-                writer.writeAll("\x1b[31m^\x1b[0m\n") catch {};
+                // Region underline: ^^^^ if col_end is set, else single ^
+                if (self.col_end) |ce| {
+                    const span = if (ce > c) ce - c else 1;
+                    writer.writeAll("\x1b[31m") catch {};
+                    for (0..span) |_| {
+                        writer.writeAll("^") catch {};
+                    }
+                    writer.writeAll("\x1b[0m\n") catch {};
+                } else {
+                    writer.writeAll("\x1b[31m^\x1b[0m\n") catch {};
+                }
             }
         }
 
-        // Message
-        writer.writeAll("  ") catch {};
-        writer.writeAll(self.message) catch {};
-        writer.writeAll("\n") catch {};
+        // Post-message (explanation AFTER the code)
+        if (self.post_message) |pm| {
+            writer.writeAll("\n  ") catch {};
+            writer.writeAll(pm) catch {};
+            writer.writeAll("\n") catch {};
+        }
 
         // Hint
         if (self.hint) |h| {
-            writer.writeAll("\n  \x1b[33m") catch {};
+            writer.writeAll("\n  \x1b[33mHint: ") catch {};
             writer.writeAll(h) catch {};
             writer.writeAll("\x1b[0m\n") catch {};
         }
@@ -73,6 +90,12 @@ pub const BlimpError = struct {
         }
         writer.writeAll("\n\n") catch {};
 
+        // Pre-message
+        writer.writeAll("  ") catch {};
+        writer.writeAll(self.message) catch {};
+        writer.writeAll("\n\n") catch {};
+
+        // Source with gutter + region underline
         if (self.source_line) |src| {
             if (self.line) |ln| {
                 writer.print("{d}| ", .{ln}) catch {};
@@ -87,13 +110,24 @@ pub const BlimpError = struct {
                 for (0..c + gutter) |_| {
                     writer.writeAll(" ") catch {};
                 }
-                writer.writeAll("^\n") catch {};
+                if (self.col_end) |ce| {
+                    const span = if (ce > c) ce - c else 1;
+                    for (0..span) |_| {
+                        writer.writeAll("^") catch {};
+                    }
+                    writer.writeAll("\n") catch {};
+                } else {
+                    writer.writeAll("^\n") catch {};
+                }
             }
         }
 
-        writer.writeAll("  ") catch {};
-        writer.writeAll(self.message) catch {};
-        writer.writeAll("\n") catch {};
+        // Post-message
+        if (self.post_message) |pm| {
+            writer.writeAll("\n  ") catch {};
+            writer.writeAll(pm) catch {};
+            writer.writeAll("\n") catch {};
+        }
 
         if (self.hint) |h| {
             writer.writeAll("\n  Hint: ") catch {};
@@ -219,10 +253,22 @@ pub fn undefinedVariable(name: []const u8, source: []const u8, env: *const Envir
     msg_buf.appendSlice(allocator, name) catch {};
     msg_buf.appendSlice(allocator, "`.") catch {};
 
+    // Post-message with "did you mean" suggestion
+    var post: ?[]const u8 = null;
+    if (best_match) |match| {
+        var post_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+        post_buf.appendSlice(allocator, "Did you mean `") catch {};
+        post_buf.appendSlice(allocator, match) catch {};
+        post_buf.appendSlice(allocator, "`?") catch {};
+        post = post_buf.items;
+    }
+
     return .{
         .title = "UNDEFINED VARIABLE",
         .source_line = source,
+        .col_end = if (name.len > 0) @as(u32, @intCast(name.len)) else null,
         .message = msg_buf.items,
+        .post_message = post,
         .hint = hint_buf.items,
     };
 }
@@ -241,13 +287,33 @@ pub fn typeMismatch(source: []const u8) BlimpError {
     };
 }
 
-/// Build a rich error with specific left/right types shown.
+/// Build a rich error with specific left/right types shown, with operator-specific advice.
 pub fn typeMismatchDetailed(left_type: []const u8, right_type: []const u8, op: []const u8, source: []const u8) BlimpError {
     const alloc = std.heap.page_allocator;
+
+    // Operator-specific advice (inspired by Elm)
+    var post: ?[]const u8 = null;
+    if (std.mem.eql(u8, op, "+")) {
+        if (std.mem.eql(u8, left_type, "String") or std.mem.eql(u8, right_type, "String")) {
+            post = "The `+` operator works with Int and Float values.\nTo join strings, use `++` or `concat`:\n      \"hello\" ++ \" world\"";
+        } else if (std.mem.eql(u8, left_type, "List") or std.mem.eql(u8, right_type, "List")) {
+            post = "To join lists, use the `++` operator:\n      [1, 2] ++ [3, 4]";
+        }
+    } else if (std.mem.eql(u8, op, "++")) {
+        post = "The `++` operator joins lists or strings.\nBoth sides must be the same type:\n      [1, 2] ++ [3, 4]     # lists\n      \"hi\" ++ \" there\"     # strings";
+    } else if (std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/")) {
+        if (std.mem.eql(u8, left_type, "String") or std.mem.eql(u8, right_type, "String")) {
+            post = "Arithmetic operators only work with numbers.\nTo convert a string to a number, use `to_int`:\n      to_int(\"42\") + 1";
+        }
+    } else if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) {
+        post = "Equality comparison works between values of the same type.\nUse `to_string` or `to_int` to convert first.";
+    }
+
     return .{
         .title = "TYPE MISMATCH",
         .source_line = source,
         .message = std.fmt.allocPrint(alloc, "I can't use `{s}` with {s} on the left and {s} on the right.", .{ op, left_type, right_type }) catch "Types don't match.",
+        .post_message = post,
         .hint = "Both sides need to be compatible types.",
     };
 }

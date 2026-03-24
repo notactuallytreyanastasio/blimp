@@ -151,6 +151,24 @@ pub const Value = union(enum) {
             else => true,
         };
     }
+
+    /// Human-readable type name for error messages.
+    pub fn typeName(v: Value) []const u8 {
+        return switch (v) {
+            .integer => "Int",
+            .float => "Float",
+            .string => "String",
+            .atom => "Atom",
+            .boolean => "Bool",
+            .nil => "Nil",
+            .hole => "Hole",
+            .list => "List",
+            .tuple => "Tuple",
+            .map => "Map",
+            .actor_ref => "ActorRef",
+            .closure => "Function",
+        };
+    }
 };
 
 // ============================================================
