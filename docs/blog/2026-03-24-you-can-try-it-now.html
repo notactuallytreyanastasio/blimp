@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>You Can Try It Now</title>
+
+<meta name="description" content="Since the last post: closures, pattern matching, loops, an async scheduler, tagged values with Perceus RC, a 100KB WASM interpreter in your browser, and a canvas that paints your actors as generative art. There's a REPL at the bottom of this page.">
+<meta name="author" content="Bobby Grayson">
+
+<meta property="og:type" content="article">
+<meta property="og:title" content="You Can Try It Now">
+<meta property="og:description" content="Since the last post: closures, pattern matching, loops, an async scheduler, tagged values with Perceus RC, a 100KB WASM interpreter in your browser, and a canvas that paints your actors as generative art. There's a REPL at the bottom of this page.">
+<meta property="og:url" content="https://blimp.bobbby.online/blog/2026-03-24-you-can-try-it-now.html">
+<meta property="og:site_name" content="Blimp Design Journal">
+
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="You Can Try It Now">
+<meta name="twitter:description" content="Since the last post: closures, pattern matching, loops, an async scheduler, tagged values with Perceus RC, a 100KB WASM interpreter in your browser, and a canvas that paints your actors as generative art.">
+
+<link rel="stylesheet" href="style.css">
+<style>
+/* tl;dr toggle */
+.tldr-toggle {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: #0066cc;
+  cursor: pointer;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  margin-bottom: 2rem;
+  user-select: none;
+}
+
+.tldr-toggle:hover {
+  background: #f0f0f0;
+}
+
+.tldr-toggle.active {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0066cc;
+}
+
+.section-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 2rem;
+  margin-top: 3rem;
+  margin-bottom: 1rem;
+}
+
+.section-header h2 {
+  margin: 0;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.tldr-bubble {
+  display: none;
+  position: relative;
+  background: #e9e9eb;
+  color: #000;
+  padding: 0.75rem 1rem;
+  border-radius: 18px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  max-width: 55ch;
+  flex-shrink: 1;
+  margin-left: 0.5rem;
+}
+
+.tldr-bubble::before {
+  content: '';
+  position: absolute;
+  left: -30px;
+  top: 0.85rem;
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-right: 30px solid #e9e9eb;
+}
+
+.section-content {
+  overflow: hidden;
+  max-height: 5000px;
+  transition: max-height 0.5s ease, opacity 0.4s ease;
+  opacity: 1;
+}
+
+body.tldr-mode .section-content {
+  max-height: 0;
+  opacity: 0;
+}
+
+body.tldr-mode {
+  max-width: 100%;
+  padding-left: 4rem;
+  padding-right: 4rem;
+}
+
+body.tldr-mode .tldr-bubble {
+  display: block;
+  animation: bubbleFadeIn 0.4s ease 0.3s both;
+}
+
+@keyframes bubbleFadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="index.html">blimp / design journal</a></div>
+
+<h1>You Can Try It Now</h1>
+<div class="post-date">March 24, 2026</div>
+
+<div class="tldr-toggle" onclick="document.body.classList.toggle('tldr-mode'); this.classList.toggle('active');">tl;dr</div>
+<button class="blimp-try-btn" onclick="BlimpRepl.modal()">Try Blimp</button>
+
+<!-- ============================================================ -->
+<!-- Since Last Time                                              -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Since Last Time</h2>
+<div class="tldr-bubble">Two days between posts. We went from alive actors to closures, pattern matching, loops, async scheduling, tagged values with Perceus RC, full LLVM compilation, a 100KB WASM module in the browser, and a canvas that paints actors as generative art. There's a REPL at the bottom of this page.</div>
+</div>
+<div class="section-content">
+
+<p>Last post the actors were alive. We had a tree-walking interpreter, an LLVM compiler that produced native binaries, a REPL with a state sidebar, and a diff viewer that watched the work happen. That was two days ago.</p>
+
+<p>Since then we got closures, pattern matching, loops, an async scheduler, a tagged value runtime with Perceus reference counting, compiled all of it to native code via LLVM, put the entire interpreter in a browser as a 100KB WASM module, built a canvas that paints your actors as generative art, and embedded the whole thing in this blog.</p>
+
+<p>There's a REPL at the bottom of this page. Go play with it.</p>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Closures                                                     -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Closures</h2>
+<div class="tldr-bubble">First-class fn expressions that capture the enclosing scope. Unlocked map, filter, reduce, each as builtins that take closures. Store them, pass them, return them.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>We have <code>fn</code> expressions now. They capture the enclosing scope and they're first-class values, you can store them in variables, pass them as arguments, return them from other functions.</p>
+<p>This unlocked <code>map</code>, <code>filter</code>, <code>reduce</code>, and <code>each</code> as builtins that take closures.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="cm">double = <span class="kw">fn</span>(x) <span class="kw">do</span> x * <span class="nr">2</span> <span class="kw">end</span>
+double(<span class="nr">5</span>)    <span class="cm"># => 10</span>
+
+multiplier = <span class="nr">3</span>
+scale = <span class="kw">fn</span>(x) <span class="kw">do</span> x * multiplier <span class="kw">end</span>
+scale(<span class="nr">10</span>)    <span class="cm"># => 30</span>
+
+nums = [<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>, <span class="nr">4</span>, <span class="nr">5</span>]
+map(nums, <span class="kw">fn</span>(x) <span class="kw">do</span> x * <span class="nr">10</span> <span class="kw">end</span>)
+<span class="cm"># => [10, 20, 30, 40, 50]</span>
+
+filter(nums, <span class="kw">fn</span>(x) <span class="kw">do</span> x > <span class="nr">2</span> <span class="kw">end</span>)
+<span class="cm"># => [3, 4, 5]</span>
+
+reduce(nums, <span class="nr">0</span>, <span class="kw">fn</span>(acc, x) <span class="kw">do</span> acc + x <span class="kw">end</span>)
+<span class="cm"># => 15</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- The Dots                                                     -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>The Dots</h2>
+<div class="tldr-bubble">Three dots is map. Two dots is each. Use whichever reads best. Also got for/in if you want the verbose version.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>We added two operators that I think are going to feel really natural once you get used to them.</p>
+<p>Three dots is map:</p>
+<p>Two dots is each (side effects, returns <code>:ok</code>):</p>
+<p>And <code>for</code>/<code>in</code> is there too if you want the verbose version:</p>
+<p>Three ways to say the same thing. Use whichever reads best for what you're doing.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code>double = <span class="kw">fn</span>(x) <span class="kw">do</span> x * <span class="nr">2</span> <span class="kw">end</span>
+<span class="op">...</span>[<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>], double    <span class="cm"># => [2, 4, 6]</span>
+
+<span class="op">..</span>[<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>], <span class="kw">fn</span>(x) <span class="kw">do</span> x <span class="kw">end</span>
+<span class="cm"># => :ok</span>
+
+<span class="kw">for</span> x <span class="kw">in</span> [<span class="nr">10</span>, <span class="nr">20</span>, <span class="nr">30</span>] <span class="kw">do</span>
+  x + <span class="nr">1</span>
+<span class="kw">end</span>    <span class="cm"># => [11, 21, 31]</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Pattern Matching                                             -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Pattern Matching</h2>
+<div class="tldr-bubble">Real structural pattern matching in situation and case. Variables bind, maps destructure, lists split head/tail. Atoms and literals match by value, identifiers bind, Holes are wildcards and agent prompts.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p><code>situation</code> and <code>case</code> branches now do real structural pattern matching. Variables bind, maps destructure, lists split head and tail.</p>
+<p>Atoms and literals match by value, identifiers bind, and holes always match. A Hole in a situation branch is the wildcard, the catch-all, and also the place where the agent shows up.</p>
+<p>That <code>_</code> with the comment is a Hole. The agent reads it, the program keeps running (Holes act as identity until filled), and you get suggestions without leaving your code. Patterns compose recursively so you can nest destructuring inside situation branches.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">situation</span> %{name: <span class="st">"bob"</span>, age: <span class="nr">30</span>} <span class="kw">do</span>
+  %{name: n, age: a} <span class="op">-></span> n
+<span class="kw">end</span>    <span class="cm"># => "bob"</span>
+
+<span class="kw">situation</span> [<span class="nr">1</span>, <span class="nr">2</span>, <span class="nr">3</span>] <span class="kw">do</span>
+  [h | t] <span class="op">-></span> h
+<span class="kw">end</span>    <span class="cm"># => 1</span>
+
+<span class="kw">situation</span> {<span class="nr">10</span>, <span class="nr">20</span>} <span class="kw">do</span>
+  {a, b} <span class="op">-></span> a + b
+<span class="kw">end</span>    <span class="cm"># => 30</span>
+
+<span class="kw">on</span> <span class="st">:process</span>(event) <span class="kw">do</span>
+  <span class="kw">situation</span> event <span class="kw">do</span>
+    <span class="st">:known</span> <span class="op">-></span> handle(event)
+    _ <span class="cm"># Hole: figure out what to do
+      # with unknown events</span>
+  <span class="kw">end</span>
+<span class="kw">end</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Self                                                         -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Self</h2>
+<div class="tldr-bubble">Inside a handler, self resolves to the current actor's ref. Actors send messages to themselves. The async scheduler handles self-sends inline to avoid deadlock.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>Inside a handler, <code>self</code> resolves to the current actor's ref. So actors can send messages to themselves.</p>
+<p>The async scheduler handles self-sends by processing them inline to avoid deadlock.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Doubler</span> <span class="kw">do</span>
+  <span class="kw">state</span> val: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+
+  <span class="kw">on</span> <span class="st">:set</span>(n) <span class="kw">do</span>
+    <span class="kw">become</span> val: n
+    <span class="kw">reply</span> n
+  <span class="kw">end</span>
+
+  <span class="kw">on</span> <span class="st">:double</span> <span class="kw">do</span>
+    <span class="kw">self</span> <span class="op">&lt;-</span> <span class="st">:set</span>(val * <span class="nr">2</span>)
+    <span class="kw">reply</span> val
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+d = <span class="kw">spawn</span> <span class="fn">Doubler</span>
+d <span class="op">&lt;-</span> <span class="st">:set</span>(<span class="nr">5</span>)
+d <span class="op">&lt;-</span> <span class="st">:double</span>
+d <span class="op">&lt;-</span> <span class="st">:get_val</span>    <span class="cm"># val is now 10</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- The Async Scheduler                                          -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>The Async Scheduler</h2>
+<div class="tldr-bubble">Enqueues messages in mailboxes, round-robin until reply comes back. Fair scheduling across actors. Deadlock detection aborts with a clear error instead of hanging. Single-threaded for now.</div>
+</div>
+<div class="section-content">
+
+<p>Speaking of which. <code>blimp_send</code> used to process messages inline, which meant no fairness and no real concurrency. Now it enqueues the message in the target's mailbox and pumps a round-robin scheduler until the reply comes back.</p>
+
+<p>What that means: when actor A sends to actor B, and B's handler sends to actor C, all three get scheduled fairly. The scheduler does one message per actor per pass, round-robin. If two actors deadlock (A waits on B, B waits on A), it detects it and aborts with a clear error instead of hanging.</p>
+
+<p>This is single-threaded for now. The WASM target will always be single-threaded (that's how browsers work). The native target will get real threads later, but the scheduler architecture is ready for it.</p>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Tagged Values and Perceus RC                                 -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Tagged Values and Perceus RC</h2>
+<div class="tldr-bubble">Every value is a BlimpVal* heap-allocated tagged union with a reference count. When it hits zero, recursive free. Perceus insight: refcount of 1 means you can mutate in place instead of allocating.</div>
+</div>
+<div class="section-content">
+
+<p>Under the hood, every value in compiled code is now a <code>BlimpVal*</code>, a heap-allocated tagged union. Integers, floats, strings, atoms, booleans, lists, maps, closures, actor refs, all the same pointer type.</p>
+
+<p>And every <code>BlimpVal</code> has a reference count. When you bind a value to a variable, the count goes up. When a scope exits, the count goes down. When it hits zero, the value and all its children get freed recursively. Lists dec their elements, maps dec their values, closures dec their captured environment.</p>
+
+<p>The Perceus insight: if the refcount is 1 (you're the only owner), you can mutate in place instead of allocating. <code>become count: count + 1</code> doesn't need to allocate a new integer if the old one has refcount 1, it just overwrites it. We have <code>blimp_rc_reuse</code> in the runtime for this but we're not using it aggressively in codegen yet. That's an optimization pass for later.</p>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Compiled to Native, All of It                                -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Compiled to Native, All of It</h2>
+<div class="tldr-bubble">LLVM compiler handles lists, closures, for loops, spread operators, and actor compilation. A single program spawns actors, defines closures, maps over lists, loops, all compiled to a native binary.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>The LLVM compiler now handles lists, closures, for loops, and spread operators alongside the existing actor compilation. A single program can spawn actors, define closures, map over lists, and loop, all compiled to a native binary.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<pre><code><span class="kw">actor</span> <span class="fn">Counter</span> <span class="kw">do</span>
+  <span class="kw">state</span> count: <span class="fn">Int</span> <span class="op">::</span> <span class="nr">0</span>
+  <span class="kw">on</span> <span class="st">:increment</span> <span class="kw">do</span>
+    <span class="kw">become</span> count: count + <span class="nr">1</span>
+    <span class="kw">reply</span> count + <span class="nr">1</span>
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+c = <span class="kw">spawn</span> <span class="fn">Counter</span>
+c <span class="op">&lt;-</span> <span class="st">:increment</span>
+c <span class="op">&lt;-</span> <span class="st">:increment</span>
+c <span class="op">&lt;-</span> <span class="st">:increment</span>
+
+nums = [<span class="nr">10</span>, <span class="nr">20</span>, <span class="nr">30</span>]
+double = <span class="kw">fn</span>(x) <span class="kw">do</span> x * <span class="nr">2</span> <span class="kw">end</span>
+result = <span class="op">...</span>nums, double
+
+<span class="kw">for</span> x <span class="kw">in</span> result <span class="kw">do</span>
+  x + <span class="nr">1</span>
+<span class="kw">end</span>
+
+<span class="cm"># Output:</span>
+<span class="cm"># [21, 41, 61]</span></code></pre>
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Blimp in the Browser                                         -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>Blimp in the Browser</h2>
+<div class="tldr-bubble">Interpreter compiles to 100KB WASM via Zig's wasm32-freestanding target. No Emscripten, no WASI. Tiny JS loader (80 lines) handles strings through linear memory. Three-function API: init, eval, getState. Embedded in this blog.</div>
+</div>
+<div class="section-content">
+
+<p>The interpreter compiles to a 100KB WASM module via Zig's native <code>wasm32-freestanding</code> target. No Emscripten, no WASI, no polyfills. Just the lexer, parser, evaluator, and actor runtime, compiled to WASM.</p>
+
+<p>A tiny JS loader (<code>blimp.js</code>, 80 lines) handles loading the module, passing strings through linear memory, and wiring up print callbacks. The API is three functions: <code>init</code>, <code>eval</code>, <code>getState</code>.</p>
+
+<p>We embedded it in this blog. There's a REPL at the bottom of every page. The playground at <code>/blog/playground.html</code> has the full setup: REPL, state panel, canvas, and a cheat sheet with copy-paste examples of every feature.</p>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- The Canvas                                                   -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>The Canvas</h2>
+<div class="tldr-bubble">Actors are hexagons with fill patterns generated from SHA-256 hash of state. Same state, same visual. State transitions morph the pattern. Message sends animate as dashed rays with particles and impact rings. Generative art that IS the program.</div>
+</div>
+
+<div class="split section-content">
+
+<div class="split-pair">
+<div class="split-prose">
+<p>This is the part where it gets weird and I love it.</p>
+<p>Every actor on the canvas is a hexagon. The hexagon's fill pattern is generated from a SHA-256 hash of the actor's state. Same type and same state produce the same visual. When state changes via <code>become</code>, the hash changes and the pattern morphs. You can literally see state transitions as color shifts.</p>
+<p>Four pattern types: scattered dots, concentric rings, diagonal stripes, soft blobs. The hash determines which type and what parameters. Two counters both at <code>count: 0</code> look identical. Increment one and they diverge visually.</p>
+<p>When you send a message, a dashed ray animates from the green REPL blob to the target hexagon. The ray has a particle head that travels the path and an impact ring that pulses on arrival. The message name floats along the path.</p>
+<p>Raw values (variables that aren't actors) get squares instead of hexagons. The layout adapts to any number of shapes, scaling down and using hex-grid packing when there are many.</p>
+<p>It's generative art that IS the program. The program paints itself.</p>
+</div>
+<div class="split-leader"></div>
+<div class="split-side">
+<img src="img/playground-counters.png" alt="The playground canvas showing multiple counter actors as hexagons with different fill patterns" style="max-width:100%; border:1px solid #ddd; border-radius:3px;">
+</div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- What's Next                                                  -->
+<!-- ============================================================ -->
+
+<div class="section-header">
+<h2>What's Next</h2>
+<div class="tldr-bubble">Still need: def for named functions inside actors, string operations as builtins, supervision so bubbles propagate and restart actors, send_after for timers, a UI DSL that wraps Tailwind so you can build interfaces from Blimp. Actors all the way down.</div>
+</div>
+<div class="section-content">
+
+<p>We still don't have:</p>
+
+<ul>
+<li><strong><code>def</code> for named functions</strong> inside actors, just anonymous <code>fn</code> for now</li>
+<li><strong>String operations</strong> as builtins (concat, split, contains)</li>
+<li><strong>Supervision</strong> (Phase 5) so bubbles actually propagate and restart actors</li>
+<li><strong>Send after</strong> for timers and heartbeats</li>
+<li><strong>A UI DSL</strong> that wraps something like Tailwind so you can build interfaces from Blimp without writing HTML</li>
+</ul>
+
+<p>That last one is the one I keep thinking about. If actors are the runtime and the browser is the target, then the language should be able to describe interfaces. Not with JSX, not with templates. With actors. A button is an actor. A form is an actor. The page is a supervision tree. Clicks are messages.</p>
+
+<p>We'll see. For now, go try the REPL.</p>
+
+</div>
+
+<div style="border-top:1px solid #e0e0e0;margin-top:3rem;padding-top:1.5rem;">
+<h2 style="font-size:0.85rem;color:#999;font-weight:400;margin-bottom:0.5rem;text-align:center;letter-spacing:0.05em;">try blimp</h2>
+<div style="padding:0.4rem 1rem;background:#0e0e1a;border-radius:8px 8px 0 0;">
+<button class="blimp-try-btn" onclick="if(typeof demoPost4==='function')demoPost4()" style="font-size:0.75rem;padding:0.2rem 0.75rem;">Demo</button>
+</div>
+<div id="post-repl" style="height:500px;overflow:hidden;border-radius:0 0 8px 8px;"></div>
+</div>
+
+<script>
+(function() {
+  // Mobile code toggles
+  var mq = window.matchMedia('(max-width: 900px)');
+  function setup(e) {
+    var sides = document.querySelectorAll('.split-side');
+    document.querySelectorAll('.code-toggle').forEach(function(t) { t.remove(); });
+    sides.forEach(function(side) {
+      side.classList.remove('is-open');
+    });
+    if (!e.matches) return;
+    sides.forEach(function(side) {
+      var toggle = document.createElement('div');
+      toggle.className = 'code-toggle';
+      toggle.innerHTML = '<span class="chevron">&#9654;</span> <span class="code-icon">&lt;/&gt;</span> code';
+      toggle.addEventListener('click', function() {
+        var open = side.classList.toggle('is-open');
+        toggle.classList.toggle('is-open', open);
+      });
+      side.parentNode.insertBefore(toggle, side);
+    });
+  }
+  mq.addEventListener('change', setup);
+  setup(mq);
+
+  // Image lightbox
+  var overlay = document.createElement('div');
+  overlay.className = 'lightbox-overlay';
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', function() {
+    overlay.classList.remove('is-open');
+    overlay.innerHTML = '';
+  });
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && overlay.classList.contains('is-open')) {
+      overlay.classList.remove('is-open');
+      overlay.innerHTML = '';
+    }
+  });
+
+  document.querySelectorAll('.split-side img, .section-content > img').forEach(function(img) {
+    img.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var full = document.createElement('img');
+      full.src = img.src;
+      full.alt = img.alt;
+      overlay.innerHTML = '';
+      overlay.appendChild(full);
+      overlay.classList.add('is-open');
+    });
+  });
+})();
+
+// Demo function for post 4
+function demoPost4() {
+  if (typeof BlimpRepl === 'undefined' || !BlimpRepl.type) {
+    setTimeout(demoPost4, 500);
+    return;
+  }
+
+  var code = `actor Counter do
+  state count: Int :: 0
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+  on :get do
+    reply count
+  end
+end
+
+c1 = spawn Counter
+c2 = spawn Counter
+c1 <- :increment
+c1 <- :increment
+c2 <- :increment
+c1 <- :get
+c2 <- :get`;
+
+  BlimpRepl.type(code, 40);
+}
+</script>
+<script src="repl/blimp-repl.js"></script>
+</body>
+</html>
