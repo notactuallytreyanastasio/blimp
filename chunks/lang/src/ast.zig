@@ -47,6 +47,7 @@ pub const Node = struct {
         fn_expr: FnExpr,
         call_expr: CallExpr,
         def_stmt: DefStmt,
+        bubble_stmt: BubbleStmt,
         for_expr: ForExpr,
         spread_map: SpreadExpr,   // ...list, fn -> map
         spread_each: SpreadExpr,  // ..list, fn -> each
@@ -206,6 +207,11 @@ pub const Node = struct {
     pub const SpawnExpr = struct {
         actor_name: []const u8,
         overrides: []const KeyValue,
+    };
+
+    /// Bubble statement: bubble or bubble reason: "msg"
+    pub const BubbleStmt = struct {
+        reason: ?*const Node, // optional reason expression
     };
 
     /// Named function definition: def name(params) do ... end

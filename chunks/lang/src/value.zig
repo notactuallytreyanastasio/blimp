@@ -37,6 +37,7 @@ pub const Value = union(enum) {
         params: []const @import("ast.zig").Node.HandlerParam,
         guard: ?*const @import("ast.zig").Node,
         body: []const @import("ast.zig").Node,
+        bubble_strategy: ?[]const u8 = null,
     };
 
     pub const ActorInstance = struct {

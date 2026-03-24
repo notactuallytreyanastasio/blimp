@@ -8,6 +8,7 @@ pub const EvalError = error{
     DivisionByZero,
     NotSupported,
     OutOfMemory,
+    Bubble, // Actor failure propagation
 };
 
 pub const BuiltinFn = *const fn (allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value;

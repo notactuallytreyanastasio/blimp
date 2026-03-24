@@ -104,19 +104,55 @@ pub const Registry = struct {
         return null;
     }
 
-    /// Update a single state field on a spawned instance.
-    pub fn updateState(self: *Registry, ref: ActorRef, field_name: []const u8, new_value: *const Value) void {
-        _ = self;
-        // We need the entry pointer -- caller should use getInstance and update directly
-        // This is a convenience that walks all instances
-        // Actually we can't do it through self because we'd need the instance.
-        // Let's provide this as a method anyway for API completeness.
-        // We'll look up from ref.
-        // But we already have the pattern of updating through the entry pointer.
-        // For now this is unused -- become goes through the entry pointer directly.
-        _ = ref;
-        _ = field_name;
-        _ = new_value;
+    /// Restart a single actor: reset its state to template defaults.
+    pub fn restartActor(self: *Registry, ref: ActorRef) void {
+        const entry = self.getInstance(ref) orelse return;
+        const template = self.lookupTemplate(ref.type_name) orelse return;
+
+        // Reset state to defaults
+        for (template.default_state, 0..) |default_field, i| {
+            if (i < entry.state_fields.len) {
+                entry.state_fields[i] = default_field;
+            }
+        }
+        entry.status = .idle;
+    }
+
+    /// Restart all children of a supervisor.
+    /// Children are actors whose type_name starts with supervisor_name + "."
+    pub fn restartChildren(self: *Registry, supervisor_name: []const u8) void {
+        for (self.instances.items) |*entry| {
+            const name = entry.ref.type_name;
+            // Check if this actor is a child of the supervisor
+            if (name.len > supervisor_name.len + 1 and
+                std.mem.startsWith(u8, name, supervisor_name) and
+                name[supervisor_name.len] == '.')
+            {
+                const template = self.lookupTemplate(name) orelse continue;
+                // Reset state to defaults
+                for (template.default_state, 0..) |default_field, i| {
+                    if (i < entry.state_fields.len) {
+                        entry.state_fields[i] = default_field;
+                    }
+                }
+                entry.status = .idle;
+            }
+        }
+    }
+
+    /// Get all children of a supervisor (for introspection).
+    pub fn getChildren(self: *const Registry, supervisor_name: []const u8) []const ActorRef {
+        var children: std.ArrayList(ActorRef) = .{ .items = &.{}, .capacity = 0 };
+        for (self.instances.items) |entry| {
+            const name = entry.ref.type_name;
+            if (name.len > supervisor_name.len + 1 and
+                std.mem.startsWith(u8, name, supervisor_name) and
+                name[supervisor_name.len] == '.')
+            {
+                children.append(self.allocator, entry.ref) catch {};
+            }
+        }
+        return children.items;
     }
 };
 

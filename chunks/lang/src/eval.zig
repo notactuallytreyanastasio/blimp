@@ -24,6 +24,7 @@ pub const Evaluator = struct {
     actor_ctx: ?*ActorContext = null,
     msg_log: [64]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
+    bubble_reason: ?*const Value = null,
 
     // Message log for canvas rays
     pub const MsgLogEntry = struct {
@@ -35,6 +36,7 @@ pub const Evaluator = struct {
     pub const ActorContext = struct {
         entry: *registry_mod.ActorEntry,
         reply_value: ?*const Value = null,
+        bubble_strategy: ?[]const u8 = null,
     };
 
     pub fn init(allocator: std.mem.Allocator) Evaluator {
@@ -193,6 +195,9 @@ pub const Evaluator = struct {
             // Named function definition
             .def_stmt => |ds| return self.evalDefStmt(ds),
 
+            // Bubble (failure propagation)
+            .bubble_stmt => |bs| return self.evalBubble(bs),
+
             // For loop
             .for_expr => |fe| return self.evalForExpr(fe),
 
@@ -228,6 +233,7 @@ pub const Evaluator = struct {
                         .params = mh.params,
                         .guard = mh.guard,
                         .body = mh.body,
+                        .bubble_strategy = mh.bubble_strategy,
                     }) catch return error.OutOfMemory;
                 },
                 else => {
@@ -339,6 +345,40 @@ pub const Evaluator = struct {
             .hint = null,
         };
         return error.NotSupported;
+    }
+
+    fn evalBubble(self: *Evaluator, bs: ast.Node.BubbleStmt) EvalError!*const Value {
+        // Store the bubble reason if provided
+        if (bs.reason) |reason_node| {
+            const reason_val = try self.eval(reason_node.*);
+            self.bubble_reason = reason_val;
+        } else {
+            self.bubble_reason = null;
+        }
+
+        // If we're in an actor handler with a bubble strategy, execute supervision
+        if (self.actor_ctx) |ctx| {
+            const actor_name = ctx.entry.ref.type_name;
+
+            // Find the supervisor (parent) from dot notation
+            // e.g., "Shop.Checkout" -> supervisor is "Shop"
+            if (std.mem.lastIndexOf(u8, actor_name, ".")) |dot_idx| {
+                const supervisor_name = actor_name[0..dot_idx];
+
+                // Get the bubble strategy from the handler annotation
+                const strategy = ctx.bubble_strategy orelse "SelfBubble";
+
+                if (std.mem.eql(u8, strategy, "CascadeBubble")) {
+                    // Restart all children of the supervisor
+                    self.registry.restartChildren(supervisor_name);
+                } else {
+                    // SelfBubble: restart just this actor
+                    self.registry.restartActor(ctx.entry.ref);
+                }
+            }
+        }
+
+        return error.Bubble;
     }
 
     fn evalDefStmt(self: *Evaluator, ds: ast.Node.DefStmt) EvalError!*const Value {
@@ -502,10 +542,11 @@ pub const Evaluator = struct {
                         self.env.define(field.key, field.val);
                     }
 
-                    // Set actor context
+                    // Set actor context with bubble strategy from handler
                     var ctx = ActorContext{
                         .entry = entry,
                         .reply_value = null,
+                        .bubble_strategy = handler.bubble_strategy,
                     };
                     const prev_ctx = self.actor_ctx;
                     self.actor_ctx = &ctx;
@@ -1029,7 +1070,13 @@ pub const Evaluator = struct {
     }
 
     fn evalOrElse(self: *Evaluator, oe: ast.Node.OrElseExpr) EvalError!*const Value {
-        const try_val = try self.eval(oe.try_expr.*);
+        const try_val = self.eval(oe.try_expr.*) catch |err| {
+            if (err == error.Bubble) {
+                // Bubble caught by orelse - execute fallback
+                return self.eval(oe.fallback.*);
+            }
+            return err;
+        };
         switch (try_val.*) {
             .nil, .hole => return self.eval(oe.fallback.*),
             else => return try_val,

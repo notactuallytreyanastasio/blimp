@@ -113,6 +113,7 @@ pub const Parser = struct {
             .kw_on => error.UnexpectedToken, // nested handlers not allowed
             .kw_become => self.parseBecomeStmt(),
             .kw_reply => self.parseReplyStmt(),
+            .kw_bubble => self.parseBubbleStmt(),
             .kw_situation => self.parseSituation(),
             .kw_case => self.parseCase(),
             .identifier => {
@@ -258,6 +259,28 @@ pub const Parser = struct {
         value_ptr.* = value;
         return Node{
             .kind = .{ .reply_stmt = .{ .value = value_ptr } },
+            .loc = loc,
+        };
+    }
+
+    /// Parse: bubble or bubble reason: "msg"
+    fn parseBubbleStmt(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_bubble);
+
+        // Optional reason: bubble reason: "msg"
+        var reason: ?*Node = null;
+        if (self.current.kind != .newline and self.current.kind != .eof and
+            self.current.kind != .kw_end)
+        {
+            const expr = try self.parseExpression();
+            const ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            ptr.* = expr;
+            reason = ptr;
+        }
+
+        return Node{
+            .kind = .{ .bubble_stmt = .{ .reason = reason } },
             .loc = loc,
         };
     }
@@ -695,10 +718,18 @@ pub const Parser = struct {
         const has_parens = self.current.kind == .lparen;
         if (has_parens) self.advance();
 
-        // Expect an upper_identifier for the actor name
+        // Expect an upper_identifier for the actor name, with optional dot notation
         if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
-        const actor_name = self.current.lexeme;
+        var actor_name = self.current.lexeme;
         self.advance();
+
+        // Handle dot notation: spawn Shop.Checkout
+        while (self.current.kind == .dot) {
+            self.advance();
+            if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
+            actor_name = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ actor_name, self.current.lexeme }) catch return error.OutOfMemory;
+            self.advance();
+        }
 
         // Optional state overrides: , key: value, key: value
         var overrides: []const Node.KeyValue = &.{};
