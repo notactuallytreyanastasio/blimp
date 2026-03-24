@@ -14,6 +14,18 @@ pub const Value = union(enum) {
     tuple: []const *const Value,
     map: []const MapEntry,
     actor_ref: registry_mod.ActorRef,
+    closure: Closure,
+
+    pub const Closure = struct {
+        params: []const []const u8,
+        body: []const @import("ast.zig").Node,
+        env: []const CapturedBinding, // captured variables from enclosing scope
+    };
+
+    pub const CapturedBinding = struct {
+        name: []const u8,
+        val: *const Value,
+    };
 
     pub const MapEntry = struct {
         key: []const u8,
@@ -71,6 +83,14 @@ pub const Value = union(enum) {
             .actor_ref => |ref| {
                 writer.print("ref<{s}:{d}>", .{ ref.type_name, ref.id }) catch {};
             },
+            .closure => |c| {
+                writer.writeAll("fn(") catch {};
+                for (c.params, 0..) |p, i| {
+                    if (i > 0) writer.writeAll(", ") catch {};
+                    writer.writeAll(p) catch {};
+                }
+                writer.writeAll(") do ... end") catch {};
+            },
         }
     }
 
@@ -117,6 +137,7 @@ pub const Value = union(enum) {
                 const ref_b = b.actor_ref;
                 return ref_a.id == ref_b.id;
             },
+            .closure => false, // closures are never equal by value
         };
     }
 

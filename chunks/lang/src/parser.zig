@@ -664,6 +664,7 @@ pub const Parser = struct {
                 return Node{ .kind = .{ .hole = .{ .directive = null } }, .loc = loc };
             },
             .kw_spawn => return self.parseSpawnExpr(),
+            .kw_fn => return self.parseFnExpr(),
             .lbracket => return self.parseListLit(),
             .lbrace => return self.parseTupleLit(),
             .percent => return self.parseMapLit(),
@@ -707,6 +708,44 @@ pub const Parser = struct {
             .kind = .{ .spawn_expr = .{
                 .actor_name = actor_name,
                 .overrides = overrides,
+            } },
+            .loc = loc,
+        };
+    }
+
+    /// Parse: fn(x, y) do ... end
+    fn parseFnExpr(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_fn);
+
+        // Parameter list: fn(x, y) or fn() for no params
+        try self.expect(.lparen);
+        var params: std.ArrayList([]const u8) = .empty;
+        while (self.current.kind != .rparen and self.current.kind != .eof) {
+            if (self.current.kind != .identifier) return error.UnexpectedToken;
+            params.append(self.allocator, self.current.lexeme) catch return error.OutOfMemory;
+            self.advance();
+            if (self.current.kind == .comma) self.advance();
+        }
+        try self.expect(.rparen);
+
+        // Body: do ... end
+        self.skipNewlines();
+        try self.expect(.kw_do);
+        self.skipNewlines();
+
+        var body: std.ArrayList(Node) = .empty;
+        while (self.current.kind != .kw_end and self.current.kind != .eof) {
+            const stmt = try self.parseExpressionStatement();
+            body.append(self.allocator, stmt) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+        try self.expect(.kw_end);
+
+        return Node{
+            .kind = .{ .fn_expr = .{
+                .params = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
             .loc = loc,
         };

@@ -161,7 +161,17 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         .title = "UNKNOWN FUNCTION",
         .source_line = source,
         .message = std.fmt.allocPrint(std.heap.page_allocator, "I don't know a function called `{s}`.", .{name}) catch "Unknown function.",
-        .hint = "Built-in functions:\n      length, max, min, append, reverse,\n      lookup, put, keys, now",
+        .hint = "Built-in functions:\n      length, max, min, append, reverse,\n      lookup, put, keys, now,\n      map, filter, reduce, each",
+    };
+}
+
+/// Build a rich error when trying to call a non-callable value.
+pub fn notCallable(source: []const u8) BlimpError {
+    return .{
+        .title = "NOT CALLABLE",
+        .source_line = source,
+        .message = "This value is not a function and cannot be called.",
+        .hint = "Define a function with:\n      fn(x, y) do ... end",
     };
 }
 

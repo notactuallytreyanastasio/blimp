@@ -44,6 +44,8 @@ pub const Node = struct {
         message_send: MessageSend,
         orelse_expr: OrElseExpr,
         spawn_expr: SpawnExpr,
+        fn_expr: FnExpr,
+        call_expr: CallExpr,
     };
 
     pub const ActorDef = struct {
@@ -199,6 +201,18 @@ pub const Node = struct {
     pub const SpawnExpr = struct {
         actor_name: []const u8,
         overrides: []const KeyValue,
+    };
+
+    /// Anonymous function: fn(x, y) do ... end
+    pub const FnExpr = struct {
+        params: []const []const u8, // parameter names
+        body: []const Node,
+    };
+
+    /// Calling an expression as a function: expr.(args) or just expr(args)
+    pub const CallExpr = struct {
+        callee: *const Node, // the expression being called
+        args: []const Node,
     };
 
     /// Key-value pair for state, become, and map literals.

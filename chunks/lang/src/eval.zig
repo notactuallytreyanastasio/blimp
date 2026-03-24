@@ -174,6 +174,12 @@ pub const Evaluator = struct {
 
             // Spawn expression
             .spawn_expr => |se| return self.evalSpawnExpr(se),
+
+            // Anonymous function
+            .fn_expr => |fe| return self.evalFnExpr(fe),
+
+            // Calling an expression as a function
+            .call_expr => |ce| return self.evalCallExpr(ce),
         }
     }
 
@@ -247,6 +253,78 @@ pub const Evaluator = struct {
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
         v.* = Value{ .actor_ref = ref };
         return v;
+    }
+
+    fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {
+        // Capture the current environment bindings
+        const bindings = self.env.allBindings(self.allocator);
+        var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
+        for (bindings, 0..) |b, i| {
+            captured[i] = .{ .name = b.name, .val = b.val };
+        }
+
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .closure = .{
+            .params = fe.params,
+            .body = fe.body,
+            .env = captured,
+        } };
+        return v;
+    }
+
+    fn evalCallExpr(self: *Evaluator, ce: ast.Node.CallExpr) EvalError!*const Value {
+        const callee_val = try self.eval(ce.callee.*);
+        return self.callClosure(callee_val, ce.args);
+    }
+
+    fn callClosure(self: *Evaluator, callee_val: *const Value, arg_nodes: []const ast.Node) EvalError!*const Value {
+        switch (callee_val.*) {
+            .closure => |c| {
+                if (c.params.len != arg_nodes.len) {
+                    self.last_error = errors.wrongArgCount("fn", c.params.len, arg_nodes.len, self.source);
+                    return error.TypeError;
+                }
+
+                // Push a new scope with captured env + params
+                self.env.pushScope();
+
+                // Bind captured variables
+                for (c.env) |binding| {
+                    self.env.define(binding.name, binding.val);
+                }
+
+                // Bind parameters
+                for (c.params, 0..) |param, i| {
+                    const arg_val = self.eval(arg_nodes[i]) catch |err| {
+                        self.env.popScope();
+                        return err;
+                    };
+                    self.env.define(param, arg_val);
+                }
+
+                // Evaluate body
+                var last_val: *const Value = undefined;
+                var has_val = false;
+                for (c.body) |stmt| {
+                    last_val = self.eval(stmt) catch |err| {
+                        self.env.popScope();
+                        return err;
+                    };
+                    has_val = true;
+                }
+
+                self.env.popScope();
+
+                if (has_val) return last_val;
+                const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+                nil_val.* = Value.nil;
+                return nil_val;
+            },
+            else => {
+                self.last_error = errors.notCallable(self.source);
+                return error.TypeError;
+            },
+        }
     }
 
     fn evalMessageSend(self: *Evaluator, ms: ast.Node.MessageSend) EvalError!*const Value {
@@ -602,7 +680,20 @@ pub const Evaluator = struct {
     }
 
     fn evalFuncCall(self: *Evaluator, call: ast.Node.FuncCall) EvalError!*const Value {
-        // Look up the builtin
+        // First check if the name refers to a closure in the environment
+        if (self.env.lookup(call.name)) |val| {
+            if (val.* == .closure) {
+                return self.callClosure(val, call.args);
+            }
+        }
+
+        // Higher-order builtins that need the evaluator to call closures
+        if (std.mem.eql(u8, call.name, "map")) return self.builtinMap(call.args);
+        if (std.mem.eql(u8, call.name, "filter")) return self.builtinFilter(call.args);
+        if (std.mem.eql(u8, call.name, "reduce")) return self.builtinReduce(call.args);
+        if (std.mem.eql(u8, call.name, "each")) return self.builtinEach(call.args);
+
+        // Otherwise, look up the builtin
         const func = self.builtins.get(call.name) orelse {
             self.last_error = errors.unknownFunction(call.name, self.source);
             return error.UndefinedVariable;
@@ -615,6 +706,114 @@ pub const Evaluator = struct {
         }
 
         return func(self.allocator, args);
+    }
+
+    // ── Higher-order builtins ─────────────────────────────
+
+    /// map(list, fn(x) do ... end) -> new list
+    fn builtinMap(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        if (arg_nodes.len != 2) return error.TypeError;
+        const list_val = try self.eval(arg_nodes[0]);
+        const fn_val = try self.eval(arg_nodes[1]);
+        if (list_val.* != .list) return error.TypeError;
+
+        const items = list_val.list;
+        var results = self.allocator.alloc(*const Value, items.len) catch return error.OutOfMemory;
+        for (items, 0..) |item, i| {
+            // Create a single-element arg node that wraps the value
+            results[i] = try self.callClosureWithValues(fn_val, &.{item});
+        }
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .list = results };
+        return v;
+    }
+
+    /// filter(list, fn(x) do ... end) -> filtered list
+    fn builtinFilter(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        if (arg_nodes.len != 2) return error.TypeError;
+        const list_val = try self.eval(arg_nodes[0]);
+        const fn_val = try self.eval(arg_nodes[1]);
+        if (list_val.* != .list) return error.TypeError;
+
+        var results: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
+        for (list_val.list) |item| {
+            const result = try self.callClosureWithValues(fn_val, &.{item});
+            if (result.truthy()) {
+                results.append(self.allocator, item) catch return error.OutOfMemory;
+            }
+        }
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .list = results.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
+        return v;
+    }
+
+    /// reduce(list, initial, fn(acc, x) do ... end) -> value
+    fn builtinReduce(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        if (arg_nodes.len != 3) return error.TypeError;
+        const list_val = try self.eval(arg_nodes[0]);
+        var acc = try self.eval(arg_nodes[1]);
+        const fn_val = try self.eval(arg_nodes[2]);
+        if (list_val.* != .list) return error.TypeError;
+
+        for (list_val.list) |item| {
+            acc = try self.callClosureWithValues(fn_val, &.{ acc, item });
+        }
+        return acc;
+    }
+
+    /// each(list, fn(x) do ... end) -> :ok (side effects only)
+    fn builtinEach(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        if (arg_nodes.len != 2) return error.TypeError;
+        const list_val = try self.eval(arg_nodes[0]);
+        const fn_val = try self.eval(arg_nodes[1]);
+        if (list_val.* != .list) return error.TypeError;
+
+        for (list_val.list) |item| {
+            _ = try self.callClosureWithValues(fn_val, &.{item});
+        }
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .atom = "ok" };
+        return v;
+    }
+
+    /// Call a closure with pre-evaluated Value arguments (not AST nodes)
+    fn callClosureWithValues(self: *Evaluator, callee_val: *const Value, args: []const *const Value) EvalError!*const Value {
+        switch (callee_val.*) {
+            .closure => |c| {
+                if (c.params.len != args.len) return error.TypeError;
+
+                self.env.pushScope();
+
+                // Bind captured variables
+                for (c.env) |binding| {
+                    self.env.define(binding.name, binding.val);
+                }
+
+                // Bind parameters
+                for (c.params, 0..) |param, i| {
+                    self.env.define(param, args[i]);
+                }
+
+                // Evaluate body
+                var last_val: *const Value = undefined;
+                var has_val = false;
+                for (c.body) |stmt| {
+                    last_val = self.eval(stmt) catch |err| {
+                        self.env.popScope();
+                        return err;
+                    };
+                    has_val = true;
+                }
+
+                self.env.popScope();
+
+                if (has_val) return last_val;
+                const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+                nil_val.* = Value.nil;
+                return nil_val;
+            },
+            else => return error.TypeError,
+        }
     }
 
     fn evalPipe(self: *Evaluator, pipe: ast.Node.PipeExpr) EvalError!*const Value {

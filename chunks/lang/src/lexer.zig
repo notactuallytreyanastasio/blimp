@@ -271,10 +271,10 @@ pub const Lexer = struct {
 // ============================================================
 
 test "lex keywords" {
-    var lexer = Lexer.init("actor do end state on become reply when def");
+    var lexer = Lexer.init("actor do end state on become reply when def fn");
     const expected = [_]Token.Kind{
         .kw_actor, .kw_do, .kw_end, .kw_state, .kw_on,
-        .kw_become, .kw_reply, .kw_when, .kw_def,
+        .kw_become, .kw_reply, .kw_when, .kw_def, .kw_fn,
     };
     for (expected) |exp| {
         const tok = lexer.next();
