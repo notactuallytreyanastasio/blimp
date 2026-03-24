@@ -417,8 +417,9 @@ function submitBuffer() {
 }
 
 function autoComplete() {
-  if (!blimp || !inputEl) { console.log('no blimp or inputEl'); return; }
-  if (typeof blimp.complete !== 'function') { console.log('no complete method'); return; }
+  console.log('autoComplete called, inputEl:', !!inputEl, 'blimp:', !!blimp, 'val:', inputEl ? inputEl.value : 'none');
+  if (!blimp || !inputEl) return;
+  if (typeof blimp.complete !== 'function') { console.log('no complete method on blimp'); return; }
   var text = inputEl.value;
   var cursor = inputEl.selectionStart;
   var start = cursor;
