@@ -417,16 +417,20 @@ function submitBuffer() {
 }
 
 function autoComplete() {
-  console.log('autoComplete called, inputEl:', !!inputEl, 'blimp:', !!blimp, 'val:', inputEl ? inputEl.value : 'none');
   if (!blimp || !inputEl) return;
-  if (typeof blimp.complete !== 'function') { console.log('no complete method on blimp'); return; }
+  if (typeof blimp.complete !== 'function') return;
   var text = inputEl.value;
   var cursor = inputEl.selectionStart;
+  // Get the last word (the one being typed)
   var start = cursor;
   while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
   compPrefix = text.substring(start, cursor);
+  console.log('prefix:', JSON.stringify(compPrefix), 'cursor:', cursor, 'start:', start);
   if (compPrefix.length < 1) { dismissComp(); return; }
-  try { compItems = blimp.complete(compPrefix); } catch(e) { console.log('complete error:', e); compItems = []; }
+  try {
+    compItems = blimp.complete(compPrefix);
+    console.log('got', compItems.length, 'completions for', JSON.stringify(compPrefix), compItems.length > 0 ? compItems[0].label : '');
+  } catch(e) { console.log('complete error:', e); compItems = []; }
   if (compItems.length === 0 || (compItems.length === 1 && compItems[0].insert === compPrefix)) {
     dismissComp(); return;
   }
