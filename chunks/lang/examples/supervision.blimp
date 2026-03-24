@@ -1,0 +1,65 @@
+# Supervision demo: CascadeBubble restarts siblings
+# The namespace IS the blast radius
+
+actor Bank do
+  state name: String :: "First National"
+end
+
+actor Bank.Account do
+  state balance: Int :: 0
+  state owner: String :: "unknown"
+
+  on :deposit(amount) when amount > 0 do
+    become balance: balance + amount
+    reply balance + amount
+  end
+
+  on :withdraw(amount) when amount > 0 do
+    become balance: balance - amount
+    reply balance - amount
+  end
+
+  on :balance do
+    reply balance
+  end
+
+  on :overdraft bubbles(CascadeBubble) do
+    bubble :insufficient_funds
+  end
+end
+
+actor Bank.Audit do
+  state events: Int :: 0
+
+  on :log do
+    become events: events + 1
+    reply events
+  end
+
+  on :count do
+    reply events
+  end
+end
+
+# Spawn the system
+b = spawn Bank
+acct = spawn Bank.Account
+audit = spawn Bank.Audit
+
+# Normal operations
+acct <- :deposit(1000)
+acct <- :withdraw(200)
+audit <- :log
+audit <- :log
+audit <- :log
+
+# Check state
+acct <- :balance
+audit <- :count
+
+# Now trigger CascadeBubble - both Account and Audit restart
+result = acct <- :overdraft orelse :caught
+
+# Both siblings reset to defaults
+acct <- :balance
+audit <- :count
