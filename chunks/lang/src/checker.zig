@@ -443,6 +443,8 @@ pub const Checker = struct {
                 }
                 break :blk .bool_type;
             },
+            // Concatenation: ++
+            .concat => .any, // returns list or string depending on operands
         };
     }
 

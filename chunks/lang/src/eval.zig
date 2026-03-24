@@ -665,12 +665,27 @@ pub const Evaluator = struct {
                         },
                         else => return error.TypeError,
                     },
+                    else => return error.TypeError,
+                }
+            },
+            .concat => {
+                switch (left.*) {
                     .list => |a| switch (right.*) {
                         .list => |b| {
                             var items = self.allocator.alloc(*const Value, a.len + b.len) catch return error.OutOfMemory;
                             @memcpy(items[0..a.len], a);
                             @memcpy(items[a.len..], b);
                             result.* = Value{ .list = items };
+                            return result;
+                        },
+                        else => return error.TypeError,
+                    },
+                    .string => |a| switch (right.*) {
+                        .string => |b| {
+                            const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
+                            @memcpy(new_str[0..a.len], a);
+                            @memcpy(new_str[a.len..], b);
+                            result.* = Value{ .string = new_str };
                             return result;
                         },
                         else => return error.TypeError,

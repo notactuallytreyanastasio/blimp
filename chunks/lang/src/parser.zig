@@ -569,8 +569,8 @@ pub const Parser = struct {
 
     fn parseAddSub(self: *Parser) ParseError!Node {
         var left = try self.parseMulDiv();
-        while (self.current.kind == .plus or self.current.kind == .minus) {
-            const op: Node.BinaryOp.Op = if (self.current.kind == .plus) .add else .sub;
+        while (self.current.kind == .plus or self.current.kind == .minus or self.current.kind == .plus_plus) {
+            const op: Node.BinaryOp.Op = if (self.current.kind == .plus_plus) .concat else if (self.current.kind == .plus) .add else .sub;
             self.advance();
             const right = try self.parseMulDiv();
             left = try self.makeBinaryOp(op, left, right);

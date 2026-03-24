@@ -122,6 +122,7 @@ pub const Node = struct {
 
         pub const Op = enum {
             add,
+            concat, // ++ for list concatenation
             sub,
             mul,
             div,

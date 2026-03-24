@@ -40,6 +40,7 @@ pub const Token = struct {
         kw_self,
         kw_for,
         kw_in,
+        plus_plus,  // ++ (list concat)
         dot_dot,    // .. (each)
         dot_dot_dot, // ... (map)
 

@@ -328,6 +328,7 @@ fn exprToString(node: Node, allocator: std.mem.Allocator) []const u8 {
                 .gte => ">=",
                 .and_op => "&&",
                 .or_op => "||",
+                .concat => "++",
             };
             const right_str = exprToString(op.right.*, allocator);
             return std.fmt.allocPrint(allocator, "{s} {s} {s}", .{ left_str, op_str, right_str }) catch "?";

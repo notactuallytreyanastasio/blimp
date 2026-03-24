@@ -499,6 +499,7 @@ pub const Codegen = struct {
             },
             .and_op => c.LLVMBuildAnd(self.builder, lhs.val, rhs.val, "andtmp"),
             .or_op => c.LLVMBuildOr(self.builder, lhs.val, rhs.val, "ortmp"),
+            .concat => return CodegenError.UnsupportedNode, // ++ needs tagged values
         };
         return .{ .val = val, .tag = .int };
     }

@@ -203,7 +203,13 @@ pub const Lexer = struct {
 
         // Single-character tokens
         const kind: Token.Kind = switch (c) {
-            '+' => .plus,
+            '+' => {
+                if (self.pos < self.source.len and self.source[self.pos] == '+') {
+                    self.pos += 1;
+                    return self.makeToken(.plus_plus, "++");
+                }
+                return .{ .kind = .plus, .lexeme = self.source[start..self.pos], .line = self.line, .col = start_col };
+            },
             '-' => .minus,
             '*' => .star,
             '/' => .slash,
