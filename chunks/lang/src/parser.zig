@@ -742,7 +742,7 @@ pub const Parser = struct {
             .dot_dot => return self.parseSpread(.spread_each),
             .lbracket => return self.parseListLit(),
             .lbrace => return self.parseTupleLit(),
-            .percent => return self.parseMapLit(),
+            .percent => return self.parsePercentExpr(),
             .lparen => {
                 self.advance();
                 const expr = try self.parseExpression();
@@ -999,6 +999,80 @@ pub const Parser = struct {
             .kind = .{ .tuple_lit = .{
                 .elements = elements.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
+            .loc = loc,
+        };
+    }
+
+    /// Dispatch %{ for maps or %Name{ for structs
+    fn parsePercentExpr(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.percent);
+
+        // %Name{...} = struct literal
+        if (self.current.kind == .upper_identifier) {
+            return self.parseStructLit(loc);
+        }
+
+        // %{...} = map literal
+        return self.parseMapLitBody(loc);
+    }
+
+    fn parseStructLit(self: *Parser, loc: ast.Loc) ParseError!Node {
+        const type_name = self.current.lexeme;
+        self.advance();
+
+        // Handle dot notation: %Shop.Checkout{...}
+        var name = type_name;
+        while (self.current.kind == .dot) {
+            self.advance();
+            if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
+            name = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ name, self.current.lexeme }) catch return error.OutOfMemory;
+            self.advance();
+        }
+
+        try self.expect(.lbrace);
+        self.skipNewlines();
+        var fields: std.ArrayList(ast.Node.KeyValue) = .empty;
+        while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            if (self.current.kind != .identifier) return error.UnexpectedToken;
+            const key = self.current.lexeme;
+            self.advance();
+            try self.expect(.colon);
+            self.skipNewlines();
+            const value = try self.parseExpression();
+            fields.append(self.allocator, .{ .key = key, .value = value }) catch return error.OutOfMemory;
+            if (self.current.kind == .comma) self.advance();
+            self.skipNewlines();
+        }
+        try self.expect(.rbrace);
+
+        return .{
+            .kind = .{ .struct_lit = .{
+                .type_name = name,
+                .fields = fields.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            } },
+            .loc = loc,
+        };
+    }
+
+    fn parseMapLitBody(self: *Parser, loc: ast.Loc) ParseError!Node {
+        // Already consumed %, now expect {
+        try self.expect(.lbrace);
+        var entries: std.ArrayList(ast.Node.KeyValue) = .empty;
+        while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            if (self.current.kind != .identifier and self.current.kind != .string) return error.UnexpectedToken;
+            const key = self.current.lexeme;
+            self.advance();
+            try self.expect(.colon);
+            self.skipNewlines();
+            const value = try self.parseExpression();
+            entries.append(self.allocator, .{ .key = key, .value = value }) catch return error.OutOfMemory;
+            if (self.current.kind == .comma) self.advance();
+            self.skipNewlines();
+        }
+        try self.expect(.rbrace);
+        return .{
+            .kind = .{ .map_lit = .{ .entries = entries.toOwnedSlice(self.allocator) catch return error.OutOfMemory } },
             .loc = loc,
         };
     }

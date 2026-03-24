@@ -186,6 +186,9 @@ pub const Evaluator = struct {
             // Spawn expression
             .spawn_expr => |se| return self.evalSpawnExpr(se),
 
+            // Struct literal: %Counter{count: 42}
+            .struct_lit => |sl| return self.evalStructLit(sl),
+
             // Anonymous function
             .fn_expr => |fe| return self.evalFnExpr(fe),
 
@@ -400,6 +403,29 @@ pub const Evaluator = struct {
         } };
 
         self.env.define(ds.name, v);
+        return v;
+    }
+
+    fn evalStructLit(self: *Evaluator, sl: ast.Node.StructLit) EvalError!*const Value {
+        // %Counter{count: 42} = spawn Counter with overrides
+        const template = self.registry.lookupTemplate(sl.type_name) orelse {
+            self.last_error = errors.templateNotFound(sl.type_name, self.source);
+            return error.UndefinedVariable;
+        };
+
+        var overrides_list = std.ArrayList(Value.MapEntry){ .items = &.{}, .capacity = 0 };
+        for (sl.fields) |field| {
+            const val = try self.eval(field.value);
+            overrides_list.append(self.allocator, .{
+                .key = field.key,
+                .val = val,
+            }) catch return error.OutOfMemory;
+        }
+        const overrides = overrides_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+
+        const ref = self.registry.spawn(template, overrides);
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .actor_ref = ref };
         return v;
     }
 

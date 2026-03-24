@@ -44,6 +44,7 @@ pub const Node = struct {
         message_send: MessageSend,
         orelse_expr: OrElseExpr,
         spawn_expr: SpawnExpr,
+        struct_lit: StructLit,
         fn_expr: FnExpr,
         call_expr: CallExpr,
         def_stmt: DefStmt,
@@ -209,6 +210,12 @@ pub const Node = struct {
     pub const SpawnExpr = struct {
         actor_name: []const u8,
         overrides: []const KeyValue,
+    };
+
+    /// Struct literal: %Counter{count: 42}
+    pub const StructLit = struct {
+        type_name: []const u8,
+        fields: []const KeyValue,
     };
 
     /// Range expression: 1..10
