@@ -120,6 +120,7 @@ body.tldr-mode .tldr-bubble {
 <div class="post-date">March 23, 2026</div>
 
 <div class="tldr-toggle" onclick="document.body.classList.toggle('tldr-mode'); this.classList.toggle('active');">tl;dr</div>
+<button class="blimp-try-btn" onclick="BlimpRepl.modal()">Try Blimp</button>
 
 <!-- ============================================================ -->
 <!-- Since the Grammar                                            -->
@@ -622,5 +623,6 @@ $ blimp-compile counter.blimp --run
   });
 })();
 </script>
+<script src="repl/blimp-repl.js"></script>
 </body>
 </html>

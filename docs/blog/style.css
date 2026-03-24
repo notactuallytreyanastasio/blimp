@@ -425,6 +425,28 @@ hr {
   }
 }
 
+/* Try Blimp button (loaded from repl widget CSS but backup here) */
+.blimp-try-btn {
+  display: inline-block;
+  font-family: inherit;
+  font-size: 0.85rem;
+  color: #a6e22e;
+  cursor: pointer;
+  padding: 0.4rem 1rem;
+  border: 1px solid #a6e22e;
+  border-radius: 4px;
+  background: transparent;
+  text-decoration: none;
+  user-select: none;
+  margin-left: 0.75rem;
+  vertical-align: middle;
+  transition: background 0.15s;
+}
+
+.blimp-try-btn:hover {
+  background: rgba(166, 226, 46, 0.1);
+}
+
 /* Selection */
 ::selection {
   background: #b3d4fc;
