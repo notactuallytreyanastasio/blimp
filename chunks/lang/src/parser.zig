@@ -285,7 +285,25 @@ pub const Parser = struct {
         };
     }
 
-    /// Check if current position looks like the start of a new branch (pattern ->)
+    /// Check if current position looks like a branch start by scanning
+    /// the source for -> on the same line. Doesn't modify parser state.
+    fn looksLikeBranch(self: *const Parser) bool {
+        // Scan forward from AFTER current token looking for -> on this line.
+        // The current token's lexeme tells us where we are in the source.
+        const lexeme_ptr = @intFromPtr(self.current.lexeme.ptr);
+        const source_ptr = @intFromPtr(self.lexer.source.ptr);
+        if (lexeme_ptr < source_ptr) return false;
+        var pos = lexeme_ptr - source_ptr + self.current.lexeme.len;
+        while (pos + 1 < self.lexer.source.len) {
+            const c = self.lexer.source[pos];
+            if (c == '\n') return false;
+            if (c == '-' and self.lexer.source[pos + 1] == '>') return true;
+            pos += 1;
+        }
+        return false;
+    }
+
+    /// DEPRECATED: old lookahead approach
     fn peekIsBranchStart(self: *Parser) bool {
         // Save position
         const saved_pos = self.lexer.pos;
@@ -413,26 +431,18 @@ pub const Parser = struct {
             self.current.kind != .hole and
             self.current.kind != .atom)
         {
-            // If we see a newline, check if the next line starts a new branch pattern
+            // If we see a newline, check if the next line starts a new branch
             if (self.current.kind == .newline) {
                 self.skipNewlines();
                 if (self.current.kind == .kw_end or self.current.kind == .eof) break;
-                // Any of these at the start of a new line could be a branch pattern
-                if (self.current.kind == .integer or
-                    self.current.kind == .string or
-                    self.current.kind == .true_lit or
-                    self.current.kind == .false_lit or
-                    self.current.kind == .nil_lit or
-                    self.current.kind == .lbracket or
-                    self.current.kind == .percent or
-                    self.current.kind == .lbrace or
-                    self.current.kind == .hole or
-                    self.current.kind == .atom) break;
+                if (self.current.kind == .hole or self.current.kind == .atom) break;
+                // For other tokens (integer, identifier, true, etc.), peek ahead
+                // to see if there's a -> following. If so, it's a new branch.
+                if (self.looksLikeBranch()) break;
                 continue;
             }
             const stmt = try self.parseHandlerBody();
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
-            self.skipNewlines();
         }
 
         return .{
