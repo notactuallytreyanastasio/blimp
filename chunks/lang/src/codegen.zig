@@ -243,6 +243,7 @@ pub const Codegen = struct {
             .spread_each => |se| self.compileSpreadEach(se),
             .list_lit => |ll| self.compileListLit(ll),
             .fn_expr => |fe| self.compileFnExpr(fe),
+            .def_stmt => |ds| self.compileDef(ds),
             else => CodegenError.UnsupportedNode,
         };
     }
@@ -992,6 +993,60 @@ pub const Codegen = struct {
         // Return :ok atom
         const ok_id = self.atoms.intern(self.allocator, "ok");
         return .{ .val = c.LLVMConstInt(self.i64_type, ok_id, 0), .tag = .atom };
+    }
+
+    fn compileDef(self: *Codegen, ds: ast.Node.DefStmt) CodegenError!TaggedVal {
+        // Save current context
+        const saved_fn = self.current_fn;
+        const saved_scope = self.scope;
+        self.scope = .{};
+
+        // Create function: i64 name(i64, i64, ...)
+        const param_count: u32 = @intCast(ds.params.len);
+        var param_types = self.allocator.alloc(c.LLVMTypeRef, param_count) catch return CodegenError.LLVMError;
+        for (0..param_count) |i| {
+            param_types[i] = self.i64_type;
+        }
+        const fn_type = c.LLVMFunctionType(self.i64_type, param_types.ptr, param_count, 0);
+
+        // Forward-declare so recursive calls work
+        const func = c.LLVMAddFunction(self.module, self.zname(ds.name), fn_type);
+
+        const entry_bb = c.LLVMAppendBasicBlock(func, "entry");
+        c.LLVMPositionBuilderAtEnd(self.builder, entry_bb);
+        self.current_fn = func;
+
+        // Bind params as i64 allocas
+        for (ds.params, 0..) |param_name, i| {
+            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param_name));
+            _ = c.LLVMBuildStore(self.builder, c.LLVMGetParam(func, @intCast(i)), alloca);
+            self.scope.put(self.allocator, .{ .name = param_name, .alloca = alloca, .tag = .int, .llvm_type = self.i64_type });
+        }
+
+        // Compile body
+        var last_tv: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        for (ds.body) |stmt| {
+            last_tv = try self.compileExpr(stmt);
+        }
+
+        // Return the last expression value
+        if (c.LLVMGetBasicBlockTerminator(c.LLVMGetInsertBlock(self.builder)) == null) {
+            _ = c.LLVMBuildRet(self.builder, last_tv.val);
+        }
+
+        // Restore context
+        self.current_fn = saved_fn;
+        self.scope = saved_scope;
+
+        // Position builder back in the calling function
+        if (saved_fn) |f| {
+            const last_bb = c.LLVMGetLastBasicBlock(f);
+            c.LLVMPositionBuilderAtEnd(self.builder, last_bb);
+        }
+
+        // Return the function name as an atom (like the interpreter)
+        const name_id = self.atoms.intern(self.allocator, ds.name);
+        return .{ .val = c.LLVMConstInt(self.i64_type, name_id, 0), .tag = .atom };
     }
 
     fn compileListLit(self: *Codegen, ll: ast.Node.ListLit) CodegenError!TaggedVal {
