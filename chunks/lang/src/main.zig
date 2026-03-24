@@ -316,6 +316,16 @@ fn countDepthChange(line: []const u8) i32 {
                 continue;
             }
         }
+        // Check for "catch" keyword (closes try block, net -1 with its do)
+        if (i + 5 <= line.len and std.mem.eql(u8, line[i .. i + 5], "catch")) {
+            const before_ok = (i == 0) or (!std.ascii.isAlphanumeric(line[i - 1]) and line[i - 1] != '_');
+            const after_ok = (i + 5 >= line.len) or (!std.ascii.isAlphanumeric(line[i + 5]) and line[i + 5] != '_');
+            if (before_ok and after_ok) {
+                delta -= 1; // catch closes try block
+                i += 5;
+                continue;
+            }
+        }
         // Check for "end" keyword at word boundary
         if (i + 3 <= line.len and std.mem.eql(u8, line[i .. i + 3], "end")) {
             const before_ok = (i == 0) or (!std.ascii.isAlphanumeric(line[i - 1]) and line[i - 1] != '_');

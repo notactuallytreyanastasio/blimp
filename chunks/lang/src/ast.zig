@@ -45,6 +45,7 @@ pub const Node = struct {
         orelse_expr: OrElseExpr,
         spawn_expr: SpawnExpr,
         struct_lit: StructLit,
+        try_catch: TryCatch,
         fn_expr: FnExpr,
         call_expr: CallExpr,
         def_stmt: DefStmt,
@@ -210,6 +211,13 @@ pub const Node = struct {
     pub const SpawnExpr = struct {
         actor_name: []const u8,
         overrides: []const KeyValue,
+    };
+
+    /// Try/catch: try do ... catch var do ... end
+    pub const TryCatch = struct {
+        try_body: []const Node,
+        catch_var: ?[]const u8, // variable name for the error, or null
+        catch_body: []const Node,
     };
 
     /// Struct literal: %Counter{count: 42}

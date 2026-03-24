@@ -733,6 +733,7 @@ pub const Parser = struct {
             },
             .kw_spawn => return self.parseSpawnExpr(),
             .kw_fn => return self.parseFnExpr(),
+            .kw_try => return self.parseTryCatch(),
             .kw_for => return self.parseForExpr(),
             .kw_self => {
                 self.advance();
@@ -853,6 +854,59 @@ pub const Parser = struct {
                 .iterable = iter_ptr,
                 .func = func_ptr,
             }),
+            .loc = loc,
+        };
+    }
+
+    /// Parse: try do ... catch var do ... end
+    fn parseTryCatch(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_try);
+        self.skipNewlines();
+        try self.expect(.kw_do);
+        self.skipNewlines();
+
+        // Try body
+        var try_body: std.ArrayList(Node) = .empty;
+        while (self.current.kind != .kw_catch and self.current.kind != .kw_end and self.current.kind != .eof) {
+            const stmt = try self.parseTopLevel();
+            try_body.append(self.allocator, stmt) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+
+        // Catch clause
+        var catch_var: ?[]const u8 = null;
+        var catch_body: std.ArrayList(Node) = .empty;
+
+        if (self.current.kind == .kw_catch) {
+            self.advance();
+            self.skipNewlines();
+
+            // Optional catch variable
+            if (self.current.kind == .identifier) {
+                catch_var = self.current.lexeme;
+                self.advance();
+            }
+
+            self.skipNewlines();
+            try self.expect(.kw_do);
+            self.skipNewlines();
+
+            while (self.current.kind != .kw_end and self.current.kind != .eof) {
+                const stmt = try self.parseTopLevel();
+                catch_body.append(self.allocator, stmt) catch return error.OutOfMemory;
+                self.skipNewlines();
+            }
+        }
+
+        try self.expect(.kw_end);
+
+        return Node{
+            .kind = .{ .try_catch = .{
+                .try_body = try_body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .catch_var = catch_var,
+                .catch_body = catch_body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            } },
             .loc = loc,
         };
     }

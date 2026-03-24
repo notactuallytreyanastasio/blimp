@@ -193,6 +193,9 @@ pub const Evaluator = struct {
             // Struct literal: %Counter{count: 42}
             .struct_lit => |sl| return self.evalStructLit(sl),
 
+            // Try/catch
+            .try_catch => |tc| return self.evalTryCatch(tc),
+
             // Anonymous function
             .fn_expr => |fe| return self.evalFnExpr(fe),
 
@@ -454,6 +457,54 @@ pub const Evaluator = struct {
 
         self.env.define(ds.name, v);
         return v;
+    }
+
+    fn evalTryCatch(self: *Evaluator, tc: ast.Node.TryCatch) EvalError!*const Value {
+        // Try to evaluate the try body
+        var last_val: *const Value = undefined;
+        var has_val = false;
+        for (tc.try_body) |stmt| {
+            last_val = self.eval(stmt) catch |err| {
+                // Caught an error - run the catch body
+                self.env.pushScope();
+                if (tc.catch_var) |var_name| {
+                    // Bind the error reason if we have one
+                    const reason = self.bubble_reason orelse blk: {
+                        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                        v.* = Value{ .atom = switch (err) {
+                            error.TypeError => "type_error",
+                            error.UndefinedVariable => "undefined",
+                            error.DivisionByZero => "division_by_zero",
+                            error.Bubble => "bubble",
+                            else => "error",
+                        } };
+                        break :blk v;
+                    };
+                    self.env.define(var_name, reason);
+                }
+
+                var catch_result: *const Value = undefined;
+                var catch_has = false;
+                for (tc.catch_body) |catch_stmt| {
+                    catch_result = self.eval(catch_stmt) catch {
+                        self.env.popScope();
+                        return err; // re-raise if catch body also fails
+                    };
+                    catch_has = true;
+                }
+                self.env.popScope();
+
+                if (catch_has) return catch_result;
+                const nil = self.allocator.create(Value) catch return error.OutOfMemory;
+                nil.* = .nil;
+                return nil;
+            };
+            has_val = true;
+        }
+        if (has_val) return last_val;
+        const nil = self.allocator.create(Value) catch return error.OutOfMemory;
+        nil.* = .nil;
+        return nil;
     }
 
     fn evalStructLit(self: *Evaluator, sl: ast.Node.StructLit) EvalError!*const Value {

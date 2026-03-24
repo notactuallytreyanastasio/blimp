@@ -38,6 +38,8 @@ pub const Token = struct {
         kw_orelse,
         kw_spawn,
         kw_self,
+        kw_try,
+        kw_catch,
         kw_for,
         kw_in,
         plus_plus,  // ++ (list concat)
@@ -104,6 +106,8 @@ pub const Token = struct {
             .{ "orelse", .kw_orelse },
             .{ "spawn", .kw_spawn },
             .{ "self", .kw_self },
+            .{ "try", .kw_try },
+            .{ "catch", .kw_catch },
             .{ "for", .kw_for },
             .{ "in", .kw_in },
             .{ "true", .true_lit },
