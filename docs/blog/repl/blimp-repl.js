@@ -104,6 +104,8 @@
       inputEl.addEventListener('input', function() {
         this.style.height = 'auto';
         this.style.height = Math.min(this.scrollHeight, 240) + 'px';
+        // Auto-show completions as you type
+        autoComplete();
       });
       inputRow.appendChild(pc);
       inputRow.appendChild(inputEl);
@@ -146,29 +148,37 @@
       depth = 0;
     }
 
+    function autoComplete() {
+      if (!blimp || !blimp.complete || !inputEl) return;
+      var text = inputEl.value;
+      var cursor = inputEl.selectionStart;
+      var start = cursor;
+      while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
+      compPrefix = text.substring(start, cursor);
+
+      if (compPrefix.length < 1) { dismissCompletions(); return; }
+
+      compItems = blimp.complete(compPrefix);
+      // Don't show if only match is exact
+      if (compItems.length === 1 && compItems[0].insert === compPrefix) {
+        dismissCompletions(); return;
+      }
+      if (compItems.length === 0) { dismissCompletions(); return; }
+
+      compIdx = 0;
+      renderCompletions();
+    }
+
     function handleKey(e) {
-      // Tab: show/cycle completions
+      // Tab: accept current completion or cycle
       if (e.key === 'Tab') {
         e.preventDefault();
-        if (!blimp || !blimp.complete) return;
-
         if (compEl && compItems.length > 0) {
-          // Cycle to next
-          compIdx = (compIdx + 1) % compItems.length;
-          renderCompletions();
-        } else {
-          // Get completions for current word
-          var text = inputEl.value;
-          var cursor = inputEl.selectionStart;
-          // Find the word before cursor
-          var start = cursor;
-          while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
-          compPrefix = text.substring(start, cursor);
-          if (compPrefix.length === 0) return;
-
-          compItems = blimp.complete(compPrefix);
-          if (compItems.length === 0) return;
-          compIdx = 0;
+          if (e.shiftKey) {
+            compIdx = (compIdx - 1 + compItems.length) % Math.min(compItems.length, 3);
+          } else {
+            compIdx = (compIdx + 1) % Math.min(compItems.length, 3);
+          }
           renderCompletions();
         }
         return;
@@ -178,7 +188,6 @@
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         if (compEl && compIdx >= 0 && compIdx < compItems.length) {
-          // Accept the completion
           acceptCompletion(compItems[compIdx]);
           dismissCompletions();
           return;
@@ -193,25 +202,22 @@
         return;
       }
 
-      // Escape: dismiss completions
+      // Escape: dismiss
       if (e.key === 'Escape') {
         if (compEl) { dismissCompletions(); e.preventDefault(); return; }
       }
 
-      // Any other key: dismiss completions
-      if (compEl && e.key !== 'Shift') {
-        dismissCompletions();
-      }
-
-      // History navigation
-      if (e.key === 'ArrowUp' && !buffer && inputEl.selectionStart === 0) {
-        e.preventDefault();
-        if (historyIdx > 0) { historyIdx--; inputEl.value = history[historyIdx]; }
-      }
-      if (e.key === 'ArrowDown' && !buffer) {
-        e.preventDefault();
-        if (historyIdx < history.length - 1) { historyIdx++; inputEl.value = history[historyIdx]; }
-        else { historyIdx = history.length; inputEl.value = ''; }
+      // History navigation (only when no completions showing)
+      if (!compEl) {
+        if (e.key === 'ArrowUp' && !buffer && inputEl.selectionStart === 0) {
+          e.preventDefault();
+          if (historyIdx > 0) { historyIdx--; inputEl.value = history[historyIdx]; }
+        }
+        if (e.key === 'ArrowDown' && !buffer) {
+          e.preventDefault();
+          if (historyIdx < history.length - 1) { historyIdx++; inputEl.value = history[historyIdx]; }
+          else { historyIdx = history.length; inputEl.value = ''; }
+        }
       }
     }
 
