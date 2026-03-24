@@ -69,13 +69,17 @@ pub const Evaluator = struct {
                 return v;
             },
             .string_lit => |lit| {
-                const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 // Strip surrounding quotes if present
                 const raw = lit.value;
                 const s = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
                     raw[1 .. raw.len - 1]
                 else
                     raw;
+                // Check for interpolation: #{expr}
+                if (std.mem.indexOf(u8, s, "#{") != null) {
+                    return self.evalStringInterp(s);
+                }
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = Value{ .string = s };
                 return v;
             },
@@ -385,6 +389,52 @@ pub const Evaluator = struct {
         }
 
         return error.Bubble;
+    }
+
+    fn evalStringInterp(self: *Evaluator, s: []const u8) EvalError!*const Value {
+        var result: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        var i: usize = 0;
+        while (i < s.len) {
+            if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
+                // Find the closing }
+                const start = i + 2;
+                var depth: u32 = 1;
+                var j = start;
+                while (j < s.len and depth > 0) {
+                    if (s[j] == '{') depth += 1;
+                    if (s[j] == '}') depth -= 1;
+                    if (depth > 0) j += 1;
+                }
+                if (depth != 0) return error.UnsupportedOperation;
+
+                // Parse and evaluate the expression inside #{...}
+                const expr_src = s[start..j];
+                const P = @import("parser.zig").Parser;
+                var parser = P.init(self.allocator, expr_src);
+                const expr_node = parser.parseExpressionPublic() catch return error.UnsupportedOperation;
+                const val = try self.eval(expr_node);
+
+                // Format the value into the string
+                var buf: [4096]u8 = undefined;
+                var fbs = std.io.fixedBufferStream(&buf);
+                val.format(fbs.writer());
+                const formatted = fbs.getWritten();
+                // Strip quotes from string values
+                if (formatted.len >= 2 and formatted[0] == '"' and formatted[formatted.len - 1] == '"') {
+                    result.appendSlice(self.allocator, formatted[1 .. formatted.len - 1]) catch return error.OutOfMemory;
+                } else {
+                    result.appendSlice(self.allocator, formatted) catch return error.OutOfMemory;
+                }
+
+                i = j + 1; // skip past }
+            } else {
+                result.append(self.allocator, s[i]) catch return error.OutOfMemory;
+                i += 1;
+            }
+        }
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .string = result.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
+        return v;
     }
 
     fn evalDefStmt(self: *Evaluator, ds: ast.Node.DefStmt) EvalError!*const Value {
