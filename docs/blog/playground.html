@@ -183,6 +183,9 @@ body {
     </div>
     <div class="state-panel" id="state"></div>
   </div>
+  <div style="padding:0.4rem 1rem;border-bottom:1px solid #1a1a2e;flex-shrink:0;">
+    <button class="btn" id="demoBtn" onclick="runDemo()" style="font-size:0.8rem;padding:0.25rem 1rem;">Demo</button>
+  </div>
   <div class="bottom-half" id="repl"></div>
 </div>
 
@@ -485,6 +488,111 @@ document.addEventListener('keydown', function(e) {
     if (o.classList.contains('open')) toggleCheatsheet();
   }
 });
+
+// ── Demo: type commands at human speed ──────────────────
+
+var demoRunning = false;
+
+function runDemo() {
+  if (demoRunning) return;
+  demoRunning = true;
+  var btn = document.getElementById('demoBtn');
+  btn.classList.add('active');
+  btn.textContent = 'Running...';
+
+  resetRepl();
+
+  var commands = [
+    // Define Counter
+    'actor Counter do\n  state count: Int :: 0\n\n  on :increment do\n    become count: count + 1\n    reply count + 1\n  end\n\n  on :get do\n    reply count\n  end\nend',
+    // Define Greeter
+    'actor Greeter do\n  state name: String :: "world"\n\n  on :set_name(n) do\n    become name: n\n    reply n\n  end\n\n  on :greet do\n    reply name\n  end\nend',
+    // Spawn counters
+    'c1 = spawn Counter',
+    'c2 = spawn Counter',
+    'c3 = spawn Counter',
+    // Spawn greeters
+    'g1 = spawn Greeter',
+    'g2 = spawn Greeter',
+    // Send messages
+    'c1 <- :increment',
+    'c1 <- :increment',
+    'c1 <- :increment',
+    'c2 <- :increment',
+    'c2 <- :increment',
+    'c3 <- :increment',
+    'g1 <- :set_name("alice")',
+    'g2 <- :set_name("bob")',
+    'g1 <- :greet',
+    'g2 <- :greet',
+    // Use closures
+    'c1 <- :get',
+    'c2 <- :get',
+    'c3 <- :get',
+    // Map over a list
+    'double = fn(x) do x * 2 end',
+    '...[1, 2, 3, 4, 5], double',
+  ];
+
+  var idx = 0;
+
+  function typeNext() {
+    if (idx >= commands.length) {
+      demoRunning = false;
+      btn.classList.remove('active');
+      btn.textContent = 'Demo';
+      return;
+    }
+
+    var cmd = commands[idx];
+    idx++;
+
+    // Type the command character by character
+    var chars = cmd.split('');
+    var ci = 0;
+
+    function typeChar() {
+      if (ci >= chars.length) {
+        // Done typing, submit after a pause
+        setTimeout(function() {
+          // Simulate Enter
+          if (inputEl) {
+            inputEl.value = cmd;
+            var lines = cmd.split('\n');
+            // Freeze + submit the full command
+            freezeInput();
+            buffer = cmd;
+            depth = 0;
+            submitBuffer();
+            createPrompt();
+            // Next command after delay
+            var delay = cmd.length > 50 ? 600 : 400;
+            setTimeout(typeNext, delay);
+          }
+        }, 200);
+        return;
+      }
+
+      if (inputEl) {
+        // For multiline, show the accumulating text
+        inputEl.value = cmd.substring(0, ci + 1);
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 240) + 'px';
+        scroll.scrollTop = scroll.scrollHeight;
+      }
+      ci++;
+      // Vary typing speed: faster for whitespace/newlines
+      var ch = chars[ci - 1];
+      var speed = (ch === ' ' || ch === '\n') ? 15 : 30 + Math.random() * 25;
+      setTimeout(typeChar, speed);
+    }
+
+    typeChar();
+  }
+
+  // Start after a brief pause
+  setTimeout(typeNext, 500);
+}
 </script>
 </body>
 </html>

@@ -15,8 +15,18 @@ class BlimpCanvas {
     this._resize();
     window.addEventListener('resize', () => this._resize());
 
+    // ResizeObserver catches cases window resize misses (mobile rotation, flex layout changes)
+    if (typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(() => this._resize()).observe(this.canvas.parentElement);
+    }
+
     var self = this;
     requestAnimationFrame(function loop() {
+      // Re-check size each frame in case layout shifted
+      var r = self.canvas.parentElement.getBoundingClientRect();
+      if (Math.abs(r.width - self.w) > 1 || Math.abs(r.height - self.h) > 1) {
+        self._resize();
+      }
       self._draw();
       requestAnimationFrame(loop);
     });
@@ -24,13 +34,14 @@ class BlimpCanvas {
 
   _resize() {
     var r = this.canvas.parentElement.getBoundingClientRect();
-    this.dpr = devicePixelRatio || 1;
+    this.dpr = window.devicePixelRatio || 1;
     this.w = r.width;
     this.h = r.height;
     this.canvas.width = this.w * this.dpr;
     this.canvas.height = this.h * this.dpr;
     this.canvas.style.width = this.w + 'px';
     this.canvas.style.height = this.h + 'px';
+    this._layout();
   }
 
   // Called after each eval with fresh state + source text
@@ -97,12 +108,26 @@ class BlimpCanvas {
       this.nodes = this.nodes.filter(n => ids[n.id] || n.shape === 'square');
     }
 
-    // Parse message sends from source
+    // Add rays from runtime message log (catches sends inside closures)
+    if (state.messages) {
+      for (var msg of state.messages) {
+        if (this.nodes[msg.target]) {
+          this.rays.push({
+            toId: msg.target,
+            t0: performance.now(),
+            color: this._strColor(msg.message),
+            label: ':' + msg.message
+          });
+        }
+      }
+    }
+
+    // Also parse direct sends from source text
     if (source) {
       var re = /(\w+)\s*<-\s*:(\w+)/g, m;
       while ((m = re.exec(source)) !== null) {
         var toRef = this.varMap[m[1]];
-        if (toRef) {
+        if (toRef && this.nodes[toRef]) {
           this.rays.push({
             toId: toRef,
             t0: performance.now(),

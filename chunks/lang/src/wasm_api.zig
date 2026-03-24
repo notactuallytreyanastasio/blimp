@@ -199,7 +199,24 @@ fn updateStateJson() void {
         actor_idx += 1;
     }
 
+    // Message log for canvas rays
+    w.writeAll("],\"messages\":[") catch {};
+    for (0..eval.msg_log_count) |mi| {
+        if (mi > 0) w.writeAll(",") catch {};
+        const msg = eval.msg_log[mi];
+        w.writeAll("{\"target\":\"ref<") catch {};
+        w.writeAll(msg.target_type) catch {};
+        w.writeAll(":") catch {};
+        w.print("{d}", .{msg.target_id}) catch {};
+        w.writeAll(">\",\"message\":\"") catch {};
+        w.writeAll(msg.message) catch {};
+        w.writeAll("\"}") catch {};
+    }
     w.writeAll("]}") catch {};
+
+    // Clear the message log after reading
+    eval.msg_log_count = 0;
+
     state_len = @intCast(fbs.pos);
 }
 

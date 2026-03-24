@@ -22,6 +22,15 @@ pub const Evaluator = struct {
     last_error: ?BlimpError = null,
     source: []const u8 = "",
     actor_ctx: ?*ActorContext = null,
+    msg_log: [64]MsgLogEntry = undefined,
+    msg_log_count: u32 = 0,
+
+    // Message log for canvas rays
+    pub const MsgLogEntry = struct {
+        target_id: u64,
+        target_type: []const u8,
+        message: []const u8,
+    };
 
     pub const ActorContext = struct {
         entry: *registry_mod.ActorEntry,
@@ -407,6 +416,16 @@ pub const Evaluator = struct {
         // Target must be an actor_ref
         switch (target_val.*) {
             .actor_ref => |ref| {
+                // Log for canvas rays
+                if (self.msg_log_count < 64) {
+                    self.msg_log[self.msg_log_count] = .{
+                        .target_id = ref.id,
+                        .target_type = ref.type_name,
+                        .message = ms.message,
+                    };
+                    self.msg_log_count += 1;
+                }
+
                 // Look up the instance in the registry
                 const entry = self.registry.getInstance(ref) orelse {
                     self.last_error = errors.notAnActor(self.source);
