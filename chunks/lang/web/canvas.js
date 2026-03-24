@@ -111,7 +111,7 @@ class BlimpCanvas {
     // Add rays from runtime message log (catches sends inside closures)
     if (state.messages) {
       for (var msg of state.messages) {
-        if (this.nodes[msg.target]) {
+        if (this.nodes.find(n => n.id === msg.target)) {
           this.rays.push({
             toId: msg.target,
             t0: performance.now(),
@@ -127,7 +127,7 @@ class BlimpCanvas {
       var re = /(\w+)\s*<-\s*:(\w+)/g, m;
       while ((m = re.exec(source)) !== null) {
         var toRef = this.varMap[m[1]];
-        if (toRef && this.nodes[toRef]) {
+        if (toRef && this.nodes.find(n => n.id === toRef)) {
           this.rays.push({
             toId: toRef,
             t0: performance.now(),

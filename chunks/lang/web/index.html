@@ -299,15 +299,15 @@ body {
     }
 
     addLine('spacer-line', '');
-    updateState();
-    viz.feed(blimp.getState(), source);
+    var state = blimp.getState();
+    updateState(state);
+    viz.feed(state, source);
 
     buffer = '';
     depth = 0;
   }
 
-  function updateState() {
-    var state = blimp.getState();
+  function updateState(state) {
     stateContent.innerHTML = '';
 
     // Variables
