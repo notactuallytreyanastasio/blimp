@@ -6,6 +6,7 @@ const Environment = @import("env.zig").Environment;
 pub const BlimpError = struct {
     title: []const u8,
     source_line: ?[]const u8 = null,
+    line: ?u32 = null,
     col: ?u32 = null,
     message: []const u8,
     hint: ?[]const u8 = null,
@@ -24,15 +25,21 @@ pub const BlimpError = struct {
         }
         writer.writeAll("\x1b[0m\n\n") catch {};
 
-        // Source line with caret
+        // Source line with line number gutter
         if (self.source_line) |src| {
-            writer.writeAll("  \x1b[90m") catch {};
+            if (self.line) |ln| {
+                writer.print("\x1b[90m{d}|\x1b[0m ", .{ln}) catch {};
+            } else {
+                writer.writeAll("  ") catch {};
+            }
+            writer.writeAll("\x1b[91m") catch {};
             writer.writeAll(src) catch {};
             writer.writeAll("\x1b[0m\n") catch {};
 
             if (self.col) |c| {
-                // Caret pointing at the problem
-                for (0..c + 1) |_| {
+                // Underline region with ^^^^
+                const gutter = if (self.line != null) @as(usize, 4) else @as(usize, 2);
+                for (0..c + gutter) |_| {
                     writer.writeAll(" ") catch {};
                 }
                 writer.writeAll("\x1b[31m^\x1b[0m\n") catch {};
@@ -67,12 +74,17 @@ pub const BlimpError = struct {
         writer.writeAll("\n\n") catch {};
 
         if (self.source_line) |src| {
-            writer.writeAll("  ") catch {};
+            if (self.line) |ln| {
+                writer.print("{d}| ", .{ln}) catch {};
+            } else {
+                writer.writeAll("  ") catch {};
+            }
             writer.writeAll(src) catch {};
             writer.writeAll("\n") catch {};
 
             if (self.col) |c| {
-                for (0..c + 1) |_| {
+                const gutter = if (self.line != null) @as(usize, 4) else @as(usize, 2);
+                for (0..c + gutter) |_| {
                     writer.writeAll(" ") catch {};
                 }
                 writer.writeAll("^\n") catch {};
@@ -93,11 +105,51 @@ pub const BlimpError = struct {
     }
 };
 
+/// Simple edit distance for "did you mean?" suggestions
+fn editDistance(a: []const u8, b: []const u8) usize {
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+    // Simple approach for short strings
+    if (a.len > 20 or b.len > 20) return 100;
+
+    var prev_row: [21]usize = undefined;
+    var curr_row: [21]usize = undefined;
+
+    for (0..b.len + 1) |j| prev_row[j] = j;
+
+    for (a, 0..) |ca, i| {
+        curr_row[0] = i + 1;
+        for (b, 0..) |cb, j| {
+            const cost: usize = if (ca == cb) 0 else 1;
+            curr_row[j + 1] = @min(@min(curr_row[j] + 1, prev_row[j + 1] + 1), prev_row[j] + cost);
+        }
+        for (0..b.len + 1) |j| prev_row[j] = curr_row[j];
+    }
+    return prev_row[b.len];
+}
+
 /// Build a rich error for an undefined variable, suggesting similar names.
 pub fn undefinedVariable(name: []const u8, source: []const u8, env: *const Environment, allocator: std.mem.Allocator) BlimpError {
     const bindings = env.allBindings(allocator);
 
     var hint_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+
+    // Find the closest match for "Did you mean?"
+    var best_match: ?[]const u8 = null;
+    var best_dist: usize = 100;
+    for (bindings) |binding| {
+        const dist = editDistance(name, binding.name);
+        if (dist < best_dist and dist <= 3) {
+            best_dist = dist;
+            best_match = binding.name;
+        }
+    }
+
+    if (best_match) |match| {
+        hint_buf.appendSlice(allocator, "Did you mean `") catch {};
+        hint_buf.appendSlice(allocator, match) catch {};
+        hint_buf.appendSlice(allocator, "`?\n\n") catch {};
+    }
 
     if (bindings.len > 0) {
         hint_buf.appendSlice(allocator, "Variables in scope:\n") catch {};
@@ -131,7 +183,22 @@ pub fn typeMismatch(source: []const u8) BlimpError {
         .title = "TYPE MISMATCH",
         .source_line = source,
         .message = "I can't do this operation because the types don't match.",
-        .hint = "Both sides of an operator need to be the same type (Int, Float, or String).",
+        .hint = "Both sides of an operator need to be compatible types.\n\n" ++
+            "      Int + Int       => Int\n" ++
+            "      Float + Float   => Float\n" ++
+            "      String + String => String (use ++ for lists)\n" ++
+            "      Int + Float     => Float (auto-promoted)",
+    };
+}
+
+/// Build a rich error with specific left/right types shown.
+pub fn typeMismatchDetailed(left_type: []const u8, right_type: []const u8, op: []const u8, source: []const u8) BlimpError {
+    const alloc = std.heap.page_allocator;
+    return .{
+        .title = "TYPE MISMATCH",
+        .source_line = source,
+        .message = std.fmt.allocPrint(alloc, "I can't use `{s}` with {s} on the left and {s} on the right.", .{ op, left_type, right_type }) catch "Types don't match.",
+        .hint = "Both sides need to be compatible types.",
     };
 }
 
@@ -157,11 +224,43 @@ pub fn notSupportedInRepl(keyword: []const u8, source: []const u8) BlimpError {
 
 /// Build a rich error for an unknown function.
 pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
+    // Check for close matches among builtins
+    const builtins = [_][]const u8{
+        "length",  "max",     "min",      "append",  "reverse",
+        "lookup",  "put",     "keys",     "now",     "concat",
+        "split",   "contains", "to_string", "to_int", "slice",
+        "upcase",  "downcase", "range",    "head",    "tail",
+        "sort",    "merge",   "values",   "type_of",  "print",
+        "rem",     "abs",     "nil?",     "elem",    "floor",
+        "ceil",    "round",   "not",      "size",    "empty?",
+        "flat",    "zip",     "uniq",     "sum",
+        "map",     "filter",  "reduce",   "each",
+    };
+
+    var best_match: ?[]const u8 = null;
+    var best_dist: usize = 100;
+    for (builtins) |b| {
+        const dist = editDistance(name, b);
+        if (dist < best_dist and dist <= 3) {
+            best_dist = dist;
+            best_match = b;
+        }
+    }
+
+    var hint = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+    const alloc = std.heap.page_allocator;
+    if (best_match) |match| {
+        hint.appendSlice(alloc, "Did you mean `") catch {};
+        hint.appendSlice(alloc, match) catch {};
+        hint.appendSlice(alloc, "`?\n\n") catch {};
+    }
+    hint.appendSlice(alloc, "Built-in functions:\n      length, max, min, append, reverse, lookup, put,\n      keys, now, concat, split, contains, to_string,\n      to_int, slice, upcase, downcase, range, head, tail,\n      sort, merge, values, type_of, print, rem, abs,\n      nil?, elem, floor, ceil, round, not, size, empty?,\n      flat, zip, uniq, sum, map, filter, reduce, each") catch {};
+
     return .{
         .title = "UNKNOWN FUNCTION",
         .source_line = source,
-        .message = std.fmt.allocPrint(std.heap.page_allocator, "I don't know a function called `{s}`.", .{name}) catch "Unknown function.",
-        .hint = "Built-in functions:\n      length, max, min, append, reverse,\n      lookup, put, keys, now,\n      map, filter, reduce, each",
+        .message = std.fmt.allocPrint(alloc, "I don't know a function called `{s}`.", .{name}) catch "Unknown function.",
+        .hint = hint.items,
     };
 }
 
@@ -177,11 +276,25 @@ pub fn notCallable(source: []const u8) BlimpError {
 
 /// Build a rich error when an actor has no matching handler for a message.
 pub fn noMatchingHandler(actor_name: []const u8, message_name: []const u8, source: []const u8) BlimpError {
+    const alloc = std.heap.page_allocator;
+
+    // Check for close match in message name
+    var hint_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+
+    hint_buf.appendSlice(alloc, "Actor `") catch {};
+    hint_buf.appendSlice(alloc, actor_name) catch {};
+    hint_buf.appendSlice(alloc, "` has no handler for `:") catch {};
+    hint_buf.appendSlice(alloc, message_name) catch {};
+    hint_buf.appendSlice(alloc, "`.\n\n") catch {};
+    hint_buf.appendSlice(alloc, "Define a handler with:\n      on :") catch {};
+    hint_buf.appendSlice(alloc, message_name) catch {};
+    hint_buf.appendSlice(alloc, " do ... end") catch {};
+
     return .{
         .title = "NO MATCHING HANDLER",
         .source_line = source,
-        .message = std.fmt.allocPrint(std.heap.page_allocator, "Actor {s} has no handler for :{s}.", .{ actor_name, message_name }) catch "No matching handler.",
-        .hint = "Define a handler with:\n      on :message_name do ... end",
+        .message = std.fmt.allocPrint(alloc, "I tried to send :{s} to this actor, but it doesn't know how to handle it.", .{message_name}) catch "No matching handler.",
+        .hint = hint_buf.items,
     };
 }
 
