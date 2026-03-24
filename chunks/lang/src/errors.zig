@@ -164,6 +164,56 @@ pub fn undefinedVariable(name: []const u8, source: []const u8, env: *const Envir
         hint_buf.appendSlice(allocator, "No variables defined yet. Try:\n      x = 42") catch {};
     }
 
+    // Detect common other-language keywords used as variables
+    if (std.mem.eql(u8, name, "return")) {
+        return .{
+            .title = "NO RETURN KEYWORD",
+            .source_line = source,
+            .message = "Blimp doesn't use `return`. The last expression in a block is the return value.",
+            .hint = "Just write the value:\n      def add(a, b) do\n        a + b\n      end",
+        };
+    }
+    if (std.mem.eql(u8, name, "class")) {
+        return .{
+            .title = "NO CLASSES",
+            .source_line = source,
+            .message = "Blimp doesn't have classes. Use actors instead.",
+            .hint = "Actors are Blimp's unit of encapsulation:\n      actor Counter do\n        state count: Int :: 0\n        on :increment do ... end\n      end",
+        };
+    }
+    if (std.mem.eql(u8, name, "function")) {
+        return .{
+            .title = "USE DEF OR FN",
+            .source_line = source,
+            .message = "Blimp uses `def` for named functions and `fn` for anonymous functions.",
+            .hint = "Named:     def add(a, b) do a + b end\n      Anonymous: fn(x) do x * 2 end",
+        };
+    }
+    if (std.mem.eql(u8, name, "var") or std.mem.eql(u8, name, "let") or std.mem.eql(u8, name, "const")) {
+        return .{
+            .title = "NO VAR/LET/CONST",
+            .source_line = source,
+            .message = "Blimp doesn't need variable declaration keywords.",
+            .hint = "Just assign directly:\n      x = 42\n      name = \"hello\"",
+        };
+    }
+    if (std.mem.eql(u8, name, "if")) {
+        return .{
+            .title = "USE SITUATION",
+            .source_line = source,
+            .message = "Blimp doesn't have `if`. Use `situation` for branching.",
+            .hint = "situation condition do\n        true -> do_this\n        _ -> do_that\n      end",
+        };
+    }
+    if (std.mem.eql(u8, name, "while") or std.mem.eql(u8, name, "loop")) {
+        return .{
+            .title = "USE FOR",
+            .source_line = source,
+            .message = "Blimp doesn't have `while` or `loop`. Use `for` to iterate.",
+            .hint = "for x in range(1, 10) do\n        x * 2\n      end",
+        };
+    }
+
     var msg_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
     msg_buf.appendSlice(allocator, "I can't find a variable called `") catch {};
     msg_buf.appendSlice(allocator, name) catch {};
@@ -361,12 +411,69 @@ pub fn alreadyDefined(name: []const u8, source: []const u8) BlimpError {
 /// Build a rich error for a parse error, detecting common mistakes.
 pub fn parseError(source: []const u8) BlimpError {
     // Check for common keyword-as-variable mistakes
-    // Note: "actor" is now supported in the REPL via multi-line input
     const keywords = [_][]const u8{ "state", "on", "become", "reply", "when", "bubbles" };
     for (keywords) |kw| {
         if (std.mem.startsWith(u8, source, kw)) {
             return notSupportedInRepl(kw, source);
         }
+    }
+
+    // Detect other-language operators
+    if (std.mem.indexOf(u8, source, "===") != null) {
+        return .{
+            .title = "UNKNOWN OPERATOR",
+            .source_line = source,
+            .message = "Blimp does not have a `===` operator like JavaScript.",
+            .hint = "Use `==` instead. In Blimp, `==` does structural equality.",
+        };
+    }
+    if (std.mem.indexOf(u8, source, "!==") != null) {
+        return .{
+            .title = "UNKNOWN OPERATOR",
+            .source_line = source,
+            .message = "Blimp does not have a `!==` operator like JavaScript.",
+            .hint = "Use `!=` instead.",
+        };
+    }
+    if (std.mem.indexOf(u8, source, "**") != null) {
+        return .{
+            .title = "UNKNOWN OPERATOR",
+            .source_line = source,
+            .message = "Blimp does not have a `**` exponentiation operator like Python.",
+            .hint = "Use a function like `pow(base, exp)` instead (not yet built-in).",
+        };
+    }
+    if (std.mem.indexOf(u8, source, "elsif") != null or std.mem.indexOf(u8, source, "elif") != null) {
+        return .{
+            .title = "NO ELSIF/ELIF",
+            .source_line = source,
+            .message = "Blimp doesn't have elsif or elif.",
+            .hint = "Use `situation` for branching:\n      situation condition do\n        true -> first_thing\n        _ -> other_thing\n      end",
+        };
+    }
+    if (std.mem.indexOf(u8, source, "return ") != null) {
+        return .{
+            .title = "NO RETURN KEYWORD",
+            .source_line = source,
+            .message = "Blimp doesn't use `return`. The last expression in a block is the return value.",
+            .hint = "Just write the value:\n      def add(a, b) do\n        a + b\n      end",
+        };
+    }
+    if (std.mem.indexOf(u8, source, "class ") != null) {
+        return .{
+            .title = "NO CLASSES",
+            .source_line = source,
+            .message = "Blimp doesn't have classes. Use actors instead.",
+            .hint = "Actors are Blimp's unit of encapsulation:\n      actor Counter do\n        state count: Int :: 0\n        on :increment do ... end\n      end",
+        };
+    }
+    if (std.mem.indexOf(u8, source, "function ") != null) {
+        return .{
+            .title = "USE DEF OR FN",
+            .source_line = source,
+            .message = "Blimp uses `def` for named functions and `fn` for anonymous functions.",
+            .hint = "Named:     def add(a, b) do a + b end\n      Anonymous: fn(x) do x * 2 end",
+        };
     }
 
     return .{
