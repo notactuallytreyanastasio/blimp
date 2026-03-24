@@ -452,7 +452,7 @@ pub const Evaluator = struct {
         v.* = Value{ .closure = .{
             .params = ds.params,
             .body = ds.body,
-            .env = captured,
+            .env = captured, .return_type = ds.return_type,
         } };
 
         self.env.define(ds.name, v);
@@ -531,7 +531,6 @@ pub const Evaluator = struct {
     }
 
     fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {
-        // Capture the current environment bindings
         const bindings = self.env.allBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         for (bindings, 0..) |b, i| {
@@ -543,6 +542,7 @@ pub const Evaluator = struct {
             .params = fe.params,
             .body = fe.body,
             .env = captured,
+            .return_type = fe.return_type,
         } };
         return v;
     }
@@ -568,13 +568,28 @@ pub const Evaluator = struct {
                     self.env.define(binding.name, binding.val);
                 }
 
-                // Bind parameters
+                // Bind parameters with optional type checking
                 for (c.params, 0..) |param, i| {
                     const arg_val = self.eval(arg_nodes[i]) catch |err| {
                         self.env.popScope();
                         return err;
                     };
-                    self.env.define(param, arg_val);
+
+                    // Runtime type check if annotation present
+                    if (param.type_name) |expected_type| {
+                        if (!self.checkType(arg_val, expected_type)) {
+                            self.env.popScope();
+                            self.last_error = errors.typeMismatchDetailed(
+                                arg_val.typeName(),
+                                expected_type,
+                                param.name,
+                                self.source,
+                            );
+                            return error.TypeError;
+                        }
+                    }
+
+                    self.env.define(param.name, arg_val);
                 }
 
                 // Evaluate body
@@ -750,6 +765,32 @@ pub const Evaluator = struct {
         const val = try self.eval(rs.value.*);
         ctx.reply_value = val;
         return val;
+    }
+
+    /// Check if a value matches an expected type name.
+    fn checkType(self: *Evaluator, val: *const Value, expected: []const u8) bool {
+        _ = self;
+        // Built-in types
+        if (std.mem.eql(u8, expected, "Int")) return val.* == .integer;
+        if (std.mem.eql(u8, expected, "Float")) return val.* == .float;
+        if (std.mem.eql(u8, expected, "String")) return val.* == .string;
+        if (std.mem.eql(u8, expected, "Atom")) return val.* == .atom;
+        if (std.mem.eql(u8, expected, "Bool")) return val.* == .boolean;
+        if (std.mem.eql(u8, expected, "Nil")) return val.* == .nil;
+        if (std.mem.eql(u8, expected, "List")) return val.* == .list;
+        if (std.mem.eql(u8, expected, "Tuple")) return val.* == .tuple;
+        if (std.mem.eql(u8, expected, "Map")) return val.* == .map;
+        if (std.mem.eql(u8, expected, "Function")) return val.* == .closure;
+        // List type: [Int], [String], etc.
+        if (expected.len > 2 and expected[0] == '[' and expected[expected.len - 1] == ']') {
+            return val.* == .list; // TODO: check element types
+        }
+        // Actor type: matches actor_ref with the right type_name
+        if (val.* == .actor_ref) {
+            return std.mem.eql(u8, val.actor_ref.type_name, expected);
+        }
+        // Unknown type: allow through (future: check actor templates)
+        return true;
     }
 
     fn typeError(self: *Evaluator, left: *const Value, right: *const Value, op_str: []const u8) EvalError {
@@ -1105,9 +1146,15 @@ pub const Evaluator = struct {
                     self.env.define(binding.name, binding.val);
                 }
 
-                // Bind parameters
+                // Bind parameters with type checking
                 for (c.params, 0..) |param, i| {
-                    self.env.define(param, args[i]);
+                    if (param.type_name) |expected_type| {
+                        if (!self.checkType(args[i], expected_type)) {
+                            self.env.popScope();
+                            return error.TypeError;
+                        }
+                    }
+                    self.env.define(param.name, args[i]);
                 }
 
                 // Evaluate body

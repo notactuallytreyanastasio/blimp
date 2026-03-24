@@ -17,9 +17,10 @@ pub const Value = union(enum) {
     closure: Closure,
 
     pub const Closure = struct {
-        params: []const []const u8,
+        params: []const @import("ast.zig").Node.HandlerParam, // typed params
         body: []const @import("ast.zig").Node,
-        env: []const CapturedBinding, // captured variables from enclosing scope
+        env: []const CapturedBinding,
+        return_type: ?[]const u8 = null,
     };
 
     pub const CapturedBinding = struct {
@@ -88,9 +89,18 @@ pub const Value = union(enum) {
                 writer.writeAll("fn(") catch {};
                 for (c.params, 0..) |p, i| {
                     if (i > 0) writer.writeAll(", ") catch {};
-                    writer.writeAll(p) catch {};
+                    writer.writeAll(p.name) catch {};
+                    if (p.type_name) |t| {
+                        writer.writeAll(": ") catch {};
+                        writer.writeAll(t) catch {};
+                    }
                 }
-                writer.writeAll(") do ... end") catch {};
+                writer.writeAll(")") catch {};
+                if (c.return_type) |rt| {
+                    writer.writeAll(" -> ") catch {};
+                    writer.writeAll(rt) catch {};
+                }
+                writer.writeAll(" do ... end") catch {};
             },
         }
     }

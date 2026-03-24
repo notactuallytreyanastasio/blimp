@@ -240,7 +240,8 @@ pub const Node = struct {
     /// Named function definition: def name(params) do ... end
     pub const DefStmt = struct {
         name: []const u8,
-        params: []const []const u8,
+        params: []const HandlerParam,
+        return_type: ?[]const u8 = null, // -> Type
         body: []const Node,
     };
 
@@ -259,7 +260,8 @@ pub const Node = struct {
 
     /// Anonymous function: fn(x, y) do ... end
     pub const FnExpr = struct {
-        params: []const []const u8, // parameter names
+        params: []const HandlerParam,
+        return_type: ?[]const u8 = null, // -> Type
         body: []const Node,
     };
 

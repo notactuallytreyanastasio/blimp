@@ -1018,9 +1018,9 @@ pub const Codegen = struct {
 
         // Bind params as i64 allocas
         for (ds.params, 0..) |param_name, i| {
-            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param_name));
+            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param_name.name));
             _ = c.LLVMBuildStore(self.builder, c.LLVMGetParam(func, @intCast(i)), alloca);
-            self.scope.put(self.allocator, .{ .name = param_name, .alloca = alloca, .tag = .int, .llvm_type = self.i64_type });
+            self.scope.put(self.allocator, .{ .name = param_name.name, .alloca = alloca, .tag = .int, .llvm_type = self.i64_type });
         }
 
         // Compile body
@@ -1112,9 +1112,9 @@ pub const Codegen = struct {
             const unwrapped = c.LLVMBuildCall2(self.builder,
                 c.LLVMFunctionType(self.i64_type, &unwrap_pt, 1, 0),
                 unwrap_fn, &unwrap_args, 1, "unwrapped");
-            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param_name));
+            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param_name.name));
             _ = c.LLVMBuildStore(self.builder, unwrapped, alloca);
-            self.scope.put(self.allocator, .{ .name = param_name, .alloca = alloca, .tag = .int, .llvm_type = self.i64_type });
+            self.scope.put(self.allocator, .{ .name = param_name.name, .alloca = alloca, .tag = .int, .llvm_type = self.i64_type });
         }
 
         // Compile body

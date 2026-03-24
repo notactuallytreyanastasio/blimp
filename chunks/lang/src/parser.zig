@@ -912,6 +912,45 @@ pub const Parser = struct {
     }
 
     /// Parse: def name(params) do ... end
+    /// Parse typed parameter list: (name: Type, name: Type) or (name, name) for untyped
+    fn parseTypedParamList(self: *Parser) ParseError![]const Node.HandlerParam {
+        try self.expect(.lparen);
+        var params: std.ArrayList(Node.HandlerParam) = .empty;
+        while (self.current.kind != .rparen and self.current.kind != .eof) {
+            if (self.current.kind != .identifier) return error.UnexpectedToken;
+            const param_name = self.current.lexeme;
+            self.advance();
+
+            // Optional type annotation: name: Type
+            var type_name: ?[]const u8 = null;
+            if (self.current.kind == .colon) {
+                self.advance();
+                // Parse type name (simple or complex)
+                if (self.current.kind == .upper_identifier) {
+                    type_name = self.current.lexeme;
+                    self.advance();
+                } else if (self.current.kind == .lbracket) {
+                    // [Type]
+                    self.advance();
+                    if (self.current.kind == .upper_identifier) {
+                        type_name = std.fmt.allocPrint(self.allocator, "[{s}]", .{self.current.lexeme}) catch return error.OutOfMemory;
+                        self.advance();
+                    }
+                    try self.expect(.rbracket);
+                }
+            }
+
+            params.append(self.allocator, .{
+                .name = param_name,
+                .type_name = type_name,
+            }) catch return error.OutOfMemory;
+
+            if (self.current.kind == .comma) self.advance();
+        }
+        try self.expect(.rparen);
+        return params.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+    }
+
     fn parseDefStmt(self: *Parser) ParseError!Node {
         const loc = self.currentLoc();
         try self.expect(.kw_def);
@@ -920,16 +959,18 @@ pub const Parser = struct {
         const name = self.current.lexeme;
         self.advance();
 
-        // Parameter list
-        try self.expect(.lparen);
-        var params: std.ArrayList([]const u8) = .empty;
-        while (self.current.kind != .rparen and self.current.kind != .eof) {
-            if (self.current.kind != .identifier) return error.UnexpectedToken;
-            params.append(self.allocator, self.current.lexeme) catch return error.OutOfMemory;
+        // Typed parameter list
+        const params = try self.parseTypedParamList();
+
+        // Optional return type: -> Type
+        var return_type: ?[]const u8 = null;
+        if (self.current.kind == .arrow) {
             self.advance();
-            if (self.current.kind == .comma) self.advance();
+            if (self.current.kind == .upper_identifier) {
+                return_type = self.current.lexeme;
+                self.advance();
+            }
         }
-        try self.expect(.rparen);
 
         self.skipNewlines();
         try self.expect(.kw_do);
@@ -946,7 +987,8 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .def_stmt = .{
                 .name = name,
-                .params = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .params = params,
+                .return_type = return_type,
                 .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
             .loc = loc,
@@ -957,16 +999,18 @@ pub const Parser = struct {
         const loc = self.currentLoc();
         try self.expect(.kw_fn);
 
-        // Parameter list: fn(x, y) or fn() for no params
-        try self.expect(.lparen);
-        var params: std.ArrayList([]const u8) = .empty;
-        while (self.current.kind != .rparen and self.current.kind != .eof) {
-            if (self.current.kind != .identifier) return error.UnexpectedToken;
-            params.append(self.allocator, self.current.lexeme) catch return error.OutOfMemory;
+        // Typed parameter list
+        const params = try self.parseTypedParamList();
+
+        // Optional return type: -> Type
+        var return_type: ?[]const u8 = null;
+        if (self.current.kind == .arrow) {
             self.advance();
-            if (self.current.kind == .comma) self.advance();
+            if (self.current.kind == .upper_identifier) {
+                return_type = self.current.lexeme;
+                self.advance();
+            }
         }
-        try self.expect(.rparen);
 
         // Body: do ... end
         self.skipNewlines();
@@ -983,7 +1027,8 @@ pub const Parser = struct {
 
         return Node{
             .kind = .{ .fn_expr = .{
-                .params = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .params = params,
+                .return_type = return_type,
                 .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
             .loc = loc,
