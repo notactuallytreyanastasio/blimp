@@ -926,10 +926,16 @@ pub const Evaluator = struct {
 
         for (sit.branches) |branch| {
             if (branch.pattern) |pattern| {
-                // Evaluate the pattern and compare
-                const pat_val = try self.eval(pattern.*);
-                if (subject.eql(pat_val.*)) {
-                    return self.evalBody(branch.body);
+                // Try to match the pattern against the subject
+                if (self.matchPattern(pattern.*, subject)) |bindings| {
+                    // Push scope with bindings, evaluate body, pop
+                    self.env.pushScope();
+                    for (bindings) |b| {
+                        self.env.define(b.name, b.val);
+                    }
+                    const result = self.evalBody(branch.body);
+                    self.env.popScope();
+                    return result;
                 }
             } else {
                 // Wildcard/hole branch -- always matches
@@ -941,6 +947,125 @@ pub const Evaluator = struct {
         const result = self.allocator.create(Value) catch return error.OutOfMemory;
         result.* = .nil;
         return result;
+    }
+
+    const PatternBinding = struct {
+        name: []const u8,
+        val: *const Value,
+    };
+
+    /// Try to match a pattern AST node against a runtime value.
+    /// Returns bindings on success, null on failure.
+    fn matchPattern(self: *Evaluator, pattern: ast.Node, subject: *const Value) ?[]const PatternBinding {
+        switch (pattern.kind) {
+            // Identifier: always matches, binds the value
+            .identifier => |id| {
+                var bindings = self.allocator.alloc(PatternBinding, 1) catch return null;
+                bindings[0] = .{ .name = id.name, .val = subject };
+                return bindings;
+            },
+            // Hole: always matches, no bindings
+            .hole => return &.{},
+            // Literals: match by value
+            .integer_lit => |lit| {
+                if (subject.* == .integer and subject.integer == lit.value) return &.{};
+                return null;
+            },
+            .float_lit => |lit| {
+                if (subject.* == .float and subject.float == lit.value) return &.{};
+                return null;
+            },
+            .string_lit => |lit| {
+                if (subject.* == .string and std.mem.eql(u8, subject.string, lit.value)) return &.{};
+                return null;
+            },
+            .atom_lit => |lit| {
+                if (subject.* == .atom and std.mem.eql(u8, subject.atom, lit.name)) return &.{};
+                return null;
+            },
+            .bool_lit => |lit| {
+                if (subject.* == .boolean and subject.boolean == lit.value) return &.{};
+                return null;
+            },
+            .nil_lit => {
+                if (subject.* == .nil) return &.{};
+                return null;
+            },
+            // Map destructuring: %{key: var, key2: var2}
+            .map_lit => |ml| {
+                if (subject.* != .map) return null;
+                var all_bindings: std.ArrayList(PatternBinding) = .{ .items = &.{}, .capacity = 0 };
+                for (ml.entries) |entry| {
+                    // Find the key in the subject map
+                    var found = false;
+                    for (subject.map) |map_entry| {
+                        if (std.mem.eql(u8, map_entry.key, entry.key)) {
+                            // Recursively match the value pattern
+                            const sub_bindings = self.matchPattern(entry.value, map_entry.val) orelse return null;
+                            for (sub_bindings) |b| {
+                                all_bindings.append(self.allocator, b) catch return null;
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return null;
+                }
+                return all_bindings.toOwnedSlice(self.allocator) catch return null;
+            },
+            // List pattern: [head | tail] destructuring
+            .list_lit => |ll| {
+                if (subject.* != .list) return null;
+                if (ll.tail != null) {
+                    // [head | tail] pattern
+                    if (subject.list.len == 0) return null;
+                    var all_bindings: std.ArrayList(PatternBinding) = .{ .items = &.{}, .capacity = 0 };
+
+                    // Match head elements
+                    if (ll.elements.len > subject.list.len) return null;
+                    for (ll.elements, 0..) |elem_pat, i| {
+                        const sub = self.matchPattern(elem_pat, subject.list[i]) orelse return null;
+                        for (sub) |b| all_bindings.append(self.allocator, b) catch return null;
+                    }
+
+                    // Bind tail
+                    const tail_start = ll.elements.len;
+                    const tail_items = subject.list[tail_start..];
+                    const tail_val = self.allocator.create(Value) catch return null;
+                    tail_val.* = Value{ .list = tail_items };
+                    const tail_bindings = self.matchPattern(ll.tail.?.*, tail_val) orelse return null;
+                    for (tail_bindings) |b| all_bindings.append(self.allocator, b) catch return null;
+
+                    return all_bindings.toOwnedSlice(self.allocator) catch return null;
+                } else {
+                    // Fixed-length list pattern [a, b, c]
+                    if (subject.list.len != ll.elements.len) return null;
+                    var all_bindings: std.ArrayList(PatternBinding) = .{ .items = &.{}, .capacity = 0 };
+                    for (ll.elements, 0..) |elem_pat, i| {
+                        const sub = self.matchPattern(elem_pat, subject.list[i]) orelse return null;
+                        for (sub) |b| all_bindings.append(self.allocator, b) catch return null;
+                    }
+                    return all_bindings.toOwnedSlice(self.allocator) catch return null;
+                }
+            },
+            // Tuple pattern: {a, b}
+            .tuple_lit => |tl| {
+                if (subject.* != .tuple) return null;
+                if (subject.tuple.len != tl.elements.len) return null;
+                var all_bindings: std.ArrayList(PatternBinding) = .{ .items = &.{}, .capacity = 0 };
+                for (tl.elements, 0..) |elem_pat, i| {
+                    const sub = self.matchPattern(elem_pat, subject.tuple[i]) orelse return null;
+                    for (sub) |b| all_bindings.append(self.allocator, b) catch return null;
+                }
+                return all_bindings.toOwnedSlice(self.allocator) catch return null;
+            },
+            else => {
+                // For anything else, evaluate and compare
+                const pat_val = self.eval(pattern) catch return null;
+                if (subject.eql(pat_val.*)) return &.{};
+                return null;
+            },
+        }
     }
 
     fn evalBody(self: *Evaluator, body: []const ast.Node) EvalError!*const Value {
