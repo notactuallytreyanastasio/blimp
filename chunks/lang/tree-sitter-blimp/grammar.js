@@ -8,13 +8,20 @@ module.exports = grammar({
 
   word: ($) => $.identifier,
 
-  conflicts: () => [],
+  conflicts: ($) => [
+    [$.spawn_expression],
+  ],
 
   rules: {
-    // Top level: a source file is a sequence of definitions
+    // Top level: a source file is a sequence of definitions and statements
     source_file: ($) => repeat($._definition),
 
-    _definition: ($) => choice($.actor_definition),
+    _definition: ($) =>
+      choice(
+        $.actor_definition,
+        $.def_statement,
+        $._statement,
+      ),
 
     // ============================================================
     // Actor definition
@@ -25,7 +32,7 @@ module.exports = grammar({
 
     // Actor names can be dotted: Shop, Shop.Checkout, Shop.Checkout.Tax
     actor_name: ($) =>
-      seq($.upper_identifier, repeat(seq(".", $.upper_identifier))),
+      prec.left(10, seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
 
     _actor_body: ($) =>
       choice(
@@ -94,6 +101,20 @@ module.exports = grammar({
       ),
 
     // ============================================================
+    // Named function definition: def name(params) do ... end
+    // ============================================================
+
+    def_statement: ($) =>
+      seq(
+        "def",
+        $.identifier,
+        "(", commaSep($.identifier), ")",
+        "do",
+        repeat($._statement),
+        "end",
+      ),
+
+    // ============================================================
     // Statements
     // ============================================================
 
@@ -101,8 +122,10 @@ module.exports = grammar({
       choice(
         $.become_statement,
         $.reply_statement,
+        $.bubble_statement,
         $.situation_expression,
         $.case_expression,
+        $.for_expression,
         $.assignment,
         $._expression,
       ),
@@ -111,7 +134,21 @@ module.exports = grammar({
 
     reply_statement: ($) => seq("reply", $._expression),
 
+    bubble_statement: ($) =>
+      prec.right(0, choice(
+        seq("bubble", $.atom),          // bubble :reason (atom only)
+        seq("bubble", $.string),        // bubble "reason message"
+        "bubble",                       // bubble (no reason)
+      )),
+
     assignment: ($) => seq($.identifier, "=", $._expression),
+
+    // ============================================================
+    // For loop: for x in expr do ... end
+    // ============================================================
+
+    for_expression: ($) =>
+      seq("for", $.identifier, "in", $._expression, "do", repeat($._statement), "end"),
 
     // ============================================================
     // Expressions
@@ -122,6 +159,9 @@ module.exports = grammar({
         $.orelse_expression,
         $.pipe_expression,
         $.message_send,
+        $.spread_map,
+        $.spread_each,
+        $.concat_expression,
         $.binary_expression,
         $._unary_expression,
       ),
@@ -131,6 +171,14 @@ module.exports = grammar({
 
     pipe_expression: ($) =>
       prec.left(0, seq($._expression, "|>", $._expression)),
+
+    // ...list, fn  (map)
+    spread_map: ($) =>
+      prec.right(8, seq("...", $._expression, ",", $._expression)),
+
+    // ..list, fn  (each)
+    spread_each: ($) =>
+      prec.right(8, seq("..", $._expression, ",", $._expression)),
 
     message_send: ($) =>
       choice(
@@ -148,6 +196,10 @@ module.exports = grammar({
           $.atom,
         )),
       ),
+
+    // ++ for list/string concatenation
+    concat_expression: ($) =>
+      prec.left(4, seq($._expression, "++", $._expression)),
 
     binary_expression: ($) =>
       choice(
@@ -181,6 +233,8 @@ module.exports = grammar({
     _primary: ($) =>
       choice(
         $.spawn_expression,
+        $.fn_expression,
+        $.self_ref,
         $.integer,
         $.float,
         $.string,
@@ -196,12 +250,23 @@ module.exports = grammar({
         $.parenthesized_expression,
       ),
 
-    // spawn Counter or spawn Counter(count: 10)
+    // spawn Counter or spawn Shop.Checkout or spawn Counter(count: 10)
     spawn_expression: ($) =>
       choice(
-        prec(10, seq("spawn", $.upper_identifier, "(", $.key_value_list, ")")),
-        prec(8, seq("spawn", $.upper_identifier)),
+        prec(12, seq("spawn", $.spawn_target, "(", $.key_value_list, ")")),
+        prec(12, seq("spawn", $.spawn_target)),
       ),
+
+    // Spawn target greedily consumes dot notation: Shop.Checkout
+    spawn_target: ($) =>
+      prec.left(15, seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
+
+    // fn(x, y) do ... end
+    fn_expression: ($) =>
+      seq("fn", "(", commaSep($.identifier), ")", "do", repeat($._statement), "end"),
+
+    // self reference inside handler
+    self_ref: (_) => "self",
 
     parenthesized_expression: ($) => seq("(", $._expression, ")"),
 
