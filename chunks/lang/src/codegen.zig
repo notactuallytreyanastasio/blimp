@@ -237,6 +237,10 @@ pub const Codegen = struct {
             .message_send => |msg| self.compileMessageSend(msg),
             .become_stmt => |bec| self.compileBecome(bec),
             .reply_stmt => |rep| self.compileReply(rep),
+            .self_ref => self.compileSelfRef(),
+            .for_expr => |fe| self.compileFor(fe),
+            .spread_map => |se| self.compileSpreadMap(se),
+            .spread_each => |se| self.compileSpreadEach(se),
             else => CodegenError.UnsupportedNode,
         };
     }
@@ -852,6 +856,36 @@ pub const Codegen = struct {
         // Return actor_id as i64
         const id_i64 = c.LLVMBuildZExt(self.builder, actor_id, self.i64_type, "id_wide");
         return .{ .val = id_i64, .tag = .actor_ref };
+    }
+
+    // ── New feature codegen ──────────────────────────────
+
+    fn compileSelfRef(self: *Codegen) CodegenError!TaggedVal {
+        // self resolves to the current actor's ID, stored as a global during spawn
+        // For now we use blimp_actor_count() - 1 as a placeholder within handler context
+        _ = self;
+        return CodegenError.UnsupportedNode; // TODO: wire up actor ID in handler context
+    }
+
+    fn compileFor(self: *Codegen, fe: ast.Node.ForExpr) CodegenError!TaggedVal {
+        // For loops: evaluate iterable, iterate with a counter
+        // For now, compile as inline unrolled calls since we don't have
+        // list length at compile time. Use runtime list iteration.
+        _ = self;
+        _ = fe;
+        return CodegenError.UnsupportedNode; // TODO: needs runtime list iteration support
+    }
+
+    fn compileSpreadMap(self: *Codegen, se: ast.Node.SpreadExpr) CodegenError!TaggedVal {
+        _ = self;
+        _ = se;
+        return CodegenError.UnsupportedNode; // TODO: needs closure + list iteration in codegen
+    }
+
+    fn compileSpreadEach(self: *Codegen, se: ast.Node.SpreadExpr) CodegenError!TaggedVal {
+        _ = self;
+        _ = se;
+        return CodegenError.UnsupportedNode; // TODO: needs closure + list iteration in codegen
     }
 
     fn emitHandlerTable(self: *Codegen, actor: *const ActorDescriptor, actor_id: c.LLVMValueRef) void {
