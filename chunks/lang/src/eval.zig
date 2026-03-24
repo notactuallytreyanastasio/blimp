@@ -190,6 +190,9 @@ pub const Evaluator = struct {
             // Calling an expression as a function
             .call_expr => |ce| return self.evalCallExpr(ce),
 
+            // Named function definition
+            .def_stmt => |ds| return self.evalDefStmt(ds),
+
             // For loop
             .for_expr => |fe| return self.evalForExpr(fe),
 
@@ -336,6 +339,25 @@ pub const Evaluator = struct {
             .hint = null,
         };
         return error.NotSupported;
+    }
+
+    fn evalDefStmt(self: *Evaluator, ds: ast.Node.DefStmt) EvalError!*const Value {
+        // def is sugar for: name = fn(params) do body end
+        const bindings = self.env.allBindings(self.allocator);
+        var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
+        for (bindings, 0..) |b, i| {
+            captured[i] = .{ .name = b.name, .val = b.val };
+        }
+
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .closure = .{
+            .params = ds.params,
+            .body = ds.body,
+            .env = captured,
+        } };
+
+        self.env.define(ds.name, v);
+        return v;
     }
 
     fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {

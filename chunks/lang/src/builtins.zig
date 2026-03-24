@@ -38,6 +38,14 @@ pub const BuiltinRegistry = struct {
         reg.register("put", &builtinPut);
         reg.register("keys", &builtinKeys);
         reg.register("now", &builtinNow);
+        reg.register("concat", &builtinConcat);
+        reg.register("split", &builtinSplit);
+        reg.register("contains", &builtinContains);
+        reg.register("to_string", &builtinToString);
+        reg.register("to_int", &builtinToInt);
+        reg.register("slice", &builtinSlice);
+        reg.register("upcase", &builtinUpcase);
+        reg.register("downcase", &builtinDowncase);
         return reg;
     }
 
@@ -64,6 +72,16 @@ fn builtinLength(allocator: std.mem.Allocator, args: []const *const Value) EvalE
         .list => |items| {
             const result = allocator.create(Value) catch return error.OutOfMemory;
             result.* = Value{ .integer = @intCast(items.len) };
+            return result;
+        },
+        .string => |s| {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .integer = @intCast(s.len) };
+            return result;
+        },
+        .map => |entries| {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .integer = @intCast(entries.len) };
             return result;
         },
         else => return error.TypeError,
@@ -215,6 +233,178 @@ fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
         std.time.timestamp();
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = timestamp };
+    return result;
+}
+
+// ── String builtins ─────────────────────────────────────
+
+/// concat("hello", " ", "world") => "hello world"
+fn builtinConcat(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 2) return error.TypeError;
+    var total_len: usize = 0;
+    for (args) |arg| {
+        switch (arg.*) {
+            .string => |s| total_len += s.len,
+            .integer => |n| {
+                total_len += @intCast(std.fmt.count("{d}", .{n}));
+            },
+            .atom => |a| total_len += a.len + 1,
+            else => return error.TypeError,
+        }
+    }
+    var buf = allocator.alloc(u8, total_len) catch return error.OutOfMemory;
+    var pos: usize = 0;
+    for (args) |arg| {
+        switch (arg.*) {
+            .string => |s| {
+                @memcpy(buf[pos .. pos + s.len], s);
+                pos += s.len;
+            },
+            .integer => |n| {
+                const written = std.fmt.bufPrint(buf[pos..], "{d}", .{n}) catch "";
+                pos += written.len;
+            },
+            .atom => |a| {
+                buf[pos] = ':';
+                pos += 1;
+                @memcpy(buf[pos .. pos + a.len], a);
+                pos += a.len;
+            },
+            else => {},
+        }
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = buf[0..pos] };
+    return result;
+}
+
+/// split("a,b,c", ",") => ["a", "b", "c"]
+fn builtinSplit(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const str = args[0].string;
+    const sep = args[1].string;
+
+    var parts: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i + sep.len <= str.len) : (i += 1) {
+        if (std.mem.eql(u8, str[i .. i + sep.len], sep)) {
+            const part = allocator.create(Value) catch return error.OutOfMemory;
+            part.* = Value{ .string = str[start..i] };
+            parts.append(allocator, part) catch return error.OutOfMemory;
+            i += sep.len;
+            start = i;
+            continue;
+        }
+    }
+    // Last segment
+    const last = allocator.create(Value) catch return error.OutOfMemory;
+    last.* = Value{ .string = str[start..] };
+    parts.append(allocator, last) catch return error.OutOfMemory;
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = parts.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+/// contains("hello world", "world") => true
+fn builtinContains(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const found = std.mem.indexOf(u8, args[0].string, args[1].string) != null;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .boolean = found };
+    return result;
+}
+
+/// to_string(42) => "42", to_string(:ok) => "ok"
+fn builtinToString(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    switch (args[0].*) {
+        .string => return args[0],
+        .integer => |n| {
+            result.* = Value{ .string = std.fmt.allocPrint(allocator, "{d}", .{n}) catch return error.OutOfMemory };
+        },
+        .float => |f| {
+            result.* = Value{ .string = std.fmt.allocPrint(allocator, "{d}", .{f}) catch return error.OutOfMemory };
+        },
+        .atom => |a| {
+            result.* = Value{ .string = a };
+        },
+        .boolean => |b| {
+            result.* = Value{ .string = if (b) "true" else "false" };
+        },
+        .nil => {
+            result.* = Value{ .string = "nil" };
+        },
+        else => return error.TypeError,
+    }
+    return result;
+}
+
+/// to_int("42") => 42
+fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    switch (args[0].*) {
+        .integer => return args[0],
+        .string => |s| {
+            const n = std.fmt.parseInt(i64, s, 10) catch return error.TypeError;
+            result.* = Value{ .integer = n };
+        },
+        .float => |f| {
+            result.* = Value{ .integer = @intFromFloat(f) };
+        },
+        .boolean => |b| {
+            result.* = Value{ .integer = if (b) 1 else 0 };
+        },
+        else => return error.TypeError,
+    }
+    return result;
+}
+
+/// slice("hello", 1, 3) => "ell"
+fn builtinSlice(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .integer or args[2].* != .integer) return error.TypeError;
+    const str = args[0].string;
+    const start: usize = @intCast(@max(args[1].integer, 0));
+    const end: usize = @intCast(@min(args[2].integer, @as(i64, @intCast(str.len))));
+    if (start >= str.len or start >= end) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .string = "" };
+        return result;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = str[start..end] };
+    return result;
+}
+
+/// upcase("hello") => "HELLO"
+fn builtinUpcase(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const src = args[0].string;
+    var buf = allocator.alloc(u8, src.len) catch return error.OutOfMemory;
+    for (src, 0..) |c, i| {
+        buf[i] = if (c >= 'a' and c <= 'z') c - 32 else c;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = buf };
+    return result;
+}
+
+/// downcase("HELLO") => "hello"
+fn builtinDowncase(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const src = args[0].string;
+    var buf = allocator.alloc(u8, src.len) catch return error.OutOfMemory;
+    for (src, 0..) |c, i| {
+        buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = buf };
     return result;
 }
 

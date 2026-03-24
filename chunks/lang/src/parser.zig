@@ -43,6 +43,7 @@ pub const Parser = struct {
     fn parseTopLevel(self: *Parser) ParseError!Node {
         return switch (self.current.kind) {
             .kw_actor => self.parseActorDef(),
+            .kw_def => self.parseDefStmt(),
             .kw_situation => self.parseSituation(),
             .kw_case => self.parseCase(),
             else => self.parseExpressionStatement(),
@@ -777,6 +778,48 @@ pub const Parser = struct {
                 .iterable = iter_ptr,
                 .func = func_ptr,
             }),
+            .loc = loc,
+        };
+    }
+
+    /// Parse: def name(params) do ... end
+    fn parseDefStmt(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_def);
+
+        if (self.current.kind != .identifier) return error.UnexpectedToken;
+        const name = self.current.lexeme;
+        self.advance();
+
+        // Parameter list
+        try self.expect(.lparen);
+        var params: std.ArrayList([]const u8) = .empty;
+        while (self.current.kind != .rparen and self.current.kind != .eof) {
+            if (self.current.kind != .identifier) return error.UnexpectedToken;
+            params.append(self.allocator, self.current.lexeme) catch return error.OutOfMemory;
+            self.advance();
+            if (self.current.kind == .comma) self.advance();
+        }
+        try self.expect(.rparen);
+
+        self.skipNewlines();
+        try self.expect(.kw_do);
+        self.skipNewlines();
+
+        var body: std.ArrayList(Node) = .empty;
+        while (self.current.kind != .kw_end and self.current.kind != .eof) {
+            const stmt = try self.parseExpressionStatement();
+            body.append(self.allocator, stmt) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+        try self.expect(.kw_end);
+
+        return Node{
+            .kind = .{ .def_stmt = .{
+                .name = name,
+                .params = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            } },
             .loc = loc,
         };
     }
