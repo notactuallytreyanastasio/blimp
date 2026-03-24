@@ -3,7 +3,215 @@
 #include <string.h>
 #include <time.h>
 
-// ── Print functions ──────────────────────────────────────
+// ── Tagged Values ───────────────────────────────────────
+// Every Blimp value at runtime is a BlimpVal*.
+// This is the foundation for lists, maps, closures, etc.
+
+typedef enum {
+    VAL_INT,
+    VAL_FLOAT,
+    VAL_STRING,
+    VAL_ATOM,
+    VAL_BOOL,
+    VAL_NIL,
+    VAL_LIST,
+    VAL_MAP,
+    VAL_ACTOR_REF,
+    VAL_CLOSURE,
+} ValTag;
+
+typedef struct BlimpVal BlimpVal;
+typedef struct BlimpVal {
+    ValTag tag;
+    union {
+        long long integer;
+        double float_val;
+        char *string;
+        int atom_id;
+        int bool_val;
+        struct { BlimpVal **items; int len; int cap; } list;
+        struct { char **keys; BlimpVal **vals; int len; } map;
+        int actor_id;
+        struct { void *func_ptr; BlimpVal **env; int env_len; int param_count; } closure;
+    };
+} BlimpVal;
+
+// ── Value constructors ──────────────────────────────────
+
+BlimpVal *blimp_val_int(long long n) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_INT;
+    v->integer = n;
+    return v;
+}
+
+BlimpVal *blimp_val_float(double f) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_FLOAT;
+    v->float_val = f;
+    return v;
+}
+
+BlimpVal *blimp_val_string(const char *s) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_STRING;
+    v->string = strdup(s);
+    return v;
+}
+
+BlimpVal *blimp_val_atom(int atom_id) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_ATOM;
+    v->atom_id = atom_id;
+    return v;
+}
+
+BlimpVal *blimp_val_bool(int b) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_BOOL;
+    v->bool_val = b;
+    return v;
+}
+
+BlimpVal *blimp_val_nil(void) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_NIL;
+    return v;
+}
+
+BlimpVal *blimp_val_list(int initial_cap) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_LIST;
+    v->list.len = 0;
+    v->list.cap = initial_cap > 0 ? initial_cap : 4;
+    v->list.items = (BlimpVal **)malloc(sizeof(BlimpVal *) * v->list.cap);
+    return v;
+}
+
+BlimpVal *blimp_val_actor_ref(int actor_id) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_ACTOR_REF;
+    v->actor_id = actor_id;
+    return v;
+}
+
+BlimpVal *blimp_val_closure(void *func_ptr, int param_count, BlimpVal **env, int env_len) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->tag = VAL_CLOSURE;
+    v->closure.func_ptr = func_ptr;
+    v->closure.param_count = param_count;
+    v->closure.env = env;
+    v->closure.env_len = env_len;
+    return v;
+}
+
+// ── List operations ─────────────────────────────────────
+
+void blimp_list_push(BlimpVal *list, BlimpVal *item) {
+    if (list->tag != VAL_LIST) return;
+    if (list->list.len >= list->list.cap) {
+        list->list.cap *= 2;
+        list->list.items = (BlimpVal **)realloc(list->list.items, sizeof(BlimpVal *) * list->list.cap);
+    }
+    list->list.items[list->list.len++] = item;
+}
+
+BlimpVal *blimp_list_get(BlimpVal *list, int index) {
+    if (list->tag != VAL_LIST || index < 0 || index >= list->list.len) return blimp_val_nil();
+    return list->list.items[index];
+}
+
+int blimp_list_len(BlimpVal *list) {
+    if (list->tag != VAL_LIST) return 0;
+    return list->list.len;
+}
+
+// Map over a list with a closure: ...list, fn
+// The closure's func_ptr has signature: BlimpVal*(BlimpVal*)
+BlimpVal *blimp_list_map(BlimpVal *list, BlimpVal *closure) {
+    if (list->tag != VAL_LIST || closure->tag != VAL_CLOSURE) return blimp_val_nil();
+    BlimpVal *result = blimp_val_list(list->list.len);
+    typedef BlimpVal *(*MapFn)(BlimpVal *);
+    MapFn fn = (MapFn)closure->closure.func_ptr;
+    for (int i = 0; i < list->list.len; i++) {
+        blimp_list_push(result, fn(list->list.items[i]));
+    }
+    return result;
+}
+
+// Each over a list with a closure: ..list, fn
+void blimp_list_each(BlimpVal *list, BlimpVal *closure) {
+    if (list->tag != VAL_LIST || closure->tag != VAL_CLOSURE) return;
+    typedef BlimpVal *(*EachFn)(BlimpVal *);
+    EachFn fn = (EachFn)closure->closure.func_ptr;
+    for (int i = 0; i < list->list.len; i++) {
+        fn(list->list.items[i]);
+    }
+}
+
+// Filter a list with a closure
+BlimpVal *blimp_list_filter(BlimpVal *list, BlimpVal *closure) {
+    if (list->tag != VAL_LIST || closure->tag != VAL_CLOSURE) return blimp_val_nil();
+    BlimpVal *result = blimp_val_list(list->list.len);
+    typedef BlimpVal *(*FilterFn)(BlimpVal *);
+    FilterFn fn = (FilterFn)closure->closure.func_ptr;
+    for (int i = 0; i < list->list.len; i++) {
+        BlimpVal *keep = fn(list->list.items[i]);
+        if (keep->tag == VAL_BOOL && keep->bool_val) {
+            blimp_list_push(result, list->list.items[i]);
+        } else if (keep->tag == VAL_INT && keep->integer != 0) {
+            blimp_list_push(result, list->list.items[i]);
+        }
+    }
+    return result;
+}
+
+// Reduce a list with a closure and initial value
+BlimpVal *blimp_list_reduce(BlimpVal *list, BlimpVal *init, BlimpVal *closure) {
+    if (list->tag != VAL_LIST || closure->tag != VAL_CLOSURE) return init;
+    typedef BlimpVal *(*ReduceFn)(BlimpVal *, BlimpVal *);
+    ReduceFn fn = (ReduceFn)closure->closure.func_ptr;
+    BlimpVal *acc = init;
+    for (int i = 0; i < list->list.len; i++) {
+        acc = fn(acc, list->list.items[i]);
+    }
+    return acc;
+}
+
+// ── Tagged value printing ───────────────────────────────
+
+void blimp_print_val(BlimpVal *v) {
+    if (!v) { printf("nil\n"); return; }
+    switch (v->tag) {
+        case VAL_INT: printf("%lld\n", v->integer); break;
+        case VAL_FLOAT: printf("%g\n", v->float_val); break;
+        case VAL_STRING: printf("\"%s\"\n", v->string); break;
+        case VAL_ATOM: printf(":%d\n", v->atom_id); break;
+        case VAL_BOOL: printf("%s\n", v->bool_val ? "true" : "false"); break;
+        case VAL_NIL: printf("nil\n"); break;
+        case VAL_ACTOR_REF: printf("ref<%d>\n", v->actor_id); break;
+        case VAL_CLOSURE: printf("fn/%d\n", v->closure.param_count); break;
+        case VAL_LIST:
+            printf("[");
+            for (int i = 0; i < v->list.len; i++) {
+                if (i > 0) printf(", ");
+                // Inline print without newline
+                switch (v->list.items[i]->tag) {
+                    case VAL_INT: printf("%lld", v->list.items[i]->integer); break;
+                    case VAL_FLOAT: printf("%g", v->list.items[i]->float_val); break;
+                    case VAL_STRING: printf("\"%s\"", v->list.items[i]->string); break;
+                    case VAL_BOOL: printf("%s", v->list.items[i]->bool_val ? "true" : "false"); break;
+                    case VAL_NIL: printf("nil"); break;
+                    default: printf("?"); break;
+                }
+            }
+            printf("]\n");
+            break;
+        case VAL_MAP: printf("%%{...}\n"); break;
+    }
+}
+
+// ── Print functions (legacy i64 path) ───────────────────
 
 void blimp_print_int(long long val) {
     printf("%lld\n", val);
