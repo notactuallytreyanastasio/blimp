@@ -426,7 +426,6 @@ function autoComplete() {
   compPrefix = text.substring(start, cursor);
   if (compPrefix.length < 1) { dismissComp(); return; }
   try { compItems = blimp.complete(compPrefix); } catch(e) { console.log('complete error:', e); compItems = []; }
-  console.log('complete("' + compPrefix + '"):', compItems.length, 'results');
   if (compItems.length === 0 || (compItems.length === 1 && compItems[0].insert === compPrefix)) {
     dismissComp(); return;
   }
@@ -436,17 +435,28 @@ function autoComplete() {
 
 function renderComp() {
   dismissComp();
+  if (!inputRow) return;
+
   compEl = document.createElement('div');
-  compEl.style.cssText = 'margin-left:4rem;margin-top:0.1rem;';
+  compEl.style.cssText = 'padding:0.25rem 0;margin-left:4.5rem;border-left:2px solid #333;padding-left:0.5rem;margin-top:2px;margin-bottom:4px;';
+
   var max = Math.min(compItems.length, 3);
   for (var i = 0; i < max; i++) {
     var item = document.createElement('div');
-    item.style.cssText = 'padding:0.1rem 0.5rem;font-size:11px;color:' + (i === compIdx ? '#a6e22e' : '#555') + ';cursor:pointer;border-radius:2px;' + (i === compIdx ? 'background:#1a1a3e;' : '');
-    item.textContent = compItems[i].label;
-    var kind = document.createElement('span');
-    kind.style.cssText = 'color:#333;font-size:9px;margin-left:0.5rem;';
-    kind.textContent = compItems[i].kind;
-    item.appendChild(kind);
+    var isActive = (i === compIdx);
+    item.style.cssText = 'padding:1px 4px;font-size:12px;line-height:1.5;cursor:pointer;border-radius:2px;color:' +
+      (isActive ? '#a6e22e' : '#666') + ';' +
+      (isActive ? 'background:rgba(166,226,46,0.1);' : '');
+
+    var labelSpan = document.createElement('span');
+    labelSpan.textContent = compItems[i].label;
+    item.appendChild(labelSpan);
+
+    var kindSpan = document.createElement('span');
+    kindSpan.style.cssText = 'color:#444;font-size:10px;margin-left:0.75rem;font-style:italic;';
+    kindSpan.textContent = compItems[i].kind;
+    item.appendChild(kindSpan);
+
     (function(idx) {
       item.addEventListener('click', function() {
         acceptComp(compItems[idx]);
@@ -458,13 +468,14 @@ function renderComp() {
   }
   if (compItems.length > 3) {
     var more = document.createElement('div');
-    more.style.cssText = 'padding:0.1rem 0.5rem;font-size:9px;color:#333;';
+    more.style.cssText = 'font-size:10px;color:#444;padding:1px 4px;';
     more.textContent = '... ' + (compItems.length - 3) + ' more';
     compEl.appendChild(more);
   }
-  if (inputRow && inputRow.parentNode) {
-    inputRow.parentNode.insertBefore(compEl, inputRow.nextSibling);
-  }
+
+  // Insert right after the input row
+  inputRow.after(compEl);
+  scroll.scrollTop = scroll.scrollHeight;
 }
 
 function acceptComp(comp) {
