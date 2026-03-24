@@ -19,6 +19,10 @@
 .blimp-repl-container .input-row{display:flex;align-items:flex-start;margin-top:0.15rem}\
 .blimp-repl-container .input-row .pc{color:#a6e22e;white-space:pre;user-select:none}\
 .blimp-repl-container .input-row textarea{flex:1;background:transparent;border:none;color:#d4d4d4;font:inherit;font-size:13px;line-height:1.6;resize:none;outline:none;min-height:1.6em;max-height:15em;padding:0;margin:0}\
+.blimp-completions{position:relative;margin-left:3.5rem;margin-top:0.1rem}\
+.blimp-completions .comp-item{padding:0.15rem 0.5rem;font-size:12px;color:#888;cursor:pointer;border-radius:2px;white-space:nowrap}\
+.blimp-completions .comp-item.active{background:#1a1a3e;color:#a6e22e}\
+.blimp-completions .comp-item .comp-kind{color:#555;font-size:10px;margin-left:0.5rem}\
 .blimp-repl-header{padding:0.5rem 1.25rem;border-bottom:1px solid #1a1a2e;display:flex;align-items:center;gap:0.75rem;flex-shrink:0}\
 .blimp-repl-header .title{font-size:0.9rem;color:#a6e22e;font-weight:500}\
 .blimp-repl-header .status{font-size:0.75rem;color:#666}\
@@ -71,6 +75,12 @@
     var historyIdx = -1;
     var inputRow = null;
     var inputEl = null;
+
+    // Completion state
+    var compEl = null;       // the dropdown element
+    var compItems = [];      // current completion candidates
+    var compIdx = -1;        // which one is highlighted (-1 = none)
+    var compPrefix = '';     // what prefix we're completing
 
     function addLine(cls, text) {
       var div = document.createElement('div');
@@ -137,8 +147,43 @@
     }
 
     function handleKey(e) {
+      // Tab: show/cycle completions
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        if (!blimp || !blimp.complete) return;
+
+        if (compEl && compItems.length > 0) {
+          // Cycle to next
+          compIdx = (compIdx + 1) % compItems.length;
+          renderCompletions();
+        } else {
+          // Get completions for current word
+          var text = inputEl.value;
+          var cursor = inputEl.selectionStart;
+          // Find the word before cursor
+          var start = cursor;
+          while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
+          compPrefix = text.substring(start, cursor);
+          if (compPrefix.length === 0) return;
+
+          compItems = blimp.complete(compPrefix);
+          if (compItems.length === 0) return;
+          compIdx = 0;
+          renderCompletions();
+        }
+        return;
+      }
+
+      // Enter: accept completion if showing, otherwise submit
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
+        if (compEl && compIdx >= 0 && compIdx < compItems.length) {
+          // Accept the completion
+          acceptCompletion(compItems[compIdx]);
+          dismissCompletions();
+          return;
+        }
+        dismissCompletions();
         var line = freezeInput();
         buffer += (buffer ? '\n' : '') + line;
         depth += countDepth(line);
@@ -147,6 +192,18 @@
         createPrompt();
         return;
       }
+
+      // Escape: dismiss completions
+      if (e.key === 'Escape') {
+        if (compEl) { dismissCompletions(); e.preventDefault(); return; }
+      }
+
+      // Any other key: dismiss completions
+      if (compEl && e.key !== 'Shift') {
+        dismissCompletions();
+      }
+
+      // History navigation
       if (e.key === 'ArrowUp' && !buffer && inputEl.selectionStart === 0) {
         e.preventDefault();
         if (historyIdx > 0) { historyIdx--; inputEl.value = history[historyIdx]; }
@@ -156,6 +213,58 @@
         if (historyIdx < history.length - 1) { historyIdx++; inputEl.value = history[historyIdx]; }
         else { historyIdx = history.length; inputEl.value = ''; }
       }
+    }
+
+    function renderCompletions() {
+      dismissCompletions();
+      compEl = document.createElement('div');
+      compEl.className = 'blimp-completions';
+      var max = Math.min(compItems.length, 3);
+      for (var i = 0; i < max; i++) {
+        var item = document.createElement('div');
+        item.className = 'comp-item' + (i === compIdx ? ' active' : '');
+        item.textContent = compItems[i].label;
+        var kind = document.createElement('span');
+        kind.className = 'comp-kind';
+        kind.textContent = compItems[i].kind;
+        item.appendChild(kind);
+        (function(idx) {
+          item.addEventListener('click', function() {
+            acceptCompletion(compItems[idx]);
+            dismissCompletions();
+            inputEl.focus();
+          });
+        })(i);
+        compEl.appendChild(item);
+      }
+      if (compItems.length > 3) {
+        var more = document.createElement('div');
+        more.className = 'comp-item';
+        more.style.color = '#444';
+        more.textContent = '... ' + (compItems.length - 3) + ' more';
+        compEl.appendChild(more);
+      }
+      // Insert after input row
+      if (inputRow && inputRow.parentNode) {
+        inputRow.parentNode.insertBefore(compEl, inputRow.nextSibling);
+      }
+    }
+
+    function acceptCompletion(comp) {
+      var text = inputEl.value;
+      var cursor = inputEl.selectionStart;
+      var start = cursor;
+      while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
+      inputEl.value = text.substring(0, start) + comp.insert + text.substring(cursor);
+      var newPos = start + comp.insert.length;
+      inputEl.setSelectionRange(newPos, newPos);
+    }
+
+    function dismissCompletions() {
+      if (compEl) { compEl.remove(); compEl = null; }
+      compItems = [];
+      compIdx = -1;
+      compPrefix = '';
     }
 
     // Load WASM, canvas, and initialize

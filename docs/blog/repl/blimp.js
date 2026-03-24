@@ -62,6 +62,21 @@ class Blimp {
     try { return JSON.parse(json); } catch (e) { return { vars: [], actors: [] }; }
   }
 
+  complete(prefix) {
+    const encoded = new TextEncoder().encode(prefix);
+    const ptr = this.instance.exports.blimp_alloc(encoded.length);
+    if (!ptr) return [];
+    const view = new Uint8Array(this.memory.buffer, ptr, encoded.length);
+    view.set(encoded);
+    this.instance.exports.blimp_complete(ptr, encoded.length);
+    this.instance.exports.blimp_free(ptr, encoded.length);
+    const cPtr = this.instance.exports.blimp_get_complete_ptr();
+    const cLen = this.instance.exports.blimp_get_complete_len();
+    const json = this._readString(cPtr, cLen);
+    if (!json) return [];
+    try { return JSON.parse(json); } catch (e) { return []; }
+  }
+
   reset() {
     this.instance.exports.blimp_reset();
   }
