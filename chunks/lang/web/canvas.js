@@ -46,12 +46,36 @@ class BlimpCanvas {
       }
     }
 
+    // Sync value nodes (non-actor variables get squares)
+    if (state.vars) {
+      for (var v of state.vars) {
+        if (v.value && v.value.startsWith('ref<')) continue; // skip actor refs
+        if (v.value && v.value.startsWith(':')) continue; // skip actor templates
+        var vid = 'var:' + v.name;
+        var h = this._hash('val|' + v.name + '=' + v.value);
+        var existing = this.nodes.find(n => n.id === vid);
+        if (existing) {
+          var changed = !this._eqArr(existing.hash, h);
+          existing.hash = h;
+          existing.state = { value: v.value };
+          if (changed) existing.flashT = performance.now();
+        } else {
+          this.nodes.push({
+            id: vid, type: v.name, state: { value: v.value },
+            shape: 'square',
+            x: 0, y: 0, hash: h,
+            scale: 0, flashT: 0, birthT: performance.now()
+          });
+        }
+      }
+    }
+
     // Sync actor nodes
     if (state.actors) {
       var ids = {};
       for (var a of state.actors) {
         ids[a.ref] = true;
-        var h = this._hash(a.ref + JSON.stringify(a.state));
+        var h = this._hash(a.type + '|' + JSON.stringify(a.state));
         var existing = this.nodes.find(n => n.id === a.ref);
         if (existing) {
           var changed = !this._eqArr(existing.hash, h);
@@ -62,14 +86,15 @@ class BlimpCanvas {
         } else {
           this.nodes.push({
             id: a.ref, type: a.type, state: a.state,
+            shape: 'hex',
             x: 0, y: 0, hash: h,
-            scale: 0,       // grows from 0 to 1
+            scale: 0,
             flashT: 0,
             birthT: performance.now()
           });
         }
       }
-      this.nodes = this.nodes.filter(n => ids[n.id]);
+      this.nodes = this.nodes.filter(n => ids[n.id] || n.shape === 'square');
     }
 
     // Parse message sends from source
@@ -93,23 +118,50 @@ class BlimpCanvas {
 
   _layout() {
     var n = this.nodes.length;
+    this._hexScale = 1;
     if (n === 0) return;
 
-    var cx = this.w * 0.55;
-    var cy = this.h * 0.5;
-    // Adaptive radius: grows with actor count but fits in canvas
-    var maxR = Math.min(this.w * 0.3, this.h * 0.35);
-    var r = Math.min(maxR, Math.max(60, n * 25));
+    // Available area: right 75% of canvas, with padding
+    var pad = 40;
+    var startX = this.w * 0.22;
+    var areaW = this.w - startX - pad;
+    var areaH = this.h - pad * 2;
 
-    if (n === 1) {
-      this.nodes[0].x = cx;
-      this.nodes[0].y = cy;
-    } else {
-      for (var i = 0; i < n; i++) {
-        var a = (2 * Math.PI * i / n) - Math.PI / 2;
-        this.nodes[i].x = cx + Math.cos(a) * r;
-        this.nodes[i].y = cy + Math.sin(a) * r;
+    // Find a grid that fits all nodes without overlap.
+    // Try increasing columns until everything fits with decent spacing.
+    var bestCols = 1, bestSize = 0;
+    for (var tryC = 1; tryC <= n; tryC++) {
+      var tryR = Math.ceil(n / tryC);
+      var cellW = areaW / tryC;
+      var cellH = areaH / tryR;
+      var fit = Math.min(cellW, cellH); // max hex diameter that fits
+      if (fit > bestSize) {
+        bestSize = fit;
+        bestCols = tryC;
       }
+    }
+
+    var cols = bestCols;
+    var rows = Math.ceil(n / cols);
+    var cellW = areaW / cols;
+    var cellH = areaH / rows;
+
+    // Scale hexagons: 32px radius is "full size" at 80px cell
+    this._hexScale = Math.min(1, Math.min(cellW, cellH) / 80);
+
+    // Center the grid
+    var gridW = cols * cellW;
+    var gridH = rows * cellH;
+    var offX = startX + (areaW - gridW) / 2;
+    var offY = pad + (areaH - gridH) / 2;
+
+    for (var i = 0; i < n; i++) {
+      var col = i % cols;
+      var row = Math.floor(i / cols);
+      // Stagger odd rows for hex packing feel
+      var xOff = (row % 2) * cellW * 0.3;
+      this.nodes[i].x = offX + cellW * (col + 0.5) + xOff;
+      this.nodes[i].y = offY + cellH * (row + 0.5);
     }
   }
 
@@ -186,33 +238,41 @@ class BlimpCanvas {
   _drawHex(node, now) {
     var ctx = this.ctx;
     var s = node.scale;
-    var r = 32 * s;
+    var hs = this._hexScale || 1;
+    var r = 32 * s * hs;
     if (r < 1) return;
     var h = node.hash;
 
     ctx.save();
     ctx.translate(node.x, node.y);
 
-    // Build hex path
-    var hexPath = () => {
+    var isSquare = node.shape === 'square';
+
+    // Build shape path
+    var shapePath = () => {
       ctx.beginPath();
-      for (var i = 0; i < 6; i++) {
-        var a = Math.PI / 3 * i - Math.PI / 6;
-        i === 0 ? ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r)
-                 : ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+      if (isSquare) {
+        var s = r * 0.85;
+        ctx.rect(-s, -s, s * 2, s * 2);
+      } else {
+        for (var i = 0; i < 6; i++) {
+          var a = Math.PI / 3 * i - Math.PI / 6;
+          i === 0 ? ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r)
+                   : ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+        }
+        ctx.closePath();
       }
-      ctx.closePath();
     };
 
     // Fill
-    hexPath();
+    shapePath();
     ctx.save();
     ctx.clip();
     this._genFill(ctx, h, r);
     ctx.restore();
 
     // Border
-    hexPath();
+    shapePath();
     var flash = (now - node.flashT) / 500;
     if (flash >= 0 && flash < 1) {
       ctx.strokeStyle = 'rgba(255,255,255,' + (1 - flash) * 0.9 + ')';
