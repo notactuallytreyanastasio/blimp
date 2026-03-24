@@ -417,15 +417,16 @@ function submitBuffer() {
 }
 
 function autoComplete() {
-  if (!blimp || !inputEl) return;
-  if (typeof blimp.complete !== 'function') return;
+  if (!blimp || !inputEl) { console.log('no blimp or inputEl'); return; }
+  if (typeof blimp.complete !== 'function') { console.log('no complete method'); return; }
   var text = inputEl.value;
   var cursor = inputEl.selectionStart;
   var start = cursor;
   while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
   compPrefix = text.substring(start, cursor);
   if (compPrefix.length < 1) { dismissComp(); return; }
-  try { compItems = blimp.complete(compPrefix); } catch(e) { compItems = []; }
+  try { compItems = blimp.complete(compPrefix); } catch(e) { console.log('complete error:', e); compItems = []; }
+  console.log('complete("' + compPrefix + '"):', compItems.length, 'results');
   if (compItems.length === 0 || (compItems.length === 1 && compItems[0].insert === compPrefix)) {
     dismissComp(); return;
   }
