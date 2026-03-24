@@ -116,17 +116,8 @@ pub const Parser = struct {
             .kw_bubble => self.parseBubbleStmt(),
             .kw_situation => self.parseSituation(),
             .kw_case => self.parseCase(),
-            .identifier => {
-                // Parse as expression statement, then validate it's not a bare identifier
-                const node = try self.parseExpressionStatement();
-                // Reject bare identifiers but allow assigns, sends, calls
-                if (node.kind == .identifier) return error.UnexpectedToken;
-                return node;
-            },
-            .upper_identifier => {
-                const node = try self.parseExpressionStatement();
-                if (node.kind == .identifier) return error.UnexpectedToken;
-                return node;
+            .identifier, .upper_identifier => {
+                return self.parseExpressionStatement();
             },
             else => self.parseExpressionStatement(),
         };
