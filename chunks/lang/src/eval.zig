@@ -665,6 +665,16 @@ pub const Evaluator = struct {
                         },
                         else => return error.TypeError,
                     },
+                    .list => |a| switch (right.*) {
+                        .list => |b| {
+                            var items = self.allocator.alloc(*const Value, a.len + b.len) catch return error.OutOfMemory;
+                            @memcpy(items[0..a.len], a);
+                            @memcpy(items[a.len..], b);
+                            result.* = Value{ .list = items };
+                            return result;
+                        },
+                        else => return error.TypeError,
+                    },
                     else => return error.TypeError,
                 }
             },
