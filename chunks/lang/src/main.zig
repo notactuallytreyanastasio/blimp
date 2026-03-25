@@ -376,6 +376,17 @@ fn replPlain(allocator: std.mem.Allocator) void {
         stdin_reader.interface.toss(1);
         if (line.len == 0 and depth == 0) continue;
 
+        // Skip comment-only lines when not inside a block
+        if (depth == 0) {
+            var is_comment = false;
+            for (line) |ch| {
+                if (ch == ' ' or ch == '\t') continue;
+                if (ch == '#') { is_comment = true; break; }
+                break;
+            }
+            if (is_comment) continue;
+        }
+
         // Accumulate into multi-line buffer
         if (multi_buf.items.len > 0) {
             multi_buf.append(arena.allocator(), '\n') catch continue;

@@ -412,6 +412,16 @@ pub const Parser = struct {
             pattern = pat_ptr;
         }
 
+        // Optional when guard: pattern when condition ->
+        var guard: ?*Node = null;
+        if (self.current.kind == .kw_when) {
+            self.advance();
+            const guard_expr = try self.parseExpression();
+            const guard_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+            guard_ptr.* = guard_expr;
+            guard = guard_ptr;
+        }
+
         // Expect -> arrow
         try self.expect(.arrow);
 
@@ -438,6 +448,7 @@ pub const Parser = struct {
 
         return .{
             .pattern = pattern,
+            .guard = guard,
             .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
         };
     }

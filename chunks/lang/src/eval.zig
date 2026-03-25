@@ -1370,13 +1370,24 @@ pub const Evaluator = struct {
 
         for (sit.branches) |branch| {
             if (branch.pattern) |pattern| {
-                // Try to match the pattern against the subject
                 if (self.matchPattern(pattern.*, subject)) |bindings| {
-                    // Push scope with bindings, evaluate body, pop
                     self.env.pushScope();
                     for (bindings) |b| {
                         self.env.define(b.name, b.val);
                     }
+
+                    // Check optional when guard
+                    if (branch.guard) |guard_node| {
+                        const guard_val = self.eval(guard_node.*) catch {
+                            self.env.popScope();
+                            continue; // guard eval failed, skip branch
+                        };
+                        if (!guard_val.truthy()) {
+                            self.env.popScope();
+                            continue; // guard false, try next branch
+                        }
+                    }
+
                     const result = self.evalBody(branch.body);
                     self.env.popScope();
                     return result;

@@ -194,6 +194,7 @@ pub const Node = struct {
 
     pub const Branch = struct {
         pattern: ?*const Node,
+        guard: ?*const Node = null, // optional when guard
         body: []const Node,
     };
 
