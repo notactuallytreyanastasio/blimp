@@ -777,7 +777,7 @@ defmodule TermDiffWeb.DiffLive do
                 <span class="w-8 text-right pr-1 text-neutral-300 select-none shrink-0">
                   {line.new_line_number || ""}
                 </span>
-                <span class="px-1 whitespace-pre flex-1">{line_prefix(line.type)}{line.content}</span>
+                {diff_content(line)}
               </div>
             </div>
           </div>
@@ -962,7 +962,14 @@ defmodule TermDiffWeb.DiffLive do
     <div id="line-select-area" phx-hook="LineSelect">
       <div class="text-neutral-500 text-xs mb-2 px-1">{@diff.path}</div>
       <div :if={@diff.binary} class="text-neutral-400 px-1">Binary file</div>
-      <div :for={{hunk, idx} <- Enum.with_index(@diff.hunks)} class="mb-2">
+      <% lang = TermDiff.Diff.Language.detect(@diff.path) %>
+      <div
+        :for={{hunk, idx} <- Enum.with_index(@diff.hunks)}
+        class="mb-2"
+        id={"hunk-#{@diff.path}-#{idx}"}
+        phx-hook="SyntaxHighlight"
+        data-lang={lang || ""}
+      >
         <div
           data-selected={
             if @nav.focus in [:diff_view, :log_detail] && idx == @nav.hunk_index, do: "true"
@@ -999,7 +1006,7 @@ defmodule TermDiffWeb.DiffLive do
               {severity_icon(hd(line_annotations).severity)}
             </span>
             <span :if={line_annotations == []} class="w-3 shrink-0"></span>
-            <span class="px-1 whitespace-pre flex-1">{line_prefix(line.type)}{line.content}</span>
+            {diff_content(line)}
           </div>
           <div
             :for={ann <- Enum.filter(line_annotations, &MapSet.member?(@expanded_comments, &1.id))}
@@ -1072,6 +1079,13 @@ defmodule TermDiffWeb.DiffLive do
   defp line_prefix(:addition), do: "+"
   defp line_prefix(:deletion), do: "-"
   defp line_prefix(:context), do: " "
+
+  defp diff_content(line) do
+    text =
+      "#{line_prefix(line.type)}#{Phoenix.HTML.html_escape(line.content) |> Phoenix.HTML.safe_to_string()}"
+
+    Phoenix.HTML.raw(~s(<span class="dc">#{text}</span>))
+  end
 
   defp severity_icon(:issue), do: "!"
   defp severity_icon(:warning), do: "~"

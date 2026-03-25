@@ -26,6 +26,7 @@ import {hooks as colocatedHooks} from "phoenix-colocated/term_diff"
 import topbar from "../vendor/topbar"
 import PromptSubmit from "./hooks/prompt_submit"
 import AgentAutoScroll from "./hooks/agent_auto_scroll"
+import SyntaxHighlight from "./hooks/syntax_highlight"
 
 let Hooks = {...colocatedHooks}
 
@@ -86,6 +87,7 @@ Hooks.KeyNav = {
 
 Hooks.PromptSubmit = PromptSubmit
 Hooks.AgentAutoScroll = AgentAutoScroll
+Hooks.SyntaxHighlight = SyntaxHighlight
 
 Hooks.AutoFocus = {
   mounted() {
