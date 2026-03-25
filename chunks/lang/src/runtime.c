@@ -120,6 +120,37 @@ BlimpVal *blimp_val_closure(void *func_ptr, int param_count, BlimpVal **env, int
     return v;
 }
 
+// ── Map operations ──────────────────────────────────────
+
+BlimpVal *blimp_val_map(int initial_cap) {
+    BlimpVal *v = (BlimpVal *)malloc(sizeof(BlimpVal));
+    v->rc = 1;
+    v->tag = VAL_MAP;
+    int cap = initial_cap > 0 ? initial_cap : 4;
+    v->map.keys = (char **)malloc(sizeof(char *) * cap);
+    v->map.vals = (BlimpVal **)malloc(sizeof(BlimpVal *) * cap);
+    v->map.len = 0;
+    return v;
+}
+
+void blimp_map_put(BlimpVal *map, const char *key, BlimpVal *val) {
+    if (map->tag != VAL_MAP) return;
+    // Check for existing key
+    for (int i = 0; i < map->map.len; i++) {
+        if (strcmp(map->map.keys[i], key) == 0) {
+            blimp_rc_dec(map->map.vals[i]);
+            blimp_rc_inc(val);
+            map->map.vals[i] = val;
+            return;
+        }
+    }
+    // New key
+    blimp_rc_inc(val);
+    map->map.keys[map->map.len] = strdup(key);
+    map->map.vals[map->map.len] = val;
+    map->map.len++;
+}
+
 // ── List operations ─────────────────────────────────────
 
 void blimp_list_push(BlimpVal *list, BlimpVal *item) {
@@ -289,7 +320,25 @@ void blimp_print_val(BlimpVal *v) {
             }
             printf("]\n");
             break;
-        case VAL_MAP: printf("%%{...}\n"); break;
+        case VAL_MAP:
+            printf("%%{");
+            for (int i = 0; i < v->map.len; i++) {
+                if (i > 0) printf(", ");
+                printf("%s: ", v->map.keys[i]);
+                BlimpVal *mv = v->map.vals[i];
+                switch (mv->tag) {
+                    case VAL_INT: printf("%lld", mv->integer); break;
+                    case VAL_FLOAT: printf("%g", mv->float_val); break;
+                    case VAL_STRING: printf("\"%s\"", mv->string); break;
+                    case VAL_ATOM: printf(":%d", mv->atom_id); break;
+                    case VAL_BOOL: printf("%s", mv->bool_val ? "true" : "false"); break;
+                    case VAL_NIL: printf("nil"); break;
+                    case VAL_ACTOR_REF: printf("ref<%d>", mv->actor_id); break;
+                    default: printf("?"); break;
+                }
+            }
+            printf("}\n");
+            break;
     }
 }
 

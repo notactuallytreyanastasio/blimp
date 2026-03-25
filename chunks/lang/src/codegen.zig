@@ -234,6 +234,9 @@ pub const Codegen = struct {
             .dot_access => |dot| self.compileDotAccess(dot),
             .actor_def => |def| self.compileActorDef(def),
             .spawn_expr => |spn| self.compileSpawn(spn),
+            .struct_lit => |sl| self.compileStructLit(sl),
+            .bubble_stmt => |bs| self.compileBubble(bs),
+            .map_lit => |ml| self.compileMapLit(ml),
             .message_send => |msg| self.compileMessageSend(msg),
             .become_stmt => |bec| self.compileBecome(bec),
             .reply_stmt => |rep| self.compileReply(rep),
@@ -259,6 +262,34 @@ pub const Codegen = struct {
         const buf = self.allocator.allocSentinel(u8, name.len, 0) catch return "?";
         @memcpy(buf[0..name.len], name);
         return buf;
+    }
+
+    /// Coerce any value to i64 for uniform storage (state fields, handler returns).
+    /// Pointers become ptrtoint, i32 atoms get zext, floats get bitcast.
+    fn coerceToI64(self: *Codegen, tv: TaggedVal) c.LLVMValueRef {
+        const val_type = c.LLVMTypeOf(tv.val);
+        if (val_type == self.i64_type) return tv.val;
+        const kind = c.LLVMGetTypeKind(val_type);
+        if (kind == c.LLVMPointerTypeKind) {
+            return c.LLVMBuildPtrToInt(self.builder, tv.val, self.i64_type, "ptr2i");
+        }
+        if (kind == c.LLVMIntegerTypeKind) {
+            return c.LLVMBuildZExt(self.builder, tv.val, self.i64_type, "widen");
+        }
+        if (kind == c.LLVMDoubleTypeKind) {
+            return c.LLVMBuildBitCast(self.builder, tv.val, self.i64_type, "f2i");
+        }
+        return tv.val;
+    }
+
+    /// Coerce an i64 back to the appropriate type for a given tag.
+    fn coerceFromI64(self: *Codegen, val: c.LLVMValueRef, tag: ValTag) c.LLVMValueRef {
+        return switch (tag) {
+            .string, .tagged_val => c.LLVMBuildIntToPtr(self.builder, val, self.ptr_type, "i2ptr"),
+            .atom => c.LLVMBuildTrunc(self.builder, val, self.i32_type, "trunc"),
+            .float => c.LLVMBuildBitCast(self.builder, val, self.f64_type, "i2f"),
+            else => val, // int, bool, nil, actor_ref are already i64
+        };
     }
 
     /// Get the LLVM type for a given tag.
@@ -781,12 +812,8 @@ pub const Codegen = struct {
                         idx,
                         self.zname(field.key),
                     );
-                    // Ensure value matches field type (i64) -- widen atoms/bools
-                    var store_val = new_val.val;
-                    const val_type = c.LLVMTypeOf(store_val);
-                    if (val_type != self.i64_type and c.LLVMGetTypeKind(val_type) == c.LLVMIntegerTypeKind) {
-                        store_val = c.LLVMBuildZExt(self.builder, store_val, self.i64_type, "widen");
-                    }
+                    // Coerce to i64 (handles ptr, i32, float -> i64)
+                    const store_val = self.coerceToI64(new_val);
                     _ = c.LLVMBuildStore(self.builder, store_val, gep);
                     break;
                 }
@@ -797,7 +824,9 @@ pub const Codegen = struct {
 
     fn compileReply(self: *Codegen, reply: ast.Node.ReplyStmt) CodegenError!TaggedVal {
         const val = try self.compileExpr(reply.value.*);
-        _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(true, val.val));
+        // Coerce to i64 for the {i1, i64} handler return type
+        const ret_val = self.coerceToI64(val);
+        _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(true, ret_val));
         return val;
     }
 
@@ -810,7 +839,12 @@ pub const Codegen = struct {
     }
 
     fn compileSpawn(self: *Codegen, spn: ast.Node.SpawnExpr) CodegenError!TaggedVal {
-        const actor = self.findActor(spn.actor_name) orelse return CodegenError.UnsupportedNode;
+        return self.compileSpawnInner(spn.actor_name, spn.overrides);
+    }
+
+    /// Shared spawn logic: allocate state, init fields, register actor, emit handler table.
+    fn compileSpawnInner(self: *Codegen, actor_name: []const u8, overrides: []const ast.Node.KeyValue) CodegenError!TaggedVal {
+        const actor = self.findActor(actor_name) orelse return CodegenError.UnsupportedNode;
 
         // Allocate state struct
         const size = c.LLVMSizeOf(actor.state_type);
@@ -824,20 +858,15 @@ pub const Codegen = struct {
         for (0..actor.state_field_count) |i| {
             const idx: u32 = @intCast(i);
             const field_name = actor.state_field_names[i];
-            var value = actor.state_defaults[i];
-            for (spn.overrides) |ov| {
+            var value: TaggedVal = .{ .val = actor.state_defaults[i], .tag = actor.state_default_tags[i] };
+            for (overrides) |ov| {
                 if (std.mem.eql(u8, ov.key, field_name)) {
-                    const ov_val = self.compileExpr(ov.value) catch break;
-                    value = ov_val.val;
+                    value = self.compileExpr(ov.value) catch break;
                     break;
                 }
             }
             const gep = c.LLVMBuildStructGEP2(self.builder, actor.state_type, state_ptr, idx, self.zname(field_name));
-            var store_val = value;
-            const vt = c.LLVMTypeOf(store_val);
-            if (vt != self.i64_type and c.LLVMGetTypeKind(vt) == c.LLVMIntegerTypeKind) {
-                store_val = c.LLVMBuildZExt(self.builder, store_val, self.i64_type, "widen");
-            }
+            const store_val = self.coerceToI64(value);
             _ = c.LLVMBuildStore(self.builder, store_val, gep);
         }
 
@@ -860,6 +889,115 @@ pub const Codegen = struct {
         // Return actor_id as i64
         const id_i64 = c.LLVMBuildZExt(self.builder, actor_id, self.i64_type, "id_wide");
         return .{ .val = id_i64, .tag = .actor_ref };
+    }
+
+    /// %Actor{field: val, ...} -- sugar for spawn with overrides.
+    fn compileStructLit(self: *Codegen, sl: ast.Node.StructLit) CodegenError!TaggedVal {
+        // Reuse compileSpawn by constructing the equivalent SpawnExpr fields
+        return self.compileSpawnInner(sl.type_name, sl.fields);
+    }
+
+    /// Bubble: in compiled code, returns {matched=true, 0} and the runtime
+    /// treats the handler as "no useful reply". For now, bubble is a no-op return.
+    /// TODO: propagate bubble reason through an error channel.
+    fn compileBubble(self: *Codegen, bs: ast.Node.BubbleStmt) CodegenError!TaggedVal {
+        // Compile the reason expression (if any) for side effects, but discard
+        if (bs.reason) |reason| {
+            _ = try self.compileExpr(reason.*);
+        }
+        // Return {matched=true, 0} -- signals "handled but no value"
+        _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(true, c.LLVMConstInt(self.i64_type, 0, 0)));
+        return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+    }
+
+    /// Compile map literal: %{key: val, ...} -> BlimpVal*
+    fn compileMapLit(self: *Codegen, ml: ast.Node.MapLit) CodegenError!TaggedVal {
+        const entry_count: u32 = @intCast(ml.entries.len);
+
+        // blimp_val_map(initial_cap) -> ptr
+        const make_fn = self.getRuntimeFn("blimp_val_map", &.{self.i32_type}, self.ptr_type);
+        var make_args = [_]c.LLVMValueRef{c.LLVMConstInt(self.i32_type, entry_count, 0)};
+        var make_pt = [_]c.LLVMTypeRef{self.i32_type};
+        const map_ptr = c.LLVMBuildCall2(
+            self.builder,
+            c.LLVMFunctionType(self.ptr_type, &make_pt, 1, 0),
+            make_fn,
+            &make_args,
+            1,
+            "map",
+        );
+
+        // blimp_map_put(map, key, val)
+        const put_fn = self.getRuntimeFn("blimp_map_put", &.{ self.ptr_type, self.ptr_type, self.ptr_type }, self.void_type);
+
+        for (ml.entries) |entry| {
+            // Key is a string
+            const key_str = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(entry.key), "key");
+
+            // Value -- wrap it as a BlimpVal*
+            const val_tv = try self.compileExpr(entry.value);
+            const val_ptr = self.wrapAsBlimpVal(val_tv);
+
+            var put_args = [_]c.LLVMValueRef{ map_ptr, key_str, val_ptr };
+            var put_pt = [_]c.LLVMTypeRef{ self.ptr_type, self.ptr_type, self.ptr_type };
+            _ = c.LLVMBuildCall2(
+                self.builder,
+                c.LLVMFunctionType(self.void_type, &put_pt, 3, 0),
+                put_fn,
+                &put_args,
+                3,
+                "",
+            );
+        }
+
+        return .{ .val = map_ptr, .tag = .tagged_val };
+    }
+
+    /// Wrap a tagged value as a BlimpVal* by calling the appropriate runtime constructor.
+    fn wrapAsBlimpVal(self: *Codegen, tv: TaggedVal) c.LLVMValueRef {
+        return switch (tv.tag) {
+            .int => blk: {
+                const f = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
+                var args = [_]c.LLVMValueRef{tv.val};
+                var pt = [_]c.LLVMTypeRef{self.i64_type};
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
+            },
+            .float => blk: {
+                const f = self.getRuntimeFn("blimp_val_float", &.{self.f64_type}, self.ptr_type);
+                var args = [_]c.LLVMValueRef{tv.val};
+                var pt = [_]c.LLVMTypeRef{self.f64_type};
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
+            },
+            .string => blk: {
+                const f = self.getRuntimeFn("blimp_val_string", &.{self.ptr_type}, self.ptr_type);
+                // String may be stored as i64 (ptrtoint) in state fields -- convert back to ptr
+                var str_val = tv.val;
+                if (c.LLVMGetTypeKind(c.LLVMTypeOf(str_val)) == c.LLVMIntegerTypeKind) {
+                    str_val = c.LLVMBuildIntToPtr(self.builder, str_val, self.ptr_type, "i2str");
+                }
+                var args = [_]c.LLVMValueRef{str_val};
+                var pt = [_]c.LLVMTypeRef{self.ptr_type};
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
+            },
+            .atom => blk: {
+                const f = self.getRuntimeFn("blimp_val_atom", &.{self.i32_type}, self.ptr_type);
+                var args = [_]c.LLVMValueRef{tv.val};
+                var pt = [_]c.LLVMTypeRef{self.i32_type};
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
+            },
+            .boolean => blk: {
+                const f = self.getRuntimeFn("blimp_val_bool", &.{self.i32_type}, self.ptr_type);
+                const b32 = c.LLVMBuildTrunc(self.builder, tv.val, self.i32_type, "b32");
+                var args = [_]c.LLVMValueRef{b32};
+                var pt = [_]c.LLVMTypeRef{self.i32_type};
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
+            },
+            .tagged_val => tv.val, // Already a BlimpVal*
+            .nil, .actor_ref => blk: {
+                const f = self.getRuntimeFn("blimp_val_nil", &.{}, self.ptr_type);
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &[_]c.LLVMTypeRef{}, 0, 0), f, &[_]c.LLVMValueRef{}, 0, "boxed");
+            },
+        };
     }
 
     // ── New feature codegen (tagged value path) ──────────
@@ -1009,8 +1147,10 @@ pub const Codegen = struct {
         }
         const fn_type = c.LLVMFunctionType(self.i64_type, param_types.ptr, param_count, 0);
 
-        // Forward-declare so recursive calls work
-        const func = c.LLVMAddFunction(self.module, self.zname(ds.name), fn_type);
+        // Use existing forward declaration if present, otherwise create
+        const fn_name = self.zname(ds.name);
+        const func = c.LLVMGetNamedFunction(self.module, fn_name) orelse
+            c.LLVMAddFunction(self.module, fn_name, fn_type);
 
         const entry_bb = c.LLVMAppendBasicBlock(func, "entry");
         c.LLVMPositionBuilderAtEnd(self.builder, entry_bb);
@@ -1317,37 +1457,108 @@ pub const Codegen = struct {
         for (branches, 0..) |branch, idx| {
             const is_wildcard = branch.pattern == null or
                 (branch.pattern != null and branch.pattern.?.kind == .hole);
+            const is_var_bind = !is_wildcard and branch.pattern != null and
+                branch.pattern.?.kind == .identifier;
 
-            if (is_wildcard) {
-                // Wildcard/hole: unconditional -- emit body, branch to merge
+            if (is_wildcard or (is_var_bind and branch.guard == null)) {
+                // Wildcard/hole or unguarded variable bind: unconditional branch
+                if (is_var_bind) {
+                    const var_name = branch.pattern.?.kind.identifier.name;
+                    const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(var_name));
+                    _ = c.LLVMBuildStore(self.builder, subject.val, alloca);
+                    self.scope.put(self.allocator, .{
+                        .name = var_name,
+                        .alloca = alloca,
+                        .tag = subject.tag,
+                        .llvm_type = self.i64_type,
+                    });
+                }
                 var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
                 for (branch.body) |stmt| {
                     last_val = try self.compileExpr(stmt);
                 }
-                if (phi_count < 16) {
-                    phi_vals[phi_count] = last_val.val;
+                // Only branch to merge if body didn't already terminate (e.g. reply/ret)
+                const bb = c.LLVMGetInsertBlock(self.builder);
+                if (c.LLVMGetBasicBlockTerminator(bb) == null) {
+                    if (phi_count < 16) {
+                        phi_vals[phi_count] = last_val.val;
+                        phi_blocks[phi_count] = bb;
+                        phi_count += 1;
+                    }
+                    _ = c.LLVMBuildBr(self.builder, merge_bb);
+                }
+                break; // Unconditional branch is always last
+            } else if (is_var_bind) {
+                // Variable bind with guard: bind subject to var, then test guard
+                const var_name = branch.pattern.?.kind.identifier.name;
+                const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(var_name));
+                _ = c.LLVMBuildStore(self.builder, subject.val, alloca);
+                self.scope.put(self.allocator, .{
+                    .name = var_name,
+                    .alloca = alloca,
+                    .tag = subject.tag,
+                    .llvm_type = self.i64_type,
+                });
+
+                const guard_val = try self.compileExpr(branch.guard.?.*);
+                const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+                const guard_bool = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
+
+                const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
+                const is_last = idx + 1 >= branches.len;
+                const else_bb = if (!is_last)
+                    c.LLVMAppendBasicBlockInContext(self.context, func, "else")
+                else
+                    merge_bb;
+
+                _ = c.LLVMBuildCondBr(self.builder, guard_bool, then_bb, else_bb);
+
+                if (is_last and phi_count < 16) {
+                    phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
                     phi_blocks[phi_count] = c.LLVMGetInsertBlock(self.builder);
                     phi_count += 1;
                 }
-                _ = c.LLVMBuildBr(self.builder, merge_bb);
-                break; // Wildcard is always last
+
+                c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
+                var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+                for (branch.body) |stmt| {
+                    last_val = try self.compileExpr(stmt);
+                }
+                const then_end = c.LLVMGetInsertBlock(self.builder);
+                if (c.LLVMGetBasicBlockTerminator(then_end) == null) {
+                    if (phi_count < 16) {
+                        phi_vals[phi_count] = last_val.val;
+                        phi_blocks[phi_count] = then_end;
+                        phi_count += 1;
+                    }
+                    _ = c.LLVMBuildBr(self.builder, merge_bb);
+                }
+
+                if (!is_last) {
+                    c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
+                }
             } else {
-                // Pattern match: compare subject to pattern value
+                // Literal pattern match: compare subject to pattern value
                 const pattern = try self.compileExpr(branch.pattern.?.*);
-                // Ensure both operands have the same type for icmp
                 var lhs_val = subject.val;
                 var rhs_val = pattern.val;
                 const lhs_type = c.LLVMTypeOf(lhs_val);
                 const rhs_type = c.LLVMTypeOf(rhs_val);
                 if (lhs_type != rhs_type) {
-                    // Widen the smaller one to i64
                     if (c.LLVMGetIntTypeWidth(lhs_type) < c.LLVMGetIntTypeWidth(rhs_type)) {
                         lhs_val = c.LLVMBuildZExt(self.builder, lhs_val, rhs_type, "widen_l");
                     } else {
                         rhs_val = c.LLVMBuildZExt(self.builder, rhs_val, lhs_type, "widen_r");
                     }
                 }
-                const cmp = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs_val, rhs_val, "branchtmp");
+
+                var cmp = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs_val, rhs_val, "branchtmp");
+                if (branch.guard) |guard_node| {
+                    const guard_val = try self.compileExpr(guard_node.*);
+                    const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+                    const guard_bool = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
+                    cmp = c.LLVMBuildAnd(self.builder, cmp, guard_bool, "match_and_guard");
+                }
 
                 const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
                 const is_last = idx + 1 >= branches.len;
@@ -1358,28 +1569,27 @@ pub const Codegen = struct {
 
                 _ = c.LLVMBuildCondBr(self.builder, cmp, then_bb, else_bb);
 
-                // If this is the last branch and else goes to merge, add a nil phi entry
                 if (is_last and phi_count < 16) {
-                    // The else edge from this block goes directly to merge with nil
                     phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
                     phi_blocks[phi_count] = c.LLVMGetInsertBlock(self.builder);
                     phi_count += 1;
                 }
 
-                // Emit then block
                 c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
                 var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
                 for (branch.body) |stmt| {
                     last_val = try self.compileExpr(stmt);
                 }
-                if (phi_count < 16) {
-                    phi_vals[phi_count] = last_val.val;
-                    phi_blocks[phi_count] = c.LLVMGetInsertBlock(self.builder);
-                    phi_count += 1;
+                const then_end = c.LLVMGetInsertBlock(self.builder);
+                if (c.LLVMGetBasicBlockTerminator(then_end) == null) {
+                    if (phi_count < 16) {
+                        phi_vals[phi_count] = last_val.val;
+                        phi_blocks[phi_count] = then_end;
+                        phi_count += 1;
+                    }
+                    _ = c.LLVMBuildBr(self.builder, merge_bb);
                 }
-                _ = c.LLVMBuildBr(self.builder, merge_bb);
 
-                // Position at else block for next iteration
                 if (!is_last) {
                     c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
                 }
@@ -1402,6 +1612,12 @@ pub const Codegen = struct {
         c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
 
         if (phi_count == 0) {
+            // All branches terminated (reply/ret) -- merge is dead code.
+            // Delete the empty merge block and position at the last block.
+            c.LLVMDeleteBasicBlock(merge_bb);
+            // Position at last basic block of function so subsequent codegen works
+            const last_bb = c.LLVMGetLastBasicBlock(func);
+            c.LLVMPositionBuilderAtEnd(self.builder, last_bb);
             return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
         }
 
@@ -1438,10 +1654,10 @@ pub const Codegen = struct {
         const fallback_end_bb = c.LLVMGetInsertBlock(self.builder);
         _ = c.LLVMBuildBr(self.builder, merge_bb);
 
-        // Merge with phi
+        // Merge with phi -- coerce both to i64 for uniform type
         c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
         const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "orelse");
-        var vals = [_]c.LLVMValueRef{ try_val.val, fallback_val.val };
+        var vals = [_]c.LLVMValueRef{ self.coerceToI64(try_val), self.coerceToI64(fallback_val) };
         var blocks = [_]c.LLVMBasicBlockRef{ try_bb, fallback_end_bb };
         c.LLVMAddIncoming(phi, &vals, &blocks, 2);
 
@@ -1462,6 +1678,9 @@ pub const Codegen = struct {
         const entry = c.LLVMAppendBasicBlockInContext(self.context, main_func, "entry");
         c.LLVMPositionBuilderAtEnd(self.builder, entry);
 
+        // Forward-declare all def functions so order doesn't matter
+        self.forwardDeclareDefs(nodes);
+
         // Compile all nodes; track the last result for printing
         var last: ?TaggedVal = null;
         for (nodes) |node| {
@@ -1480,6 +1699,25 @@ pub const Codegen = struct {
 
         // Return 0
         _ = c.LLVMBuildRet(self.builder, c.LLVMConstInt(self.i32_type, 0, 0));
+    }
+
+    /// Forward-declare all `def` functions so call order doesn't matter.
+    fn forwardDeclareDefs(self: *Codegen, nodes: []const ast.Node) void {
+        for (nodes) |node| {
+            if (node.kind == .def_stmt) {
+                const ds = node.kind.def_stmt;
+                // Only declare if not already present
+                if (c.LLVMGetNamedFunction(self.module, self.zname(ds.name)) == null) {
+                    const param_count: u32 = @intCast(ds.params.len);
+                    const param_types = self.allocator.alloc(c.LLVMTypeRef, param_count) catch continue;
+                    for (0..param_count) |i| {
+                        param_types[i] = self.i64_type;
+                    }
+                    const fn_type = c.LLVMFunctionType(self.i64_type, param_types.ptr, param_count, 0);
+                    _ = c.LLVMAddFunction(self.module, self.zname(ds.name), fn_type);
+                }
+            }
+        }
     }
 
     /// Backward-compat: build main from a single expression.

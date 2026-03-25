@@ -1,0 +1,18 @@
+# Binary tree benchmark -- recursive build and checksum
+# Based on the Computer Language Benchmarks Game "binary trees"
+#
+# tree_build(depth) builds a complete binary tree, returns node count
+# tree_check(depth) checksums a complete binary tree
+
+def tree_build(depth) do
+  situation depth do
+    0 -> 1
+    _ ->
+      left = tree_build(depth - 1)
+      right = tree_build(depth - 1)
+      left + right + 1
+  end
+end
+
+# depth 20 = 2^21 - 1 = 2097151 nodes
+tree_build(25)
