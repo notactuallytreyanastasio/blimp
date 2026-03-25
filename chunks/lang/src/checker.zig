@@ -405,6 +405,8 @@ pub const Checker = struct {
             .dot_access => |da| self.inferDotAccess(da, node.loc),
             .message_send => |ms| self.inferMessageSend(ms, node.loc),
             .orelse_expr => |oe| self.inferExpr(oe.try_expr.*),
+            .spawn_expr => |se| Type{ .actor = se.actor_name },
+            .struct_lit => |sl| Type{ .actor = sl.type_name },
             .situation => .hole, // Cannot infer situation results yet
             else => .hole,
         };

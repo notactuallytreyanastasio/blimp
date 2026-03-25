@@ -1,6 +1,7 @@
 const std = @import("std");
 const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
+const Checker = @import("checker.zig").Checker;
 const Codegen = @import("codegen.zig").Codegen;
 
 pub fn main() !void {
@@ -50,6 +51,21 @@ pub fn main() !void {
 
     const program_nodes = parseProgram(arena.allocator(), source);
 
+    // Type check
+    var checker = Checker.init(arena.allocator());
+    const check_result = checker.checkFile(program_nodes);
+    if (check_result.errors.len > 0) {
+        for (check_result.errors) |type_err| {
+            std.debug.print("Type error at line {}, col {}: {s}\n", .{
+                type_err.loc.line,
+                type_err.loc.col,
+                type_err.message,
+            });
+        }
+        std.debug.print("{d} type error(s) found.\n", .{check_result.errors.len});
+        std.process.exit(1);
+    }
+
     // Codegen
     var codegen = Codegen.init(arena.allocator(), "blimp_module");
     defer codegen.deinit();
@@ -72,6 +88,17 @@ pub fn main() !void {
         codegen.dumpIR();
         std.process.exit(1);
     };
+
+    // Optimize
+    codegen.optimize() catch |err| {
+        std.debug.print("Optimization error: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    if (dump_ir) {
+        std.debug.print("\n=== After optimization ===\n", .{});
+        codegen.dumpIR();
+    }
 
     // Emit object file
     const obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.o", .{output_name}, 0);

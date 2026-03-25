@@ -75,8 +75,8 @@ end
 
 actor Marketplace.AccountHolder do
   state name: String :: "unknown"
-  state account: Int :: 0
-  state wallet: Int :: 0
+  state account: Marketplace.AccountHolder.Account :: nil
+  state wallet: Marketplace.AccountHolder.Wallet :: nil
   state total_spent: Int :: 0
 
   # Pay from wallet first, fall back to account
@@ -144,17 +144,17 @@ end
 
 actor Marketplace.Institution do
   state name: String :: "unknown"
-  state account: Int :: 0
+  state account: Marketplace.Institution.Account :: nil
   state revenue: Int :: 0
 
-  on :charge(customer: Int, amount: Int) when amount > 0 do
+  on :charge(customer: Marketplace.AccountHolder, amount: Int) when amount > 0 do
     customer <- :buy(amount)
     account <- :deposit(amount)
     become revenue: revenue + amount
     reply :charged
   end
 
-  on :pay_supplier(supplier: Int, amount: Int) when amount > 0 do
+  on :pay_supplier(supplier: Marketplace.Institution, amount: Int) when amount > 0 do
     result = account <- :withdraw(amount) orelse :broke
     situation result do
       :broke -> reply :broke
@@ -181,7 +181,7 @@ actor Marketplace.Thief do
   state attempts: Int :: 0
   state blocked: Int :: 0
 
-  on :pickpocket(wallet: Int, amount: Int) do
+  on :pickpocket(wallet: Any, amount: Int) do
     become attempts: attempts + 1
     result = wallet <- :take(amount) orelse :missed
     situation result do
@@ -194,7 +194,7 @@ actor Marketplace.Thief do
     end
   end
 
-  on :hack(account: Int, amount: Int) do
+  on :hack(account: Any, amount: Int) do
     become attempts: attempts + 1
     result = account <- :withdraw(amount) orelse :blocked
     situation result do

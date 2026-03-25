@@ -6,6 +6,7 @@ const c = @cImport({
     @cInclude("llvm-c/Target.h");
     @cInclude("llvm-c/TargetMachine.h");
     @cInclude("llvm-c/Analysis.h");
+    @cInclude("llvm-c/Transforms/PassBuilder.h");
 });
 
 pub const CodegenError = error{
@@ -1896,6 +1897,40 @@ pub const Codegen = struct {
         c.LLVMDumpModule(self.module);
     }
 
+    /// Run LLVM optimization passes (O2) on the module.
+    pub fn optimize(self: *Codegen) CodegenError!void {
+        _ = c.LLVMInitializeNativeTarget();
+        _ = c.LLVMInitializeNativeAsmPrinter();
+
+        const triple = c.LLVMGetDefaultTargetTriple();
+        defer c.LLVMDisposeMessage(triple);
+
+        var target: c.LLVMTargetRef = null;
+        var target_err: [*c]u8 = null;
+        if (c.LLVMGetTargetFromTriple(triple, &target, &target_err) != 0) {
+            if (target_err) |msg| c.LLVMDisposeMessage(msg);
+            return CodegenError.TargetError;
+        }
+
+        const machine = c.LLVMCreateTargetMachine(
+            target, triple, "generic", "",
+            c.LLVMCodeGenLevelAggressive,
+            c.LLVMRelocDefault, c.LLVMCodeModelDefault,
+        );
+        defer c.LLVMDisposeTargetMachine(machine);
+
+        const opts = c.LLVMCreatePassBuilderOptions();
+        defer c.LLVMDisposePassBuilderOptions(opts);
+
+        const err = c.LLVMRunPasses(self.module, "default<O2>", machine, opts);
+        if (err != null) {
+            const msg = c.LLVMGetErrorMessage(err);
+            std.debug.print("LLVM optimize error: {s}\n", .{msg});
+            c.LLVMDisposeErrorMessage(msg);
+            return CodegenError.LLVMError;
+        }
+    }
+
     pub fn emitObjectFile(self: *Codegen, output_path: [*:0]const u8) CodegenError!void {
         _ = c.LLVMInitializeNativeTarget();
         _ = c.LLVMInitializeNativeAsmPrinter();
@@ -1919,7 +1954,7 @@ pub const Codegen = struct {
             triple,
             "generic",
             "",
-            c.LLVMCodeGenLevelDefault,
+            c.LLVMCodeGenLevelAggressive,
             c.LLVMRelocDefault,
             c.LLVMCodeModelDefault,
         );

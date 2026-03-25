@@ -940,6 +940,14 @@ pub const Parser = struct {
                 if (self.current.kind == .upper_identifier) {
                     type_name = self.current.lexeme;
                     self.advance();
+                    // Handle dotted type names: Marketplace.AccountHolder.Account
+                    while (self.current.kind == .dot) {
+                        self.advance();
+                        if (self.current.kind == .upper_identifier) {
+                            type_name = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ type_name.?, self.current.lexeme }) catch return error.OutOfMemory;
+                            self.advance();
+                        } else break;
+                    }
                 } else if (self.current.kind == .lbracket) {
                     // [Type]
                     self.advance();
@@ -1295,8 +1303,16 @@ pub const Parser = struct {
     /// Captures the full source span as a string for the checker to parse.
     fn parseTypeName(self: *Parser) ParseError![]const u8 {
         if (self.current.kind == .upper_identifier) {
-            const name = self.current.lexeme;
+            var name: []const u8 = self.current.lexeme;
             self.advance();
+            // Handle dotted type names: Marketplace.AccountHolder.Account
+            while (self.current.kind == .dot) {
+                self.advance();
+                if (self.current.kind == .upper_identifier) {
+                    name = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ name, self.current.lexeme }) catch return error.OutOfMemory;
+                    self.advance();
+                } else break;
+            }
             return name;
         }
         if (self.current.kind == .lbracket) {
