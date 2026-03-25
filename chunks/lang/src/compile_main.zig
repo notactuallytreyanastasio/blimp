@@ -3,6 +3,7 @@ const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
 const Checker = @import("checker.zig").Checker;
 const Codegen = @import("codegen.zig").Codegen;
+const BlimpError = @import("errors.zig").BlimpError;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -23,6 +24,7 @@ pub fn main() !void {
     var dump_ir = false;
     var run_after = false;
     var canvas_mode = false;
+    var lto_enabled = false;
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "-o") and i + 1 < args.len) {
@@ -35,6 +37,8 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--canvas")) {
             canvas_mode = true;
             run_after = true; // canvas implies run
+        } else if (std.mem.eql(u8, args[i], "--lto")) {
+            lto_enabled = true;
         }
     }
 
@@ -56,11 +60,18 @@ pub fn main() !void {
     const check_result = checker.checkFile(program_nodes);
     if (check_result.errors.len > 0) {
         for (check_result.errors) |type_err| {
-            std.debug.print("Type error at line {}, col {}: {s}\n", .{
-                type_err.loc.line,
-                type_err.loc.col,
-                type_err.message,
-            });
+            const src_line = getSourceLine(source, type_err.loc.line);
+            const title = categorizeError(type_err.message);
+            const hint = errorHint(type_err.message);
+            const err = BlimpError{
+                .title = title,
+                .source_line = src_line,
+                .line = type_err.loc.line,
+                .col = if (type_err.loc.col > 0) type_err.loc.col - 1 else 0,
+                .message = type_err.message,
+                .hint = hint,
+            };
+            err.formatStderr();
         }
         std.debug.print("{d} type error(s) found.\n", .{check_result.errors.len});
         std.process.exit(1);
@@ -100,14 +111,22 @@ pub fn main() !void {
         codegen.dumpIR();
     }
 
-    // Emit object file
-    const obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}.o", .{output_name}, 0);
+    // Emit object file (or bitcode for LTO)
+    const obj_ext: []const u8 = if (lto_enabled) ".bc" else ".o";
+    const obj_path = try std.fmt.allocPrintSentinel(allocator, "{s}{s}", .{ output_name, obj_ext }, 0);
     defer allocator.free(obj_path);
 
-    codegen.emitObjectFile(obj_path.ptr) catch |err| {
-        std.debug.print("Emit error: {}\n", .{err});
-        std.process.exit(1);
-    };
+    if (lto_enabled) {
+        codegen.emitBitcodeFile(obj_path.ptr) catch |err| {
+            std.debug.print("Bitcode emit error: {}\n", .{err});
+            std.process.exit(1);
+        };
+    } else {
+        codegen.emitObjectFile(obj_path.ptr) catch |err| {
+            std.debug.print("Emit error: {}\n", .{err});
+            std.process.exit(1);
+        };
+    }
 
     // Find the runtime object
     const self_exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
@@ -116,14 +135,23 @@ pub fn main() !void {
     const runtime_obj_path = try std.fmt.allocPrint(allocator, "{s}/../lib/blimp_runtime.o", .{self_exe_dir});
     defer allocator.free(runtime_obj_path);
 
-    // Link
-    const link_result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "cc", obj_path, runtime_obj_path, "-o", output_name },
-    }) catch |err| {
-        std.debug.print("Linker error: {}\n", .{err});
-        std.process.exit(1);
-    };
+    // Link (with -flto when LTO is enabled)
+    const link_result = if (lto_enabled)
+        std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "cc", "-flto", obj_path, runtime_obj_path, "-o", output_name },
+        }) catch |err| {
+            std.debug.print("Linker error: {}\n", .{err});
+            std.process.exit(1);
+        }
+    else
+        std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "cc", obj_path, runtime_obj_path, "-o", output_name },
+        }) catch |err| {
+            std.debug.print("Linker error: {}\n", .{err});
+            std.process.exit(1);
+        };
     defer allocator.free(link_result.stdout);
     defer allocator.free(link_result.stderr);
 
@@ -140,7 +168,7 @@ pub fn main() !void {
         },
     }
 
-    // Clean up object file
+    // Clean up object/bitcode file
     std.fs.cwd().deleteFile(obj_path) catch {};
 
     if (run_after) {
@@ -458,6 +486,57 @@ fn buildCanvasHtml(allocator: std.mem.Allocator, json_data: []const u8, source: 
         \\</script></body></html>
     );
     return buf.toOwnedSlice(allocator);
+}
+
+/// Extract a source line by line number (1-indexed).
+fn getSourceLine(source: []const u8, line: u32) ?[]const u8 {
+    if (line == 0) return null;
+    var current_line: u32 = 1;
+    var start: usize = 0;
+    for (source, 0..) |ch, i| {
+        if (current_line == line) {
+            // Find end of line
+            var end = i;
+            while (end < source.len and source[end] != '\n') end += 1;
+            return source[start..end];
+        }
+        if (ch == '\n') {
+            current_line += 1;
+            start = i + 1;
+        }
+    }
+    if (current_line == line) return source[start..];
+    return null;
+}
+
+/// Categorize an error message into a title.
+fn categorizeError(msg: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, msg, "missing a type annotation") != null) return "MISSING TYPE ANNOTATION";
+    if (std.mem.indexOf(u8, msg, "type mismatch") != null) return "TYPE MISMATCH";
+    if (std.mem.indexOf(u8, msg, "expected") != null and std.mem.indexOf(u8, msg, "got") != null) return "WRONG TYPE";
+    if (std.mem.indexOf(u8, msg, "expects") != null and std.mem.indexOf(u8, msg, "argument") != null) return "WRONG NUMBER OF ARGUMENTS";
+    if (std.mem.indexOf(u8, msg, "cannot compare") != null) return "COMPARISON ERROR";
+    if (std.mem.indexOf(u8, msg, "arithmetic") != null) return "ARITHMETIC ERROR";
+    if (std.mem.indexOf(u8, msg, "cannot negate") != null) return "NEGATION ERROR";
+    if (std.mem.indexOf(u8, msg, "logical") != null) return "LOGIC ERROR";
+    return "TYPE ERROR";
+}
+
+/// Generate a hint for common error patterns.
+fn errorHint(msg: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, msg, "missing a type annotation") != null) {
+        if (std.mem.indexOf(u8, msg, "handler parameter") != null) {
+            return "Handler parameters require types:\n      on :deposit(amount: Int) do ... end";
+        }
+        return "State fields require types:\n      state balance: Int :: 0";
+    }
+    if (std.mem.indexOf(u8, msg, "expected") != null and std.mem.indexOf(u8, msg, "got") != null) {
+        if (std.mem.indexOf(u8, msg, "argument") != null) {
+            return "Each message argument must match the handler's declared type.\n      Check that you're passing the right actor or value.";
+        }
+        return "The types need to match. Check your variable bindings.";
+    }
+    return null;
 }
 
 fn parseProgram(arena: std.mem.Allocator, source: []const u8) []const ast.Node {

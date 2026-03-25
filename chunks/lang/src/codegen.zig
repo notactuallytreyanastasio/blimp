@@ -7,6 +7,7 @@ const c = @cImport({
     @cInclude("llvm-c/TargetMachine.h");
     @cInclude("llvm-c/Analysis.h");
     @cInclude("llvm-c/Transforms/PassBuilder.h");
+    @cInclude("llvm-c/BitWriter.h");
 });
 
 pub const CodegenError = error{
@@ -106,6 +107,8 @@ pub const Codegen = struct {
     handler_ret_type: c.LLVMTypeRef, // {i1, i64} -- matched flag + return value
     // Current function being built (needed for creating basic blocks)
     current_fn: ?c.LLVMValueRef = null,
+    // When set, compileFuncCall marks calls to this name with musttail
+    tail_call_target: ?[]const u8 = null,
     // Current actor context (set during handler compilation)
     current_actor: ?*ActorDescriptor = null,
     // Cached runtime function refs (lazily declared)
@@ -392,6 +395,12 @@ pub const Codegen = struct {
             func = c.LLVMAddFunction(self.module, extern_name, ft);
         }
         const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, n, "calltmp");
+        // Mark as tail call if this is a recursive call to the current def
+        if (self.tail_call_target) |target| {
+            if (std.mem.eql(u8, name, target)) {
+                c.LLVMSetTailCall(val, 1);
+            }
+        }
         return .{ .val = val, .tag = .int };
     }
 
@@ -1203,6 +1212,7 @@ pub const Codegen = struct {
         // Save current context
         const saved_fn = self.current_fn;
         const saved_scope = self.scope;
+        const saved_tail_target = self.tail_call_target;
         self.scope = .{};
 
         // Create function: i64 name(i64, i64, ...)
@@ -1221,6 +1231,9 @@ pub const Codegen = struct {
         const entry_bb = c.LLVMAppendBasicBlock(func, "entry");
         c.LLVMPositionBuilderAtEnd(self.builder, entry_bb);
         self.current_fn = func;
+
+        // Enable TCO: set tail_call_target so recursive calls get musttail
+        self.tail_call_target = ds.name;
 
         // Bind params as i64 allocas
         for (ds.params, 0..) |param_name, i| {
@@ -1243,6 +1256,7 @@ pub const Codegen = struct {
         // Restore context
         self.current_fn = saved_fn;
         self.scope = saved_scope;
+        self.tail_call_target = saved_tail_target;
 
         // Position builder back in the calling function
         if (saved_fn) |f| {
@@ -1912,8 +1926,13 @@ pub const Codegen = struct {
             return CodegenError.TargetError;
         }
 
+        const cpu = c.LLVMGetHostCPUName();
+        defer c.LLVMDisposeMessage(cpu);
+        const features = c.LLVMGetHostCPUFeatures();
+        defer c.LLVMDisposeMessage(features);
+
         const machine = c.LLVMCreateTargetMachine(
-            target, triple, "generic", "",
+            target, triple, cpu, features,
             c.LLVMCodeGenLevelAggressive,
             c.LLVMRelocDefault, c.LLVMCodeModelDefault,
         );
@@ -1922,7 +1941,7 @@ pub const Codegen = struct {
         const opts = c.LLVMCreatePassBuilderOptions();
         defer c.LLVMDisposePassBuilderOptions(opts);
 
-        const err = c.LLVMRunPasses(self.module, "default<O2>", machine, opts);
+        const err = c.LLVMRunPasses(self.module, "default<O3>,tailcallelim", machine, opts);
         if (err != null) {
             const msg = c.LLVMGetErrorMessage(err);
             std.debug.print("LLVM optimize error: {s}\n", .{msg});
@@ -1949,11 +1968,16 @@ pub const Codegen = struct {
             return CodegenError.TargetError;
         }
 
+        const cpu = c.LLVMGetHostCPUName();
+        defer c.LLVMDisposeMessage(cpu);
+        const features = c.LLVMGetHostCPUFeatures();
+        defer c.LLVMDisposeMessage(features);
+
         const machine = c.LLVMCreateTargetMachine(
             target,
             triple,
-            "generic",
-            "",
+            cpu,
+            features,
             c.LLVMCodeGenLevelAggressive,
             c.LLVMRelocDefault,
             c.LLVMCodeModelDefault,
@@ -1971,6 +1995,14 @@ pub const Codegen = struct {
                 std.debug.print("LLVM emit error: {s}\n", .{msg});
                 c.LLVMDisposeMessage(msg);
             }
+            return CodegenError.EmitError;
+        }
+    }
+
+    /// Emit LLVM bitcode file (for LTO -- the linker can optimize across modules).
+    pub fn emitBitcodeFile(self: *Codegen, output_path: [*:0]const u8) CodegenError!void {
+        if (c.LLVMWriteBitcodeToFile(self.module, output_path) != 0) {
+            std.debug.print("LLVM bitcode emit error\n", .{});
             return CodegenError.EmitError;
         }
     }

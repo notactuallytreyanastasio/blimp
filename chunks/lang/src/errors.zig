@@ -78,6 +78,53 @@ pub const BlimpError = struct {
         writer.writeAll("\n") catch {};
     }
 
+    /// Format to stderr using std.debug.print (no writer needed).
+    pub fn formatStderr(self: BlimpError) void {
+        // Title bar
+        std.debug.print("\n\x1b[36m-- {s} ", .{self.title});
+        const title_len = self.title.len + 4;
+        const dash_count = if (title_len < 60) 60 - title_len else 5;
+        for (0..dash_count) |_| std.debug.print("\xe2\x94\x80", .{});
+        std.debug.print("\x1b[0m\n\n", .{});
+
+        // Pre-message
+        std.debug.print("  {s}\n\n", .{self.message});
+
+        // Source line with line number + region underline
+        if (self.source_line) |src| {
+            if (self.line) |ln| {
+                std.debug.print("\x1b[90m{d}|\x1b[0m \x1b[91m{s}\x1b[0m\n", .{ ln, src });
+            } else {
+                std.debug.print("  \x1b[91m{s}\x1b[0m\n", .{src});
+            }
+
+            if (self.col) |col| {
+                const gutter: usize = if (self.line != null) 4 else 2;
+                for (0..col + gutter) |_| std.debug.print(" ", .{});
+                if (self.col_end) |ce| {
+                    const span = if (ce > col) ce - col else 1;
+                    std.debug.print("\x1b[31m", .{});
+                    for (0..span) |_| std.debug.print("^", .{});
+                    std.debug.print("\x1b[0m\n", .{});
+                } else {
+                    std.debug.print("\x1b[31m^\x1b[0m\n", .{});
+                }
+            }
+        }
+
+        // Post-message
+        if (self.post_message) |pm| {
+            std.debug.print("\n  {s}\n", .{pm});
+        }
+
+        // Hint
+        if (self.hint) |h| {
+            std.debug.print("\n  \x1b[33mHint: {s}\x1b[0m\n", .{h});
+        }
+
+        std.debug.print("\n", .{});
+    }
+
     /// Format without ANSI colors (for piped/non-TTY output).
     pub fn formatPlain(self: BlimpError, writer: anytype) void {
         writer.writeAll("\n-- ") catch {};
