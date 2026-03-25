@@ -47,25 +47,60 @@ pub const CompletionEngine = struct {
             }
         }
 
-        // 2. Builtins
-        const builtin_names = [_][]const u8{
-            "length",    "max",       "min",       "append",   "reverse",
-            "lookup",    "put",       "keys",      "now",      "concat",
-            "split",     "contains",  "to_string", "to_int",   "slice",
-            "upcase",    "downcase",  "range",     "head",     "tail",
-            "sort",      "merge",     "values",    "type_of",  "print",
-            "rem",       "abs",       "nil?",      "elem",     "floor",
-            "ceil",      "round",     "not",       "size",     "empty?",
-            "flat",      "zip",       "uniq",      "sum",
-            "map",       "filter",    "reduce",    "each",
+        // 2. Builtins with signatures
+        const BuiltinSig = struct { name: []const u8, sig: []const u8 };
+        const builtin_sigs = [_]BuiltinSig{
+            .{ .name = "length", .sig = "length(collection) -> Int" },
+            .{ .name = "max", .sig = "max(a: Int, b: Int) -> Int" },
+            .{ .name = "min", .sig = "min(a: Int, b: Int) -> Int" },
+            .{ .name = "append", .sig = "append(list: List, item) -> List" },
+            .{ .name = "reverse", .sig = "reverse(list: List) -> List" },
+            .{ .name = "lookup", .sig = "lookup(map: Map, key: String)" },
+            .{ .name = "put", .sig = "put(map: Map, key: String, val) -> Map" },
+            .{ .name = "keys", .sig = "keys(map: Map) -> [String]" },
+            .{ .name = "now", .sig = "now() -> Int" },
+            .{ .name = "concat", .sig = "concat(a: String, b: String, ...) -> String" },
+            .{ .name = "split", .sig = "split(str: String, sep: String) -> [String]" },
+            .{ .name = "contains", .sig = "contains(str: String, sub: String) -> Bool" },
+            .{ .name = "to_string", .sig = "to_string(val) -> String" },
+            .{ .name = "to_int", .sig = "to_int(val) -> Int" },
+            .{ .name = "slice", .sig = "slice(str: String, start: Int, end: Int) -> String" },
+            .{ .name = "upcase", .sig = "upcase(str: String) -> String" },
+            .{ .name = "downcase", .sig = "downcase(str: String) -> String" },
+            .{ .name = "range", .sig = "range(start: Int, end: Int) -> [Int]" },
+            .{ .name = "head", .sig = "head(list: List)" },
+            .{ .name = "tail", .sig = "tail(list: List) -> List" },
+            .{ .name = "sort", .sig = "sort(list: [Int]) -> [Int]" },
+            .{ .name = "merge", .sig = "merge(a: Map, b: Map) -> Map" },
+            .{ .name = "values", .sig = "values(map: Map) -> List" },
+            .{ .name = "type_of", .sig = "type_of(val) -> Atom" },
+            .{ .name = "print", .sig = "print(val) -> val" },
+            .{ .name = "rem", .sig = "rem(a: Int, b: Int) -> Int" },
+            .{ .name = "abs", .sig = "abs(n: Int) -> Int" },
+            .{ .name = "nil?", .sig = "nil?(val) -> Bool" },
+            .{ .name = "elem", .sig = "elem(collection, index: Int)" },
+            .{ .name = "floor", .sig = "floor(f: Float) -> Int" },
+            .{ .name = "ceil", .sig = "ceil(f: Float) -> Int" },
+            .{ .name = "round", .sig = "round(f: Float) -> Int" },
+            .{ .name = "not", .sig = "not(val) -> Bool" },
+            .{ .name = "size", .sig = "size(collection) -> Int" },
+            .{ .name = "empty?", .sig = "empty?(collection) -> Bool" },
+            .{ .name = "flat", .sig = "flat(list: [List]) -> List" },
+            .{ .name = "zip", .sig = "zip(a: List, b: List) -> [Tuple]" },
+            .{ .name = "uniq", .sig = "uniq(list: List) -> List" },
+            .{ .name = "sum", .sig = "sum(list: [Int]) -> Int" },
+            .{ .name = "map", .sig = "map(list: List, fn: Function) -> List" },
+            .{ .name = "filter", .sig = "filter(list: List, fn: Function) -> List" },
+            .{ .name = "reduce", .sig = "reduce(list: List, init, fn: Function)" },
+            .{ .name = "each", .sig = "each(list: List, fn: Function) -> :ok" },
         };
-        for (builtin_names) |name| {
-            if (startsWith(name, prefix)) {
+        for (builtin_sigs) |b| {
+            if (startsWith(b.name, prefix)) {
                 results.append(self.allocator, .{
-                    .label = std.fmt.allocPrint(self.allocator, "{s}()", .{name}) catch name,
-                    .insert = std.fmt.allocPrint(self.allocator, "{s}(", .{name}) catch name,
+                    .label = b.sig,
+                    .insert = std.fmt.allocPrint(self.allocator, "{s}(", .{b.name}) catch b.name,
                     .kind = .builtin,
-                    .score = prefixScore(name, prefix) + 10, // builtins rank after user vars
+                    .score = prefixScore(b.name, prefix) + 10,
                 }) catch {};
             }
         }
