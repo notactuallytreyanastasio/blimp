@@ -382,6 +382,75 @@ long long blimp_now(void) {
     return (long long)time(NULL);
 }
 
+// ── Canvas Event Log ─────────────────────────────────────
+// Records events for animated visualization replay.
+
+#define MAX_EVENTS 4096
+#define MAX_ATOM_NAMES 256
+
+typedef enum {
+    EVT_SPAWN,      // actor spawned: {actor_id, type_name}
+    EVT_SEND,       // message sent: {from_id, to_id, msg_atom_id}
+    EVT_STATE,      // state changed: {actor_id, field_count, fields...}
+} EventType;
+
+typedef struct {
+    EventType type;
+    int actor_id;
+    int target_id;
+    int atom_id;
+    const char *type_name;   // for spawn events
+    // State snapshot (for EVT_STATE)
+    int field_count;
+    long long field_vals[8];
+} CanvasEvent;
+
+static CanvasEvent event_log[MAX_EVENTS];
+static int event_count = 0;
+static int canvas_enabled = 0;
+
+// Atom name table: maps atom IDs to string names
+static const char *atom_names[MAX_ATOM_NAMES];
+static int atom_name_count = 0;
+
+// Actor type names (set at spawn time)
+static const char *actor_type_names[256];
+
+// Actor field names and counts (set by codegen)
+typedef struct {
+    const char **names;
+    int count;
+} ActorFieldInfo;
+static ActorFieldInfo actor_fields[256];
+
+void blimp_canvas_enable(void) {
+    canvas_enabled = 1;
+}
+
+void blimp_set_atom_name(int atom_id, const char *name) {
+    if (atom_id < MAX_ATOM_NAMES) {
+        atom_names[atom_id] = name;
+        if (atom_id >= atom_name_count) atom_name_count = atom_id + 1;
+    }
+}
+
+void blimp_set_actor_fields(int actor_id, const char **names, int count) {
+    if (actor_id < 256) {
+        actor_fields[actor_id].names = names;
+        actor_fields[actor_id].count = count;
+    }
+}
+
+static void log_event(CanvasEvent evt) {
+    if (!canvas_enabled || event_count >= MAX_EVENTS) return;
+    event_log[event_count++] = evt;
+}
+
+static const char *atom_name(int id) {
+    if (id >= 0 && id < atom_name_count && atom_names[id]) return atom_names[id];
+    return "?";
+}
+
 // ── Actor Runtime ────────────────────────────────────────
 
 #define MAX_ACTORS 256
@@ -562,6 +631,17 @@ int blimp_register_actor(void *state_ptr) {
     return id;
 }
 
+void blimp_set_actor_type(int actor_id, const char *type_name) {
+    if (actor_id < 256) {
+        actor_type_names[actor_id] = type_name;
+        log_event((CanvasEvent){
+            .type = EVT_SPAWN,
+            .actor_id = actor_id,
+            .type_name = type_name,
+        });
+    }
+}
+
 void blimp_set_handlers(int actor_id, void *handler_table, int count) {
     // Copy the handler table (the original is on the stack)
     HandlerEntry *copy = (HandlerEntry *)malloc(count * sizeof(HandlerEntry));
@@ -605,6 +685,14 @@ static int scheduler_step(void) {
             msg->reply_ready = 1;
             mailbox_dequeue(&a->mailbox);
 
+            // Log state snapshot after handler
+            if (canvas_enabled && actor_fields[aid].count > 0) {
+                CanvasEvent evt = { .type = EVT_STATE, .actor_id = aid, .field_count = actor_fields[aid].count };
+                long long *state = (long long *)a->state_ptr;
+                for (int f = 0; f < evt.field_count && f < 8; f++) evt.field_vals[f] = state[f];
+                log_event(evt);
+            }
+
             current_actor_id = prev_actor;
             a->is_processing = 0;
             a->status = ACTOR_IDLE;
@@ -635,6 +723,14 @@ static int scheduler_step(void) {
 long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long *args) {
     Actor *actor = &actors[actor_id];
 
+    // Log the send event
+    log_event((CanvasEvent){
+        .type = EVT_SEND,
+        .actor_id = current_actor_id,
+        .target_id = actor_id,
+        .atom_id = handler_atom_id,
+    });
+
     // Enqueue
     Message *msg = mailbox_enqueue(&actor->mailbox);
     if (!msg) return 0;
@@ -652,6 +748,15 @@ long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long
         msg->reply_value = result;
         msg->reply_ready = 1;
         mailbox_dequeue(&actor->mailbox);
+
+        // Log state snapshot after self-send handler
+        if (canvas_enabled && actor_fields[actor_id].count > 0) {
+            CanvasEvent evt = { .type = EVT_STATE, .actor_id = actor_id, .field_count = actor_fields[actor_id].count };
+            long long *state = (long long *)actor->state_ptr;
+            for (int f = 0; f < evt.field_count && f < 8; f++) evt.field_vals[f] = state[f];
+            log_event(evt);
+        }
+
         return result;
     }
 
@@ -702,4 +807,40 @@ void blimp_scheduler_run(void) {
         int processed = scheduler_step();
         if (processed == 0) break;
     }
+}
+
+// ── Canvas JSON export ──────────────────────────────────
+
+void blimp_canvas_dump(const char *path) {
+    if (!canvas_enabled || event_count == 0) return;
+
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "blimp: cannot write canvas to %s\n", path); return; }
+
+    fprintf(f, "[\n");
+    for (int i = 0; i < event_count; i++) {
+        CanvasEvent *e = &event_log[i];
+        if (i > 0) fprintf(f, ",\n");
+        switch (e->type) {
+            case EVT_SPAWN:
+                fprintf(f, "  {\"t\":\"spawn\",\"id\":%d,\"type\":\"%s\"}", e->actor_id, e->type_name ? e->type_name : "?");
+                break;
+            case EVT_SEND:
+                fprintf(f, "  {\"t\":\"send\",\"from\":%d,\"to\":%d,\"msg\":\"%s\"}", e->actor_id, e->target_id, atom_name(e->atom_id));
+                break;
+            case EVT_STATE: {
+                fprintf(f, "  {\"t\":\"state\",\"id\":%d,\"fields\":{", e->actor_id);
+                ActorFieldInfo *fi = &actor_fields[e->actor_id];
+                for (int j = 0; j < e->field_count && j < 8; j++) {
+                    if (j > 0) fprintf(f, ",");
+                    const char *fname = (fi->names && j < fi->count) ? fi->names[j] : "?";
+                    fprintf(f, "\"%s\":%lld", fname, e->field_vals[j]);
+                }
+                fprintf(f, "}}");
+                break;
+            }
+        }
+    }
+    fprintf(f, "\n]\n");
+    fclose(f);
 }

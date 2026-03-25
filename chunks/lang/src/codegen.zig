@@ -94,6 +94,7 @@ pub const Codegen = struct {
     scope: Scope,
     atoms: AtomTable,
     actors: std.ArrayList(ActorDescriptor) = .empty,
+    canvas_mode: bool = false,
     // Cached type refs
     i64_type: c.LLVMTypeRef,
     i32_type: c.LLVMTypeRef,
@@ -886,9 +887,73 @@ pub const Codegen = struct {
         // Build and register handler table
         self.emitHandlerTable(actor, actor_id);
 
+        // Canvas: register actor type name and field info
+        if (self.canvas_mode) {
+            self.emitCanvasActorInfo(actor, actor_id);
+        }
+
         // Return actor_id as i64
         const id_i64 = c.LLVMBuildZExt(self.builder, actor_id, self.i64_type, "id_wide");
         return .{ .val = id_i64, .tag = .actor_ref };
+    }
+
+    /// Emit canvas actor info: type name and field names.
+    fn emitCanvasActorInfo(self: *Codegen, actor: *const ActorDescriptor, actor_id: c.LLVMValueRef) void {
+        // blimp_set_actor_type(actor_id, "TypeName")
+        const type_str = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(actor.name), "type_name");
+        const set_type_fn = self.getRuntimeFn("blimp_set_actor_type", &.{ self.i32_type, self.ptr_type }, self.void_type);
+        var type_args = [_]c.LLVMValueRef{ actor_id, type_str };
+        var type_pt = [_]c.LLVMTypeRef{ self.i32_type, self.ptr_type };
+        _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &type_pt, 2, 0), set_type_fn, &type_args, 2, "");
+
+        // Build field name array as global and call blimp_set_actor_fields
+        if (actor.state_field_count > 0) {
+            // Create global string ptrs for each field name
+            const field_ptrs = self.allocator.alloc(c.LLVMValueRef, actor.state_field_count) catch return;
+            for (0..actor.state_field_count) |i| {
+                field_ptrs[i] = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(actor.state_field_names[i]), "fname");
+            }
+            // Create a global array of pointers
+            const arr_type = c.LLVMArrayType2(self.ptr_type, actor.state_field_count);
+            const arr_alloca = c.LLVMBuildAlloca(self.builder, arr_type, "field_names");
+            for (0..actor.state_field_count) |i| {
+                var indices = [_]c.LLVMValueRef{
+                    c.LLVMConstInt(self.i32_type, 0, 0),
+                    c.LLVMConstInt(self.i32_type, @intCast(i), 0),
+                };
+                const gep = c.LLVMBuildGEP2(self.builder, arr_type, arr_alloca, &indices, 2, "fn_ptr");
+                _ = c.LLVMBuildStore(self.builder, field_ptrs[i], gep);
+            }
+            const set_fields_fn = self.getRuntimeFn("blimp_set_actor_fields", &.{ self.i32_type, self.ptr_type, self.i32_type }, self.void_type);
+            var fields_args = [_]c.LLVMValueRef{ actor_id, arr_alloca, c.LLVMConstInt(self.i32_type, actor.state_field_count, 0) };
+            var fields_pt = [_]c.LLVMTypeRef{ self.i32_type, self.ptr_type, self.i32_type };
+            _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &fields_pt, 3, 0), set_fields_fn, &fields_args, 3, "");
+        }
+    }
+
+    /// Emit canvas enable + atom table registration at start of main.
+    fn emitCanvasSetup(self: *Codegen) void {
+        // blimp_canvas_enable()
+        const enable_fn = self.getRuntimeFn("blimp_canvas_enable", &.{}, self.void_type);
+        _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &[_]c.LLVMTypeRef{}, 0, 0), enable_fn, &[_]c.LLVMValueRef{}, 0, "");
+
+        // Register all atom names
+        const set_atom_fn = self.getRuntimeFn("blimp_set_atom_name", &.{ self.i32_type, self.ptr_type }, self.void_type);
+        for (self.atoms.names.items, 0..) |name, i| {
+            const str = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(name), "atom");
+            var args = [_]c.LLVMValueRef{ c.LLVMConstInt(self.i32_type, @intCast(i), 0), str };
+            var pt = [_]c.LLVMTypeRef{ self.i32_type, self.ptr_type };
+            _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &pt, 2, 0), set_atom_fn, &args, 2, "");
+        }
+    }
+
+    /// Emit canvas dump call at end of main.
+    fn emitCanvasDump(self: *Codegen, path: [*:0]const u8) void {
+        const dump_fn = self.getRuntimeFn("blimp_canvas_dump", &.{self.ptr_type}, self.void_type);
+        const path_str = c.LLVMBuildGlobalStringPtr(self.builder, path, "canvas_path");
+        var args = [_]c.LLVMValueRef{path_str};
+        var pt = [_]c.LLVMTypeRef{self.ptr_type};
+        _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &pt, 1, 0), dump_fn, &args, 1, "");
     }
 
     /// %Actor{field: val, ...} -- sugar for spawn with overrides.
@@ -1681,10 +1746,21 @@ pub const Codegen = struct {
         // Forward-declare all def functions so order doesn't matter
         self.forwardDeclareDefs(nodes);
 
+        // Canvas mode: enable event logging at program start
+        if (self.canvas_mode) {
+            const enable_fn = self.getRuntimeFn("blimp_canvas_enable", &.{}, self.void_type);
+            _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &[_]c.LLVMTypeRef{}, 0, 0), enable_fn, &[_]c.LLVMValueRef{}, 0, "");
+        }
+
         // Compile all nodes; track the last result for printing
         var last: ?TaggedVal = null;
         for (nodes) |node| {
             last = try self.compileExpr(node);
+        }
+
+        // Canvas mode: register atom names (must be after compilation interns all atoms)
+        if (self.canvas_mode) {
+            self.emitCanvasSetup();
         }
 
         // Drain any remaining async messages
@@ -1695,6 +1771,11 @@ pub const Codegen = struct {
         // Print the last result
         if (last) |result| {
             self.emitPrint(result);
+        }
+
+        // Canvas mode: dump event log
+        if (self.canvas_mode) {
+            self.emitCanvasDump("blimp_canvas.json");
         }
 
         // Return 0
