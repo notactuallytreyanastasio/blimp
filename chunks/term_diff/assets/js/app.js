@@ -31,7 +31,8 @@ let Hooks = {...colocatedHooks}
 
 Hooks.AutoScroll = {
   updated() {
-    let hot = this.el.querySelector(".diff-hot-add, .diff-hot-del")
+    if (this.el.dataset.following !== "true") return
+    let hot = this.el.querySelector(".diff-hot")
     if (hot) {
       hot.scrollIntoView({ behavior: "smooth", block: "center" })
     }
@@ -128,6 +129,7 @@ Hooks.LineSelect = {
     })
   }
 }
+
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {

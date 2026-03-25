@@ -25,15 +25,21 @@
   }
 }
 
-/* Follow mode hot highlights that fade */
-@layer components {
-  .diff-hot-add {
-    background-color: #bbf7d0;
-    transition: background-color 2s ease;
-  }
+/* Diff line backgrounds - !important to beat Tailwind layer specificity */
+.diff-line-add {
+  background-color: rgba(34, 197, 94, 0.18) !important;
+}
 
-  .diff-hot-del {
-    background-color: #fecaca;
-    transition: background-color 2s ease;
-  }
+.diff-line-del {
+  background-color: rgba(239, 68, 68, 0.18) !important;
+}
+
+.diff-line-add.diff-hot {
+  background-color: rgba(34, 197, 94, 0.4) !important;
+  transition: background-color 2s ease;
+}
+
+.diff-line-del.diff-hot {
+  background-color: rgba(239, 68, 68, 0.4) !important;
+  transition: background-color 2s ease;
 }
