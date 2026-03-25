@@ -524,12 +524,28 @@ function handleKey(e) {
   if (!compEl) {
     if (e.key === 'ArrowUp' && !buffer && inputEl.selectionStart === 0) {
       e.preventDefault();
-      if (historyIdx > 0) { historyIdx--; inputEl.value = cmdHistory[historyIdx]; }
+      if (historyIdx > 0) {
+        historyIdx--;
+        inputEl.value = cmdHistory[historyIdx];
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 300) + 'px';
+        inputEl.setSelectionRange(0, 0);
+        scroll.scrollTop = scroll.scrollHeight;
+      }
     }
     if (e.key === 'ArrowDown' && !buffer) {
       e.preventDefault();
-      if (historyIdx < cmdHistory.length - 1) { historyIdx++; inputEl.value = cmdHistory[historyIdx]; }
-      else { historyIdx = cmdHistory.length; inputEl.value = ''; }
+      if (historyIdx < cmdHistory.length - 1) {
+        historyIdx++;
+        inputEl.value = cmdHistory[historyIdx];
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 300) + 'px';
+        scroll.scrollTop = scroll.scrollHeight;
+      } else {
+        historyIdx = cmdHistory.length;
+        inputEl.value = '';
+        inputEl.style.height = 'auto';
+      }
     }
   }
 }
