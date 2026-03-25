@@ -291,16 +291,16 @@ The 846-line C runtime provides:
 
 ## The Marketplace
 
-The flagship example is a marketplace simulation with 12 actors across 6 types, all under the `Marketplace.*` namespace:
+The flagship example is a marketplace simulation with 12 actors across 7 types. The supervision hierarchy reflects real ownership -- your account and wallet belong to you, not to the marketplace:
 
 ```
-actor Marketplace do ... end                  # The world. Tracks epochs.
-
-actor Marketplace.Account do ... end          # Bank account. Guarded withdrawals.
-actor Marketplace.Wallet do ... end           # Cash on hand. Easy to steal.
-actor Marketplace.AccountHolder do ... end    # Person. Wallet-first buying, cash withdrawals.
-actor Marketplace.Institution do ... end      # Business. Charges customers, pays suppliers.
-actor Marketplace.Thief do ... end            # Pickpockets wallets, hacks accounts.
+Marketplace                                   # The world. Tracks epochs.
+  Marketplace.AccountHolder                   # Person. Wallet-first buying.
+    Marketplace.AccountHolder.Account           # Their bank account.
+    Marketplace.AccountHolder.Wallet            # Their cash on hand.
+  Marketplace.Institution                     # Business. Charges customers.
+    Marketplace.Institution.Account             # Business bank account.
+  Marketplace.Thief                           # Pickpockets wallets, hacks accounts.
 ```
 
 The simulation runs 5 days: commerce between people and businesses, cash withdrawals from accounts to wallets, theft attempts (some blocked by insufficient funds), inter-business supplier payments. An `AccountHolder` buying something tries their wallet first, falls back to their bank account. A `Thief` pickpocketing a wallet is easy; hacking a bank account is hard.

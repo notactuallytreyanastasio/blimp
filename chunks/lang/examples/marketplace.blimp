@@ -1,10 +1,13 @@
 # Marketplace Simulation
-# Everything lives under the Marketplace actor -- the world.
-# Marketplace.Account is the bank account (institutional money).
-# Marketplace.Wallet is cash on hand (vulnerable to theft).
-# Marketplace.AccountHolder ties a person to their account + wallet.
-# Marketplace.Institution is a business that holds accounts.
-# Marketplace.Thief targets wallets (easy) and accounts (hard).
+#
+# Hierarchy:
+#   Marketplace
+#     Marketplace.AccountHolder          (person)
+#       Marketplace.AccountHolder.Account   (their bank account)
+#       Marketplace.AccountHolder.Wallet    (their cash on hand)
+#     Marketplace.Institution            (business)
+#       Marketplace.Institution.Account     (business bank account)
+#     Marketplace.Thief                  (villain)
 
 # ── The world ──
 
@@ -20,9 +23,9 @@ actor Marketplace do
   end
 end
 
-# ── Bank account: institutional, harder to steal from ──
+# ── Bank account: supervised by whoever owns it ──
 
-actor Marketplace.Account do
+actor Marketplace.AccountHolder.Account do
   state balance: Int :: 0
   state owner: String :: "unknown"
   state tx: Int :: 0
@@ -46,9 +49,9 @@ actor Marketplace.Account do
   end
 end
 
-# ── Wallet: cash on hand, easier to steal ──
+# ── Wallet: cash on hand, supervised by the account holder ──
 
-actor Marketplace.Wallet do
+actor Marketplace.AccountHolder.Wallet do
   state cash: Int :: 0
   state owner: String :: "unknown"
   on :add(amount: Int) when amount > 0 do
@@ -68,7 +71,7 @@ actor Marketplace.Wallet do
   end
 end
 
-# ── AccountHolder: a person with both an account and a wallet ──
+# ── AccountHolder: owns an account and a wallet ──
 
 actor Marketplace.AccountHolder do
   state name: String :: "unknown"
@@ -81,7 +84,6 @@ actor Marketplace.AccountHolder do
     wallet_result = wallet <- :take(amount) orelse :short
     situation wallet_result do
       :short ->
-        # Not enough cash, try the bank account
         account <- :withdraw(amount)
         become total_spent: total_spent + amount
         reply :from_account
@@ -115,7 +117,30 @@ actor Marketplace.AccountHolder do
   end
 end
 
-# ── Institution: a business with a big account ──
+# ── Institution account: supervised by the institution ──
+
+actor Marketplace.Institution.Account do
+  state balance: Int :: 0
+  state owner: String :: "unknown"
+  state tx: Int :: 0
+  on :deposit(amount: Int) when amount > 0 do
+    become balance: balance + amount, tx: tx + 1
+    reply balance + amount
+  end
+  on :withdraw(amount: Int) when amount > 0 do
+    situation balance - amount do
+      n when n >= 0 ->
+        become balance: n, tx: tx + 1
+        reply n
+      _ -> bubble :insufficient_funds
+    end
+  end
+  on :balance -> Int do
+    reply balance
+  end
+end
+
+# ── Institution: a business that owns an account ──
 
 actor Marketplace.Institution do
   state name: String :: "unknown"
@@ -194,20 +219,20 @@ end
 # Boot the world
 market = spawn Marketplace
 
-# People
-alice_acct = %Marketplace.Account{balance: 1000, owner: "alice"}
-alice_wallet = %Marketplace.Wallet{cash: 200, owner: "alice"}
+# People -- account and wallet are children of the account holder
+alice_acct = %Marketplace.AccountHolder.Account{balance: 1000, owner: "alice"}
+alice_wallet = %Marketplace.AccountHolder.Wallet{cash: 200, owner: "alice"}
 alice = %Marketplace.AccountHolder{name: "alice", account: alice_acct, wallet: alice_wallet}
 
-bob_acct = %Marketplace.Account{balance: 500, owner: "bob"}
-bob_wallet = %Marketplace.Wallet{cash: 50, owner: "bob"}
+bob_acct = %Marketplace.AccountHolder.Account{balance: 500, owner: "bob"}
+bob_wallet = %Marketplace.AccountHolder.Wallet{cash: 50, owner: "bob"}
 bob = %Marketplace.AccountHolder{name: "bob", account: bob_acct, wallet: bob_wallet}
 
-# Businesses
-shop_acct = %Marketplace.Account{balance: 5000, owner: "shop"}
+# Businesses -- account is a child of the institution
+shop_acct = %Marketplace.Institution.Account{balance: 5000, owner: "shop"}
 shop = %Marketplace.Institution{name: "shop", account: shop_acct}
 
-cafe_acct = %Marketplace.Account{balance: 2000, owner: "cafe"}
+cafe_acct = %Marketplace.Institution.Account{balance: 2000, owner: "cafe"}
 cafe = %Marketplace.Institution{name: "cafe", account: cafe_acct}
 
 # The thief
@@ -216,11 +241,8 @@ thief = spawn Marketplace.Thief
 # ── Day 1: Normal commerce ──
 market <- :tick
 
-# Alice goes shopping
 shop <- :charge(alice, 50)
 cafe <- :charge(alice, 15)
-
-# Bob goes shopping
 shop <- :charge(bob, 30)
 cafe <- :charge(bob, 8)
 
@@ -230,18 +252,14 @@ market <- :tick
 alice <- :withdraw_cash(100)
 bob <- :withdraw_cash(50)
 
-# More shopping (wallet first now)
 shop <- :charge(alice, 25)
 cafe <- :charge(bob, 12)
 
 # ── Day 3: The thief strikes ──
 market <- :tick
 
-# Easy targets: wallets
 thief <- :pickpocket(alice_wallet, 75)
 thief <- :pickpocket(bob_wallet, 100)
-
-# Hard target: bank account
 thief <- :hack(alice_acct, 500)
 thief <- :hack(bob_acct, 1000)
 
@@ -249,8 +267,6 @@ thief <- :hack(bob_acct, 1000)
 market <- :tick
 
 shop <- :pay_supplier(cafe, 200)
-
-# More shopping
 shop <- :charge(alice, 40)
 cafe <- :charge(bob, 20)
 
