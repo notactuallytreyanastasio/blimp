@@ -63,6 +63,7 @@ pub const BuiltinRegistry = struct {
         reg.register("ceil", &builtinCeil);
         reg.register("round", &builtinRound);
         reg.register("not", &builtinNot);
+        reg.register("random", &builtinRandom);
         reg.register("size", &builtinSize);
         reg.register("empty?", &builtinIsEmpty);
         reg.register("flat", &builtinFlat);
@@ -777,6 +778,29 @@ fn builtinSum(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     }
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = total };
+    return result;
+}
+
+/// random(min, max) => random integer in [min, max] inclusive
+var random_state: u64 = 0x853c49e6748fea9b;
+
+fn builtinRandom(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .integer or args[1].* != .integer) return error.TypeError;
+    const min_val = args[0].integer;
+    const max_val = args[1].integer;
+    if (max_val < min_val) return error.TypeError;
+
+    // xorshift64
+    random_state ^= random_state << 13;
+    random_state ^= random_state >> 7;
+    random_state ^= random_state << 17;
+
+    const range: u64 = @intCast(max_val - min_val + 1);
+    const val = min_val + @as(i64, @intCast(random_state % range));
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .integer = val };
     return result;
 }
 

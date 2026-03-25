@@ -1,0 +1,110 @@
+# Marketplace Simulation
+# 5 actor types interacting with randomness
+
+actor Account do
+  state balance: Int :: 0
+  state owner: String :: "unknown"
+  state tx: Int :: 0
+  on :deposit(amount) when amount > 0 do
+    become balance: balance + amount, tx: tx + 1
+    reply balance + amount
+  end
+  on :withdraw(amount) when amount > 0 do
+    situation balance - amount do
+      n when n >= 0 ->
+        become balance: n, tx: tx + 1
+        reply n
+      _ -> bubble :insufficient_funds
+    end
+  end
+  on :balance do
+    reply balance
+  end
+  on :info do
+    reply %{owner: owner, balance: balance, tx: tx}
+  end
+end
+
+actor Network do
+  state ok: Int :: 0
+  state fail: Int :: 0
+  on :process(amount) do
+    situation random(1, 10) do
+      1 -> become fail: fail + 1
+        bubble :network_error
+      2 -> become fail: fail + 1
+        bubble :network_error
+      _ -> become ok: ok + 1
+        reply :approved
+    end
+  end
+  on :stats do
+    reply %{ok: ok, fail: fail}
+  end
+end
+
+actor Thief do
+  state stolen: Int :: 0
+  state attempts: Int :: 0
+  on :steal(account, amount) do
+    become attempts: attempts + 1
+    try do
+      account <- :withdraw(amount)
+      become stolen: stolen + amount
+      reply :stolen
+    catch err do
+      reply :blocked
+    end
+  end
+  on :report do
+    reply %{stolen: stolen, attempts: attempts}
+  end
+end
+
+# Set up
+net = spawn Network
+thief = spawn Thief
+alice = %Account{balance: 500, owner: "alice"}
+bob = %Account{balance: 300, owner: "bob"}
+charlie = %Account{balance: 1000, owner: "charlie"}
+
+# Run 15 rounds of activity
+for round in range(1, 15) do
+  # Random person buys something (5-50 cost)
+  who = random(1, 3)
+  cost = random(5, 50)
+
+  situation who do
+    1 -> try do
+        net <- :process(cost)
+        alice <- :withdraw(cost)
+      catch e do
+        :failed
+      end
+    2 -> try do
+        net <- :process(cost)
+        bob <- :withdraw(cost)
+      catch e do
+        :failed
+      end
+    _ -> try do
+        net <- :process(cost)
+        charlie <- :withdraw(cost)
+      catch e do
+        :failed
+      end
+  end
+
+  # Thief acts ~20% of the time
+  situation random(1, 5) do
+    1 -> thief <- :steal(alice, random(10, 30))
+    _ -> :quiet
+  end
+end
+
+# Final report
+alice <- :info
+bob <- :info
+charlie <- :info
+net <- :stats
+thief <- :report

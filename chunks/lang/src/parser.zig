@@ -418,10 +418,10 @@ pub const Parser = struct {
         // Parse body statements until next branch or end
         var body: std.ArrayList(Node) = .empty;
         while (self.current.kind != .kw_end and
-            self.current.kind != .eof and
-            self.current.kind != .hole and
-            self.current.kind != .atom)
+            self.current.kind != .eof)
         {
+            // Hole at current position (not after newline) means new branch
+            if (self.current.kind == .hole) break;
             // If we see a newline, check if the next line starts a new branch
             if (self.current.kind == .newline) {
                 self.skipNewlines();

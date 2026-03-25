@@ -93,6 +93,7 @@ pub const CompletionEngine = struct {
             .{ .name = "filter", .sig = "filter(list: List, fn: Function) -> List" },
             .{ .name = "reduce", .sig = "reduce(list: List, init, fn: Function)" },
             .{ .name = "each", .sig = "each(list: List, fn: Function) -> :ok" },
+            .{ .name = "random", .sig = "random(min: Int, max: Int) -> Int" },
         };
         for (builtin_sigs) |b| {
             if (startsWith(b.name, prefix)) {
