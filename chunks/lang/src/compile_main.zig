@@ -189,7 +189,7 @@ fn buildCanvasHtml(allocator: std.mem.Allocator, json_data: []const u8, source: 
         \\* { margin: 0; padding: 0; box-sizing: border-box; }
         \\body { background: #0e0e1a; overflow: hidden; font-family: monospace; }
         \\canvas { display: block; width: 100vw; height: 100vh; }
-        \\#source { position: fixed; top: 12px; left: 12px; color: #556; font-size: 11px;
+        \\#source { position: fixed; top: 12px; left: 12px; color: #fff; font-size: 11px;
         \\  white-space: pre; max-height: 40vh; overflow: auto; opacity: 0.6; z-index: 10;
         \\  background: rgba(14,14,26,0.85); padding: 8px; border-radius: 4px; }
         \\#info { position: fixed; bottom: 12px; left: 12px; color: #668; font-size: 11px; z-index: 10; }
@@ -351,12 +351,12 @@ fn buildCanvasHtml(allocator: std.mem.Allocator, json_data: []const u8, source: 
         \\  else { ctx.strokeStyle = col(a.hash, 0, 0.6); ctx.lineWidth = 1.5; }
         \\  ctx.stroke();
         \\  // Label
-        \\  ctx.fillStyle = '#556'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+        \\  ctx.fillStyle = '#fff'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
         \\  ctx.fillText(a.type, 0, r + 13);
         \\  // State text
         \\  let fields = Object.entries(a.fields);
         \\  if (fields.length > 0) {
-        \\    ctx.fillStyle = '#445'; ctx.font = '8px monospace';
+        \\    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '10px monospace';
         \\    fields.forEach(([k,v], i) => ctx.fillText(k + ': ' + v, 0, r + 23 + i * 10));
         \\  }
         \\  ctx.restore();
@@ -378,6 +378,29 @@ fn buildCanvasHtml(allocator: std.mem.Allocator, json_data: []const u8, source: 
         \\  ctx.restore();
         \\}
         \\
+        \\function drawParentLines() {
+        \\  let ids = Object.keys(actors);
+        \\  ctx.save();
+        \\  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        \\  ctx.lineWidth = 1;
+        \\  ctx.setLineDash([3, 6]);
+        \\  for (let id of ids) {
+        \\    let a = actors[id];
+        \\    let dot = a.type.lastIndexOf('.');
+        \\    if (dot < 0) continue;
+        \\    let parentType = a.type.substring(0, dot);
+        \\    // Find the parent actor by type name
+        \\    for (let pid of ids) {
+        \\      if (actors[pid].type === parentType) {
+        \\        let p = actors[pid];
+        \\        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(a.x, a.y); ctx.stroke();
+        \\        break;
+        \\      }
+        \\    }
+        \\  }
+        \\  ctx.restore();
+        \\}
+        \\
         \\function draw() {
         \\  let now = performance.now();
         \\  processEvents();
@@ -388,6 +411,8 @@ fn buildCanvasHtml(allocator: std.mem.Allocator, json_data: []const u8, source: 
         \\  for (let x = 0; x < W; x += 30) for (let y = 0; y < H; y += 30) ctx.fillRect(x, y, 1, 1);
         \\  let bx = W * 0.12, by = H * 0.5;
         \\  drawBlob(bx, by, now);
+        \\  // Parent-child lines (behind hexagons)
+        \\  drawParentLines();
         \\  Object.values(actors).forEach(a => drawHex(a, now));
         \\  // Rays
         \\  for (let i = rays.length - 1; i >= 0; i--) {

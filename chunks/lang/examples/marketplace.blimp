@@ -1,14 +1,36 @@
-# Marketplace Simulation - simplified for REPL compatibility
+# Marketplace Simulation
+# Everything lives under the Marketplace actor -- the world.
+# Marketplace.Account is the bank account (institutional money).
+# Marketplace.Wallet is cash on hand (vulnerable to theft).
+# Marketplace.AccountHolder ties a person to their account + wallet.
+# Marketplace.Institution is a business that holds accounts.
+# Marketplace.Thief targets wallets (easy) and accounts (hard).
 
-actor Account do
+# ── The world ──
+
+actor Marketplace do
+  state name: String :: "bazaar"
+  state epoch: Int :: 0
+  on :tick -> Int do
+    become epoch: epoch + 1
+    reply epoch
+  end
+  on :epoch -> Int do
+    reply epoch
+  end
+end
+
+# ── Bank account: institutional, harder to steal from ──
+
+actor Marketplace.Account do
   state balance: Int :: 0
   state owner: String :: "unknown"
   state tx: Int :: 0
-  on :deposit(amount) when amount > 0 do
+  on :deposit(amount: Int) when amount > 0 do
     become balance: balance + amount, tx: tx + 1
     reply balance + amount
   end
-  on :withdraw(amount) when amount > 0 do
+  on :withdraw(amount: Int) when amount > 0 do
     situation balance - amount do
       n when n >= 0 ->
         become balance: n, tx: tx + 1
@@ -16,7 +38,7 @@ actor Account do
       _ -> bubble :insufficient_funds
     end
   end
-  on :balance do
+  on :balance -> Int do
     reply balance
   end
   on :info do
@@ -24,52 +46,226 @@ actor Account do
   end
 end
 
-actor Thief do
-  state stolen: Int :: 0
-  state attempts: Int :: 0
-  on :steal(account, amount) do
-    become attempts: attempts + 1
+# ── Wallet: cash on hand, easier to steal ──
+
+actor Marketplace.Wallet do
+  state cash: Int :: 0
+  state owner: String :: "unknown"
+  on :add(amount: Int) when amount > 0 do
+    become cash: cash + amount
+    reply cash + amount
+  end
+  on :take(amount: Int) when amount > 0 do
+    situation cash - amount do
+      n when n >= 0 ->
+        become cash: n
+        reply n
+      _ -> bubble :empty_wallet
+    end
+  end
+  on :cash -> Int do
+    reply cash
+  end
+end
+
+# ── AccountHolder: a person with both an account and a wallet ──
+
+actor Marketplace.AccountHolder do
+  state name: String :: "unknown"
+  state account: Int :: 0
+  state wallet: Int :: 0
+  state total_spent: Int :: 0
+
+  # Pay from wallet first, fall back to account
+  on :buy(amount: Int) when amount > 0 do
+    wallet_result = wallet <- :take(amount) orelse :short
+    situation wallet_result do
+      :short ->
+        # Not enough cash, try the bank account
+        account <- :withdraw(amount)
+        become total_spent: total_spent + amount
+        reply :from_account
+      _ ->
+        become total_spent: total_spent + amount
+        reply :from_wallet
+    end
+  end
+
+  # Deposit goes to account
+  on :deposit(amount: Int) when amount > 0 do
+    account <- :deposit(amount)
+    reply :ok
+  end
+
+  # Withdraw cash from account into wallet
+  on :withdraw_cash(amount: Int) when amount > 0 do
     result = account <- :withdraw(amount) orelse :blocked
     situation result do
       :blocked -> reply :blocked
       _ ->
-        become stolen: stolen + amount
-        reply :stolen
+        wallet <- :add(amount)
+        reply :ok
     end
   end
-  on :report do
-    reply %{stolen: stolen, attempts: attempts}
+
+  on :status do
+    acct_bal = account <- :balance
+    wallet_cash = wallet <- :cash
+    reply %{name: name, account: acct_bal, wallet: wallet_cash, spent: total_spent}
   end
 end
 
-# Set up
-alice = %Account{balance: 500, owner: "alice"}
-bob = %Account{balance: 300, owner: "bob"}
-thief = spawn Thief
+# ── Institution: a business with a big account ──
 
-# Round 1: Alice buys stuff
-alice <- :withdraw(25)
-alice <- :withdraw(10)
-alice <- :withdraw(50)
+actor Marketplace.Institution do
+  state name: String :: "unknown"
+  state account: Int :: 0
+  state revenue: Int :: 0
 
-# Round 2: Bob buys stuff
-bob <- :withdraw(15)
-bob <- :withdraw(30)
+  on :charge(customer: Int, amount: Int) when amount > 0 do
+    customer <- :buy(amount)
+    account <- :deposit(amount)
+    become revenue: revenue + amount
+    reply :charged
+  end
 
-# Round 3: Thief strikes
-thief <- :steal(alice, 100)
-thief <- :steal(bob, 500)
+  on :pay_supplier(supplier: Int, amount: Int) when amount > 0 do
+    result = account <- :withdraw(amount) orelse :broke
+    situation result do
+      :broke -> reply :broke
+      _ ->
+        supplier <- :deposit(amount)
+        reply :paid
+    end
+  end
 
-# Round 4: More activity
-alice <- :deposit(200)
-alice <- :withdraw(75)
-bob <- :deposit(100)
+  on :revenue -> Int do
+    reply revenue
+  end
 
-# Round 5: Thief again
-thief <- :steal(alice, 50)
-thief <- :steal(bob, 25)
+  on :status do
+    bal = account <- :balance
+    reply %{name: name, balance: bal, revenue: revenue}
+  end
+end
 
-# Final report
-alice <- :info
-bob <- :info
+# ── Thief: targets wallets (easy) and accounts (hard) ──
+
+actor Marketplace.Thief do
+  state stolen: Int :: 0
+  state attempts: Int :: 0
+  state blocked: Int :: 0
+
+  on :pickpocket(wallet: Int, amount: Int) do
+    become attempts: attempts + 1
+    result = wallet <- :take(amount) orelse :missed
+    situation result do
+      :missed ->
+        become blocked: blocked + 1
+        reply :missed
+      _ ->
+        become stolen: stolen + amount
+        reply :got_it
+    end
+  end
+
+  on :hack(account: Int, amount: Int) do
+    become attempts: attempts + 1
+    result = account <- :withdraw(amount) orelse :blocked
+    situation result do
+      :blocked ->
+        become blocked: blocked + 1
+        reply :blocked
+      _ ->
+        become stolen: stolen + amount
+        reply :hacked
+    end
+  end
+
+  on :report do
+    reply %{stolen: stolen, attempts: attempts, blocked: blocked}
+  end
+end
+
+# ══════════════════════════════════════════════════════════
+# The simulation
+# ══════════════════════════════════════════════════════════
+
+# Boot the world
+market = spawn Marketplace
+
+# People
+alice_acct = %Marketplace.Account{balance: 1000, owner: "alice"}
+alice_wallet = %Marketplace.Wallet{cash: 200, owner: "alice"}
+alice = %Marketplace.AccountHolder{name: "alice", account: alice_acct, wallet: alice_wallet}
+
+bob_acct = %Marketplace.Account{balance: 500, owner: "bob"}
+bob_wallet = %Marketplace.Wallet{cash: 50, owner: "bob"}
+bob = %Marketplace.AccountHolder{name: "bob", account: bob_acct, wallet: bob_wallet}
+
+# Businesses
+shop_acct = %Marketplace.Account{balance: 5000, owner: "shop"}
+shop = %Marketplace.Institution{name: "shop", account: shop_acct}
+
+cafe_acct = %Marketplace.Account{balance: 2000, owner: "cafe"}
+cafe = %Marketplace.Institution{name: "cafe", account: cafe_acct}
+
+# The thief
+thief = spawn Marketplace.Thief
+
+# ── Day 1: Normal commerce ──
+market <- :tick
+
+# Alice goes shopping
+shop <- :charge(alice, 50)
+cafe <- :charge(alice, 15)
+
+# Bob goes shopping
+shop <- :charge(bob, 30)
+cafe <- :charge(bob, 8)
+
+# ── Day 2: Cash withdrawals ──
+market <- :tick
+
+alice <- :withdraw_cash(100)
+bob <- :withdraw_cash(50)
+
+# More shopping (wallet first now)
+shop <- :charge(alice, 25)
+cafe <- :charge(bob, 12)
+
+# ── Day 3: The thief strikes ──
+market <- :tick
+
+# Easy targets: wallets
+thief <- :pickpocket(alice_wallet, 75)
+thief <- :pickpocket(bob_wallet, 100)
+
+# Hard target: bank account
+thief <- :hack(alice_acct, 500)
+thief <- :hack(bob_acct, 1000)
+
+# ── Day 4: Business pays supplier ──
+market <- :tick
+
+shop <- :pay_supplier(cafe, 200)
+
+# More shopping
+shop <- :charge(alice, 40)
+cafe <- :charge(bob, 20)
+
+# ── Day 5: Thief tries again ──
+market <- :tick
+
+thief <- :pickpocket(alice_wallet, 50)
+thief <- :pickpocket(bob_wallet, 30)
+thief <- :hack(shop_acct, 2000)
+
+# ── Final report ──
+
+market <- :epoch
+alice <- :status
+bob <- :status
+shop <- :status
+cafe <- :status
 thief <- :report

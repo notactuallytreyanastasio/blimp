@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Blimp Canvas</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0e0e1a; overflow: hidden; font-family: monospace; }
+canvas { display: block; width: 100vw; height: 100vh; }
+#source { position: fixed; top: 12px; left: 12px; color: #fff; font-size: 11px;
+  white-space: pre; max-height: 40vh; overflow: auto; opacity: 0.6; z-index: 10;
+  background: rgba(14,14,26,0.85); padding: 8px; border-radius: 4px; }
+#info { position: fixed; bottom: 12px; left: 12px; color: #668; font-size: 11px; z-index: 10; }
+</style></head><body>
+<div id="source"></div>
+<canvas id="c"></canvas>
+<div id="info"></div>
+<script>
+const EVENTS =[
+  {"t":"spawn","id":0,"type":"Marketplace"},
+  {"t":"spawn","id":1,"type":"Marketplace.Account"},
+  {"t":"spawn","id":2,"type":"Marketplace.Wallet"},
+  {"t":"spawn","id":3,"type":"Marketplace.AccountHolder"},
+  {"t":"spawn","id":4,"type":"Marketplace.Account"},
+  {"t":"spawn","id":5,"type":"Marketplace.Wallet"},
+  {"t":"spawn","id":6,"type":"Marketplace.AccountHolder"},
+  {"t":"spawn","id":7,"type":"Marketplace.Account"},
+  {"t":"spawn","id":8,"type":"Marketplace.Institution"},
+  {"t":"spawn","id":9,"type":"Marketplace.Account"},
+  {"t":"spawn","id":10,"type":"Marketplace.Institution"},
+  {"t":"spawn","id":11,"type":"Marketplace.Thief"},
+  {"t":"send","from":-1,"to":0,"msg":"tick"},
+  {"t":"state","id":0,"fields":{"name":4309830636,"epoch":1}},
+  {"t":"send","from":-1,"to":8,"msg":"charge"},
+  {"t":"send","from":8,"to":3,"msg":"buy"},
+  {"t":"send","from":3,"to":2,"msg":"take"},
+  {"t":"state","id":2,"fields":{"cash":150,"owner":4309830744}},
+  {"t":"state","id":3,"fields":{"name":4309830744,"account":1,"wallet":2,"total_spent":50}},
+  {"t":"send","from":8,"to":7,"msg":"deposit"},
+  {"t":"state","id":7,"fields":{"balance":5050,"owner":4309830836,"tx":1}},
+  {"t":"state","id":8,"fields":{"name":4309830836,"account":7,"revenue":50}},
+  {"t":"send","from":-1,"to":10,"msg":"charge"},
+  {"t":"send","from":10,"to":3,"msg":"buy"},
+  {"t":"send","from":3,"to":2,"msg":"take"},
+  {"t":"state","id":2,"fields":{"cash":135,"owner":4309830744}},
+  {"t":"state","id":3,"fields":{"name":4309830744,"account":1,"wallet":2,"total_spent":65}},
+  {"t":"send","from":10,"to":9,"msg":"deposit"},
+  {"t":"state","id":9,"fields":{"balance":2015,"owner":4309830865,"tx":1}},
+  {"t":"state","id":10,"fields":{"name":4309830865,"account":9,"revenue":15}},
+  {"t":"send","from":-1,"to":8,"msg":"charge"},
+  {"t":"send","from":8,"to":6,"msg":"buy"},
+  {"t":"send","from":6,"to":5,"msg":"take"},
+  {"t":"state","id":5,"fields":{"cash":20,"owner":4309830832}},
+  {"t":"state","id":6,"fields":{"name":4309830832,"account":4,"wallet":5,"total_spent":30}},
+  {"t":"send","from":8,"to":7,"msg":"deposit"},
+  {"t":"state","id":7,"fields":{"balance":5080,"owner":4309830836,"tx":2}},
+  {"t":"state","id":8,"fields":{"name":4309830836,"account":7,"revenue":80}},
+  {"t":"send","from":-1,"to":10,"msg":"charge"},
+  {"t":"send","from":10,"to":6,"msg":"buy"},
+  {"t":"send","from":6,"to":5,"msg":"take"},
+  {"t":"state","id":5,"fields":{"cash":12,"owner":4309830832}},
+  {"t":"state","id":6,"fields":{"name":4309830832,"account":4,"wallet":5,"total_spent":38}},
+  {"t":"send","from":10,"to":9,"msg":"deposit"},
+  {"t":"state","id":9,"fields":{"balance":2023,"owner":4309830865,"tx":2}},
+  {"t":"state","id":10,"fields":{"name":4309830865,"account":9,"revenue":23}},
+  {"t":"send","from":-1,"to":0,"msg":"tick"},
+  {"t":"state","id":0,"fields":{"name":4309830636,"epoch":2}},
+  {"t":"send","from":-1,"to":3,"msg":"withdraw_cash"},
+  {"t":"send","from":3,"to":1,"msg":"withdraw"},
+  {"t":"state","id":1,"fields":{"balance":900,"owner":4309830744,"tx":1}},
+  {"t":"send","from":3,"to":2,"msg":"add"},
+  {"t":"state","id":2,"fields":{"cash":235,"owner":4309830744}},
+  {"t":"state","id":3,"fields":{"name":4309830744,"account":1,"wallet":2,"total_spent":65}},
+  {"t":"send","from":-1,"to":6,"msg":"withdraw_cash"},
+  {"t":"send","from":6,"to":4,"msg":"withdraw"},
+  {"t":"state","id":4,"fields":{"balance":450,"owner":4309830832,"tx":1}},
+  {"t":"send","from":6,"to":5,"msg":"add"},
+  {"t":"state","id":5,"fields":{"cash":62,"owner":4309830832}},
+  {"t":"state","id":6,"fields":{"name":4309830832,"account":4,"wallet":5,"total_spent":38}},
+  {"t":"send","from":-1,"to":8,"msg":"charge"},
+  {"t":"send","from":8,"to":3,"msg":"buy"},
+  {"t":"send","from":3,"to":2,"msg":"take"},
+  {"t":"state","id":2,"fields":{"cash":210,"owner":4309830744}},
+  {"t":"state","id":3,"fields":{"name":4309830744,"account":1,"wallet":2,"total_spent":90}},
+  {"t":"send","from":8,"to":7,"msg":"deposit"},
+  {"t":"state","id":7,"fields":{"balance":5105,"owner":4309830836,"tx":3}},
+  {"t":"state","id":8,"fields":{"name":4309830836,"account":7,"revenue":105}},
+  {"t":"send","from":-1,"to":10,"msg":"charge"},
+  {"t":"send","from":10,"to":6,"msg":"buy"},
+  {"t":"send","from":6,"to":5,"msg":"take"},
+  {"t":"state","id":5,"fields":{"cash":50,"owner":4309830832}},
+  {"t":"state","id":6,"fields":{"name":4309830832,"account":4,"wallet":5,"total_spent":50}},
+  {"t":"send","from":10,"to":9,"msg":"deposit"},
+  {"t":"state","id":9,"fields":{"balance":2035,"owner":4309830865,"tx":3}},
+  {"t":"state","id":10,"fields":{"name":4309830865,"account":9,"revenue":35}},
+  {"t":"send","from":-1,"to":0,"msg":"tick"},
+  {"t":"state","id":0,"fields":{"name":4309830636,"epoch":3}},
+  {"t":"send","from":-1,"to":11,"msg":"pickpocket"},
+  {"t":"send","from":11,"to":2,"msg":"take"},
+  {"t":"state","id":2,"fields":{"cash":135,"owner":4309830744}},
+  {"t":"state","id":11,"fields":{"stolen":75,"attempts":1,"blocked":0}},
+  {"t":"send","from":-1,"to":11,"msg":"pickpocket"},
+  {"t":"send","from":11,"to":5,"msg":"take"},
+  {"t":"state","id":5,"fields":{"cash":50,"owner":4309830832}},
+  {"t":"state","id":11,"fields":{"stolen":75,"attempts":2,"blocked":1}},
+  {"t":"send","from":-1,"to":11,"msg":"hack"},
+  {"t":"send","from":11,"to":1,"msg":"withdraw"},
+  {"t":"state","id":1,"fields":{"balance":400,"owner":4309830744,"tx":2}},
+  {"t":"state","id":11,"fields":{"stolen":575,"attempts":3,"blocked":1}},
+  {"t":"send","from":-1,"to":11,"msg":"hack"},
+  {"t":"send","from":11,"to":4,"msg":"withdraw"},
+  {"t":"state","id":4,"fields":{"balance":450,"owner":4309830832,"tx":1}},
+  {"t":"state","id":11,"fields":{"stolen":575,"attempts":4,"blocked":2}},
+  {"t":"send","from":-1,"to":0,"msg":"tick"},
+  {"t":"state","id":0,"fields":{"name":4309830636,"epoch":4}},
+  {"t":"send","from":-1,"to":8,"msg":"pay_supplier"},
+  {"t":"send","from":8,"to":7,"msg":"withdraw"},
+  {"t":"state","id":7,"fields":{"balance":4905,"owner":4309830836,"tx":4}},
+  {"t":"send","from":8,"to":10,"msg":"deposit"},
+  {"t":"state","id":10,"fields":{"name":4309830865,"account":9,"revenue":35}},
+  {"t":"state","id":8,"fields":{"name":4309830836,"account":7,"revenue":105}},
+  {"t":"send","from":-1,"to":8,"msg":"charge"},
+  {"t":"send","from":8,"to":3,"msg":"buy"},
+  {"t":"send","from":3,"to":2,"msg":"take"},
+  {"t":"state","id":2,"fields":{"cash":95,"owner":4309830744}},
+  {"t":"state","id":3,"fields":{"name":4309830744,"account":1,"wallet":2,"total_spent":130}},
+  {"t":"send","from":8,"to":7,"msg":"deposit"},
+  {"t":"state","id":7,"fields":{"balance":4945,"owner":4309830836,"tx":5}},
+  {"t":"state","id":8,"fields":{"name":4309830836,"account":7,"revenue":145}},
+  {"t":"send","from":-1,"to":10,"msg":"charge"},
+  {"t":"send","from":10,"to":6,"msg":"buy"},
+  {"t":"send","from":6,"to":5,"msg":"take"},
+  {"t":"state","id":5,"fields":{"cash":30,"owner":4309830832}},
+  {"t":"state","id":6,"fields":{"name":4309830832,"account":4,"wallet":5,"total_spent":70}},
+  {"t":"send","from":10,"to":9,"msg":"deposit"},
+  {"t":"state","id":9,"fields":{"balance":2055,"owner":4309830865,"tx":4}},
+  {"t":"state","id":10,"fields":{"name":4309830865,"account":9,"revenue":55}},
+  {"t":"send","from":-1,"to":0,"msg":"tick"},
+  {"t":"state","id":0,"fields":{"name":4309830636,"epoch":5}},
+  {"t":"send","from":-1,"to":11,"msg":"pickpocket"},
+  {"t":"send","from":11,"to":2,"msg":"take"},
+  {"t":"state","id":2,"fields":{"cash":45,"owner":4309830744}},
+  {"t":"state","id":11,"fields":{"stolen":625,"attempts":5,"blocked":2}},
+  {"t":"send","from":-1,"to":11,"msg":"pickpocket"},
+  {"t":"send","from":11,"to":5,"msg":"take"},
+  {"t":"state","id":5,"fields":{"cash":0,"owner":4309830832}},
+  {"t":"state","id":11,"fields":{"stolen":625,"attempts":6,"blocked":3}},
+  {"t":"send","from":-1,"to":11,"msg":"hack"},
+  {"t":"send","from":11,"to":7,"msg":"withdraw"},
+  {"t":"state","id":7,"fields":{"balance":2945,"owner":4309830836,"tx":6}},
+  {"t":"state","id":11,"fields":{"stolen":2625,"attempts":7,"blocked":3}},
+  {"t":"send","from":-1,"to":0,"msg":"epoch"},
+  {"t":"state","id":0,"fields":{"name":4309830636,"epoch":5}},
+  {"t":"send","from":-1,"to":3,"msg":"status"},
+  {"t":"send","from":3,"to":1,"msg":"balance"},
+  {"t":"state","id":1,"fields":{"balance":400,"owner":4309830744,"tx":2}},
+  {"t":"send","from":3,"to":2,"msg":"cash"},
+  {"t":"state","id":2,"fields":{"cash":45,"owner":4309830744}},
+  {"t":"state","id":3,"fields":{"name":4309830744,"account":1,"wallet":2,"total_spent":130}},
+  {"t":"send","from":-1,"to":6,"msg":"status"},
+  {"t":"send","from":6,"to":4,"msg":"balance"},
+  {"t":"state","id":4,"fields":{"balance":450,"owner":4309830832,"tx":1}},
+  {"t":"send","from":6,"to":5,"msg":"cash"},
+  {"t":"state","id":5,"fields":{"cash":0,"owner":4309830832}},
+  {"t":"state","id":6,"fields":{"name":4309830832,"account":4,"wallet":5,"total_spent":70}},
+  {"t":"send","from":-1,"to":8,"msg":"status"},
+  {"t":"send","from":8,"to":7,"msg":"balance"},
+  {"t":"state","id":7,"fields":{"balance":2945,"owner":4309830836,"tx":6}},
+  {"t":"state","id":8,"fields":{"name":4309830836,"account":7,"revenue":145}},
+  {"t":"send","from":-1,"to":10,"msg":"status"},
+  {"t":"send","from":10,"to":9,"msg":"balance"},
+  {"t":"state","id":9,"fields":{"balance":2055,"owner":4309830865,"tx":4}},
+  {"t":"state","id":10,"fields":{"name":4309830865,"account":9,"revenue":55}},
+  {"t":"send","from":-1,"to":11,"msg":"report"},
+  {"t":"state","id":11,"fields":{"stolen":2625,"attempts":7,"blocked":3}}
+]
+;
+const SOURCE = `# Marketplace Simulation
+# Everything lives under the Marketplace actor -- the world.
+# Marketplace.Account is the bank account (institutional money).
+# Marketplace.Wallet is cash on hand (vulnerable to theft).
+# Marketplace.AccountHolder ties a person to their account + wallet.
+# Marketplace.Institution is a business that holds accounts.
+# Marketplace.Thief targets wallets (easy) and accounts (hard).
+
+# ── The world ──
+
+actor Marketplace do
+  state name: String :: "bazaar"
+  state epoch: Int :: 0
+  on :tick -> Int do
+    become epoch: epoch + 1
+    reply epoch
+  end
+  on :epoch -> Int do
+    reply epoch
+  end
+end
+
+# ── Bank account: institutional, harder to steal from ──
+
+actor Marketplace.Account do
+  state balance: Int :: 0
+  state owner: String :: "unknown"
+  state tx: Int :: 0
+  on :deposit(amount: Int) when amount > 0 do
+    become balance: balance + amount, tx: tx + 1
+    reply balance + amount
+  end
+  on :withdraw(amount: Int) when amount > 0 do
+    situation balance - amount do
+      n when n >= 0 ->
+        become balance: n, tx: tx + 1
+        reply n
+      _ -> bubble :insufficient_funds
+    end
+  end
+  on :balance -> Int do
+    reply balance
+  end
+  on :info do
+    reply %{owner: owner, balance: balance, tx: tx}
+  end
+end
+
+# ── Wallet: cash on hand, easier to steal ──
+
+actor Marketplace.Wallet do
+  state cash: Int :: 0
+  state owner: String :: "unknown"
+  on :add(amount: Int) when amount > 0 do
+    become cash: cash + amount
+    reply cash + amount
+  end
+  on :take(amount: Int) when amount > 0 do
+    situation cash - amount do
+      n when n >= 0 ->
+        become cash: n
+        reply n
+      _ -> bubble :empty_wallet
+    end
+  end
+  on :cash -> Int do
+    reply cash
+  end
+end
+
+# ── AccountHolder: a person with both an account and a wallet ──
+
+actor Marketplace.AccountHolder do
+  state name: String :: "unknown"
+  state account: Int :: 0
+  state wallet: Int :: 0
+  state total_spent: Int :: 0
+
+  # Pay from wallet first, fall back to account
+  on :buy(amount: Int) when amount > 0 do
+    wallet_result = wallet <- :take(amount) orelse :short
+    situation wallet_result do
+      :short ->
+        # Not enough cash, try the bank account
+        account <- :withdraw(amount)
+        become total_spent: total_spent + amount
+        reply :from_account
+      _ ->
+        become total_spent: total_spent + amount
+        reply :from_wallet
+    end
+  end
+
+  # Deposit goes to account
+  on :deposit(amount: Int) when amount > 0 do
+    account <- :deposit(amount)
+    reply :ok
+  end
+
+  # Withdraw cash from account into wallet
+  on :withdraw_cash(amount: Int) when amount > 0 do
+    result = account <- :withdraw(amount) orelse :blocked
+    situation result do
+      :blocked -> reply :blocked
+      _ ->
+        wallet <- :add(amount)
+        reply :ok
+    end
+  end
+
+  on :status do
+    acct_bal = account <- :balance
+    wallet_cash = wallet <- :cash
+    reply %{name: name, account: acct_bal, wallet: wallet_cash, spent: total_spent}
+  end
+end
+
+# ── Institution: a business with a big account ──
+
+actor Marketplace.Institution do
+  state name: String :: "unknown"
+  state account: Int :: 0
+  state revenue: Int :: 0
+
+  on :charge(customer: Int, amount: Int) when amount > 0 do
+    customer <- :buy(amount)
+    account <- :deposit(amount)
+    become revenue: revenue + amount
+    reply :charged
+  end
+
+  on :pay_supplier(supplier: Int, amount: Int) when amount > 0 do
+    result = account <- :withdraw(amount) orelse :broke
+    situation result do
+      :broke -> reply :broke
+      _ ->
+        supplier <- :deposit(amount)
+        reply :paid
+    end
+  end
+
+  on :revenue -> Int do
+    reply revenue
+  end
+
+  on :status do
+    bal = account <- :balance
+    reply %{name: name, balance: bal, revenue: revenue}
+  end
+end
+
+# ── Thief: targets wallets (easy) and accounts (hard) ──
+
+actor Marketplace.Thief do
+  state stolen: Int :: 0
+  state attempts: Int :: 0
+  state blocked: Int :: 0
+
+  on :pickpocket(wallet: Int, amount: Int) do
+    become attempts: attempts + 1
+    result = wallet <- :take(amount) orelse :missed
+    situation result do
+      :missed ->
+        become blocked: blocked + 1
+        reply :missed
+      _ ->
+        become stolen: stolen + amount
+        reply :got_it
+    end
+  end
+
+  on :hack(account: Int, amount: Int) do
+    become attempts: attempts + 1
+    result = account <- :withdraw(amount) orelse :blocked
+    situation result do
+      :blocked ->
+        become blocked: blocked + 1
+        reply :blocked
+      _ ->
+        become stolen: stolen + amount
+        reply :hacked
+    end
+  end
+
+  on :report do
+    reply %{stolen: stolen, attempts: attempts, blocked: blocked}
+  end
+end
+
+# ══════════════════════════════════════════════════════════
+# The simulation
+# ══════════════════════════════════════════════════════════
+
+# Boot the world
+market = spawn Marketplace
+
+# People
+alice_acct = %Marketplace.Account{balance: 1000, owner: "alice"}
+alice_wallet = %Marketplace.Wallet{cash: 200, owner: "alice"}
+alice = %Marketplace.AccountHolder{name: "alice", account: alice_acct, wallet: alice_wallet}
+
+bob_acct = %Marketplace.Account{balance: 500, owner: "bob"}
+bob_wallet = %Marketplace.Wallet{cash: 50, owner: "bob"}
+bob = %Marketplace.AccountHolder{name: "bob", account: bob_acct, wallet: bob_wallet}
+
+# Businesses
+shop_acct = %Marketplace.Account{balance: 5000, owner: "shop"}
+shop = %Marketplace.Institution{name: "shop", account: shop_acct}
+
+cafe_acct = %Marketplace.Account{balance: 2000, owner: "cafe"}
+cafe = %Marketplace.Institution{name: "cafe", account: cafe_acct}
+
+# The thief
+thief = spawn Marketplace.Thief
+
+# ── Day 1: Normal commerce ──
+market <- :tick
+
+# Alice goes shopping
+shop <- :charge(alice, 50)
+cafe <- :charge(alice, 15)
+
+# Bob goes shopping
+shop <- :charge(bob, 30)
+cafe <- :charge(bob, 8)
+
+# ── Day 2: Cash withdrawals ──
+market <- :tick
+
+alice <- :withdraw_cash(100)
+bob <- :withdraw_cash(50)
+
+# More shopping (wallet first now)
+shop <- :charge(alice, 25)
+cafe <- :charge(bob, 12)
+
+# ── Day 3: The thief strikes ──
+market <- :tick
+
+# Easy targets: wallets
+thief <- :pickpocket(alice_wallet, 75)
+thief <- :pickpocket(bob_wallet, 100)
+
+# Hard target: bank account
+thief <- :hack(alice_acct, 500)
+thief <- :hack(bob_acct, 1000)
+
+# ── Day 4: Business pays supplier ──
+market <- :tick
+
+shop <- :pay_supplier(cafe, 200)
+
+# More shopping
+shop <- :charge(alice, 40)
+cafe <- :charge(bob, 20)
+
+# ── Day 5: Thief tries again ──
+market <- :tick
+
+thief <- :pickpocket(alice_wallet, 50)
+thief <- :pickpocket(bob_wallet, 30)
+thief <- :hack(shop_acct, 2000)
+
+# ── Final report ──
+
+market <- :epoch
+alice <- :status
+bob <- :status
+shop <- :status
+cafe <- :status
+thief <- :report
+`;
+document.getElementById('source').textContent = SOURCE;
+
+// ── Canvas replay engine ──
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const dpr = window.devicePixelRatio || 1;
+let W, H;
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+}
+resize(); window.addEventListener('resize', resize);
+
+// State
+const actors = {}; // id -> {type, fields, x, y, hash, scale, birthT, flashT}
+const rays = [];   // {from, to, t0, color, label}
+let eventIdx = 0;
+const EVENT_INTERVAL = 120; // ms between events
+const startTime = performance.now();
+
+function hash(str) {
+  let b = new Uint8Array(32);
+  for (let r = 0; r < 32; r++) {
+    let h = 0x6a09e667 ^ (r * 0x9e3779b9);
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x5bd1e995); h ^= h >>> 15; }
+    b[r] = h & 0xff;
+  }
+  return b;
+}
+
+function strColor(s) {
+  let h = 0; for (let i = 0; i < s.length; i++) { h = s.charCodeAt(i) + ((h << 5) - h); }
+  return `hsl(${Math.abs(h) % 360}, 70%, 60%)`;
+}
+
+function col(h, off, a) {
+  if (!h) return `rgba(40,40,60,${a})`;
+  let hue = ((h[off % 32] * 7 + h[(off+1) % 32]) % 360);
+  let sat = 40 + (h[(off+2) % 32] % 30);
+  return `hsla(${hue}, ${sat}%, 35%, ${a})`;
+}
+
+function layoutActors() {
+  let ids = Object.keys(actors);
+  let n = ids.length; if (n === 0) return;
+  let pad = 60, startX = W * 0.28, areaW = W - startX - pad, areaH = H - pad * 2;
+  let bestCols = 1, bestSize = 0;
+  for (let c = 1; c <= n; c++) {
+    let r = Math.ceil(n / c), cw = areaW / c, ch = areaH / r, fit = Math.min(cw, ch);
+    if (fit > bestSize) { bestSize = fit; bestCols = c; }
+  }
+  let cols = bestCols, rows = Math.ceil(n / cols);
+  let cellW = areaW / cols, cellH = areaH / rows;
+  let gridW = cols * cellW, gridH = rows * cellH;
+  let offX = startX + (areaW - gridW) / 2, offY = pad + (areaH - gridH) / 2;
+  ids.forEach((id, i) => {
+    let c = i % cols, r = Math.floor(i / cols);
+    actors[id].x = offX + cellW * (c + 0.5) + (r % 2) * cellW * 0.3;
+    actors[id].y = offY + cellH * (r + 0.5);
+  });
+}
+
+function processEvents() {
+  let now = performance.now();
+  while (eventIdx < EVENTS.length && (eventIdx * EVENT_INTERVAL) < (now - startTime)) {
+    let e = EVENTS[eventIdx++];
+    if (e.t === 'spawn') {
+      actors[e.id] = { type: e.type, fields: {}, x: 0, y: 0, hash: hash(e.type + '|' + e.id),
+        scale: 0, birthT: now, flashT: 0 };
+      layoutActors();
+    } else if (e.t === 'send') {
+      rays.push({ from: e.from, to: e.to, t0: now, color: strColor(e.msg), label: ':' + e.msg });
+    } else if (e.t === 'state') {
+      let a = actors[e.id];
+      if (a) { a.fields = e.fields; a.hash = hash(e.id + '|' + JSON.stringify(e.fields)); a.flashT = now; }
+    }
+  }
+}
+
+function drawBlob(x, y, now) {
+  let t = now / 2000;
+  ctx.save(); ctx.translate(x, y); ctx.beginPath();
+  for (let i = 0; i <= 40; i++) {
+    let a = (i / 40) * Math.PI * 2;
+    let w = Math.sin(a * 3 + t) * 4 + Math.cos(a * 5 + t * 1.3) * 3;
+    let r = 22 + w;
+    i === 0 ? ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r) : ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+  }
+  ctx.closePath();
+  let g = ctx.createRadialGradient(0, 0, 0, 0, 0, 30);
+  g.addColorStop(0, 'rgba(166,226,46,0.25)'); g.addColorStop(1, 'rgba(166,226,46,0)');
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = 'rgba(166,226,46,0.4)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = 'rgba(166,226,46,0.5)'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('main', 0, 38); ctx.restore();
+}
+
+function drawHex(a, now) {
+  let age = (now - a.birthT) / 400;
+  a.scale = Math.min(1, 1 - Math.pow(1 - Math.min(age, 1), 3));
+  let r = 32 * a.scale; if (r < 1) return;
+  ctx.save(); ctx.translate(a.x, a.y);
+  // Hex path
+  let hexPath = () => { ctx.beginPath();
+    for (let i = 0; i < 6; i++) { let an = Math.PI/3*i - Math.PI/6;
+      i===0 ? ctx.moveTo(Math.cos(an)*r, Math.sin(an)*r) : ctx.lineTo(Math.cos(an)*r, Math.sin(an)*r); }
+    ctx.closePath(); };
+  // Fill
+  hexPath(); ctx.save(); ctx.clip();
+  let c1 = col(a.hash, 0, 1), c2 = col(a.hash, 3, 1);
+  let g = ctx.createLinearGradient(-r, -r, r, r); g.addColorStop(0, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fillRect(-r, -r, r*2, r*2);
+  // Pattern
+  let ptype = a.hash[6] % 4; ctx.globalAlpha = 0.4;
+  if (ptype === 0) { for (let i=0;i<12;i++) {
+    let dx=((a.hash[(i*2+8)%32]/255)*2-1)*r*0.8, dy=((a.hash[(i*2+9)%32]/255)*2-1)*r*0.8;
+    ctx.beginPath(); ctx.arc(dx,dy,(a.hash[(i+20)%32]/255)*4+1.5,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); }
+  } else if (ptype === 1) { for (let i=0;i<3;i++) {
+    ctx.beginPath(); ctx.arc(((a.hash[(i*2+14)%32]/255)-0.5)*r*0.6,((a.hash[(i*2+15)%32]/255)-0.5)*r*0.6,
+      (a.hash[(i+12)%32]/255)*r*0.5+8,0,Math.PI*2); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke(); }
+  } else if (ptype === 2) { ctx.save(); ctx.rotate((a.hash[7]/255)*Math.PI); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5;
+    for (let s=-r*2;s<r*2;s+=5+(a.hash[8]%5)) { ctx.beginPath(); ctx.moveTo(s,-r*2); ctx.lineTo(s,r*2); ctx.stroke(); }
+    ctx.restore();
+  } else { for (let i=0;i<4;i++) { let bx=((a.hash[(i*2+10)%32]/255)*2-1)*r*0.5, by=((a.hash[(i*2+11)%32]/255)*2-1)*r*0.5;
+    let bg=ctx.createRadialGradient(bx,by,0,bx,by,r*0.35); bg.addColorStop(0,'rgba(255,255,255,0.3)');
+    bg.addColorStop(1,'rgba(255,255,255,0)'); ctx.fillStyle=bg; ctx.fillRect(-r,-r,r*2,r*2); } }
+  ctx.globalAlpha = 1; ctx.restore();
+  // Border
+  hexPath(); let flash = (now - a.flashT) / 500;
+  if (flash >= 0 && flash < 1) { ctx.strokeStyle = 'rgba(255,255,255,' + (1-flash)*0.9 + ')'; ctx.lineWidth = 2 + (1-flash)*4; }
+  else { ctx.strokeStyle = col(a.hash, 0, 0.6); ctx.lineWidth = 1.5; }
+  ctx.stroke();
+  // Label
+  ctx.fillStyle = '#fff'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
+  ctx.fillText(a.type, 0, r + 13);
+  // State text
+  let fields = Object.entries(a.fields);
+  if (fields.length > 0) {
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '10px monospace';
+    fields.forEach(([k,v], i) => ctx.fillText(k + ': ' + v, 0, r + 23 + i * 10));
+  }
+  ctx.restore();
+}
+
+function drawRay(fx, fy, tx, ty, t, color, label) {
+  let prog = Math.min(t * 2.5, 1); prog = 1 - Math.pow(1 - prog, 3);
+  let mx = fx + (tx - fx) * prog, my = fy + (ty - fy) * prog;
+  let alpha = 1 - t;
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.setLineDash([5, 4]); ctx.strokeStyle = color; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(mx, my); ctx.stroke();
+  if (prog < 1) { ctx.setLineDash([]); ctx.beginPath(); ctx.arc(mx, my, 4, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill(); }
+  if (prog >= 1 && t < 0.9) { let ring = (t - 0.4) / 0.5;
+    if (ring > 0) { ctx.setLineDash([]); ctx.globalAlpha = alpha * (1-ring);
+      ctx.beginPath(); ctx.arc(tx, ty, 20 + ring*30, 0, Math.PI*2); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); } }
+  if (t < 0.5) { ctx.setLineDash([]); ctx.fillStyle = color; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(label, (fx+tx)/2, (fy+ty)/2 - 10); }
+  ctx.restore();
+}
+
+function drawParentLines() {
+  let ids = Object.keys(actors);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 6]);
+  for (let id of ids) {
+    let a = actors[id];
+    let dot = a.type.lastIndexOf('.');
+    if (dot < 0) continue;
+    let parentType = a.type.substring(0, dot);
+    // Find the parent actor by type name
+    for (let pid of ids) {
+      if (actors[pid].type === parentType) {
+        let p = actors[pid];
+        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(a.x, a.y); ctx.stroke();
+        break;
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function draw() {
+  let now = performance.now();
+  processEvents();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0e0e1a'; ctx.fillRect(0, 0, W, H);
+  // Dots
+  ctx.fillStyle = '#161625';
+  for (let x = 0; x < W; x += 30) for (let y = 0; y < H; y += 30) ctx.fillRect(x, y, 1, 1);
+  let bx = W * 0.12, by = H * 0.5;
+  drawBlob(bx, by, now);
+  // Parent-child lines (behind hexagons)
+  drawParentLines();
+  Object.values(actors).forEach(a => drawHex(a, now));
+  // Rays
+  for (let i = rays.length - 1; i >= 0; i--) {
+    let r = rays[i], t = (now - r.t0) / 1200;
+    if (t > 1) { rays.splice(i, 1); continue; }
+    let from = actors[r.from], to = actors[r.to];
+    let fx = from ? from.x : bx, fy = from ? from.y : by;
+    if (to) drawRay(fx, fy, to.x, to.y, t, r.color, r.label);
+  }
+  // Info
+  let total = EVENTS.length, done = eventIdx;
+  document.getElementById('info').textContent = `${done}/${total} events` + (done >= total ? ' (complete)' : '');
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script></body></html>
