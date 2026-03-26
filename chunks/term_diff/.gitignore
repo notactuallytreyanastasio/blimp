@@ -35,3 +35,4 @@ term_diff-*.tar
 npm-debug.log
 /assets/node_modules/
 
+config/.config.exs
