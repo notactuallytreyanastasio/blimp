@@ -1361,114 +1361,103 @@ test "view code_block with lang" {
 /// Renders a view_node tree to an HTML string.
 fn builtinToHtml(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
-    var buf = std.ArrayList(u8).init(allocator);
-    renderHtml(args[0], &buf) catch return error.OutOfMemory;
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    renderHtml(allocator, args[0], &buf) catch return error.OutOfMemory;
     const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .string = buf.toOwnedSlice() catch return error.OutOfMemory };
+    result.* = Value{ .string = buf.toOwnedSlice(allocator) catch return error.OutOfMemory };
     return result;
 }
 
-fn renderHtml(val: *const Value, buf: *std.ArrayList(u8)) !void {
+fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayListUnmanaged(u8)) !void {
     switch (val.*) {
         .view_node => |node| {
-            // Map Blimp view tags to HTML elements
             const tag = blimpTagToHtml(node.tag);
-            try buf.appendSlice("<");
-            try buf.appendSlice(tag);
-            // row gets a data-row attribute for CSS flexbox direction
+            try buf.appendSlice(allocator, "<");
+            try buf.appendSlice(allocator, tag);
             if (std.mem.eql(u8, node.tag, "row")) {
-                try buf.appendSlice(" data-row");
+                try buf.appendSlice(allocator, " data-row");
             }
-            // Render attributes
             for (node.attrs) |attr| {
                 if (std.mem.eql(u8, attr.key, "href")) {
                     var val_buf: [512]u8 = undefined;
                     var fbs = std.io.fixedBufferStream(&val_buf);
                     attr.val.format(fbs.writer());
                     const raw = fbs.getWritten();
-                    // Strip surrounding quotes from string values
                     const href = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
-                    try buf.appendSlice(" href=\"");
-                    try buf.appendSlice(href);
-                    try buf.appendSlice("\"");
+                    try buf.appendSlice(allocator, " href=\"");
+                    try buf.appendSlice(allocator, href);
+                    try buf.appendSlice(allocator, "\"");
                 } else if (std.mem.eql(u8, attr.key, "src")) {
                     var val_buf: [512]u8 = undefined;
                     var fbs = std.io.fixedBufferStream(&val_buf);
                     attr.val.format(fbs.writer());
                     const raw = fbs.getWritten();
                     const src = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
-                    try buf.appendSlice(" src=\"");
-                    try buf.appendSlice(src);
-                    try buf.appendSlice("\"");
+                    try buf.appendSlice(allocator, " src=\"");
+                    try buf.appendSlice(allocator, src);
+                    try buf.appendSlice(allocator, "\"");
                 } else if (std.mem.eql(u8, attr.key, "sends")) {
-                    // button sends attr -> data-sends for JS to pick up
                     var val_buf: [256]u8 = undefined;
                     var fbs = std.io.fixedBufferStream(&val_buf);
                     attr.val.format(fbs.writer());
                     const raw = fbs.getWritten();
-                    // Strip leading colon from atom
                     const msg = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
-                    try buf.appendSlice(" data-sends=\"");
-                    try buf.appendSlice(msg);
-                    try buf.appendSlice("\" onclick=\"blimpSend(this)\"");
+                    try buf.appendSlice(allocator, " data-sends=\"");
+                    try buf.appendSlice(allocator, msg);
+                    try buf.appendSlice(allocator, "\" onclick=\"blimpSend(this)\"");
                 } else if (std.mem.eql(u8, attr.key, "level")) {
-                    // heading level - handled in tag mapping, skip here
+                    // heading level - handled in tag mapping
                 } else if (std.mem.eql(u8, attr.key, "lang")) {
                     var val_buf: [64]u8 = undefined;
                     var fbs = std.io.fixedBufferStream(&val_buf);
                     attr.val.format(fbs.writer());
                     const raw = fbs.getWritten();
                     const lang = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
-                    try buf.appendSlice(" data-lang=\"");
-                    try buf.appendSlice(lang);
-                    try buf.appendSlice("\"");
+                    try buf.appendSlice(allocator, " data-lang=\"");
+                    try buf.appendSlice(allocator, lang);
+                    try buf.appendSlice(allocator, "\"");
                 }
             }
-            // Self-closing tags
-            if (std.mem.eql(u8, node.tag, "divider") or
-                std.mem.eql(u8, node.tag, "image"))
-            {
-                try buf.appendSlice(" />");
+            if (std.mem.eql(u8, node.tag, "divider") or std.mem.eql(u8, node.tag, "image")) {
+                try buf.appendSlice(allocator, " />");
                 return;
             }
-            try buf.appendSlice(">");
-            // Children
+            try buf.appendSlice(allocator, ">");
             for (node.children) |child| {
-                try renderHtml(child, buf);
+                try renderHtml(allocator, child, buf);
             }
-            try buf.appendSlice("</");
-            try buf.appendSlice(tag);
-            try buf.appendSlice(">");
+            try buf.appendSlice(allocator, "</");
+            try buf.appendSlice(allocator, tag);
+            try buf.appendSlice(allocator, ">");
         },
         .string => |s| {
-            // HTML-escape the string content
             for (s) |c| {
                 switch (c) {
-                    '<' => try buf.appendSlice("&lt;"),
-                    '>' => try buf.appendSlice("&gt;"),
-                    '&' => try buf.appendSlice("&amp;"),
-                    '"' => try buf.appendSlice("&quot;"),
-                    else => try buf.append(c),
+                    '<' => try buf.appendSlice(allocator, "&lt;"),
+                    '>' => try buf.appendSlice(allocator, "&gt;"),
+                    '&' => try buf.appendSlice(allocator, "&amp;"),
+                    '"' => try buf.appendSlice(allocator, "&quot;"),
+                    else => try buf.append(allocator, c),
                 }
             }
         },
         .integer => |n| {
             var tmp: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&tmp, "{d}", .{n}) catch return;
-            try buf.appendSlice(s);
+            try buf.appendSlice(allocator, s);
         },
         .float => |f| {
             var tmp: [64]u8 = undefined;
             const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
-            try buf.appendSlice(s);
+            try buf.appendSlice(allocator, s);
         },
-        .boolean => |b| try buf.appendSlice(if (b) "true" else "false"),
+        .boolean => |b| try buf.appendSlice(allocator, if (b) "true" else "false"),
         .nil => {},
         else => {
             var tmp: [256]u8 = undefined;
             var fbs = std.io.fixedBufferStream(&tmp);
             val.format(fbs.writer());
-            try buf.appendSlice(fbs.getWritten());
+            try buf.appendSlice(allocator, fbs.getWritten());
         },
     }
 }

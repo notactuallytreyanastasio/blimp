@@ -1,14 +1,12 @@
 # Blimp HTTP Server
 #
 # A minimal HTTP/1.1 server written in Blimp.
-# Actors handle routing and sessions. No Phoenix. No framework.
-#
 # Boot:  blimp web/server.blimp
 # Then:  open http://localhost:8080
 
-# ── HTTP helpers ─────────────────────────────────────────────
+# -- HTTP helpers -----------------------------------------------------
 
-# Parse the first line of an HTTP request: "GET /path HTTP/1.1"
+# Parse first line of HTTP request: "GET /path HTTP/1.1"
 # Returns %{method: "GET", path: "/"}
 def parse_request_line(raw) do
   parts = split(raw, " ")
@@ -33,11 +31,12 @@ end
 def http_redirect(location) do
   concat(
     "HTTP/1.1 302 Found\r\n",
-    concat("Location: ", concat(location, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+    concat("Location: ", concat(location,
+    "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
   )
 end
 
-# Wrap a rendered view in a full HTML page with the Blimp client script
+# Wrap rendered view in a full HTML page
 def html_page(title, body_html) do
   concat(
     "<!DOCTYPE html><html><head><meta charset=utf-8>",
@@ -50,26 +49,26 @@ end
 def html_styles() do
   "<style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, sans-serif; background: #f9f9f9; color: #111; }
+    body { font-family: system-ui, sans-serif; background: rgb(249,249,249); color: rgb(17,17,17); }
     div { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
     div[data-row] { flex-direction: row; }
     h1,h2,h3,h4,h5,h6 { margin: 8px 0; }
-    button { padding: 8px 16px; background: #0070f3; color: white; border: none;
+    button { padding: 8px 16px; background: rgb(0,112,243); color: white; border: none;
              border-radius: 4px; cursor: pointer; font-size: 16px; }
-    button:hover { background: #0051b3; }
+    button:hover { background: rgb(0,81,179); }
     span { display: inline; }
     ul { padding-left: 24px; }
-    pre { background: #1e1e1e; color: #d4d4d4; padding: 16px; border-radius: 4px;
+    pre { background: rgb(30,30,30); color: rgb(212,212,212); padding: 16px; border-radius: 4px;
           overflow-x: auto; font-family: monospace; }
-    code { font-family: monospace; background: #eee; padding: 2px 4px; border-radius: 2px; }
-    blockquote { border-left: 4px solid #ccc; padding-left: 12px; color: #555; }
-    hr { border: none; border-top: 1px solid #ddd; margin: 16px 0; }
+    code { font-family: monospace; background: rgb(238,238,238); padding: 2px 4px; border-radius: 2px; }
+    blockquote { border-left: 4px solid rgb(204,204,204); padding-left: 12px; color: rgb(85,85,85); }
+    hr { border: none; border-top: 1px solid rgb(221,221,221); margin: 16px 0; }
     img, video { max-width: 100%; }
     .page { max-width: 800px; margin: 40px auto; padding: 24px; }
   </style>"
 end
 
-# Tiny JS: sends button messages via form POST, no WebSocket yet
+# Tiny JS: button clicks become form POSTs
 def blimp_script() do
   "<script>
     function blimpSend(btn) {
@@ -88,10 +87,10 @@ def blimp_script() do
   </script>"
 end
 
-# ── Session store (simple in-memory map actor) ───────────────
+# -- Session store ----------------------------------------------------
 
 actor Sessions do
-  state store: %{} :: %{}
+  state store: Map :: %{}
   state next_id: Int :: 1
 
   on :new_session do
@@ -100,51 +99,26 @@ actor Sessions do
     reply id
   end
 
-  on :get(id) do
+  on :get(id: String) do
     reply lookup(store, id)
   end
 
-  on :put(id, data) do
+  on :put(id: String, data: Map) do
     become store: put(store, id, data)
     reply :ok
   end
 end
 
-# ── Router ────────────────────────────────────────────────────
-
-# Dispatch a request to the right handler.
-# Returns an HTTP response string.
-def dispatch(method, path, session_id, session_data) do
-  situation path do
-    "/" ->
-      situation method do
-        "POST" ->
-          # Receive button event: advance session state based on msg param
-          # (POST body not parsed yet, stub: always :increment)
-          new_data = handle_event(session_data, :increment)
-          Sessions <- :put(session_id, new_data)
-          http_redirect("/")
-        _ ->
-          # GET — render view
-          view = render_app(session_data)
-          html = to_html(view)
-          http_ok(html_page("Counter", concat("<div class='page'>", concat(html, "</div>"))))
-      end
-    _ ->
-      http_ok("<h1>404 Not Found</h1>")
-  end
-end
-
-# ── App: Counter ──────────────────────────────────────────────
+# -- App: Counter -----------------------------------------------------
 
 # Initial state for a new session
 def initial_state() do
   %{count: 0}
 end
 
-# Pure event handler: given session data and a message atom, return new data
-def handle_event(data, msg) do
-  situation msg do
+# Pure event handler: state x message -> new state
+def handle_event(data: Map, msg: Atom) -> Map do
+  case msg do
     :increment -> put(data, "count", lookup(data, "count") + 1)
     :decrement -> put(data, "count", lookup(data, "count") - 1)
     :reset     -> put(data, "count", 0)
@@ -152,8 +126,8 @@ def handle_event(data, msg) do
   end
 end
 
-# Pure render: given session data, return a view_node tree
-def render_app(data) do
+# Pure render: state -> view_node
+def render_app(data: Map) -> ViewNode do
   count = lookup(data, "count")
   stack(
     heading("Blimp Counter"),
@@ -166,102 +140,42 @@ def render_app(data) do
   )
 end
 
-# ── Server loop ───────────────────────────────────────────────
+# -- Router -----------------------------------------------------------
 
-actor HTTP.Server do
-  state port: Int :: 8080
-  state fd: Int :: -1
-
-  on :start do
-    server_fd = tcp_listen(port)
-    become fd: server_fd
-    print(concat("Blimp HTTP server listening on http://localhost:", to_string(port)))
-    HTTP.Server <- :accept
-  end
-
-  on :accept do
-    client_fd = tcp_accept(fd)
-    raw = tcp_read(client_fd)
-
-    # Parse first line of HTTP request
-    first_line = head(split(raw, "\r\n"))
-    req = parse_request_line(first_line)
-    method = lookup(req, "method")
-    path = lookup(req, "path")
-
-    # Session: read cookie or assign new id (simplified: use header)
-    # For now, everyone gets the same session "1" until cookie parsing is added
-    session_id = "1"
-    existing = Sessions <- :get(session_id)
-    session_data = existing orelse initial_state()
-
-    # If POST, extract msg from body (last line of request)
-    data = situation method do
-      "POST" ->
-        lines = split(raw, "\r\n")
-        body = last_line(lines)
-        msg = parse_form_value(body, "msg")
-        new_data = handle_event(session_data, to_atom(msg))
-        Sessions <- :put(session_id, new_data)
-        new_data
-      _ ->
-        session_data
-    end
-
-    response = situation method do
-      "POST" -> http_redirect("/")
-      _ ->
-        view = render_app(data)
-        html = to_html(view)
-        http_ok(html_page("Counter", concat("<div class='page'>", concat(html, "</div>"))))
-    end
-
-    tcp_write(client_fd, response)
-    tcp_close(client_fd)
-
-    # Loop
-    HTTP.Server <- :accept
-  end
-end
-
-# ── Helpers for body parsing ──────────────────────────────────
-
-# Get last element of a list
-def last_line(lines) do
-  situation empty?(lines) do
-    true -> ""
-    _ ->
-      situation empty?(tail(lines)) do
-        true -> head(lines)
-        _    -> last_line(tail(lines))
-      end
-  end
-end
-
-# Parse "key=value&key2=value2", return value for given key
-def parse_form_value(body, key) do
+# Parse "key=value&key2=value2", return value for key
+def form_value(body: String, key: String) -> String do
   pairs = split(body, "&")
-  find_value(pairs, concat(key, "="))
+  find_pair(pairs, concat(key, "="))
 end
 
-def find_value(pairs, prefix) do
-  situation empty?(pairs) do
+def find_pair(pairs: List, prefix: String) -> String do
+  case empty?(pairs) do
     true -> ""
-    _ ->
+    _    ->
       pair = head(pairs)
-      situation contains(pair, prefix) do
+      case contains(pair, prefix) do
         true ->
           parts = split(pair, "=")
           head(tail(parts))
         _ ->
-          find_value(tail(pairs), prefix)
+          find_pair(tail(pairs), prefix)
       end
   end
 end
 
-# Convert a string to an atom (strips whitespace)
-def to_atom(s) do
-  situation s do
+def last_elem(items: List) -> String do
+  case empty?(items) do
+    true -> ""
+    _    ->
+      case empty?(tail(items)) do
+        true -> head(items)
+        _    -> last_elem(tail(items))
+      end
+  end
+end
+
+def string_to_msg(s: String) -> Atom do
+  case s do
     "increment" -> :increment
     "decrement" -> :decrement
     "reset"     -> :reset
@@ -269,6 +183,59 @@ def to_atom(s) do
   end
 end
 
-# ── Boot ─────────────────────────────────────────────────────
+# -- Dispatcher -------------------------------------------------------
 
-HTTP.Server <- :start
+def dispatch(method: String, raw: String, session_id: String, data: Map) -> String do
+  case method do
+    "POST" ->
+      lines = split(raw, "\r\n")
+      body = last_elem(lines)
+      msg_str = form_value(body, "msg")
+      msg = string_to_msg(msg_str)
+      new_data = handle_event(data, msg)
+      Sessions <- :put(session_id, new_data)
+      http_redirect("/")
+    _ ->
+      view = render_app(data)
+      html = to_html(view)
+      http_ok(html_page("Counter", concat("<div class='page'>", concat(html, "</div>"))))
+  end
+end
+
+# -- HTTP Server actor ------------------------------------------------
+
+actor HTTPServer do
+  state port: Int :: 8080
+  state fd: Int :: -1
+
+  on :start do
+    server_fd = tcp_listen(port)
+    become fd: server_fd
+    print(concat("Blimp HTTP server listening on http://localhost:", to_string(port)))
+    HTTPServer <- :accept
+  end
+
+  on :accept do
+    client_fd = tcp_accept(fd)
+    raw = tcp_read(client_fd)
+
+    first_line = head(split(raw, "\r\n"))
+    req = parse_request_line(first_line)
+    method = lookup(req, "method")
+
+    session_id = "1"
+    existing = Sessions <- :get(session_id)
+    data = existing orelse initial_state()
+
+    response = dispatch(method, raw, session_id, data)
+
+    tcp_write(client_fd, response)
+    tcp_close(client_fd)
+
+    HTTPServer <- :accept
+  end
+end
+
+# -- Boot -------------------------------------------------------------
+
+HTTPServer <- :start

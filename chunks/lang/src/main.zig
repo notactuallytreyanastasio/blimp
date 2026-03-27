@@ -6,6 +6,7 @@ const Checker = @import("checker.zig").Checker;
 const introspect = @import("introspect.zig");
 const Evaluator = @import("eval.zig").Evaluator;
 const Value = @import("value.zig").Value;
+const errors = @import("errors.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -77,10 +78,31 @@ pub fn main() !void {
         return;
     }
 
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
-    printNodes(&stdout_writer.interface, nodes, 0);
-    stdout_writer.interface.flush() catch {};
+    // Check for --ast flag (print AST without evaluating)
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "--ast")) {
+        var stdout_buf: [4096]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+        printNodes(&stdout_writer.interface, nodes, 0);
+        stdout_writer.interface.flush() catch {};
+        return;
+    }
+
+    // Default: evaluate the file
+    var evaluator = Evaluator.init(arena.allocator());
+    evaluator.setSource(source);
+    for (nodes) |node| {
+        _ = evaluator.eval(node) catch |err| {
+            if (evaluator.last_error) |blimp_err| {
+                var buf: [2048]u8 = undefined;
+                var fbs = std.io.fixedBufferStream(&buf);
+                blimp_err.format(fbs.writer());
+                std.debug.print("{s}\n", .{fbs.getWritten()});
+            } else {
+                std.debug.print("Runtime error: {}\n", .{err});
+            }
+            std.process.exit(1);
+        };
+    }
 }
 
 fn printNodes(writer: *std.io.Writer, nodes: []const ast.Node, indent: u32) void {

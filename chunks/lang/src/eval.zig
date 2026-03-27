@@ -79,6 +79,29 @@ pub const Evaluator = struct {
                 if (std.mem.indexOf(u8, s, "#{") != null) {
                     return self.evalStringInterp(s);
                 }
+                // Process escape sequences if any backslashes present
+                if (std.mem.indexOf(u8, s, "\\") != null) {
+                    var buf: std.ArrayListUnmanaged(u8) = .{};
+                    var i: usize = 0;
+                    while (i < s.len) {
+                        if (s[i] == '\\' and i + 1 < s.len) {
+                            switch (s[i + 1]) {
+                                'n' => { buf.append(self.allocator, '\n') catch return error.OutOfMemory; i += 2; },
+                                'r' => { buf.append(self.allocator, '\r') catch return error.OutOfMemory; i += 2; },
+                                't' => { buf.append(self.allocator, '\t') catch return error.OutOfMemory; i += 2; },
+                                '\\' => { buf.append(self.allocator, '\\') catch return error.OutOfMemory; i += 2; },
+                                '"' => { buf.append(self.allocator, '"') catch return error.OutOfMemory; i += 2; },
+                                else => { buf.append(self.allocator, s[i]) catch return error.OutOfMemory; i += 1; },
+                            }
+                        } else {
+                            buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
+                            i += 1;
+                        }
+                    }
+                    const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                    v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
+                    return v;
+                }
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = Value{ .string = s };
                 return v;
@@ -261,9 +284,14 @@ pub const Evaluator = struct {
         // Register the template in the registry
         self.registry.registerTemplate(def.name, default_state, handlers);
 
-        // Bind the actor name as an atom in the environment (template marker)
+        // Auto-spawn a singleton instance and bind the actor_ref in the environment
+        const template = self.registry.lookupTemplate(def.name) orelse {
+            return error.UndefinedVariable;
+        };
+        const ref = self.registry.spawn(template, &.{});
+
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
-        v.* = Value{ .atom = def.name };
+        v.* = Value{ .actor_ref = ref };
 
         self.env.define(def.name, v);
 

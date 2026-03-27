@@ -219,6 +219,7 @@ pub const Value = union(enum) {
             .map => "Map",
             .actor_ref => "ActorRef",
             .closure => "Function",
+            .view_node => "ViewNode",
         };
     }
 };
