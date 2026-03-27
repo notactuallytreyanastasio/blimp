@@ -23,6 +23,9 @@ var error_len: u32 = 0;
 var state_buf: [65536]u8 = undefined;
 var state_len: u32 = 0;
 var last_status: i32 = 0;
+var view_buf: [65536]u8 = undefined;
+var view_len: u32 = 0;
+var has_view: bool = false;
 
 // Message log - track recent sends for canvas rays
 const MaxMessages = 64;
@@ -96,10 +99,26 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
 
     // Format result
     if (last_value) |val| {
-        var fbs = std.io.fixedBufferStream(&result_buf);
-        val.format(fbs.writer());
-        result_len = @intCast(fbs.pos);
+        // Check if result is a view_node -- serialize as JSON for DOM rendering
+        if (val.* == .view_node) {
+            has_view = true;
+            var vfbs = std.io.fixedBufferStream(&view_buf);
+            writeViewJson(vfbs.writer(), val);
+            view_len = @intCast(vfbs.pos);
+            // Also set text result for REPL display
+            var fbs = std.io.fixedBufferStream(&result_buf);
+            val.format(fbs.writer());
+            result_len = @intCast(fbs.pos);
+        } else {
+            has_view = false;
+            view_len = 0;
+            var fbs = std.io.fixedBufferStream(&result_buf);
+            val.format(fbs.writer());
+            result_len = @intCast(fbs.pos);
+        }
     } else {
+        has_view = false;
+        view_len = 0;
         result_len = 0;
     }
     error_len = 0;
@@ -159,6 +178,7 @@ fn writeJsonEscaped(w: anytype, val: *const Value) void {
             }
             w.writeAll(") do ... end") catch {};
         },
+        .view_node => w.writeAll("<view_node>") catch {},
     }
 }
 
@@ -220,6 +240,82 @@ fn updateStateJson() void {
     state_len = @intCast(fbs.pos);
 }
 
+/// Serialize a view_node tree as JSON for the JS renderer.
+fn writeViewJson(w: anytype, val: *const Value) void {
+    switch (val.*) {
+        .view_node => |node| {
+            w.writeAll("{\"tag\":\"") catch {};
+            w.writeAll(node.tag) catch {};
+            w.writeAll("\",\"attrs\":{") catch {};
+            for (node.attrs, 0..) |attr, i| {
+                if (i > 0) w.writeAll(",") catch {};
+                w.writeAll("\"") catch {};
+                w.writeAll(attr.key) catch {};
+                w.writeAll("\":") catch {};
+                writeViewJson(w, attr.val);
+            }
+            w.writeAll("},\"children\":[") catch {};
+            for (node.children, 0..) |child, i| {
+                if (i > 0) w.writeAll(",") catch {};
+                writeViewJson(w, child);
+            }
+            w.writeAll("]}") catch {};
+        },
+        .string => |s| {
+            w.writeAll("{\"text\":\"") catch {};
+            // Escape JSON special chars in string values
+            for (s) |c| {
+                switch (c) {
+                    '"' => w.writeAll("\\\"") catch {},
+                    '\\' => w.writeAll("\\\\") catch {},
+                    '\n' => w.writeAll("\\n") catch {},
+                    '\t' => w.writeAll("\\t") catch {},
+                    else => w.writeByte(c) catch {},
+                }
+            }
+            w.writeAll("\"}") catch {};
+        },
+        .integer => |n| {
+            w.writeAll("{\"text\":\"") catch {};
+            w.print("{d}", .{n}) catch {};
+            w.writeAll("\"}") catch {};
+        },
+        .float => |f| {
+            w.writeAll("{\"text\":\"") catch {};
+            w.print("{d}", .{f}) catch {};
+            w.writeAll("\"}") catch {};
+        },
+        .atom => |a| {
+            w.writeAll("\"") catch {};
+            w.writeAll(a) catch {};
+            w.writeAll("\"") catch {};
+        },
+        .boolean => |b| {
+            if (b) w.writeAll("true") catch {} else w.writeAll("false") catch {};
+        },
+        else => {
+            w.writeAll("{\"text\":\"") catch {};
+            val.format(w);
+            w.writeAll("\"}") catch {};
+        },
+    }
+}
+
+/// Returns 1 if the last eval result was a view_node, 0 otherwise.
+export fn blimp_has_view() i32 {
+    return if (has_view) 1 else 0;
+}
+
+/// Get the view JSON pointer.
+export fn blimp_get_view_ptr() [*]const u8 {
+    return &view_buf;
+}
+
+/// Get the view JSON length.
+export fn blimp_get_view_len() u32 {
+    return view_len;
+}
+
 /// Get the result string pointer.
 export fn blimp_get_result_ptr() [*]const u8 {
     return &result_buf;
@@ -256,6 +352,8 @@ export fn blimp_reset() void {
     result_len = 0;
     error_len = 0;
     state_len = 0;
+    view_len = 0;
+    has_view = false;
     last_status = 0;
 }
 
