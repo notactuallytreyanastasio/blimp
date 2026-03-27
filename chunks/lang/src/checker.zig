@@ -608,13 +608,28 @@ pub const Checker = struct {
             },
             .lookup_fn => {
                 // lookup(%{K => V}, K) -> V
+                // lookup(%{name: String, age: Int}, "name") -> String
                 if (args.len != 2) {
                     self.addError(loc, "lookup() expects 2 arguments, got {d}", .{args.len});
                     return .hole;
                 }
                 const map_type = self.inferExpr(args[0]);
-                _ = self.inferExpr(args[1]);
+                const key_type = self.inferExpr(args[1]);
+                _ = key_type;
                 if (map_type == .map) return map_type.map.value.*;
+                // For record types, try to resolve the specific field type
+                if (map_type == .record_type) {
+                    // If the key is a string literal, look up the exact field
+                    if (args[1].kind == .string_lit) {
+                        const raw = args[1].kind.string_lit.value;
+                        const key_name = if (raw.len >= 2 and raw[0] == '"')
+                            raw[1 .. raw.len - 1]
+                        else
+                            raw;
+                        if (map_type.recordField(key_name)) |field_ty| return field_ty.*;
+                    }
+                    return .any;
+                }
                 return .hole;
             },
             .insert_fn => {

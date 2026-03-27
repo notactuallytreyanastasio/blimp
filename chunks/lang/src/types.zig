@@ -27,10 +27,28 @@ pub const Type = union(enum) {
     /// Actor reference type.
     actor: []const u8,
 
+    /// Record type: %{name: String, age: Int}
+    /// Each field has its own declared type. Structurally a typed map.
+    record_type: []const RecordField,
+
+    pub const RecordField = struct {
+        name: []const u8,
+        ty: *const Type,
+    };
+
     pub const MapType = struct {
         key: *const Type,
         value: *const Type,
     };
+
+    /// Look up a field type by name in a record type. Returns null if not found.
+    pub fn recordField(self: Type, name: []const u8) ?*const Type {
+        if (self != .record_type) return null;
+        for (self.record_type) |field| {
+            if (std.mem.eql(u8, field.name, name)) return field.ty;
+        }
+        return null;
+    }
 
     /// Check structural equality of two types.
     pub fn eql(a: Type, b: Type) bool {
@@ -54,6 +72,15 @@ pub const Type = union(enum) {
                 return true;
             },
             .actor => |name_a| std.mem.eql(u8, name_a, b.actor),
+            .record_type => |fields_a| {
+                const fields_b = b.record_type;
+                if (fields_a.len != fields_b.len) return false;
+                for (fields_a, fields_b) |fa, fb| {
+                    if (!std.mem.eql(u8, fa.name, fb.name)) return false;
+                    if (!fa.ty.eql(fb.ty.*)) return false;
+                }
+                return true;
+            },
         };
     }
 
@@ -81,8 +108,13 @@ pub const Type = union(enum) {
         //   nil -> map: empty map
         //   nil -> actor: uninitialized actor ref
         //   list -> nil: nil inferred from [] can accept any list
-        if (sub == .nil and (super == .list or super == .map or super == .actor)) return true;
+        if (sub == .nil and (super == .list or super == .map or super == .actor or super == .record_type)) return true;
         if (sub == .list and super == .nil) return true;
+        // Records and maps are mutually compatible — a record is a typed map,
+        // a map value satisfies a record annotation at runtime.
+        if (sub == .record_type and super == .map) return true;
+        if (sub == .map and super == .record_type) return true;
+        if (sub == .record_type and super == .record_type) return true;
         // Structural subtyping for composite types
         if (sub == .tuple and super == .tuple) {
             if (sub.tuple.len != super.tuple.len) return false;
@@ -118,13 +150,27 @@ pub const Type = union(enum) {
             .map => "%{...}",
             .tuple => "{...}",
             .actor => |n| n,
+            .record_type => "%{...}",
         };
     }
 };
 
+/// Parse a single record field "key: Type" string into a RecordField.
+/// Returns null if the string doesn't look like a field declaration.
+fn parseRecordField(allocator: std.mem.Allocator, s: []const u8) error{OutOfMemory}!?Type.RecordField {
+    const colon = std.mem.indexOfScalar(u8, s, ':') orelse return null;
+    const name = std.mem.trim(u8, s[0..colon], " \t\n\r");
+    const type_str = std.mem.trim(u8, s[colon + 1 ..], " \t\n\r");
+    if (name.len == 0 or type_str.len == 0) return null;
+    const ty = try parseTypeName(allocator, type_str);
+    const ty_ptr = try allocator.create(Type);
+    ty_ptr.* = ty;
+    return Type.RecordField{ .name = name, .ty = ty_ptr };
+}
+
 /// Parse a type name string (from the AST) into a Type.
 /// Allocates composite types on the given allocator.
-pub fn parseTypeName(allocator: std.mem.Allocator, type_str: []const u8) !Type {
+pub fn parseTypeName(allocator: std.mem.Allocator, type_str: []const u8) error{OutOfMemory}!Type {
     // Primitive types
     if (std.mem.eql(u8, type_str, "Int")) return .int;
     if (std.mem.eql(u8, type_str, "Float")) return .float;
@@ -187,20 +233,62 @@ pub fn parseTypeName(allocator: std.mem.Allocator, type_str: []const u8) !Type {
         return Type{ .tuple = elem_types.toOwnedSlice(allocator) catch return error.OutOfMemory };
     }
 
-    // Map type: %{K => V}
-    if (type_str.len >= 5 and type_str[0] == '%' and type_str[1] == '{' and type_str[type_str.len - 1] == '}') {
-        const inner = type_str[2 .. type_str.len - 1];
-        // Find " => " separator
-        if (std.mem.indexOf(u8, inner, "=>")) |sep| {
-            const key_str = std.mem.trim(u8, inner[0..sep], " ");
-            const val_str = std.mem.trim(u8, inner[sep + 2 ..], " ");
-            const key_type = try parseTypeName(allocator, key_str);
-            const val_type = try parseTypeName(allocator, val_str);
-            const key_ptr = try allocator.create(Type);
-            key_ptr.* = key_type;
-            const val_ptr = try allocator.create(Type);
-            val_ptr.* = val_type;
-            return Type{ .map = .{ .key = key_ptr, .value = val_ptr } };
+    // Map or record type starting with %{
+    if (type_str.len >= 3 and type_str[0] == '%' and type_str[1] == '{' and type_str[type_str.len - 1] == '}') {
+        const inner_raw = std.mem.trim(u8, type_str[2 .. type_str.len - 1], " \t\n\r");
+
+        // Distinguish: %{Key => Value} (homogeneous map) vs %{key: Type, ...} (record)
+        // Heuristic: if there's a "=>" it's a map, otherwise it's a record.
+        if (std.mem.indexOf(u8, inner_raw, "=>") != null) {
+            // %{K => V} homogeneous map
+            if (std.mem.indexOf(u8, inner_raw, "=>")) |sep| {
+                const key_str = std.mem.trim(u8, inner_raw[0..sep], " ");
+                const val_str = std.mem.trim(u8, inner_raw[sep + 2 ..], " ");
+                const key_type = try parseTypeName(allocator, key_str);
+                const val_type = try parseTypeName(allocator, val_str);
+                const key_ptr = try allocator.create(Type);
+                key_ptr.* = key_type;
+                const val_ptr = try allocator.create(Type);
+                val_ptr.* = val_type;
+                return Type{ .map = .{ .key = key_ptr, .value = val_ptr } };
+            }
+        } else if (inner_raw.len == 0) {
+            // %{} — empty/generic map
+            const k = try allocator.create(Type);
+            k.* = .any;
+            const v = try allocator.create(Type);
+            v.* = .any;
+            return Type{ .map = .{ .key = k, .value = v } };
+        } else {
+            // %{key1: Type1, key2: Type2, ...} — record type
+            var fields: std.ArrayListUnmanaged(Type.RecordField) = .{};
+            // Split on commas at depth 0
+            var start: usize = 0;
+            var depth: usize = 0;
+            const inner = inner_raw;
+            for (inner, 0..) |ch, i| {
+                if (ch == '[' or ch == '{' or ch == '(') depth += 1;
+                if (ch == ']' or ch == '}' or ch == ')') depth -= 1;
+                if (ch == ',' and depth == 0) {
+                    const part = std.mem.trim(u8, inner[start..i], " \t\n\r");
+                    if (part.len > 0) {
+                        if (try parseRecordField(allocator, part)) |field| {
+                            fields.append(allocator, field) catch return error.OutOfMemory;
+                        }
+                    }
+                    start = i + 1;
+                }
+            }
+            // Last field
+            const last = std.mem.trim(u8, inner[start..], " \t\n\r");
+            if (last.len > 0) {
+                if (try parseRecordField(allocator, last)) |field| {
+                    fields.append(allocator, field) catch return error.OutOfMemory;
+                }
+            }
+            if (fields.items.len > 0) {
+                return Type{ .record_type = fields.toOwnedSlice(allocator) catch return error.OutOfMemory };
+            }
         }
     }
 

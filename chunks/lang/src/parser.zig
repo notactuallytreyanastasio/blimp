@@ -1387,27 +1387,60 @@ pub const Parser = struct {
             return start[0..len];
         }
         if (self.current.kind == .percent) {
-            // %{K => V} -- map type
+            // %{K => V}  -- homogeneous map type
+            // %{key: T, key: T, ...}  -- record type
+            // %{}  -- empty/generic map
             const start = self.current.lexeme.ptr;
             self.advance(); // skip %
             if (self.current.kind != .lbrace) return error.UnexpectedToken;
             self.advance(); // skip {
-            // Key type
-            if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
-            self.advance();
-            // => separator
-            if (self.current.kind != .eq) return error.UnexpectedToken;
-            self.advance();
-            if (self.current.kind != .gt) return error.UnexpectedToken;
-            self.advance();
-            // Value type
-            if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
-            self.advance();
+            self.skipNewlines();
+
+            if (self.current.kind == .rbrace) {
+                // %{} empty map
+                const end = self.current.lexeme.ptr + self.current.lexeme.len;
+                self.advance();
+                return start[0..(@intFromPtr(end) - @intFromPtr(start))];
+            }
+
+            if (self.current.kind == .upper_identifier) {
+                // %{Key => Value} homogeneous map
+                self.advance();
+                if (self.current.kind != .eq) return error.UnexpectedToken;
+                self.advance();
+                if (self.current.kind != .gt) return error.UnexpectedToken;
+                self.advance();
+                if (self.current.kind != .upper_identifier) return error.UnexpectedToken;
+                self.advance();
+                self.skipNewlines();
+                if (self.current.kind != .rbrace) return error.UnexpectedToken;
+                const end = self.current.lexeme.ptr + self.current.lexeme.len;
+                self.advance();
+                return start[0..(@intFromPtr(end) - @intFromPtr(start))];
+            }
+
+            // %{key: Type, key: Type, ...} record type
+            // Consume field declarations until }
+            while (self.current.kind != .rbrace and self.current.kind != .eof) {
+                self.skipNewlines();
+                if (self.current.kind == .rbrace) break;
+                // field name (identifier)
+                if (self.current.kind != .identifier) return error.UnexpectedToken;
+                self.advance();
+                if (self.current.kind != .colon) return error.UnexpectedToken;
+                self.advance();
+                // field type (any valid type name)
+                _ = try self.parseTypeName();
+                self.skipNewlines();
+                if (self.current.kind == .comma) {
+                    self.advance();
+                    self.skipNewlines();
+                }
+            }
             if (self.current.kind != .rbrace) return error.UnexpectedToken;
             const end = self.current.lexeme.ptr + self.current.lexeme.len;
-            self.advance(); // skip }
-            const len = @intFromPtr(end) - @intFromPtr(start);
-            return start[0..len];
+            self.advance();
+            return start[0..(@intFromPtr(end) - @intFromPtr(start))];
         }
         return error.UnexpectedToken;
     }
