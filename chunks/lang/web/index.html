@@ -53,16 +53,48 @@ body {
   min-height: 0;
 }
 
-.canvas-pane {
+.view-pane {
   height: 45%;
   border-top: 1px solid #2a2a3e;
   flex-shrink: 0;
-  position: relative;
+  overflow-y: auto;
+  padding: 1rem 1.5rem;
 }
 
-.canvas-pane canvas {
-  display: block;
+.view-pane:empty {
+  display: none;
 }
+
+/* View DSL rendering */
+.blimp-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.blimp-row { display: flex; flex-direction: row; gap: 0.5rem; align-items: center; }
+.blimp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem; }
+.blimp-text { color: #d4d4d4; }
+.blimp-bold { font-weight: bold; }
+.blimp-italic { font-style: italic; }
+.blimp-code { font-family: inherit; background: #2a2a3e; padding: 0.1em 0.4em; border-radius: 3px; color: #a6e22e; }
+.blimp-code-block { background: #2a2a3e; padding: 0.75rem 1rem; border-radius: 4px; color: #a6e22e; white-space: pre-wrap; font-family: inherit; overflow-x: auto; }
+.blimp-blockquote { border-left: 3px solid #a6e22e; padding-left: 1rem; color: #999; font-style: italic; }
+.blimp-divider { border: none; border-top: 1px solid #2a2a3e; margin: 0.5rem 0; }
+.blimp-list { list-style: disc; padding-left: 1.5rem; color: #d4d4d4; }
+.blimp-list li { margin-bottom: 0.25rem; }
+.blimp-link { color: #6cb6ff; text-decoration: underline; cursor: pointer; }
+.blimp-image { max-width: 100%; border-radius: 4px; }
+.blimp-video { max-width: 100%; border-radius: 4px; }
+.blimp-canvas { border: 1px solid #2a2a3e; border-radius: 4px; }
+.blimp-button {
+  background: #2a2a3e;
+  color: #a6e22e;
+  border: 1px solid #3a3a5e;
+  padding: 0.4rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+.blimp-button:hover { background: #3a3a5e; }
+.blimp-button:active { background: #4a4a6e; }
 
 .repl-pane .line {
   white-space: pre-wrap;
@@ -143,9 +175,7 @@ body {
     <div class="repl-pane" id="repl">
       <!-- lines and input get appended here -->
     </div>
-    <div class="canvas-pane">
-      <canvas id="viz"></canvas>
-    </div>
+    <div class="view-pane" id="view-pane"></div>
   </div>
   <div class="state-pane">
     <h2>State</h2>
@@ -154,21 +184,23 @@ body {
 </div>
 
 <script src="blimp.js"></script>
-<script src="canvas.js"></script>
 <script>
 (async function() {
   var repl = document.getElementById('repl');
   var statusEl = document.getElementById('status');
   var stateContent = document.getElementById('state-content');
+  var viewPane = document.getElementById('view-pane');
 
   var blimp = new Blimp();
-  var viz = new BlimpCanvas(document.getElementById('viz'));
   var history = [];
   var historyIdx = -1;
   var buffer = '';
   var depth = 0;
   var inputRow = null;
   var inputEl = null;
+
+  // Track mounted actors for re-rendering
+  var mountedActors = {}; // { refString: { ref, viewData } }
 
   blimp.onPrint(function(str) {
     addLine('print-line', str);
@@ -189,10 +221,172 @@ body {
 
   createPrompt();
 
-  // Click anywhere in repl to focus the input
   repl.addEventListener('click', function() {
     if (inputEl) inputEl.focus();
   });
+
+  // ── View renderer ─────────────────────────────────────
+  // Maps view_node JSON tree -> DOM elements
+
+  function renderView(node) {
+    if (!node) return document.createTextNode('');
+
+    // Text leaf node
+    if (node.text !== undefined) {
+      return document.createTextNode(node.text);
+    }
+
+    var tag = node.tag;
+    var attrs = node.attrs || {};
+    var children = node.children || [];
+    var el;
+
+    switch (tag) {
+      case 'stack':
+        el = document.createElement('div');
+        el.className = 'blimp-stack';
+        break;
+      case 'row':
+        el = document.createElement('div');
+        el.className = 'blimp-row';
+        break;
+      case 'grid':
+        el = document.createElement('div');
+        el.className = 'blimp-grid';
+        break;
+      case 'text':
+        el = document.createElement('span');
+        el.className = 'blimp-text';
+        break;
+      case 'heading':
+        var level = (attrs.level && typeof attrs.level === 'number') ? attrs.level : 1;
+        level = Math.max(1, Math.min(6, level));
+        el = document.createElement('h' + level);
+        break;
+      case 'bold':
+        el = document.createElement('strong');
+        el.className = 'blimp-bold';
+        break;
+      case 'italic':
+        el = document.createElement('em');
+        el.className = 'blimp-italic';
+        break;
+      case 'code':
+        el = document.createElement('code');
+        el.className = 'blimp-code';
+        break;
+      case 'code_block':
+        el = document.createElement('pre');
+        el.className = 'blimp-code-block';
+        if (attrs.lang) el.dataset.lang = attrs.lang;
+        break;
+      case 'blockquote':
+        el = document.createElement('blockquote');
+        el.className = 'blimp-blockquote';
+        break;
+      case 'divider':
+        el = document.createElement('hr');
+        el.className = 'blimp-divider';
+        return el; // no children
+      case 'list':
+        el = document.createElement('ul');
+        el.className = 'blimp-list';
+        // Wrap each child in an <li>
+        for (var i = 0; i < children.length; i++) {
+          var li = document.createElement('li');
+          li.appendChild(renderView(children[i]));
+          el.appendChild(li);
+        }
+        return el;
+      case 'link':
+        el = document.createElement('a');
+        el.className = 'blimp-link';
+        if (attrs.href) el.href = attrs.href;
+        el.target = '_blank';
+        el.rel = 'noopener';
+        break;
+      case 'image':
+        el = document.createElement('img');
+        el.className = 'blimp-image';
+        if (attrs.src) el.src = attrs.src;
+        if (attrs.alt) el.alt = attrs.alt;
+        return el; // no children
+      case 'video':
+        el = document.createElement('video');
+        el.className = 'blimp-video';
+        if (attrs.src) el.src = attrs.src;
+        el.controls = true;
+        return el;
+      case 'canvas':
+        el = document.createElement('canvas');
+        el.className = 'blimp-canvas';
+        if (attrs.id) el.id = attrs.id;
+        return el;
+      case 'button':
+        el = document.createElement('button');
+        el.className = 'blimp-button';
+        if (attrs.sends) {
+          (function(msg) {
+            el.addEventListener('click', function() {
+              sendToActor(msg);
+            });
+          })(attrs.sends);
+        }
+        break;
+      default:
+        el = document.createElement('div');
+        break;
+    }
+
+    // Append children
+    for (var i = 0; i < children.length; i++) {
+      el.appendChild(renderView(children[i]));
+    }
+
+    return el;
+  }
+
+  // Send a message to a mounted actor and re-render
+  function sendToActor(message) {
+    // Find which actor is mounted -- for now use the first one
+    var refs = Object.keys(mountedActors);
+    if (refs.length === 0) return;
+
+    var actorRef = refs[0]; // e.g. "ref<Counter:0>"
+
+    // Find which variable holds this actor ref
+    var state = blimp.getState();
+    var varName = null;
+    if (state.vars) {
+      for (var v of state.vars) {
+        if (v.value === actorRef) { varName = v.name; break; }
+      }
+    }
+
+    if (varName) {
+      blimp.eval(varName + ' <- :' + message);
+      var viewResult = blimp.eval(varName + ' <- :view');
+      if (viewResult.ok && viewResult.view) {
+        mountedActors[actorRef] = { view: viewResult.view };
+        renderMountedViews();
+      }
+      // Update state sidebar
+      updateState(blimp.getState());
+      addLine('print-line', '  :' + message + ' -> ' + actorRef);
+    }
+  }
+
+  function renderMountedViews() {
+    viewPane.innerHTML = '';
+    for (var ref in mountedActors) {
+      var data = mountedActors[ref];
+      if (data.view) {
+        viewPane.appendChild(renderView(data.view));
+      }
+    }
+  }
+
+  // ── REPL functions ────────────────────────────────────
 
   function createPrompt() {
     inputRow = document.createElement('div');
@@ -219,7 +413,6 @@ body {
   }
 
   function freezeInput() {
-    // Convert the live input row into static text
     if (!inputRow || !inputEl) return;
     var text = inputEl.value;
     var prompt = depth > 0 ? '   ... ' : 'blimp> ';
@@ -247,7 +440,6 @@ body {
       return;
     }
 
-    // History (only when no buffer accumulated)
     if (e.key === 'ArrowUp' && !buffer && inputEl.selectionStart === 0) {
       e.preventDefault();
       if (historyIdx > 0) {
@@ -293,7 +485,23 @@ body {
 
     var result = blimp.eval(source);
     if (result.ok) {
-      if (result.value) addLine('result-line', '=> ' + result.value);
+      if (result.view) {
+        // Result is a view -- render it in the view pane
+        addLine('result-line', '=> <view>');
+        // Track mounted actor views
+        var state = blimp.getState();
+        if (state.actors && state.actors.length) {
+          // Associate view with the most recent actor
+          var lastActor = state.actors[state.actors.length - 1];
+          mountedActors[lastActor.ref] = { view: result.view };
+        } else {
+          // No actor -- just render as a one-shot view
+          mountedActors['__repl__'] = { view: result.view };
+        }
+        renderMountedViews();
+      } else if (result.value) {
+        addLine('result-line', '=> ' + result.value);
+      }
     } else {
       addLine('error-line', result.error);
     }
@@ -301,7 +509,6 @@ body {
     addLine('spacer-line', '');
     var state = blimp.getState();
     updateState(state);
-    viz.feed(state, source);
 
     buffer = '';
     depth = 0;
@@ -310,7 +517,6 @@ body {
   function updateState(state) {
     stateContent.innerHTML = '';
 
-    // Variables
     if (state.vars && state.vars.length) {
       for (var v of state.vars) {
         var div = document.createElement('div');
@@ -322,7 +528,6 @@ body {
       }
     }
 
-    // Actor instances with state
     if (state.actors && state.actors.length) {
       var heading = document.createElement('h2');
       heading.textContent = 'Actors';

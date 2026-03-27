@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Blimp DOM Playground</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+:root {
+  --bg: #1a1a2e;
+  --bg2: #222240;
+  --border: #2a2a3e;
+  --fg: #d4d4d4;
+  --green: #a6e22e;
+  --blue: #6cb6ff;
+  --red: #f92672;
+  --dim: #666;
+  --radius: 8px;
+  --font: 'SF Mono', 'Menlo', 'Cascadia Code', 'Fira Code', monospace;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ── Header ── */
+
+.header {
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.header h1 { font-size: 0.85rem; font-weight: 600; color: var(--green); }
+.header .status { font-size: 0.7rem; color: var(--dim); }
+
+/* ── Tabs ── */
+
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.tab {
+  flex: 1;
+  padding: 0.5rem 0;
+  text-align: center;
+  font-size: 0.7rem;
+  font-family: var(--font);
+  color: var(--dim);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tab.active { color: var(--green); border-bottom-color: var(--green); }
+
+/* ── Panels ── */
+
+.panels {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.panel {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+}
+.panel.active { display: flex; }
+
+/* ── Code panel ── */
+
+#panel-code {
+  display: none;
+  flex-direction: column;
+}
+#panel-code.active { display: flex; }
+
+#editor {
+  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 0.5rem;
+  border: none;
+  outline: none;
+  resize: none;
+  -webkit-appearance: none;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.toolbar {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.4rem;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.btn {
+  padding: 0.5rem;
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  min-height: 44px;
+  -webkit-appearance: none;
+}
+
+.btn-run { flex: 2; background: var(--green); color: var(--bg); border-color: var(--green); }
+.btn-run:active { opacity: 0.8; }
+.btn-run.running { background: var(--blue); border-color: var(--blue); }
+
+.btn-demo { flex: 1; background: #3a2a6e; color: #c4b5fd; border-color: #4a3a8e; }
+.btn-demo:active { opacity: 0.8; }
+
+.btn-more { flex: 0.6; background: var(--bg2); color: var(--fg); }
+
+/* ── View panel ── */
+
+.view-area {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 1rem;
+}
+
+.view-area:empty::after {
+  content: 'Tap Demo or write code and hit Run';
+  color: var(--dim);
+  font-size: 0.85rem;
+  display: block;
+  text-align: center;
+  margin-top: 3rem;
+}
+
+.view-error {
+  color: var(--red);
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 0.5rem;
+}
+
+/* ── Canvas panel ── */
+
+.canvas-wrap {
+  flex: 1;
+  background: #0e0e1a;
+  position: relative;
+}
+.canvas-wrap canvas { display: block; }
+
+/* ── State panel ── */
+
+.state-area {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.75rem;
+  font-size: 12px;
+}
+.state-area h2 { font-size: 0.7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; margin: 0.75rem 0 0.4rem; }
+.state-area h2:first-child { margin-top: 0; }
+.state-area .var { margin-bottom: 0.15rem; }
+.state-area .var-name { color: var(--green); }
+.state-area .var-eq { color: var(--dim); }
+.state-area .var-val { color: var(--fg); }
+
+/* ── View DSL elements ── */
+
+.blimp-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.blimp-row { display: flex; flex-direction: row; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.blimp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem; }
+.blimp-text { color: var(--fg); }
+.blimp-bold { font-weight: bold; }
+.blimp-italic { font-style: italic; }
+.blimp-code { background: var(--bg2); padding: 0.1em 0.4em; border-radius: 3px; color: var(--green); }
+.blimp-code-block { background: var(--bg2); padding: 0.75rem; border-radius: var(--radius); color: var(--green); white-space: pre-wrap; overflow-x: auto; }
+.blimp-blockquote { border-left: 3px solid var(--green); padding-left: 0.75rem; color: #999; font-style: italic; }
+.blimp-divider { border: none; border-top: 1px solid var(--border); margin: 0.4rem 0; }
+.blimp-list { list-style: disc; padding-left: 1.5rem; color: var(--fg); }
+.blimp-list li { margin-bottom: 0.2rem; }
+.blimp-link { color: var(--blue); text-decoration: underline; }
+.blimp-image { max-width: 100%; border-radius: var(--radius); }
+.blimp-button {
+  background: var(--bg2);
+  color: var(--green);
+  border: 1px solid var(--border);
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 13px;
+  -webkit-appearance: none;
+  min-height: 44px;
+}
+.blimp-button:active { background: #3a3a5e; }
+
+.view-area h1 { font-size: 1.4rem; color: var(--fg); margin-bottom: 0.2rem; }
+.view-area h2 { font-size: 1.2rem; color: var(--fg); margin-bottom: 0.2rem; }
+.view-area h3 { font-size: 1rem; color: var(--fg); margin-bottom: 0.2rem; }
+
+/* ── Examples overlay ── */
+
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 20; }
+.overlay.open { display: block; }
+.drawer {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  max-height: 70%; background: var(--bg2);
+  border-radius: 12px 12px 0 0;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  z-index: 21; padding: 1rem;
+}
+.drawer h3 { font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem; }
+.ex-item { padding: 0.6rem; margin-bottom: 0.4rem; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
+.ex-item:active { border-color: var(--green); }
+.ex-title { font-size: 0.8rem; color: var(--green); margin-bottom: 0.15rem; }
+.ex-desc { font-size: 0.7rem; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>blimp playground</h1>
+    <span class="status" id="status">loading...</span>
+  </div>
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-p="view">View</button>
+    <button class="tab" data-p="code">Code</button>
+    <button class="tab" data-p="canvas">Canvas</button>
+    <button class="tab" data-p="state">State</button>
+  </div>
+  <div class="panels">
+    <div class="panel active" id="panel-view">
+      <div class="view-area" id="view-area"></div>
+    </div>
+    <div class="panel" id="panel-code">
+      <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+      <div class="toolbar">
+        <button class="btn btn-run" id="btn-run">Run</button>
+        <button class="btn btn-demo" id="btn-demo">Demo</button>
+        <button class="btn btn-more" id="btn-more">...</button>
+      </div>
+    </div>
+    <div class="panel" id="panel-canvas">
+      <div class="canvas-wrap" id="canvas-wrap"><canvas id="viz"></canvas></div>
+    </div>
+    <div class="panel" id="panel-state">
+      <div class="state-area">
+        <h2>Variables</h2>
+        <div id="state-vars"></div>
+        <h2>Actors</h2>
+        <div id="state-actors"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="overlay" id="overlay"><div class="drawer" id="drawer"></div></div>
+
+<script src="repl/blimp.js"></script>
+<script src="repl/canvas.js"></script>
+<script>
+(async function() {
+  var statusEl = document.getElementById('status');
+  var editor = document.getElementById('editor');
+  var viewArea = document.getElementById('view-area');
+  var stateVars = document.getElementById('state-vars');
+  var stateActors = document.getElementById('state-actors');
+  var overlay = document.getElementById('overlay');
+  var drawer = document.getElementById('drawer');
+  var btnRun = document.getElementById('btn-run');
+
+  var blimp = new Blimp();
+  var viz = null;
+  var mountedActors = {};
+  var simInterval = null;
+
+  blimp.onPrint(function() {});
+
+  // ── Init ──
+
+  try {
+    await blimp.init('repl/blimp.wasm');
+    statusEl.textContent = 'ready';
+    statusEl.style.color = '#a6e22e';
+  } catch (e) {
+    statusEl.textContent = 'wasm: ' + e.message;
+    statusEl.style.color = '#f92672';
+  }
+
+  try { viz = new BlimpCanvas(document.getElementById('viz')); } catch(e) {}
+
+  // ── Tabs ──
+
+  document.getElementById('tabs').addEventListener('click', function(e) {
+    var t = e.target.closest('.tab');
+    if (!t) return;
+    document.querySelectorAll('.tab').forEach(function(x) { x.classList.remove('active'); });
+    document.querySelectorAll('.panel').forEach(function(x) { x.classList.remove('active'); });
+    t.classList.add('active');
+    document.getElementById('panel-' + t.dataset.p).classList.add('active');
+  });
+
+  // ── Demo ──
+
+  var demoCode = '# Coffee shop -- 5 actors\n\
+# Tap Demo, then tap drink buttons\n\
+\n\
+actor Register do\n\
+  state revenue: Int :: 0\n\
+  state sales: Int :: 0\n\
+  state last: String :: "none"\n\
+\n\
+  on :latte do\n\
+    become revenue: revenue + 5, sales: sales + 1, last: "Latte"\n\
+  end\n\
+  on :mocha do\n\
+    become revenue: revenue + 6, sales: sales + 1, last: "Mocha"\n\
+  end\n\
+  on :drip do\n\
+    become revenue: revenue + 3, sales: sales + 1, last: "Drip"\n\
+  end\n\
+  on :espresso do\n\
+    become revenue: revenue + 4, sales: sales + 1, last: "Espresso"\n\
+  end\n\
+  on :cortado do\n\
+    become revenue: revenue + 5, sales: sales + 1, last: "Cortado"\n\
+  end\n\
+  on :cold_brew do\n\
+    become revenue: revenue + 5, sales: sales + 1, last: "Cold Brew"\n\
+  end\n\
+\n\
+  on :tip do become revenue: revenue end\n\
+  on :star do become revenue: revenue end\n\
+  on :restock do become revenue: revenue end\n\
+\n\
+  on :view do\n\
+    stack(\n\
+      heading("Coffee Shop"),\n\
+      italic(concat("Last: ", last)),\n\
+      divider(),\n\
+      row(\n\
+        stack(bold("Revenue"), heading(concat("$", to_string(revenue)), 2)),\n\
+        stack(bold("Sales"), heading(to_string(sales), 2))\n\
+      ),\n\
+      divider(),\n\
+      heading("Menu", 3),\n\
+      row(\n\
+        button("Latte $5", :latte),\n\
+        button("Mocha $6", :mocha),\n\
+        button("Drip $3", :drip)\n\
+      ),\n\
+      row(\n\
+        button("Espresso $4", :espresso),\n\
+        button("Cortado $5", :cortado),\n\
+        button("Cold Brew $5", :cold_brew)\n\
+      ),\n\
+      divider(),\n\
+      row(\n\
+        button("Tip $1", :tip),\n\
+        button("5 stars", :star),\n\
+        button("Restock", :restock)\n\
+      ),\n\
+      divider(),\n\
+      blockquote("5 actors running. Check Canvas tab.")\n\
+    )\n\
+  end\n\
+end\n\
+\n\
+actor TipJar do\n\
+  state total: Int :: 0\n\
+  state count: Int :: 0\n\
+  on :tip do become total: total + 1, count: count + 1 end\n\
+end\n\
+\n\
+actor Inventory do\n\
+  state beans: Int :: 50\n\
+  state milk: Int :: 30\n\
+  state cups: Int :: 100\n\
+  on :use do become beans: beans - 1, milk: milk - 1, cups: cups - 1 end\n\
+  on :restock do become beans: beans + 20, milk: milk + 15 end\n\
+end\n\
+\n\
+actor Barista do\n\
+  state made: Int :: 0\n\
+  state status: String :: "idle"\n\
+  on :brew do become made: made + 1, status: "brewing" end\n\
+  on :done do become status: "idle" end\n\
+end\n\
+\n\
+actor Reviews do\n\
+  state stars: Int :: 0\n\
+  state count: Int :: 0\n\
+  on :star do become stars: stars + 5, count: count + 1 end\n\
+end\n\
+\n\
+reg = spawn Register\n\
+tips = spawn TipJar\n\
+inv = spawn Inventory\n\
+barista = spawn Barista\n\
+reviews = spawn Reviews\n\
+\n\
+reg <- :latte\n\
+barista <- :brew\n\
+inv <- :use\n\
+barista <- :done\n\
+tips <- :tip\n\
+reviews <- :star\n\
+\n\
+reg <- :espresso\n\
+barista <- :brew\n\
+inv <- :use\n\
+barista <- :done\n\
+\n\
+reg <- :cold_brew\n\
+barista <- :brew\n\
+inv <- :use\n\
+barista <- :done\n\
+tips <- :tip\n\
+\n\
+reg <- :view';
+
+  document.getElementById('btn-demo').addEventListener('click', function() {
+    editor.value = demoCode;
+    runCode(demoCode);
+  });
+
+  // ── Run ──
+
+  btnRun.addEventListener('click', function() {
+    var src = editor.value.trim();
+    if (!src) return;
+    runCode(src);
+  });
+
+  function runCode(source) {
+    btnRun.textContent = 'Running...';
+    btnRun.classList.add('running');
+
+    setTimeout(function() {
+      if (simInterval) { clearInterval(simInterval); simInterval = null; }
+      blimp.reset();
+      mountedActors = {};
+      viewArea.innerHTML = '';
+
+      var result = blimp.eval(source);
+      var state = blimp.getState();
+
+      if (viz) viz.feed(state, source);
+
+      btnRun.textContent = 'Run';
+      btnRun.classList.remove('running');
+
+      if (result.ok) {
+        var actorCount = state.actors ? state.actors.length : 0;
+        statusEl.textContent = 'ok | ' + actorCount + ' actors';
+        statusEl.style.color = '#a6e22e';
+
+        if (result.view) {
+          mountView(result.view);
+          showTab('view');
+        } else if (result.value) {
+          var pre = document.createElement('pre');
+          pre.style.padding = '1rem';
+          pre.style.color = 'var(--fg)';
+          pre.textContent = '=> ' + result.value;
+          viewArea.appendChild(pre);
+          showTab('view');
+        }
+      } else {
+        statusEl.textContent = 'error';
+        statusEl.style.color = '#f92672';
+        var div = document.createElement('div');
+        div.className = 'view-error';
+        div.textContent = result.error;
+        viewArea.appendChild(div);
+        showTab('view');
+      }
+
+      refreshState();
+      startSim();
+    }, 10); // let the button text update render
+  }
+
+  // ── Simulation loop: random actor messages ──
+
+  var simActions = [
+    // [target_var, message, also_send_to_view_actor]
+    ['reg', ':latte'], ['reg', ':mocha'], ['reg', ':drip'],
+    ['reg', ':espresso'], ['reg', ':cortado'], ['reg', ':cold_brew'],
+    ['barista', ':brew'], ['barista', ':done'],
+    ['inv', ':use'], ['inv', ':restock'],
+    ['tips', ':tip'],
+    ['reviews', ':star'],
+  ];
+
+  function startSim() {
+    if (simInterval) clearInterval(simInterval);
+    // Only run if we have multiple actors
+    var state = blimp.getState();
+    if (!state.actors || state.actors.length < 3) return;
+
+    simInterval = setInterval(function() {
+      var pick = simActions[Math.floor(Math.random() * simActions.length)];
+      var varName = pick[0];
+      var msg = pick[1];
+
+      // Check variable still exists
+      var state = blimp.getState();
+      var found = false;
+      if (state.vars) {
+        for (var v of state.vars) { if (v.name === varName) { found = true; break; } }
+      }
+      if (!found) return;
+
+      blimp.eval(varName + ' <- ' + msg);
+
+      // Re-render the view actor if it was the view actor
+      var refs = Object.keys(mountedActors);
+      if (refs.length && varName === 'reg') {
+        var vr = blimp.eval(varName + ' <- :view');
+        if (vr.ok && vr.view) {
+          mountedActors[refs[0]] = { view: vr.view };
+          renderAll();
+        }
+      }
+
+      if (viz) viz.feed(blimp.getState(), varName + ' <- ' + msg);
+      refreshState();
+
+      var actorCount = state.actors ? state.actors.length : 0;
+      statusEl.textContent = 'live | ' + actorCount + ' actors';
+    }, 800);
+  }
+
+  function showTab(name) {
+    document.querySelectorAll('.tab').forEach(function(x) { x.classList.remove('active'); });
+    document.querySelectorAll('.panel').forEach(function(x) { x.classList.remove('active'); });
+    document.querySelector('[data-p="' + name + '"]').classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+  }
+
+  // ── Examples ──
+
+  var examples = [
+    { title: 'Counter', desc: '+/- buttons',
+      code: 'actor Counter do\n  state count: Int :: 0\n  on :up do become count: count + 1 end\n  on :down do become count: count - 1 end\n  on :view do\n    stack(\n      heading("Counter"),\n      heading(to_string(count), 2),\n      row(button("- 1", :down), button("+ 1", :up))\n    )\n  end\nend\nc = spawn Counter\nc <- :view' },
+    { title: 'Toggle', desc: 'On/off switch',
+      code: 'actor Toggle do\n  state on: Bool :: false\n  on :flip do become on: not(on) end\n  on :view do\n    stack(\n      heading("Toggle"),\n      text(if on do "ON" else "OFF" end),\n      button("Flip", :flip)\n    )\n  end\nend\nt = spawn Toggle\nt <- :view' },
+    { title: 'Hello View', desc: 'No actors, just view primitives',
+      code: 'stack(\n  heading("Hello from Blimp"),\n  text("Views are first-class values."),\n  divider(),\n  row(bold("Bold"), italic("Italic"), code("code")),\n  blockquote("Actors are alive.")\n)' },
+    { title: 'Scoreboard', desc: 'Two teams',
+      code: 'actor Score do\n  state home: Int :: 0\n  state away: Int :: 0\n  on :home do become home: home + 1 end\n  on :away do become away: away + 1 end\n  on :view do\n    stack(\n      heading("Scoreboard"),\n      row(\n        stack(bold("Home"), heading(to_string(home), 2), button("+1", :home)),\n        stack(bold("Away"), heading(to_string(away), 2), button("+1", :away))\n      )\n    )\n  end\nend\ng = spawn Score\ng <- :view' }
+  ];
+
+  function buildExamples() {
+    drawer.innerHTML = '<h3>Examples</h3>';
+    examples.forEach(function(ex) {
+      var d = document.createElement('div');
+      d.className = 'ex-item';
+      d.innerHTML = '<div class="ex-title">' + esc(ex.title) + '</div><div class="ex-desc">' + esc(ex.desc) + '</div>';
+      d.addEventListener('click', function() { editor.value = ex.code; overlay.classList.remove('open'); showTab('code'); });
+      drawer.appendChild(d);
+    });
+  }
+  buildExamples();
+
+  document.getElementById('btn-more').addEventListener('click', function() { overlay.classList.toggle('open'); });
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.classList.remove('open'); });
+
+  // ── View renderer ──
+
+  function renderView(node) {
+    if (!node) return document.createTextNode('');
+    if (node.text !== undefined) return document.createTextNode(node.text);
+    var tag = node.tag, attrs = node.attrs || {}, children = node.children || [], el;
+    switch (tag) {
+      case 'stack': el = mk('div', 'blimp-stack'); break;
+      case 'row': el = mk('div', 'blimp-row'); break;
+      case 'grid': el = mk('div', 'blimp-grid'); break;
+      case 'text': el = mk('span', 'blimp-text'); break;
+      case 'heading':
+        var lv = Math.max(1, Math.min(6, (typeof attrs.level === 'number') ? attrs.level : 1));
+        el = document.createElement('h' + lv); break;
+      case 'bold': el = mk('strong', 'blimp-bold'); break;
+      case 'italic': el = mk('em', 'blimp-italic'); break;
+      case 'code': el = mk('code', 'blimp-code'); break;
+      case 'code_block': el = mk('pre', 'blimp-code-block'); break;
+      case 'blockquote': el = mk('blockquote', 'blimp-blockquote'); break;
+      case 'divider': return mk('hr', 'blimp-divider');
+      case 'list':
+        el = mk('ul', 'blimp-list');
+        children.forEach(function(c) { var li = document.createElement('li'); li.appendChild(renderView(c)); el.appendChild(li); });
+        return el;
+      case 'link': el = mk('a', 'blimp-link'); if (attrs.href) el.href = attrs.href; el.target = '_blank'; break;
+      case 'image': el = mk('img', 'blimp-image'); if (attrs.src) el.src = attrs.src; if (attrs.alt) el.alt = attrs.alt; return el;
+      case 'button':
+        el = mk('button', 'blimp-button');
+        if (attrs.sends) (function(msg) { el.addEventListener('click', function() { sendToActor(msg); }); })(attrs.sends);
+        break;
+      default: el = document.createElement('div');
+    }
+    children.forEach(function(c) { el.appendChild(renderView(c)); });
+    return el;
+  }
+
+  function mk(tag, cls) { var e = document.createElement(tag); e.className = cls; return e; }
+
+  function mountView(viewData) {
+    var state = blimp.getState();
+    if (state.actors && state.actors.length) {
+      mountedActors[state.actors[state.actors.length - 1].ref] = { view: viewData };
+    } else {
+      mountedActors['__static__'] = { view: viewData };
+    }
+    renderAll();
+  }
+
+  function renderAll() {
+    viewArea.innerHTML = '';
+    for (var r in mountedActors) {
+      if (mountedActors[r].view) viewArea.appendChild(renderView(mountedActors[r].view));
+    }
+  }
+
+  function sendToActor(message) {
+    var refs = Object.keys(mountedActors);
+    if (!refs.length) return;
+    var ref = refs[0];
+    var state = blimp.getState();
+    var varName = null;
+    if (state.vars) {
+      for (var v of state.vars) { if (v.value === ref) { varName = v.name; break; } }
+    }
+    if (!varName) return;
+    blimp.eval(varName + ' <- :' + message);
+    var vr = blimp.eval(varName + ' <- :view');
+    if (viz) viz.feed(blimp.getState(), varName + ' <- :' + message);
+    if (vr.ok && vr.view) {
+      mountedActors[ref] = { view: vr.view };
+      renderAll();
+    }
+    refreshState();
+  }
+
+  // ── State ──
+
+  function refreshState() {
+    var state = blimp.getState();
+    stateVars.innerHTML = '';
+    stateActors.innerHTML = '';
+    if (state.vars) state.vars.forEach(function(v) {
+      stateVars.innerHTML += '<div class="var"><span class="var-name">' + esc(v.name) + '</span> <span class="var-eq">=</span> <span class="var-val">' + esc(v.value) + '</span></div>';
+    });
+    if (state.actors) state.actors.forEach(function(a) {
+      stateActors.innerHTML += '<div class="var"><span class="var-name">' + esc(a.ref) + '</span></div>';
+      for (var k in a.state) {
+        stateActors.innerHTML += '<div class="var" style="padding-left:1rem"><span class="var-eq">' + esc(k) + ':</span> <span class="var-val">' + esc(a.state[k]) + '</span></div>';
+      }
+    });
+  }
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+})();
+</script>
+</body>
+</html>

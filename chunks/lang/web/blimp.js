@@ -46,7 +46,15 @@ class Blimp {
     if (status === 0) {
       const resultPtr = this.instance.exports.blimp_get_result_ptr();
       const resultLen = this.instance.exports.blimp_get_result_len();
-      return { ok: true, value: this._readString(resultPtr, resultLen) };
+      const hasView = this.instance.exports.blimp_has_view();
+      let viewData = null;
+      if (hasView) {
+        const viewPtr = this.instance.exports.blimp_get_view_ptr();
+        const viewLen = this.instance.exports.blimp_get_view_len();
+        const viewJson = this._readString(viewPtr, viewLen);
+        try { viewData = JSON.parse(viewJson); } catch (e) { /* ignore */ }
+      }
+      return { ok: true, value: this._readString(resultPtr, resultLen), view: viewData };
     } else {
       const errPtr = this.instance.exports.blimp_get_error_ptr();
       const errLen = this.instance.exports.blimp_get_error_len();

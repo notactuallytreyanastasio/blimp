@@ -15,6 +15,18 @@ pub const Value = union(enum) {
     map: []const MapEntry,
     actor_ref: registry_mod.ActorRef,
     closure: Closure,
+    view_node: ViewNode,
+
+    pub const ViewNode = struct {
+        tag: []const u8,
+        attrs: []const ViewAttr,
+        children: []const *const Value,
+
+        pub const ViewAttr = struct {
+            key: []const u8,
+            val: *const Value,
+        };
+    };
 
     pub const Closure = struct {
         params: []const @import("ast.zig").Node.HandlerParam, // typed params
@@ -102,6 +114,22 @@ pub const Value = union(enum) {
                 }
                 writer.writeAll(" do ... end") catch {};
             },
+            .view_node => |node| {
+                writer.print("<{s}", .{node.tag}) catch {};
+                for (node.attrs) |attr| {
+                    writer.print(" {s}=", .{attr.key}) catch {};
+                    attr.val.format(writer);
+                }
+                if (node.children.len == 0) {
+                    writer.writeAll(" />") catch {};
+                } else {
+                    writer.writeAll(">") catch {};
+                    for (node.children) |child| {
+                        child.format(writer);
+                    }
+                    writer.print("</{s}>", .{node.tag}) catch {};
+                }
+            },
         }
     }
 
@@ -149,10 +177,24 @@ pub const Value = union(enum) {
                 return ref_a.id == ref_b.id;
             },
             .closure => false, // closures are never equal by value
+            .view_node => |node_a| {
+                const node_b = b.view_node;
+                if (!std.mem.eql(u8, node_a.tag, node_b.tag)) return false;
+                if (node_a.attrs.len != node_b.attrs.len) return false;
+                for (node_a.attrs, node_b.attrs) |aa, ab| {
+                    if (!std.mem.eql(u8, aa.key, ab.key)) return false;
+                    if (!aa.val.eql(ab.val.*)) return false;
+                }
+                if (node_a.children.len != node_b.children.len) return false;
+                for (node_a.children, node_b.children) |ca, cb| {
+                    if (!ca.eql(cb.*)) return false;
+                }
+                return true;
+            },
         };
     }
 
-    /// Truthiness: nil and false are falsy, everything else is truthy.
+    /// Truthiness: nil, false, and hole are falsy; everything else (including view nodes) is truthy.
     pub fn truthy(v: Value) bool {
         return switch (v) {
             .nil => false,

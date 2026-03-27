@@ -70,6 +70,24 @@ pub const BuiltinRegistry = struct {
         reg.register("zip", &builtinZip);
         reg.register("uniq", &builtinUniq);
         reg.register("sum", &builtinSum);
+        // View primitives
+        reg.register("stack", &viewStack);
+        reg.register("row", &viewRow);
+        reg.register("grid", &viewGrid);
+        reg.register("text", &viewText);
+        reg.register("heading", &viewHeading);
+        reg.register("bold", &viewBold);
+        reg.register("italic", &viewItalic);
+        reg.register("code", &viewCode);
+        reg.register("code_block", &viewCodeBlock);
+        reg.register("blockquote", &viewBlockquote);
+        reg.register("divider", &viewDivider);
+        reg.register("list", &viewList);
+        reg.register("link", &viewLink);
+        reg.register("image", &viewImage);
+        reg.register("video", &viewVideo);
+        reg.register("canvas", &viewCanvas);
+        reg.register("button", &viewButton);
         return reg;
     }
 
@@ -571,6 +589,7 @@ fn builtinTypeOf(allocator: std.mem.Allocator, args: []const *const Value) EvalE
         .map => "map",
         .actor_ref => "actor_ref",
         .closure => "closure",
+        .view_node => "view_node",
     };
     result.* = Value{ .atom = type_name };
     return result;
@@ -805,6 +824,157 @@ fn builtinRandom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
 }
 
 // ============================================================
+// View primitive helpers
+// ============================================================
+
+const ViewAttr = Value.ViewNode.ViewAttr;
+
+/// Build a view_node with the given tag, no attrs, and variadic children (all must be view_node or string).
+fn makeViewNode(allocator: std.mem.Allocator, tag: []const u8, attrs: []const ViewAttr, children: []const *const Value) EvalError!*const Value {
+    const node_attrs = allocator.dupe(ViewAttr, attrs) catch return error.OutOfMemory;
+    const node_children = allocator.dupe(*const Value, children) catch return error.OutOfMemory;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .view_node = .{ .tag = tag, .attrs = node_attrs, .children = node_children } };
+    return result;
+}
+
+/// stack(child, child, ...) — vertical flex container, variadic children
+fn viewStack(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return makeViewNode(allocator, "stack", &.{}, args);
+}
+
+/// row(child, child, ...) — horizontal flex container, variadic children
+fn viewRow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return makeViewNode(allocator, "row", &.{}, args);
+}
+
+/// grid(child, child, ...) — grid container, variadic children
+fn viewGrid(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return makeViewNode(allocator, "grid", &.{}, args);
+}
+
+/// text("content") — inline text node
+fn viewText(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    return makeViewNode(allocator, "text", &.{}, args[0..1]);
+}
+
+/// heading("content", level) — h1-h6. Level defaults to 1 if omitted.
+fn viewHeading(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    const level: i64 = if (args.len == 2 and args[1].* == .integer) args[1].integer else 1;
+    const level_val = allocator.create(Value) catch return error.OutOfMemory;
+    level_val.* = Value{ .integer = level };
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "level", .val = level_val };
+    return makeViewNode(allocator, "heading", attrs, args[0..1]);
+}
+
+/// bold("content") — bold/strong text
+fn viewBold(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    return makeViewNode(allocator, "bold", &.{}, args[0..1]);
+}
+
+/// italic("content") — italic/em text
+fn viewItalic(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    return makeViewNode(allocator, "italic", &.{}, args[0..1]);
+}
+
+/// code("content") — inline code span
+fn viewCode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    return makeViewNode(allocator, "code", &.{}, args[0..1]);
+}
+
+/// code_block("content") — fenced code block, optional lang atom
+fn viewCodeBlock(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    if (args.len == 2) {
+        if (args[1].* != .atom) return error.TypeError;
+        const attrs = try allocator.alloc(ViewAttr, 1);
+        attrs[0] = .{ .key = "lang", .val = args[1] };
+        return makeViewNode(allocator, "code_block", attrs, args[0..1]);
+    }
+    return makeViewNode(allocator, "code_block", &.{}, args[0..1]);
+}
+
+/// blockquote("content") — block quote
+fn viewBlockquote(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    return makeViewNode(allocator, "blockquote", &.{}, args[0..1]);
+}
+
+/// divider() — horizontal rule
+fn viewDivider(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    return makeViewNode(allocator, "divider", &.{}, &.{});
+}
+
+/// list(item, item, ...) — unordered list with variadic items
+fn viewList(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return makeViewNode(allocator, "list", &.{}, args);
+}
+
+/// link("label", "url") — anchor link
+fn viewLink(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "href", .val = args[1] };
+    return makeViewNode(allocator, "link", attrs, args[0..1]);
+}
+
+/// image("src", "alt") — img embed, alt optional
+fn viewImage(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    if (args.len == 2) {
+        if (args[1].* != .string) return error.TypeError;
+        const attrs = try allocator.alloc(ViewAttr, 2);
+        attrs[0] = .{ .key = "src", .val = args[0] };
+        attrs[1] = .{ .key = "alt", .val = args[1] };
+        return makeViewNode(allocator, "image", attrs, &.{});
+    }
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "src", .val = args[0] };
+    return makeViewNode(allocator, "image", attrs, &.{});
+}
+
+/// video("src") — video embed
+fn viewVideo(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "src", .val = args[0] };
+    return makeViewNode(allocator, "video", attrs, &.{});
+}
+
+/// canvas("id") — canvas element for 2D drawing
+fn viewCanvas(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "id", .val = args[0] };
+    return makeViewNode(allocator, "canvas", attrs, &.{});
+}
+
+/// button("label", sends_atom) — clickable button that sends a message to the actor
+fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    if (args.len == 2) {
+        if (args[1].* != .atom) return error.TypeError;
+        const attrs = try allocator.alloc(ViewAttr, 1);
+        attrs[0] = .{ .key = "sends", .val = args[1] };
+        return makeViewNode(allocator, "button", attrs, args[0..1]);
+    }
+    return makeViewNode(allocator, "button", &.{}, args[0..1]);
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -1007,4 +1177,184 @@ test "builtin now returns integer" {
     const args = try alloc.alloc(*const Value, 0);
     const result = try builtinNow(alloc, args);
     try std.testing.expect(result.* == .integer);
+}
+
+test "view text produces view_node with tag text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const str = try alloc.create(Value);
+    str.* = Value{ .string = "hello" };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = str;
+    const result = try viewText(alloc, args);
+    try std.testing.expect(result.* == .view_node);
+    try std.testing.expectEqualStrings("text", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 1), result.view_node.children.len);
+    try std.testing.expect(result.view_node.children[0].eql(Value{ .string = "hello" }));
+}
+
+test "view heading defaults to level 1" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const str = try alloc.create(Value);
+    str.* = Value{ .string = "Title" };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = str;
+    const result = try viewHeading(alloc, args);
+    try std.testing.expect(result.* == .view_node);
+    try std.testing.expectEqualStrings("heading", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 1), result.view_node.attrs.len);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .integer = 1 }));
+}
+
+test "view heading with explicit level" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const str = try alloc.create(Value);
+    str.* = Value{ .string = "Sub" };
+    const lvl = try alloc.create(Value);
+    lvl.* = Value{ .integer = 3 };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = str;
+    args[1] = lvl;
+    const result = try viewHeading(alloc, args);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .integer = 3 }));
+}
+
+test "view stack variadic children" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const c1 = try alloc.create(Value);
+    const c1_str = try alloc.create(Value);
+    c1_str.* = Value{ .string = "a" };
+    c1.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{c1_str} } };
+    const c2 = try alloc.create(Value);
+    const c2_str = try alloc.create(Value);
+    c2_str.* = Value{ .string = "b" };
+    c2.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{c2_str} } };
+
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = c1;
+    args[1] = c2;
+    const result = try viewStack(alloc, args);
+    try std.testing.expectEqualStrings("stack", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 2), result.view_node.children.len);
+}
+
+test "view button with sends atom" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const label = try alloc.create(Value);
+    label.* = Value{ .string = "Click me" };
+    const msg = try alloc.create(Value);
+    msg.* = Value{ .atom = "checkout" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = label;
+    args[1] = msg;
+    const result = try viewButton(alloc, args);
+    try std.testing.expectEqualStrings("button", result.view_node.tag);
+    try std.testing.expectEqualStrings("sends", result.view_node.attrs[0].key);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .atom = "checkout" }));
+}
+
+test "view image with src and alt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const src = try alloc.create(Value);
+    src.* = Value{ .string = "/img/logo.png" };
+    const alt = try alloc.create(Value);
+    alt.* = Value{ .string = "Logo" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = src;
+    args[1] = alt;
+    const result = try viewImage(alloc, args);
+    try std.testing.expectEqualStrings("image", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 2), result.view_node.attrs.len);
+    try std.testing.expectEqualStrings("src", result.view_node.attrs[0].key);
+    try std.testing.expectEqualStrings("alt", result.view_node.attrs[1].key);
+}
+
+test "view canvas with id" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const id = try alloc.create(Value);
+    id.* = Value{ .string = "main-canvas" };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = id;
+    const result = try viewCanvas(alloc, args);
+    try std.testing.expectEqualStrings("canvas", result.view_node.tag);
+    try std.testing.expectEqualStrings("id", result.view_node.attrs[0].key);
+}
+
+test "view divider takes no args" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const args = try alloc.alloc(*const Value, 0);
+    const result = try viewDivider(alloc, args);
+    try std.testing.expectEqualStrings("divider", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 0), result.view_node.children.len);
+}
+
+test "view link with href" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const label = try alloc.create(Value);
+    label.* = Value{ .string = "Click here" };
+    const href = try alloc.create(Value);
+    href.* = Value{ .string = "https://example.com" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = label;
+    args[1] = href;
+    const result = try viewLink(alloc, args);
+    try std.testing.expectEqualStrings("link", result.view_node.tag);
+    try std.testing.expectEqualStrings("href", result.view_node.attrs[0].key);
+}
+
+test "view code_block with lang" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const content = try alloc.create(Value);
+    content.* = Value{ .string = "x = 42" };
+    const lang = try alloc.create(Value);
+    lang.* = Value{ .atom = "blimp" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = content;
+    args[1] = lang;
+    const result = try viewCodeBlock(alloc, args);
+    try std.testing.expectEqualStrings("code_block", result.view_node.tag);
+    try std.testing.expectEqualStrings("lang", result.view_node.attrs[0].key);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .atom = "blimp" }));
+}
+
+test "type_of view_node returns :view_node" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const node = try alloc.create(Value);
+    node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{} } };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = node;
+    const result = try builtinTypeOf(alloc, args);
+    try std.testing.expect(result.eql(Value{ .atom = "view_node" }));
 }

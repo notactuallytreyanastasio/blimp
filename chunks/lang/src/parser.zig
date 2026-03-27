@@ -1057,10 +1057,12 @@ pub const Parser = struct {
     fn parseFuncCall(self: *Parser, name: []const u8, loc: Loc) ParseError!Node {
         self.advance(); // skip (
         var args: std.ArrayList(Node) = .empty;
+        self.skipNewlines(); // allow newline after opening paren
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             const arg = try self.parseExpression();
             args.append(self.allocator, arg) catch return error.OutOfMemory;
             if (self.current.kind == .comma) self.advance();
+            self.skipNewlines(); // allow newlines between args
         }
         try self.expect(.rparen);
         return Node{
