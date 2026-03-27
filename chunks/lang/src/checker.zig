@@ -686,7 +686,15 @@ pub const Checker = struct {
 
     /// Infer the type of a dot access expression.
     /// If the object has a known actor type, look up the field in the registry.
+    /// Also handles dotted actor names: Shop.Checkout resolves to actor type.
     fn inferDotAccess(self: *Checker, da: Node.DotAccess, _: Loc) Type {
+        // First, try to resolve as a dotted actor name (e.g., Shop.Checkout)
+        if (flattenDottedNameForChecker(da, self.allocator)) |dotted_name| {
+            if (self.registry.lookupActor(dotted_name) != null) {
+                return Type{ .actor = dotted_name };
+            }
+        }
+
         const obj_type = self.inferExpr(da.object.*);
         // If the object is an actor type, look up the field in the registry
         if (obj_type == .actor) {
@@ -740,7 +748,8 @@ pub const Checker = struct {
     }
 
     /// Try to resolve an expression to an actor name for message send targets.
-    /// Handles: identifiers that are known actor names, or variables with actor types.
+    /// Handles: identifiers that are known actor names, variables with actor types,
+    /// and dot_access chains representing dotted actor names (e.g., Shop.Checkout).
     fn resolveActorName(self: *Checker, node: Node) ?[]const u8 {
         switch (node.kind) {
             .identifier => |id| {
@@ -752,8 +761,64 @@ pub const Checker = struct {
                 }
                 return null;
             },
+            .dot_access => |da| {
+                // Flatten the DotAccess chain into a dotted name (e.g., "Shop.Checkout")
+                const dotted_name = flattenDottedNameForChecker(da, self.allocator) orelse return null;
+                if (self.registry.lookupActor(dotted_name) != null) return dotted_name;
+                return null;
+            },
             else => return null,
         }
+    }
+
+    /// Flatten a DotAccess chain into a dotted name string for type checking.
+    /// e.g., DotAccess(identifier("Shop"), "Checkout") -> "Shop.Checkout"
+    fn flattenDottedNameForChecker(da: Node.DotAccess, allocator: std.mem.Allocator) ?[]const u8 {
+        var parts: [16][]const u8 = undefined;
+        var count: usize = 0;
+
+        parts[count] = da.field;
+        count += 1;
+
+        var current = da.object;
+        while (true) {
+            switch (current.kind) {
+                .dot_access => |inner_da| {
+                    if (count >= 16) return null;
+                    parts[count] = inner_da.field;
+                    count += 1;
+                    current = inner_da.object;
+                },
+                .identifier => |id| {
+                    if (count >= 16) return null;
+                    parts[count] = id.name;
+                    count += 1;
+                    break;
+                },
+                else => return null,
+            }
+        }
+
+        // Build the dotted name from parts (in reverse order)
+        var total_len: usize = count - 1; // dots
+        for (parts[0..count]) |part| {
+            total_len += part.len;
+        }
+
+        const buf = allocator.alloc(u8, total_len) catch return null;
+        var pos: usize = 0;
+        var i: usize = count;
+        while (i > 0) {
+            i -= 1;
+            @memcpy(buf[pos .. pos + parts[i].len], parts[i]);
+            pos += parts[i].len;
+            if (i > 0) {
+                buf[pos] = '.';
+                pos += 1;
+            }
+        }
+
+        return buf;
     }
 
     // ============================================================

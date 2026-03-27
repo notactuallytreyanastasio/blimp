@@ -1,0 +1,30 @@
+# Dot notation for actor names: supervision hierarchy naming
+# Shop.Checkout means Checkout is a child actor of Shop
+
+actor Shop do
+  state name: String :: "My Shop"
+end
+
+actor Shop.Checkout do
+  state total: Int :: 0
+
+  on :add(n: Int) do
+    become total: total + n
+    reply total + n
+  end
+
+  on :get do
+    reply total
+  end
+end
+
+# Message send to a dotted actor name (this was the broken case)
+result = Shop.Checkout <- :add(10)
+print(result)
+result2 = Shop.Checkout <- :add(5)
+print(result2)
+
+# Spawn a separate instance with dotted name
+checkout2 = spawn Shop.Checkout
+r3 = checkout2 <- :add(100)
+print(r3)

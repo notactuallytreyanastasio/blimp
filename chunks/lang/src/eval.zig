@@ -1366,6 +1366,16 @@ pub const Evaluator = struct {
     }
 
     fn evalDotAccess(self: *Evaluator, da: ast.Node.DotAccess) EvalError!*const Value {
+        // First, try to resolve as a dotted actor name (e.g., Shop.Checkout).
+        // Flatten the DotAccess chain into a single dotted name string and
+        // look it up in the environment (where actor singletons are bound).
+        if (flattenDottedName(da, self.allocator)) |dotted_name| {
+            if (self.env.lookup(dotted_name)) |val| {
+                return val;
+            }
+        }
+
+        // Fall back to map field access
         const obj = try self.eval(da.object.*);
         switch (obj.*) {
             .map => |entries| {
@@ -1381,6 +1391,58 @@ pub const Evaluator = struct {
             },
             else => return error.TypeError,
         }
+    }
+
+    /// Flatten a DotAccess chain into a single dotted name string.
+    /// e.g., DotAccess(DotAccess(identifier("App"), "Shop"), "Checkout") -> "App.Shop.Checkout"
+    /// Returns null if the chain doesn't consist entirely of identifiers/dot accesses.
+    fn flattenDottedName(da: ast.Node.DotAccess, allocator: std.mem.Allocator) ?[]const u8 {
+        // Collect parts in reverse order by walking the chain
+        var parts: [16][]const u8 = undefined; // max 16 nesting levels
+        var count: usize = 0;
+
+        parts[count] = da.field;
+        count += 1;
+
+        var current = da.object;
+        while (true) {
+            switch (current.kind) {
+                .dot_access => |inner_da| {
+                    if (count >= 16) return null;
+                    parts[count] = inner_da.field;
+                    count += 1;
+                    current = inner_da.object;
+                },
+                .identifier => |id| {
+                    if (count >= 16) return null;
+                    parts[count] = id.name;
+                    count += 1;
+                    break;
+                },
+                else => return null,
+            }
+        }
+
+        // Build the dotted name from parts (they're in reverse order)
+        var total_len: usize = count - 1; // account for dots
+        for (parts[0..count]) |part| {
+            total_len += part.len;
+        }
+
+        const buf = allocator.alloc(u8, total_len) catch return null;
+        var pos: usize = 0;
+        var i: usize = count;
+        while (i > 0) {
+            i -= 1;
+            @memcpy(buf[pos .. pos + parts[i].len], parts[i]);
+            pos += parts[i].len;
+            if (i > 0) {
+                buf[pos] = '.';
+                pos += 1;
+            }
+        }
+
+        return buf;
     }
 
     fn evalOrElse(self: *Evaluator, oe: ast.Node.OrElseExpr) EvalError!*const Value {

@@ -703,10 +703,10 @@ pub const Parser = struct {
 
     fn parsePostfix(self: *Parser) ParseError!Node {
         var left = try self.parsePrimary();
-        // Dot access: expr.field
+        // Dot access: expr.field or expr.UpperName (for dotted actor names like Shop.Checkout)
         while (self.current.kind == .dot) {
             self.advance();
-            if (self.current.kind != .identifier) return error.UnexpectedToken;
+            if (self.current.kind != .identifier and self.current.kind != .upper_identifier) return error.UnexpectedToken;
             const field = self.current.lexeme;
             self.advance();
             const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
@@ -2356,4 +2356,72 @@ test "parse situation with hole comment directive" {
     // Second branch: _ (hole, no arrow, no body)
     try std.testing.expect(sit.branches[1].pattern == null);
     try std.testing.expectEqual(@as(usize, 0), sit.branches[1].body.len);
+}
+
+test "parse dotted actor name in message send" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :test do
+        \\    Shop.Checkout <- :add(item)
+        \\  end
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const body = handler.body;
+    try std.testing.expectEqual(@as(usize, 1), body.len);
+
+    const send = body[0].kind.message_send;
+    // Target should be a DotAccess: Shop.Checkout
+    const da = send.target.kind.dot_access;
+    try std.testing.expectEqualStrings("Shop", da.object.kind.identifier.name);
+    try std.testing.expectEqualStrings("Checkout", da.field);
+    try std.testing.expectEqualStrings("add", send.message);
+    try std.testing.expectEqual(@as(usize, 1), send.args.len);
+}
+
+test "parse deeply nested dotted actor name in message send" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\actor A do
+        \\  on :test do
+        \\    App.Shop.Checkout <- :charge(payment)
+        \\  end
+        \\end
+    );
+    const nodes = try parser.parseFile();
+    const handler = nodes[0].kind.actor_def.body[0].kind.message_handler;
+    const body = handler.body;
+    try std.testing.expectEqual(@as(usize, 1), body.len);
+
+    const send = body[0].kind.message_send;
+    // Target should be DotAccess(DotAccess(App, Shop), Checkout)
+    const outer_da = send.target.kind.dot_access;
+    try std.testing.expectEqualStrings("Checkout", outer_da.field);
+    const inner_da = outer_da.object.kind.dot_access;
+    try std.testing.expectEqualStrings("App", inner_da.object.kind.identifier.name);
+    try std.testing.expectEqualStrings("Shop", inner_da.field);
+    try std.testing.expectEqualStrings("charge", send.message);
+}
+
+test "parse dotted actor name in top-level message send" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(),
+        \\Shop.Checkout <- :add(10)
+    );
+    const nodes = try parser.parseFile();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const send = nodes[0].kind.message_send;
+    const da = send.target.kind.dot_access;
+    try std.testing.expectEqualStrings("Shop", da.object.kind.identifier.name);
+    try std.testing.expectEqualStrings("Checkout", da.field);
+    try std.testing.expectEqualStrings("add", send.message);
 }
