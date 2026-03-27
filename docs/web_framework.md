@@ -356,6 +356,10 @@ These were added during this work and weren't in the original builtins set:
 | `tcp_close` | `(Int) -> nil` | Close fd |
 | `to_html` | `(ViewNode) -> String` | Render view tree to HTML |
 | `set_at` | `(List, Int, Any) -> List` | Immutable list element replacement |
+| `ws_accept_key` | `(String) -> String` | SHA-1+Base64 WebSocket handshake accept key |
+| `ws_read_frame` | `(Int) -> String\|nil` | Read+decode one WS text frame (handles masking, ping/pong) |
+| `ws_write_frame` | `(Int, String) -> nil` | Encode+send a WS text frame (unmasked, server-to-client) |
+| `view_diff` | `(ViewNode, ViewNode) -> List` | Structural diff of view trees, returns list of patch maps |
 
 Plus these were already present but worth noting: `rem`, `abs`, `nil?`, `elem`, `floor`, `ceil`, `round`, `not`, `random`, `size`, `empty?`, `flat`, `zip`, `uniq`, `sum`.
 
@@ -363,16 +367,28 @@ Plus these were already present but worth noting: `rem`, `abs`, `nil?`, `elem`, 
 
 ## Open issues / what to work on next
 
-### 1. WebSockets
+### 1. WebSockets — IN PROGRESS
 
-The biggest missing piece for a true LiveView-equivalent. Currently every button click causes a full page reload (POST → redirect → GET). A WebSocket connection would allow:
-- The server to push diffs to the client without a full reload
-- Instant UI updates (no round-trip page load)
-- The server to render only the changed view nodes (diffing)
+WebSocket support has been partially implemented. The full design is in `docs/lang_design/websockets.md`.
 
-The client-side JS (`blimp_script()`) needs to upgrade to WebSocket and send/receive JSON messages. The `HTTPServer` actor needs a WebSocket upgrade path.
+**What's done:**
 
-The key design question: does the WebSocket upgrade happen in a separate actor, or inside `HTTPServer`? Suggested approach: `HTTPServer` handles the HTTP upgrade request and spawns a `Session` actor per connection, which owns the WebSocket fd and the session state.
+- **Three new Zig builtins** in `builtins.zig`:
+  - `ws_accept_key(client_key)` — SHA-1 + Base64 handshake computation (tested against RFC 6455 vector)
+  - `ws_read_frame(fd)` — reads and decodes WS text frames, handles client masking, auto-responds to Ping/Pong, returns nil on Close
+  - `ws_write_frame(fd, data)` — encodes and sends WS text frames (server-to-client, unmasked)
+- **`view_diff(old_tree, new_tree)` builtin** — structural diff of ViewNode trees, returns list of patch maps (`%{op, path, value}`)
+- **Client JS updated** — `blimp_script()` now opens a WebSocket, receives patches, applies them to the DOM. Falls back to form POSTs if WS is unavailable.
+- **`server.blimp` upgraded** — HTTPServer detects `Upgrade: websocket`, performs handshake, enters `ws_loop` which reads events, diffs view trees, sends patches.
+- **Tests** — ws_accept_key produces correct RFC hash, view_diff returns empty for identical trees, detects text changes, detects tag changes as replace ops.
+
+**What's NOT done yet:**
+
+- JSON escaping in patch values (quotes in HTML will break the JSON framing)
+- Proper `to_json` / `parse_json` builtins (current WS uses minimal string-based JSON parsing)
+- The WS loop blocks the entire server (no concurrent connections yet — needs actor scheduler)
+- No WS close frame sent on server shutdown
+- Session identity not integrated with WS connections (hardcoded to session "1")
 
 ### 2. Session identity (cookies)
 

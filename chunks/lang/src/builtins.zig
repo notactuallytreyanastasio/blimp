@@ -89,6 +89,11 @@ pub const BuiltinRegistry = struct {
         reg.register("video", &viewVideo);
         reg.register("canvas", &viewCanvas);
         reg.register("button", &viewButton);
+        reg.register("input", &viewInput);
+        reg.register("textarea", &viewTextarea);
+        reg.register("select", &viewSelect);
+        reg.register("option", &viewOption);
+        reg.register("form", &viewForm);
         // HTTP / TCP builtins (native only)
         reg.register("to_html", &builtinToHtml);
         reg.register("tcp_listen", &builtinTcpListen);
@@ -96,6 +101,19 @@ pub const BuiltinRegistry = struct {
         reg.register("tcp_read", &builtinTcpRead);
         reg.register("tcp_write", &builtinTcpWrite);
         reg.register("tcp_close", &builtinTcpClose);
+        // WebSocket builtins
+        reg.register("ws_accept_key", &builtinWsAcceptKey);
+        reg.register("ws_read_frame", &builtinWsReadFrame);
+        reg.register("ws_write_frame", &builtinWsWriteFrame);
+        // View diffing
+        reg.register("view_diff", &builtinViewDiff);
+        // Process builtins (native only)
+        reg.register("fork", &builtinFork);
+        reg.register("waitpid", &builtinWaitpid);
+        reg.register("exit", &builtinExit);
+        // Non-blocking IO builtins (native only)
+        reg.register("tcp_set_nonblocking", &builtinTcpSetNonblocking);
+        reg.register("tcp_poll", &builtinTcpPoll);
         return reg;
     }
 
@@ -850,10 +868,40 @@ fn builtinRandom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
 
 const ViewAttr = Value.ViewNode.ViewAttr;
 
-/// Build a view_node with the given tag, no attrs, and variadic children (all must be view_node or string).
+/// Build a view_node with the given tag, attrs, and variadic children.
+/// If any child is a list, its elements are flattened into the children array.
+/// This allows `stack(map(items, fn(x) do text(x) end))` to work naturally.
 fn makeViewNode(allocator: std.mem.Allocator, tag: []const u8, attrs: []const ViewAttr, children: []const *const Value) EvalError!*const Value {
     const node_attrs = allocator.dupe(ViewAttr, attrs) catch return error.OutOfMemory;
-    const node_children = allocator.dupe(*const Value, children) catch return error.OutOfMemory;
+    // Count total children after flattening lists
+    var total: usize = 0;
+    for (children) |child| {
+        switch (child.*) {
+            .list => |items| {
+                total += items.len;
+            },
+            else => {
+                total += 1;
+            },
+        }
+    }
+    // Build flattened children array
+    const node_children = allocator.alloc(*const Value, total) catch return error.OutOfMemory;
+    var idx: usize = 0;
+    for (children) |child| {
+        switch (child.*) {
+            .list => |items| {
+                for (items) |item| {
+                    node_children[idx] = item;
+                    idx += 1;
+                }
+            },
+            else => {
+                node_children[idx] = child;
+                idx += 1;
+            },
+        }
+    }
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .view_node = .{ .tag = tag, .attrs = node_attrs, .children = node_children } };
     return result;
@@ -993,6 +1041,60 @@ fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
         return makeViewNode(allocator, "button", attrs, args[0..1]);
     }
     return makeViewNode(allocator, "button", &.{}, args[0..1]);
+}
+
+/// input("name", "placeholder") — text input field
+/// input("name", "placeholder", :type) — typed input (e.g. :password, :email, :number)
+fn viewInput(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 2 or args.len > 3) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .string) return error.TypeError;
+    var attr_count: usize = 2;
+    if (args.len == 3) {
+        if (args[2].* != .atom) return error.TypeError;
+        attr_count = 3;
+    }
+    const attrs = try allocator.alloc(ViewAttr, attr_count);
+    attrs[0] = .{ .key = "name", .val = args[0] };
+    attrs[1] = .{ .key = "placeholder", .val = args[1] };
+    if (args.len == 3) {
+        attrs[2] = .{ .key = "type", .val = args[2] };
+    }
+    return makeViewNode(allocator, "input", attrs, &.{});
+}
+
+/// textarea("name", "placeholder") — multi-line text input
+fn viewTextarea(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "name", .val = args[0] };
+    attrs[1] = .{ .key = "placeholder", .val = args[1] };
+    return makeViewNode(allocator, "textarea", attrs, &.{});
+}
+
+/// select("name", option1, option2, ...) — dropdown select with option children
+fn viewSelect(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "name", .val = args[0] };
+    // remaining args are option children
+    const children = if (args.len > 1) args[1..] else &[_]*const Value{};
+    return makeViewNode(allocator, "select", attrs, children);
+}
+
+/// option("label", "value") — option inside a select
+fn viewOption(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "value", .val = args[1] };
+    return makeViewNode(allocator, "option_elem", attrs, args[0..1]);
+}
+
+/// form(children...) — form wrapper that collects inputs on submit
+fn viewForm(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return makeViewNode(allocator, "form", &.{}, args);
 }
 
 // ============================================================
@@ -1391,6 +1493,9 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
             if (std.mem.eql(u8, node.tag, "row")) {
                 try buf.appendSlice(allocator, " data-row");
             }
+            if (std.mem.eql(u8, node.tag, "form")) {
+                try buf.appendSlice(allocator, " method=\"POST\" action=\"\" onsubmit=\"blimpSubmit(event)\"");
+            }
             for (node.attrs) |attr| {
                 if (std.mem.eql(u8, attr.key, "href")) {
                     var val_buf: [512]u8 = undefined;
@@ -1430,9 +1535,32 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
                     try buf.appendSlice(allocator, " data-lang=\"");
                     try buf.appendSlice(allocator, lang);
                     try buf.appendSlice(allocator, "\"");
+                } else if (std.mem.eql(u8, attr.key, "name") or
+                    std.mem.eql(u8, attr.key, "placeholder") or
+                    std.mem.eql(u8, attr.key, "value"))
+                {
+                    var val_buf: [512]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    const clean = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
+                    try buf.appendSlice(allocator, " ");
+                    try buf.appendSlice(allocator, attr.key);
+                    try buf.appendSlice(allocator, "=\"");
+                    try buf.appendSlice(allocator, clean);
+                    try buf.appendSlice(allocator, "\"");
+                } else if (std.mem.eql(u8, attr.key, "type")) {
+                    var val_buf: [64]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    const type_name = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
+                    try buf.appendSlice(allocator, " type=\"");
+                    try buf.appendSlice(allocator, type_name);
+                    try buf.appendSlice(allocator, "\"");
                 }
             }
-            if (std.mem.eql(u8, node.tag, "divider") or std.mem.eql(u8, node.tag, "image")) {
+            if (std.mem.eql(u8, node.tag, "divider") or std.mem.eql(u8, node.tag, "image") or std.mem.eql(u8, node.tag, "input")) {
                 try buf.appendSlice(allocator, " />");
                 return;
             }
@@ -1494,6 +1622,11 @@ fn blimpTagToHtml(tag: []const u8) []const u8 {
     if (std.mem.eql(u8, tag, "video")) return "video";
     if (std.mem.eql(u8, tag, "canvas")) return "canvas";
     if (std.mem.eql(u8, tag, "button")) return "button";
+    if (std.mem.eql(u8, tag, "input")) return "input";
+    if (std.mem.eql(u8, tag, "textarea")) return "textarea";
+    if (std.mem.eql(u8, tag, "select")) return "select";
+    if (std.mem.eql(u8, tag, "option_elem")) return "option";
+    if (std.mem.eql(u8, tag, "form")) return "form";
     return "div";
 }
 
@@ -1515,24 +1648,44 @@ fn builtinTcpListen(allocator: std.mem.Allocator, args: []const *const Value) Ev
     return result;
 }
 
-/// tcp_accept(server_fd: Int) -> Int  (client socket fd, blocks)
+/// tcp_accept(server_fd: Int) -> Int | nil
+/// Blocking accept by default. Returns nil if socket is non-blocking and
+/// no connection is pending (WouldBlock/EAGAIN).
 fn builtinTcpAccept(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const server_fd: std.posix.socket_t = @intCast(args[0].integer);
     var client_addr: std.posix.sockaddr = undefined;
     var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-    const client_fd = std.posix.accept(server_fd, &client_addr, &addr_len, 0) catch return error.NotSupported;
+    const client_fd = std.posix.accept(server_fd, &client_addr, &addr_len, 0) catch |err| {
+        if (err == error.WouldBlock) {
+            // Non-blocking mode: no connection pending, return nil
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        }
+        return error.NotSupported;
+    };
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = @intCast(client_fd) };
     return result;
 }
 
-/// tcp_read(fd: Int) -> String  (reads up to 64KB)
+/// tcp_read(fd: Int) -> String | nil
+/// Reads up to 64KB. Returns nil if socket is non-blocking and no data
+/// is available (WouldBlock/EAGAIN).
 fn builtinTcpRead(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     var buf: [65536]u8 = undefined;
-    const n = std.posix.read(fd, &buf) catch return error.NotSupported;
+    const n = std.posix.read(fd, &buf) catch |err| {
+        if (err == error.WouldBlock) {
+            // Non-blocking mode: no data available, return nil
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        }
+        return error.NotSupported;
+    };
     const owned = allocator.dupe(u8, buf[0..n]) catch return error.OutOfMemory;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .string = owned };
@@ -1559,6 +1712,503 @@ fn builtinTcpClose(allocator: std.mem.Allocator, args: []const *const Value) Eva
     return result;
 }
 
+// ============================================================
+// WebSocket builtins
+// ============================================================
+
+const ws_magic_guid = "258EAFA5-E914-47DA-95CA-5AB9DC80CB65";
+
+/// ws_accept_key(client_key: String) -> String
+/// Computes the Sec-WebSocket-Accept value for the WS handshake.
+/// SHA-1(client_key + magic_guid) then Base64-encoded.
+fn builtinWsAcceptKey(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const client_key = args[0].string;
+
+    // Concatenate client key + magic GUID
+    var concat_buf: [256]u8 = undefined;
+    if (client_key.len + ws_magic_guid.len > concat_buf.len) return error.NotSupported;
+    @memcpy(concat_buf[0..client_key.len], client_key);
+    @memcpy(concat_buf[client_key.len..][0..ws_magic_guid.len], ws_magic_guid);
+    const to_hash = concat_buf[0 .. client_key.len + ws_magic_guid.len];
+
+    // SHA-1 hash
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(to_hash);
+    const digest = hasher.finalResult();
+
+    // Base64 encode
+    const base64_encoder = std.base64.standard.Encoder;
+    const encoded_len = base64_encoder.calcSize(digest.len);
+    const encoded = allocator.alloc(u8, encoded_len) catch return error.OutOfMemory;
+    _ = base64_encoder.encode(encoded, &digest);
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = encoded };
+    return result;
+}
+
+/// ws_read_frame(fd: Int) -> String | nil
+/// Reads and decodes one WebSocket text frame from fd.
+/// Returns nil if the connection is closed or a close frame is received.
+/// Handles client masking. Only supports text frames (opcode 0x1).
+/// Auto-responds to Ping with Pong.
+fn builtinWsReadFrame(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+
+    // Read first 2 bytes (frame header)
+    var header: [2]u8 = undefined;
+    const h_n = std.posix.read(fd, &header) catch {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    };
+    if (h_n < 2) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+
+    const opcode = header[0] & 0x0F;
+    const masked = (header[1] & 0x80) != 0;
+    var payload_len: u64 = header[1] & 0x7F;
+
+    // Extended payload length
+    if (payload_len == 126) {
+        var ext: [2]u8 = undefined;
+        const ext_n = std.posix.read(fd, &ext) catch {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        };
+        if (ext_n < 2) {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        }
+        payload_len = @as(u64, ext[0]) << 8 | @as(u64, ext[1]);
+    } else if (payload_len == 127) {
+        var ext: [8]u8 = undefined;
+        const ext_n = std.posix.read(fd, &ext) catch {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        };
+        if (ext_n < 8) {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        }
+        payload_len = 0;
+        for (ext) |b| {
+            payload_len = (payload_len << 8) | @as(u64, b);
+        }
+    }
+
+    // Read masking key if present
+    var mask_key: [4]u8 = .{ 0, 0, 0, 0 };
+    if (masked) {
+        const m_n = std.posix.read(fd, &mask_key) catch {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        };
+        if (m_n < 4) {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        }
+    }
+
+    // Limit payload to 1MB to prevent DOS
+    if (payload_len > 1048576) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+
+    // Read payload
+    const plen: usize = @intCast(payload_len);
+    const payload = allocator.alloc(u8, plen) catch return error.OutOfMemory;
+    var total_read: usize = 0;
+    while (total_read < plen) {
+        const n = std.posix.read(fd, payload[total_read..]) catch {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        };
+        if (n == 0) {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        }
+        total_read += n;
+    }
+
+    // Unmask payload
+    if (masked) {
+        for (payload, 0..) |*byte, i| {
+            byte.* ^= mask_key[i % 4];
+        }
+    }
+
+    // Handle opcode
+    switch (opcode) {
+        0x1 => {
+            // Text frame -- return the payload as a string
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .string = payload };
+            return result;
+        },
+        0x8 => {
+            // Close frame -- return nil
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        },
+        0x9 => {
+            // Ping -- send Pong with same payload, then read next frame
+            wsWriteFrame(fd, 0xA, payload) catch {};
+            return builtinWsReadFrame(allocator, args);
+        },
+        0xA => {
+            // Pong -- ignore, read next frame
+            return builtinWsReadFrame(allocator, args);
+        },
+        else => {
+            // Unsupported opcode -- return nil
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return result;
+        },
+    }
+}
+
+/// ws_write_frame(fd: Int, data: String) -> nil
+/// Writes a WebSocket text frame (server-to-client, unmasked).
+fn builtinWsWriteFrame(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+    const data = args[1].string;
+    wsWriteFrame(fd, 0x1, data) catch return error.NotSupported;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = .nil;
+    return result;
+}
+
+/// Internal: write a WS frame with given opcode and payload.
+fn wsWriteFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) !void {
+    // Build frame header
+    var header_buf: [10]u8 = undefined;
+    var header_len: usize = 2;
+
+    header_buf[0] = 0x80 | opcode; // FIN + opcode
+    if (payload.len < 126) {
+        header_buf[1] = @intCast(payload.len);
+    } else if (payload.len <= 65535) {
+        header_buf[1] = 126;
+        header_buf[2] = @intCast((payload.len >> 8) & 0xFF);
+        header_buf[3] = @intCast(payload.len & 0xFF);
+        header_len = 4;
+    } else {
+        header_buf[1] = 127;
+        const len64: u64 = @intCast(payload.len);
+        inline for (0..8) |i| {
+            header_buf[2 + i] = @intCast((len64 >> @intCast(56 - i * 8)) & 0xFF);
+        }
+        header_len = 10;
+    }
+
+    // Write header
+    _ = try std.posix.write(fd, header_buf[0..header_len]);
+    // Write payload
+    if (payload.len > 0) {
+        _ = try std.posix.write(fd, payload);
+    }
+}
+
+// ============================================================
+// View diffing
+// ============================================================
+
+/// view_diff(old_tree, new_tree) -> List of patch maps
+/// Compares two view_node trees and returns a list of patches.
+/// Each patch is %{op: "replace"|"text"|"attrs", path: "0.1.2", value: "..."}
+fn builtinViewDiff(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+
+    var patches: std.ArrayListUnmanaged(*const Value) = .{};
+    diffViewNodes(allocator, args[0], args[1], "", &patches) catch return error.OutOfMemory;
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    const items = patches.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    result.* = Value{ .list = items };
+    return result;
+}
+
+fn diffViewNodes(
+    allocator: std.mem.Allocator,
+    old: *const Value,
+    new: *const Value,
+    path: []const u8,
+    patches: *std.ArrayListUnmanaged(*const Value),
+) !void {
+    // If structurally equal, no patches needed
+    if (old.eql(new.*)) return;
+
+    // Both view_nodes: compare structurally
+    if (old.* == .view_node and new.* == .view_node) {
+        const o = old.view_node;
+        const n = new.view_node;
+
+        // Different tags -> full replace
+        if (!std.mem.eql(u8, o.tag, n.tag)) {
+            try appendReplacePatch(allocator, patches, path, new);
+            return;
+        }
+
+        // Different attribute count -> full replace
+        if (o.attrs.len != n.attrs.len) {
+            try appendReplacePatch(allocator, patches, path, new);
+            return;
+        }
+
+        // Check attrs for changes
+        var attrs_changed = false;
+        for (o.attrs, n.attrs) |oa, na| {
+            if (!std.mem.eql(u8, oa.key, na.key) or !oa.val.eql(na.val.*)) {
+                attrs_changed = true;
+                break;
+            }
+        }
+        if (attrs_changed) {
+            try appendAttrsPatch(allocator, patches, path, n.attrs);
+        }
+
+        // Different child count -> full replace
+        if (o.children.len != n.children.len) {
+            try appendReplacePatch(allocator, patches, path, new);
+            return;
+        }
+
+        // Recurse into children
+        for (o.children, n.children, 0..) |old_child, new_child, i| {
+            const child_path = if (path.len == 0)
+                std.fmt.allocPrint(allocator, "{d}", .{i}) catch return error.OutOfMemory
+            else
+                std.fmt.allocPrint(allocator, "{s}.{d}", .{ path, i }) catch return error.OutOfMemory;
+            try diffViewNodes(allocator, old_child, new_child, child_path, patches);
+        }
+        return;
+    }
+
+    // Both strings: text patch
+    if (old.* == .string and new.* == .string) {
+        if (!std.mem.eql(u8, old.string, new.string)) {
+            try appendTextPatch(allocator, patches, path, new.string);
+        }
+        return;
+    }
+
+    // Both integers
+    if (old.* == .integer and new.* == .integer) {
+        if (old.integer != new.integer) {
+            var tmp: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{new.integer}) catch return;
+            const owned = try allocator.dupe(u8, s);
+            try appendTextPatch(allocator, patches, path, owned);
+        }
+        return;
+    }
+
+    // Type changed or unsupported combination -> full replace
+    try appendReplacePatch(allocator, patches, path, new);
+}
+
+fn appendReplacePatch(
+    allocator: std.mem.Allocator,
+    patches: *std.ArrayListUnmanaged(*const Value),
+    path: []const u8,
+    node: *const Value,
+) !void {
+    // Render the new node to HTML
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    renderHtml(allocator, node, &buf) catch return;
+    const html = buf.toOwnedSlice(allocator) catch return;
+
+    const patch = try makePatchMap(allocator, "replace", path, html);
+    try patches.append(allocator, patch);
+}
+
+fn appendTextPatch(
+    allocator: std.mem.Allocator,
+    patches: *std.ArrayListUnmanaged(*const Value),
+    path: []const u8,
+    text_val: []const u8,
+) !void {
+    const patch = try makePatchMap(allocator, "text", path, text_val);
+    try patches.append(allocator, patch);
+}
+
+fn appendAttrsPatch(
+    allocator: std.mem.Allocator,
+    patches: *std.ArrayListUnmanaged(*const Value),
+    path: []const u8,
+    attrs: []const Value.ViewNode.ViewAttr,
+) !void {
+    // Serialize attrs as a simple string for now: "key=val,key2=val2"
+    var attr_buf: std.ArrayListUnmanaged(u8) = .{};
+    for (attrs, 0..) |attr, i| {
+        if (i > 0) attr_buf.appendSlice(allocator, ",") catch return;
+        attr_buf.appendSlice(allocator, attr.key) catch return;
+        attr_buf.appendSlice(allocator, "=") catch return;
+        var val_buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&val_buf);
+        attr.val.format(fbs.writer());
+        attr_buf.appendSlice(allocator, fbs.getWritten()) catch return;
+    }
+    const attr_str = attr_buf.toOwnedSlice(allocator) catch return;
+    const patch = try makePatchMap(allocator, "attrs", path, attr_str);
+    try patches.append(allocator, patch);
+}
+
+fn makePatchMap(
+    allocator: std.mem.Allocator,
+    op: []const u8,
+    path: []const u8,
+    value_str: []const u8,
+) !*const Value {
+    // Create a map: %{op: "replace", path: "0.1", value: "<html>"}
+    const entries = try allocator.alloc(Value.MapEntry, 3);
+
+    const op_val = try allocator.create(Value);
+    op_val.* = Value{ .string = op };
+    entries[0] = .{ .key = "op", .val = op_val };
+
+    const path_val = try allocator.create(Value);
+    path_val.* = Value{ .string = if (path.len > 0) path else "" };
+    entries[1] = .{ .key = "path", .val = path_val };
+
+    const value_val = try allocator.create(Value);
+    value_val.* = Value{ .string = value_str };
+    entries[2] = .{ .key = "value", .val = value_val };
+
+    const result = try allocator.create(Value);
+    result.* = Value{ .map = entries };
+    return result;
+}
+
+// ============================================================
+// Process builtins (fork, waitpid, exit)
+// ============================================================
+
+/// fork() -> Int
+/// Returns 0 in the child process, the child PID in the parent.
+/// Returns -1 on error.
+fn builtinFork(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    const result_val = allocator.create(Value) catch return error.OutOfMemory;
+    const fork_result = std.posix.fork() catch {
+        result_val.* = Value{ .integer = -1 };
+        return result_val;
+    };
+    if (fork_result == 0) {
+        // Child process
+        result_val.* = Value{ .integer = 0 };
+    } else {
+        // Parent process -- fork_result is the child PID
+        result_val.* = Value{ .integer = @intCast(fork_result) };
+    }
+    return result_val;
+}
+
+/// waitpid(pid: Int, nohang: Bool) -> Int
+/// Waits for a child process. If nohang is true, returns immediately.
+/// Returns the pid if the child exited, 0 if nohang and child still running, -1 on error.
+fn builtinWaitpid(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1 or args[0].* != .integer) return error.TypeError;
+    const pid: std.posix.pid_t = @intCast(args[0].integer);
+    const nohang = if (args.len >= 2) switch (args[1].*) {
+        .boolean => |b| b,
+        else => false,
+    } else false;
+
+    const flags: u32 = if (nohang) @as(u32, 1) else 0; // WNOHANG = 1 on macOS/Linux
+    const result_val = allocator.create(Value) catch return error.OutOfMemory;
+    const wait_result = std.posix.waitpid(pid, flags);
+    result_val.* = Value{ .integer = @intCast(wait_result.pid) };
+    return result_val;
+}
+
+/// exit(code: Int) -> never returns
+/// Exits the current process with the given status code.
+fn builtinExit(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const code: u8 = @intCast(@max(0, @min(255, args[0].integer)));
+    std.process.exit(code);
+}
+
+// ============================================================
+// Non-blocking IO builtins
+// ============================================================
+
+/// tcp_set_nonblocking(fd: Int) -> :ok
+/// Sets a socket to non-blocking mode. After this, tcp_accept and tcp_read
+/// will return nil instead of blocking when no data/connection is ready.
+fn builtinTcpSetNonblocking(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+
+    // Get current flags and add O_NONBLOCK (same pattern as Zig stdlib)
+    var fl_flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return error.NotSupported;
+    fl_flags |= 1 << @bitOffsetOf(std.posix.O, "NONBLOCK");
+    _ = std.posix.fcntl(fd, std.posix.F.SETFL, fl_flags) catch return error.NotSupported;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .atom = "ok" };
+    return result;
+}
+
+/// tcp_poll(fds: List of Int, timeout_ms: Int) -> List of Int
+/// Polls a list of file descriptors for readability.
+/// Returns a list of fds that are ready to read (or accept).
+/// timeout_ms: -1 = block forever, 0 = return immediately, >0 = wait up to N ms.
+fn builtinTcpPoll(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .list or args[1].* != .integer) return error.TypeError;
+
+    const fd_list = args[0].list;
+    const timeout_ms: i32 = @intCast(args[1].integer);
+
+    // Build pollfd array
+    const pollfds = allocator.alloc(std.posix.pollfd, fd_list.len) catch return error.OutOfMemory;
+    for (fd_list, 0..) |fd_val, i| {
+        if (fd_val.* != .integer) return error.TypeError;
+        pollfds[i] = .{
+            .fd = @intCast(fd_val.integer),
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        };
+    }
+
+    // Call poll
+    _ = std.posix.poll(pollfds, timeout_ms) catch return error.NotSupported;
+
+    // Collect ready fds
+    var ready_list: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
+    for (pollfds) |pfd| {
+        if (pfd.revents & std.posix.POLL.IN != 0) {
+            const fd_val = allocator.create(Value) catch return error.OutOfMemory;
+            fd_val.* = Value{ .integer = @intCast(pfd.fd) };
+            ready_list.append(allocator, fd_val) catch return error.OutOfMemory;
+        }
+    }
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = ready_list.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
 test "type_of view_node returns :view_node" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1570,4 +2220,148 @@ test "type_of view_node returns :view_node" {
     args[0] = node;
     const result = try builtinTypeOf(alloc, args);
     try std.testing.expect(result.eql(Value{ .atom = "view_node" }));
+}
+
+// ============================================================
+// WebSocket tests
+// ============================================================
+
+test "ws_accept_key produces correct accept value for RFC example" {
+    // RFC 6455 Section 4.2.2 example key: "dGhlIHNhbXBsZSBub25jZQ=="
+    // SHA-1("dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-5AB9DC80CB65") -> Base64
+    // Verified with: echo -n "..." | shasum -a 1 | xxd -r -p | base64
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const key_val = try alloc.create(Value);
+    key_val.* = Value{ .string = "dGhlIHNhbXBsZSBub25jZQ==" };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = key_val;
+
+    const result = try builtinWsAcceptKey(alloc, args);
+    try std.testing.expectEqualStrings("kHmeXU03Cu63H3svTFHa4eO+ylQ=", result.string);
+}
+
+test "ws_accept_key rejects non-string arg" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const int_val = try alloc.create(Value);
+    int_val.* = Value{ .integer = 42 };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = int_val;
+
+    const result = builtinWsAcceptKey(alloc, args);
+    try std.testing.expectError(error.TypeError, result);
+}
+
+// ============================================================
+// View diff tests
+// ============================================================
+
+test "view_diff identical trees returns empty list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Create two identical text nodes: text("hello")
+    const child1 = try alloc.create(Value);
+    child1.* = Value{ .string = "hello" };
+    const children1 = try alloc.alloc(*const Value, 1);
+    children1[0] = child1;
+
+    const node1 = try alloc.create(Value);
+    node1.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = children1 } };
+
+    const child2 = try alloc.create(Value);
+    child2.* = Value{ .string = "hello" };
+    const children2 = try alloc.alloc(*const Value, 1);
+    children2[0] = child2;
+
+    const node2 = try alloc.create(Value);
+    node2.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = children2 } };
+
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = node1;
+    args[1] = node2;
+
+    const result = try builtinViewDiff(alloc, args);
+    try std.testing.expect(result.* == .list);
+    try std.testing.expectEqual(@as(usize, 0), result.list.len);
+}
+
+test "view_diff detects text change in child" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Old: text("Count: 4")
+    const old_child = try alloc.create(Value);
+    old_child.* = Value{ .string = "Count: 4" };
+    const old_children = try alloc.alloc(*const Value, 1);
+    old_children[0] = old_child;
+    const old_node = try alloc.create(Value);
+    old_node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = old_children } };
+
+    // New: text("Count: 5")
+    const new_child = try alloc.create(Value);
+    new_child.* = Value{ .string = "Count: 5" };
+    const new_children = try alloc.alloc(*const Value, 1);
+    new_children[0] = new_child;
+    const new_node = try alloc.create(Value);
+    new_node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = new_children } };
+
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = old_node;
+    args[1] = new_node;
+
+    const result = try builtinViewDiff(alloc, args);
+    try std.testing.expect(result.* == .list);
+    // Should have exactly 1 patch for the text change
+    try std.testing.expectEqual(@as(usize, 1), result.list.len);
+
+    // Check the patch is a text op
+    const patch = result.list[0];
+    try std.testing.expect(patch.* == .map);
+    // Find the "op" entry
+    var found_op = false;
+    for (patch.map) |entry| {
+        if (std.mem.eql(u8, entry.key, "op")) {
+            try std.testing.expectEqualStrings("text", entry.val.string);
+            found_op = true;
+        }
+    }
+    try std.testing.expect(found_op);
+}
+
+test "view_diff detects tag change as replace" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Old: a "text" node
+    const old_node = try alloc.create(Value);
+    old_node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{} } };
+
+    // New: a "heading" node
+    const new_node = try alloc.create(Value);
+    new_node.* = Value{ .view_node = .{ .tag = "heading", .attrs = &.{}, .children = &.{} } };
+
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = old_node;
+    args[1] = new_node;
+
+    const result = try builtinViewDiff(alloc, args);
+    try std.testing.expect(result.* == .list);
+    try std.testing.expectEqual(@as(usize, 1), result.list.len);
+
+    // Should be a "replace" op
+    const patch = result.list[0];
+    for (patch.map) |entry| {
+        if (std.mem.eql(u8, entry.key, "op")) {
+            try std.testing.expectEqualStrings("replace", entry.val.string);
+        }
+    }
 }

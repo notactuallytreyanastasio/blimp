@@ -1781,7 +1781,14 @@ pub const Evaluator = struct {
                 return null;
             },
             .string_lit => |lit| {
-                if (subject.* == .string and std.mem.eql(u8, subject.string, lit.value)) return &.{};
+                // Strip surrounding quotes from AST lexeme (lexer stores "POST" with quotes,
+                // but runtime strings are unquoted)
+                const raw = lit.value;
+                const s = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
+                    raw[1 .. raw.len - 1]
+                else
+                    raw;
+                if (subject.* == .string and std.mem.eql(u8, subject.string, s)) return &.{};
                 return null;
             },
             .atom_lit => |lit| {

@@ -1,0 +1,263 @@
+# Concurrent Blimp HTTP Server
+#
+# Demonstrates poll-based multiplexed connection handling.
+# Multiple connections are served concurrently using tcp_poll.
+# Sessions state is shared across all connections (single process).
+#
+# Boot:  blimp web/concurrent_server.blimp
+# Then:  open multiple browser tabs to http://localhost:8080
+#
+# New builtins used:
+#   tcp_set_nonblocking(fd)  -- makes accept non-blocking (returns nil if no connection)
+#   tcp_poll(fds, timeout)   -- polls multiple fds, returns list of ready fds
+#   fork()                   -- POSIX fork (for future use, not used here)
+#   waitpid(pid, nohang)     -- reap child processes
+#   exit(code)               -- exit process
+
+# -- HTTP helpers (same as server.blimp) --------------------------------
+
+def parse_request_line(raw) do
+  parts = split(raw, " ")
+  method = head(parts)
+  path_part = head(tail(parts))
+  path = split(path_part, "?") |> head
+  %{method: method, path: path}
+end
+
+def http_ok(body) do
+  len = length(body)
+  concat(
+    "HTTP/1.1 200 OK\r\n",
+    concat("Content-Type: text/html; charset=utf-8\r\n",
+    concat("Content-Length: ", concat(to_string(len),
+    concat("\r\nConnection: close\r\n\r\n", body))))
+  )
+end
+
+def http_redirect(location) do
+  concat(
+    "HTTP/1.1 302 Found\r\n",
+    concat("Location: ", concat(location,
+    "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+  )
+end
+
+def html_page(title, body_html) do
+  concat(
+    "<!DOCTYPE html><html><head><meta charset=utf-8>",
+    concat("<title>", concat(title, concat("</title>",
+    concat("<style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: system-ui, sans-serif; background: rgb(249,249,249); color: rgb(17,17,17); }
+      .page { max-width: 600px; margin: 40px auto; padding: 24px; }
+      h1 { margin-bottom: 16px; }
+      p { margin: 8px 0; }
+      button { padding: 8px 16px; background: rgb(0,112,243); color: white; border: none;
+               border-radius: 4px; cursor: pointer; font-size: 16px; margin: 4px; }
+      button:hover { background: rgb(0,81,179); }
+    </style>",
+    concat("</head><body>",
+    concat(body_html, concat("
+    <script>
+      function blimpSend(btn) {
+        var msg = btn.getAttribute('data-sends');
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = window.location.pathname;
+        var input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'msg';
+        input.value = msg;
+        form.appendChild(input);
+        document.body.appendChild(form);
+        form.submit();
+      }
+    </script>", "</body></html>")))))))
+  )
+end
+
+# -- Session store -------------------------------------------------------
+
+actor Sessions do
+  state store: Map :: %{}
+  state next_id: Int :: 1
+
+  on :new_session do
+    id = to_string(next_id)
+    become next_id: next_id + 1
+    reply id
+  end
+
+  on :get(id: String) do
+    reply lookup(store, id)
+  end
+
+  on :put(id: String, data: Map) do
+    become store: put(store, id, data)
+    reply :ok
+  end
+end
+
+# -- App: Shared Counter -------------------------------------------------
+# Multiple browser tabs share the same counter via Sessions.
+
+def initial_state() do
+  %{count: 0}
+end
+
+def handle_event(data: Map, msg: Atom) -> Map do
+  case msg do
+    :increment -> put(data, "count", lookup(data, "count") + 1)
+    :decrement -> put(data, "count", lookup(data, "count") - 1)
+    :reset     -> put(data, "count", 0)
+    _          -> data
+  end
+end
+
+def render_app(data: Map) -> String do
+  count = lookup(data, "count")
+  concat("<div class='page'>",
+    concat("<h1>Concurrent Counter</h1>",
+    concat("<p>Count: <strong>", concat(to_string(count), concat("</strong></p>",
+    concat("<p>",
+    concat("<button data-sends='decrement' onclick='blimpSend(this)'>- 1</button>",
+    concat("<button data-sends='reset' onclick='blimpSend(this)'>Reset</button>",
+    concat("<button data-sends='increment' onclick='blimpSend(this)'>+ 1</button>",
+    concat("</p>",
+    concat("<p><em>Open multiple tabs -- they share state. ",
+    concat("The server handles connections concurrently via poll().</em></p>",
+    "</div>"))))))))))))
+end
+
+# -- Dispatcher -----------------------------------------------------------
+
+def form_value(body: String, key: String) -> String do
+  pairs = split(body, "&")
+  find_pair(pairs, concat(key, "="))
+end
+
+def find_pair(pairs: List, prefix: String) -> String do
+  case empty?(pairs) do
+    true -> ""
+    _    ->
+      pair = head(pairs)
+      case contains(pair, prefix) do
+        true ->
+          parts = split(pair, "=")
+          head(tail(parts))
+        _ ->
+          find_pair(tail(pairs), prefix)
+      end
+  end
+end
+
+def last_elem(items: List) -> String do
+  case empty?(items) do
+    true -> ""
+    _    ->
+      case empty?(tail(items)) do
+        true -> head(items)
+        _    -> last_elem(tail(items))
+      end
+  end
+end
+
+def string_to_msg(s: String) -> Atom do
+  case s do
+    "increment" -> :increment
+    "decrement" -> :decrement
+    "reset"     -> :reset
+    _           -> :unknown
+  end
+end
+
+def dispatch(method: String, raw: String, session_id: String, data: Map) -> String do
+  case method do
+    "POST" ->
+      lines = split(raw, "\r\n")
+      body = last_elem(lines)
+      msg_str = form_value(body, "msg")
+      msg = string_to_msg(msg_str)
+      new_data = handle_event(data, msg)
+      Sessions <- :put(session_id, new_data)
+      http_redirect("/")
+    _ ->
+      html = render_app(data)
+      http_ok(html_page("Concurrent Counter", html))
+  end
+end
+
+# -- Connection handling --------------------------------------------------
+
+def handle_http_connection(server_fd: Int, client_fd: Int) -> String do
+  raw = tcp_read(client_fd)
+
+  first_line = head(split(raw, "\r\n"))
+  req = parse_request_line(first_line)
+  method = lookup(req, "method")
+
+  session_id = "1"
+  existing = Sessions <- :get(session_id)
+  data = existing orelse initial_state()
+
+  response = dispatch(method, raw, session_id, data)
+
+  tcp_write(client_fd, response)
+  tcp_close(client_fd)
+  :ok
+end
+
+# -- Concurrent HTTP Server -----------------------------------------------
+#
+# Uses tcp_poll to multiplex the server socket.
+# The server fd is set to non-blocking so tcp_accept returns nil
+# when no connection is pending (instead of blocking forever).
+#
+# Loop:
+#   1. Poll the server fd with a timeout
+#   2. If ready: accept and handle the HTTP request
+#   3. HTTP requests are handled synchronously (they're fast: read, dispatch, write, close)
+#   4. Loop back to poll
+#
+# This design supports future WebSocket connections: long-lived WS fds
+# would be added to the poll list alongside the server fd.
+
+actor HTTPServer do
+  state port: Int :: 8080
+  state fd: Int :: -1
+
+  on :start do
+    server_fd = tcp_listen(port)
+    become fd: server_fd
+    print(concat("Concurrent Blimp HTTP server on http://localhost:", to_string(port)))
+    print("  (poll-based multiplexing, shared sessions)")
+    HTTPServer <- :poll_loop
+  end
+
+  on :poll_loop do
+    # Poll just the server fd for now. When WebSocket support is added,
+    # WS client fds would be included in this list.
+    ready = tcp_poll([fd], 100)
+
+    case empty?(ready) do
+      true ->
+        # Timeout -- no new connections, loop back
+        HTTPServer <- :poll_loop
+      _ ->
+        # Server fd is ready -- accept and handle
+        client_fd = tcp_accept(fd)
+        case nil?(client_fd) do
+          true ->
+            # Non-blocking accept returned nil (race condition)
+            HTTPServer <- :poll_loop
+          _ ->
+            handle_http_connection(fd, client_fd)
+            HTTPServer <- :poll_loop
+        end
+    end
+  end
+end
+
+# -- Boot -----------------------------------------------------------------
+
+HTTPServer <- :start
