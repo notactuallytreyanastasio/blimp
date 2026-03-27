@@ -1,0 +1,42 @@
+[
+  {
+    "hash": "a23d476e05157a4f7ca6435ac73259557d93d920",
+    "short_hash": "a23d476",
+    "author": "Bobby Nathan",
+    "date": "2026-03-27T17:39:30-04:00",
+    "message": "Hole: auto re-exec after patch + diff output\n\nAfter patching the source file, execv() replaces the current process with\na fresh run of the patched file — zero user interaction required.\n\nDiff output shows exactly what changed:\n  ╔═══ Hole filled: file.blimp:42 ══════\n  ║ - _ # Hole: directive text\n  ║ + _ ->\n  ║ +   generated line 1\n  ║ +   generated line 2\n  ╚═════════════════════════════════════\n\nThe full cycle: hit hole → call Claude → print diff → patch file → re-exec.\nSecond run uses the real implementation, no hole, no Claude call.",
+    "files_changed": 2
+  },
+  {
+    "hash": "8acd934422d43b97df4cbc3211de61b1e5f613b0",
+    "short_hash": "8acd934",
+    "author": "Bobby Nathan",
+    "date": "2026-03-27T17:36:03-04:00",
+    "message": "Hole source patching: living codebase — holes fill themselves permanently\n\n- lexer.zig: preserve last_comment across newline tokens so parser can read\n  directive text from the line AFTER the hole token is consumed\n- parser.zig: save `_` token's line/col BEFORE advancing (correct loc for patch)\n  new parseHandlerBodyPublic() allows parsing handler-body statements in holes\n- eval.zig: evalHole() now patches the source file after filling in\n  - finds the hole line by its stored loc\n  - detects original indentation from that line\n  - builds replacement: `_ ->\\n  <generated lines>`\n  - writes patched source back to disk\n  - subsequent runs hit the real implementation, not the Hole\n- main.zig: set evaluator.source_path from resolved file path\n  --no-type-check flag to skip type checker for exploratory code",
+    "files_changed": 3
+  },
+  {
+    "hash": "33b36905ff934bce5dd80dca7cd3ed188e7ac706",
+    "short_hash": "33b3690",
+    "author": "Bobby Nathan",
+    "date": "2026-03-27T17:18:10-04:00",
+    "message": "Hole operator: situation _ # directive shells out to Claude\n\n- lexer.zig: capture comment text in last_comment (not reset on newlines)\n  so parser can read directives like `_ # Hole: fill this in`\n- parser.zig: hole branches now store directive text from the comment\n  body contains a hole node with directive instead of being empty\n- eval.zig: evalHole() called when situation hits a directive-only _ branch\n  - builds prompt: directive + subject value + visible bindings + syntax notes\n  - shells out to `claude -p <prompt>` as subprocess\n  - strips markdown fences from response\n  - parses response with parseFilePublic, evaluates all nodes, returns last\n  - graceful nil fallback if claude not found or parse fails\n- Works at REPL time and file evaluation time (both contexts)\n\nSemantics: situation = incomplete code with Holes, case = complete dispatch",
+    "files_changed": 3
+  },
+  {
+    "hash": "b0bef0e1d485e37b391999670c8420390c52207b",
+    "short_hash": "b0bef0e",
+    "author": "Bobby Nathan",
+    "date": "2026-03-27T12:11:57-04:00",
+    "message": "web framework: TCP/HTTP builtins in Zig, server.blimp in Blimp\n\n- tcp_listen/accept/read/write/close builtins (POSIX sockets, native only)\n- to_html builtin: renders view_node trees to HTML strings\n  - Handles all 17 view primitives\n  - row gets data-row attr for flexbox direction\n  - button sends: attr becomes data-sends + onclick handler\n  - HTML-escapes string content\n- web/server.blimp: HTTP/1.1 server written entirely in Blimp\n  - HTTP.Server actor: tcp_listen loop, accept, read, dispatch, respond\n  - Sessions actor: in-memory session store (map of id -> state)\n  - Pure render_app(data) -> view_node\n  - Pure handle_event(data, msg) -> data\n  - html_page wraps view HTML in a full document with styles + client JS\n  - Client JS: blimpSend() submits button clicks as form POSTs\n  - PRG pattern: POST handler -> redirect -> GET",
+    "files_changed": 2
+  },
+  {
+    "hash": "d7c68bd4adade8dd502dce1dd9a9d8487f071989",
+    "short_hash": "d7c68bd",
+    "author": "Robert Grayson",
+    "date": "2026-03-24T10:22:25-04:00",
+    "message": "fix canvas",
+    "files_changed": 4
+  }
+]
