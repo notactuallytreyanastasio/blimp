@@ -392,11 +392,12 @@ pub const Parser = struct {
 
         if (self.current.kind == .hole) {
             // Hole branch (default/wildcard) -- pattern stays null
-            // Capture any directive comment on the same line BEFORE advancing,
-            // since advance() will get the newline token (comment is already
-            // stored in lexer.last_comment from the comment handler).
+            // Save the `_` token's location BEFORE advancing — this is the
+            // exact line we need to patch in the source file.
+            const hole_line = self.current.line;
+            const hole_col = self.current.col;
             self.advance(); // consume `_`, now current = newline (or arrow)
-            // lexer.last_comment still holds the comment text from this line
+            // lexer.last_comment holds the directive text from the same line
             const directive_text = self.lexer.last_comment;
             const maybe_directive: ?[]const u8 = if (directive_text.len > 0) directive_text else null;
 
@@ -406,7 +407,7 @@ pub const Parser = struct {
                 const hole_node = self.allocator.create(Node) catch return error.OutOfMemory;
                 hole_node.* = Node{
                     .kind = .{ .hole = .{ .directive = maybe_directive } },
-                    .loc = .{ .line = self.current.line, .col = self.current.col },
+                    .loc = .{ .line = hole_line, .col = hole_col },
                 };
                 const body = self.allocator.alloc(Node, 1) catch return error.OutOfMemory;
                 body[0] = hole_node.*;
@@ -502,6 +503,19 @@ pub const Parser = struct {
     pub fn parseStatementPublic(self: *Parser) ParseError!Node {
         self.skipNewlines();
         return self.parseTopLevel();
+    }
+
+    /// Parse multiple handler-body statements (allows become, reply, situation, etc).
+    /// Used by evalHole to parse Claude-generated handler code.
+    pub fn parseHandlerBodyPublic(self: *Parser) ParseError![]const Node {
+        var stmts: std.ArrayListUnmanaged(Node) = .{};
+        self.skipNewlines();
+        while (self.current.kind != .eof) {
+            const stmt = try self.parseHandlerBody();
+            stmts.append(self.allocator, stmt) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+        return stmts.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
     // ============================================================

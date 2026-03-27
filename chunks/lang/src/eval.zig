@@ -21,6 +21,8 @@ pub const Evaluator = struct {
     registry: Registry,
     last_error: ?BlimpError = null,
     source: []const u8 = "",
+    /// Absolute path of the source file being run, for Hole patching.
+    source_path: ?[]const u8 = null,
     actor_ctx: ?*ActorContext = null,
     msg_log: [64]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
@@ -1425,7 +1427,7 @@ pub const Evaluator = struct {
                 // If the body contains a Hole node (directive-only `_ # comment`),
                 // shell out to Claude to fill it in.
                 if (branch.body.len == 1 and branch.body[0].kind == .hole) {
-                    return self.evalHole(branch.body[0].kind.hole, subject);
+                    return self.evalHole(branch.body[0].kind.hole, branch.body[0].loc, subject);
                 }
                 return self.evalBody(branch.body);
             }
@@ -1440,22 +1442,24 @@ pub const Evaluator = struct {
     /// Hole operator: called when a situation hits a `_ # directive` branch.
     /// Builds a prompt with available context, shells out to `claude -p <prompt>`,
     /// parses the response as a Blimp expression, evaluates and returns it.
-    fn evalHole(self: *Evaluator, hole: @import("ast.zig").Node.Hole, subject: *const Value) EvalError!*const Value {
+    fn evalHole(self: *Evaluator, hole: @import("ast.zig").Node.Hole, loc: @import("ast.zig").Loc, subject: *const Value) EvalError!*const Value {
         // Build context string: directive + subject value + visible bindings
         var ctx_buf: std.ArrayListUnmanaged(u8) = .{};
         defer ctx_buf.deinit(self.allocator);
 
         ctx_buf.appendSlice(self.allocator,
-            "You are filling in a Hole in Blimp code. Blimp is an actor-model language.\n" ++
-            "Syntax notes:\n" ++
-            "  - Atoms: :ok :error :valid\n" ++
-            "  - case expr do :pat -> body ... end  (complete match)\n" ++
-            "  - situation expr do :pat -> body ... end  (match with holes)\n" ++
-            "  - become field: value  (state transition)\n" ++
-            "  - reply value  (return from handler)\n" ++
-            "  - Builtins: put(map, key, val), lookup(map, key), concat(a, b), to_string(v)\n\n" ++
-            "Return ONLY a single Blimp expression or statement that should fill the hole.\n" ++
-            "No explanation. No markdown. No code fences. Just raw Blimp.\n\n"
+            "You are filling in a Hole inside a Blimp actor message handler.\n" ++
+            "Blimp is an actor-model language. You are writing the BODY of a handler branch.\n\n" ++
+            "Syntax:\n" ++
+            "  Atoms: :ok  :error  :valid  :invalid_code\n" ++
+            "  State update: become field: value, other_field: value\n" ++
+            "  Return value: reply :atom  or  reply some_expression\n" ++
+            "  Match: case expr do :pat -> body  _  -> body  end\n" ++
+            "  Builtins: put(map, key, val)  lookup(map, key)  concat(a, b)  to_string(v)  print(v)\n" ++
+            "  Map literal: %{key: value, key2: value2}\n" ++
+            "  Send message: ActorName <- :message(arg)\n\n" ++
+            "Write one or more handler-body statements (become / reply / assignments / expressions).\n" ++
+            "No explanation. No markdown. No code fences. No surrounding do/end. Just the statements.\n\n"
         ) catch return error.OutOfMemory;
 
         if (hole.directive) |dir| {
@@ -1488,7 +1492,16 @@ pub const Evaluator = struct {
             ctx_buf.appendSlice(self.allocator, "\n") catch return error.OutOfMemory;
         }
 
-        ctx_buf.appendSlice(self.allocator, "\nBlimp expression: ") catch return error.OutOfMemory;
+        // Include surrounding source context if available
+        if (self.source.len > 0) {
+            ctx_buf.appendSlice(self.allocator, "Source file context:\n```\n") catch return error.OutOfMemory;
+            // Include up to 60 lines of source (enough for most files)
+            const src_preview = if (self.source.len > 3000) self.source[0..3000] else self.source;
+            ctx_buf.appendSlice(self.allocator, src_preview) catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, "\n```\n\n") catch return error.OutOfMemory;
+        }
+
+        ctx_buf.appendSlice(self.allocator, "Fill in the Hole. Write the handler body statements:\n") catch return error.OutOfMemory;
 
         // Null-terminate for shell
         ctx_buf.append(self.allocator, 0) catch return error.OutOfMemory;
@@ -1544,7 +1557,7 @@ pub const Evaluator = struct {
         // Parse and evaluate the response as Blimp statements
         const src_copy = self.allocator.dupe(u8, response) catch return error.OutOfMemory;
         var hole_parser = Parser.init(self.allocator, src_copy);
-        const nodes = hole_parser.parseFilePublic() catch {
+        const nodes = hole_parser.parseHandlerBodyPublic() catch {
             std.debug.print("[Hole] Failed to parse Claude response as Blimp\n", .{});
             const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
             nil_val.* = .nil;
@@ -1571,7 +1584,78 @@ pub const Evaluator = struct {
             };
         }
         self.source = saved_source;
+
+        // Patch the source file: replace the `_ # directive` line with generated code
+        if (self.source_path) |file_path| {
+            self.patchHole(file_path, loc.line, response) catch |err| {
+                std.debug.print("[Hole] Warning: could not patch source file: {}\n", .{err});
+            };
+        }
+
         return last;
+    }
+
+    /// Replace the hole line in the source file with the generated code.
+    /// Preserves the indentation of the original hole line.
+    fn patchHole(self: *Evaluator, file_path: []const u8, hole_line: u32, generated: []const u8) !void {
+        // Read the file
+        const file_source = try std.fs.cwd().readFileAlloc(self.allocator, file_path, 4 * 1024 * 1024);
+        defer self.allocator.free(file_source);
+
+        // Split into lines, find the hole line (1-indexed)
+        var lines: std.ArrayListUnmanaged([]const u8) = .{};
+        var iter = std.mem.splitScalar(u8, file_source, '\n');
+        while (iter.next()) |line| {
+            try lines.append(self.allocator, line);
+        }
+
+        const line_idx = if (hole_line > 0) hole_line - 1 else 0;
+        if (line_idx >= lines.items.len) return;
+
+        const original_line = lines.items[line_idx];
+
+        // Detect indentation of the original line
+        var indent_len: usize = 0;
+        while (indent_len < original_line.len and
+               (original_line[indent_len] == ' ' or original_line[indent_len] == '\t'))
+        {
+            indent_len += 1;
+        }
+        const indent = original_line[0..indent_len];
+
+        // Build the replacement: `_ ->\n` followed by each generated line
+        // at one extra indent level (2 more spaces than the original hole).
+        var replacement: std.ArrayListUnmanaged(u8) = .{};
+        // First line: wildcard arrow at the original indentation
+        try replacement.appendSlice(self.allocator, indent);
+        try replacement.appendSlice(self.allocator, "_ ->");
+        const body_indent = try std.fmt.allocPrint(self.allocator, "{s}  ", .{indent});
+        var gen_lines = std.mem.splitScalar(u8, generated, '\n');
+        while (gen_lines.next()) |gen_line| {
+            const trimmed = std.mem.trim(u8, gen_line, " \t");
+            if (trimmed.len == 0) continue;
+            try replacement.append(self.allocator, '\n');
+            try replacement.appendSlice(self.allocator, body_indent);
+            try replacement.appendSlice(self.allocator, trimmed);
+        }
+
+        // Replace the hole line with the generated code
+        lines.items[line_idx] = replacement.items;
+
+        // Reconstruct the file
+        var out: std.ArrayListUnmanaged(u8) = .{};
+        for (lines.items, 0..) |line, i| {
+            if (i > 0) try out.append(self.allocator, '\n');
+            try out.appendSlice(self.allocator, line);
+        }
+
+        // Write back
+        const file = try std.fs.cwd().createFile(file_path, .{});
+        defer file.close();
+        try file.writeAll(out.items);
+
+        std.debug.print("[Hole patched] {s}:{d} — replaced with generated code:\n", .{ file_path, hole_line });
+        std.debug.print("  {s}\n", .{std.mem.trim(u8, replacement.items, "\n")});
     }
 
     const PatternBinding = struct {

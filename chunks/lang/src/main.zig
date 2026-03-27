@@ -53,19 +53,25 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // Type check
-    var checker = Checker.init(arena.allocator());
-    const check_result = checker.checkFile(nodes);
-    if (check_result.errors.len > 0) {
-        for (check_result.errors) |type_err| {
-            std.debug.print("Type error at line {}, col {}: {s}\n", .{
-                type_err.loc.line,
-                type_err.loc.col,
-                type_err.message,
-            });
+    // Type check (skip with --no-type-check)
+    const skip_types = for (args[2..]) |a| {
+        if (std.mem.eql(u8, a, "--no-type-check")) break true;
+    } else false;
+
+    if (!skip_types) {
+        var checker = Checker.init(arena.allocator());
+        const check_result = checker.checkFile(nodes);
+        if (check_result.errors.len > 0) {
+            for (check_result.errors) |type_err| {
+                std.debug.print("Type error at line {}, col {}: {s}\n", .{
+                    type_err.loc.line,
+                    type_err.loc.col,
+                    type_err.message,
+                });
+            }
+            std.debug.print("{d} type error(s) found.\n", .{check_result.errors.len});
+            std.process.exit(1);
         }
-        std.debug.print("{d} type error(s) found.\n", .{check_result.errors.len});
-        std.process.exit(1);
     }
 
     // Check for --introspect flag
@@ -90,6 +96,9 @@ pub fn main() !void {
     // Default: evaluate the file
     var evaluator = Evaluator.init(arena.allocator());
     evaluator.setSource(source);
+    // Store the absolute path so the Hole operator can patch the source file
+    const abs_path = std.fs.cwd().realpathAlloc(arena.allocator(), args[1]) catch args[1];
+    evaluator.source_path = abs_path;
     for (nodes) |node| {
         _ = evaluator.eval(node) catch |err| {
             if (evaluator.last_error) |blimp_err| {
