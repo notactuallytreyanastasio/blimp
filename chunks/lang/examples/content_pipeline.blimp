@@ -1,0 +1,117 @@
+# Content moderation pipeline
+#
+# A staged pipeline actor that processes user-submitted content through
+# several moderation steps before publishing. Each stage is an actor.
+# Some stages are implemented, some are Holes.
+#
+# The pipeline: raw text -> sanitize -> classify -> score -> publish/reject
+#
+# Run this and let Claude fill in the classification and scoring logic:
+#   blimp examples/content_pipeline.blimp --no-type-check
+
+actor Sanitizer do
+  on :clean(text) do
+    # Strip leading/trailing whitespace, collapse internal spaces
+    trimmed = split(text, " ")
+    cleaned = concat(head(trimmed), "")
+    reply cleaned
+  end
+end
+
+actor Classifier do
+  state categories: List :: ["spam", "hate", "safe", "promotional"]
+
+  on :classify(text) do
+    # Very rough heuristics — the Hole fills in the real logic
+    word_count = length(split(text, " "))
+    situation word_count do
+      0 ->
+        reply :empty
+
+      _ # Hole: classify text as one of :spam :hate :safe or :promotional
+        # based on its content and word_count. Check for suspicious patterns
+        # like all-caps, excessive punctuation, or very short text.
+        # Use the categories list as reference. Return a map with
+        # %{label: :safe, confidence: 85} style result.
+    end
+  end
+end
+
+actor Scorer do
+  state threshold: Int :: 60
+
+  on :score(classification) do
+    label = lookup(classification, "label")
+    confidence = lookup(classification, "confidence")
+
+    situation label do
+      :safe ->
+        situation confidence > threshold do
+          true  -> reply %{action: "publish", score: confidence}
+          _     -> reply %{action: "review", score: confidence}
+        end
+
+      :promotional ->
+        _ # Hole: promotional content needs special handling — high-confidence
+          # promotional posts go to a review queue, low-confidence ones might
+          # actually be safe. Reply with %{action: ..., score: ...} where action
+          # is one of "publish", "review", or "reject"
+
+      :spam ->
+        reply %{action: "reject", score: 0}
+
+      :hate ->
+        reply %{action: "reject", score: 0}
+
+      :empty ->
+        reply %{action: "reject", score: 0}
+
+      _ # Hole: unknown classification label came back from the classifier —
+        # this shouldn't happen but the world is messy. Log it and decide
+        # whether to default to review or reject, and why.
+    end
+  end
+end
+
+actor Publisher do
+  state published: List :: []
+  state rejected: List :: []
+  state review_queue: List :: []
+
+  on :process(text) do
+    clean = Sanitizer <- :clean(text)
+    classification = Classifier <- :classify(clean)
+    decision = Scorer <- :score(classification)
+    action = lookup(decision, "action")
+
+    case action do
+      "publish" ->
+        become published: append(published, %{text: clean, score: lookup(decision, "score")})
+        reply :published
+      "review"  ->
+        become review_queue: append(review_queue, %{text: clean, classification: classification})
+        reply :queued
+      "reject"  ->
+        become rejected: append(rejected, clean)
+        reply :rejected
+      _ ->
+        reply :error
+    end
+  end
+
+  on :stats do
+    reply %{
+      published: length(published),
+      queued: length(review_queue),
+      rejected: length(rejected)
+    }
+  end
+end
+
+# Run the pipeline on some sample content
+Publisher <- :process("Hello world, this is a nice post about baking")
+Publisher <- :process("BUY NOW!!! LIMITED TIME OFFER!!! CLICK HERE!!!")
+Publisher <- :process("check out my totally legitimate website at example.com")
+Publisher <- :process("")
+stats = Publisher <- :stats
+print(stats)

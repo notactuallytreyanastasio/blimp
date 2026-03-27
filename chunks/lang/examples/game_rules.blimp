@@ -1,0 +1,154 @@
+# Turn-based game engine with incomplete rules
+#
+# A two-player game with a board, moves, and win conditions.
+# The movement and board representation are implemented. What's missing:
+# - Win condition detection
+# - Score calculation after a win
+# - What to do when a player tries an illegal move
+# - The AI opponent's move selection
+#
+# This is a good Hole example because the logic is genuinely domain-specific
+# and benefits from Claude reasoning about the game structure from context.
+#
+# Run: blimp examples/game_rules.blimp --no-type-check
+
+actor Board do
+  state cells: List :: [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  state move_count: Int :: 0
+
+  on :place(pos: Int, player: Int) do
+    current = elem(cells, pos)
+    situation current do
+      0 ->
+        new_cells = replace_at(cells, pos, player)
+        become cells: new_cells,
+               move_count: move_count + 1
+        reply :ok
+      _ # Hole: the cell is already occupied — this is an illegal move.
+        # Decide whether to reply with :illegal, raise an error, or
+        # silently ignore it. Think about what's best for game UX.
+    end
+  end
+
+  on :check_winner do
+    # All winning lines in tic-tac-toe
+    lines = [
+      [0, 1, 2], [3, 4, 5], [6, 7, 8],
+      [0, 3, 6], [1, 4, 7], [2, 5, 8],
+      [0, 4, 8], [2, 4, 6]
+    ]
+    situation move_count >= 5 do
+      true ->
+        _ # Hole: check each line in lines — if all three cells in a line have
+          # the same non-zero player value, that player has won. Return
+          # {:winner, player_id} or :no_winner. The cells list holds 0 for empty,
+          # 1 for player one, 2 for player two.
+      _ ->
+        reply :no_winner
+    end
+  end
+
+  on :is_draw do
+    situation move_count do
+      9 -> reply :draw
+      _ -> reply :no_draw
+    end
+  end
+
+  on :state do
+    reply %{cells: cells, move_count: move_count}
+  end
+end
+
+actor Scorer do
+  state scores: Map :: %{}
+
+  on :record_win(player: String, move_count: Int) do
+    _ # Hole: calculate the points for this win — fewer moves should mean more points.
+      # A win in 5 moves (minimum) is worth more than one in 9 moves (full board).
+      # Update the scores map for this player and reply with the points earned.
+  end
+
+  on :leaderboard do
+    reply scores
+  end
+end
+
+actor AIOpponent do
+  state difficulty: Int :: 2
+
+  on :choose_move(board_state, player_id) do
+    cells = lookup(board_state, "cells")
+    empty_cells = []
+
+    # Find empty positions (value 0)
+    situation length(cells) > 0 do
+      true ->
+        _ # Hole: find all positions in cells where the value is 0 — those are
+          # valid moves. Based on difficulty (1=random, 2=block wins, 3=strategic),
+          # pick the best move position and reply with it as an integer 0-8.
+          # At difficulty 2, try to block the opponent from winning if possible.
+      _ ->
+        reply 4
+    end
+  end
+end
+
+actor Game do
+  state board: Map :: %{}
+  state current_player: Int :: 1
+  state status: Atom :: :playing
+  state round: Int :: 1
+
+  on :start do
+    become board: %{cells: [0, 0, 0, 0, 0, 0, 0, 0, 0], move_count: 0},
+           status: :playing,
+           current_player: 1
+    reply :started
+  end
+
+  on :move(pos: Int) do
+    case status do
+      :playing ->
+        result = Board <- :place(pos, current_player)
+        case result do
+          :ok ->
+            winner = Board <- :check_winner
+            case winner do
+              {:winner, p} ->
+                become status: :done
+                Scorer <- :record_win(to_string(p), lookup(board, "move_count"))
+                reply {:win, p}
+              _ ->
+                draw = Board <- :is_draw
+                case draw do
+                  :draw  -> become status: :done
+                             reply :draw
+                  _      ->
+                    next = case current_player do
+                      1 -> 2
+                      _ -> 1
+                    end
+                    become current_player: next
+                    reply {:next, next}
+                end
+            end
+          _ ->
+            reply :illegal
+        end
+      _ ->
+        reply :game_over
+    end
+  end
+end
+
+# Play a game
+Game <- :start
+Game <- :move(4)
+Game <- :move(0)
+Game <- :move(2)
+Game <- :move(6)
+result = Game <- :move(6)
+print(result)
+scores = Scorer <- :leaderboard
+print(scores)

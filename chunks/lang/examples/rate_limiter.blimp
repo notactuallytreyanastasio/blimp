@@ -1,0 +1,74 @@
+# Rate limiter with adaptive backoff
+#
+# A token bucket rate limiter. The basic mechanics are implemented:
+# tokens refill over time, requests consume them. What's left as Holes:
+#
+# - The penalty calculation when a client burns through their budget too fast
+# - The logic for detecting burst abuse vs. legitimate spikes
+# - What to do when the bucket is completely dry and a priority request arrives
+#
+# Run this to let Claude fill in the missing pieces:
+#   blimp examples/rate_limiter.blimp --no-type-check
+
+actor RateLimiter do
+  state capacity: Int :: 100
+  state tokens: Int :: 100
+  state refill_rate: Int :: 10
+  state penalty_multiplier: Int :: 1
+  state request_log: List :: []
+
+  on :refill do
+    new_tokens = tokens + refill_rate
+    become tokens: min(new_tokens, capacity)
+    reply tokens
+  end
+
+  on :request(client: String, cost: Int) do
+    situation tokens >= cost do
+      true ->
+        become tokens: tokens - cost,
+               request_log: append(request_log, %{client: client, cost: cost, status: "ok"})
+        reply :allowed
+
+      _ # Hole: not enough tokens — check if this client is a repeat offender in
+        # request_log and if so apply a penalty_multiplier to their wait time,
+        # then reply with {:denied, wait_seconds} where wait_seconds reflects the penalty
+    end
+  end
+
+  on :burst_check(client: String, window: Int) do
+    # Count how many requests this client made recently
+    client_requests = length(request_log)
+    situation client_requests > window * 3 do
+      true ->
+        _ # Hole: this client is spiking hard — figure out if it looks like a legitimate
+          # traffic burst (cost per request is small) or abuse (cost per request is high),
+          # update penalty_multiplier accordingly, and reply :throttled or :watching
+
+      _ ->
+        become penalty_multiplier: max(1, penalty_multiplier - 1)
+        reply :ok
+    end
+  end
+
+  on :priority_request(client: String, cost: Int) do
+    situation tokens do
+      0 ->
+        _ # Hole: bucket is bone dry but this is a priority request — decide whether to
+          # allow it as an overdraft (tokens go negative temporarily), queue it for the
+          # next refill, or flat-out deny it. Consider the client name and cost when deciding.
+
+      _ ->
+        become tokens: tokens - cost
+        reply :allowed
+    end
+  end
+end
+
+# Demo
+RateLimiter <- :request("alice", 15)
+RateLimiter <- :request("alice", 15)
+RateLimiter <- :request("alice", 15)
+RateLimiter <- :request("bob", 80)
+result = RateLimiter <- :request("alice", 20)
+print(result)
