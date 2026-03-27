@@ -47,3 +47,5 @@ no changes added to commit (use "git add" and/or "git commit -a")
  create mode 100644 chunks/lang/examples/rate_limiter.blimp
 [blimp-core/web-framework a496725] Fix type checker issues, remove --no-type-check escape hatch
  7 files changed, 114 insertions(+), 30 deletions(-)
+[blimp-core/web-framework f0435a1] Typed lists and record types: [Item] and %{key: Type, key: Type}
+ 3 files changed, 168 insertions(+), 32 deletions(-)
