@@ -1453,15 +1453,28 @@ pub const Evaluator = struct {
             "You are filling in a Hole inside a Blimp actor message handler.\n" ++
             "Blimp is an actor-model language. You are writing the BODY of a handler branch.\n\n" ++
             "Syntax:\n" ++
-            "  Atoms: :ok  :error  :valid  :invalid_code\n" ++
+            "  Atoms: :ok  :error  :valid  :unknown\n" ++
             "  State update: become field: value, other_field: value\n" ++
-            "  Return value: reply :atom  or  reply some_expression\n" ++
-            "  Match: case expr do :pat -> body  _  -> body  end\n" ++
-            "  Builtins: put(map, key, val)  lookup(map, key)  concat(a, b)  to_string(v)  print(v)\n" ++
+            "  Return: reply :atom  or  reply some_expression\n" ++
+            "  Assign: x = some_expression\n" ++
+            "  Match (complete): case expr do :pat -> body  _ -> body  end\n" ++
+            "  Match (incomplete): situation expr do :pat -> body  _ # Hole: ...  end\n" ++
+            "  Lambda: fn(x: Int) do x * 2 end\n" ++
+            "  Higher-order: map(list, fn)  filter(list, fn)  reduce(list, init, fn)  each(list, fn)\n" ++
+            "  Send message: ActorName <- :message(arg)\n" ++
             "  Map literal: %{key: value, key2: value2}\n" ++
-            "  Send message: ActorName <- :message(arg)\n\n" ++
-            "Write one or more handler-body statements (become / reply / assignments / expressions).\n" ++
-            "No explanation. No markdown. No code fences. No surrounding do/end. Just the statements.\n\n"
+            "  List literal: [1, 2, 3]\n\n" ++
+            "Builtins (all available):\n" ++
+            "  Collections: length  head  tail  append  reverse  range  sort  flat  zip  uniq  sum\n" ++
+            "               elem  set_at  empty?  size\n" ++
+            "  Strings:     split  concat  contains  upcase  downcase  slice\n" ++
+            "  Convert:     to_string  to_int  type_of\n" ++
+            "  Math:        max  min  abs  rem  floor  ceil  round  random\n" ++
+            "  Logic:       not  nil?\n" ++
+            "  Maps:        put  lookup  keys  values  merge\n" ++
+            "  IO:          print  now\n\n" ++
+            "Write one or more handler-body statements. No explanation, no markdown, no code fences,\n" ++
+            "no surrounding do/end. Just the raw statements.\n\n"
         ) catch return error.OutOfMemory;
 
         if (hole.directive) |dir| {

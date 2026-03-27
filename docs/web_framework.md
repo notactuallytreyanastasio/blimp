@@ -189,16 +189,35 @@ Source file context:
 Fill in the Hole. Write the handler body statements:
 ```
 
-### Known prompt quality issues
+The prompt's syntax notes section is **deliberately incomplete** — it should be updated to match the actual language. The full feature set Claude can use:
 
-Claude sometimes returns:
-- Lambda syntax (`fn x -> ...`) — Blimp doesn't have lambdas yet
-- `filter()` — not a builtin
-- Multi-statement code that uses `situation` with wrong indentation
+**Lambdas** — first-class anonymous functions:
+```blimp
+fn(x: Int) -> Int do x * 2 end
+fn(x: Int, y: Int) do x + y end
+```
+
+**Higher-order functions** — `map`, `filter`, `reduce`, `each`:
+```blimp
+evens = filter(items, fn(x: Int) do rem(x, 2) == 0 end)
+doubled = map(evens, fn(x: Int) -> Int do x * 2 end)
+total = reduce(doubled, 0, fn(acc: Int, x: Int) do acc + x end)
+each(items, fn(x: Int) do print(x) end)
+```
+
+**Full builtin list** (beyond what the prompt currently mentions):
+`length`, `head`, `tail`, `append`, `reverse`, `range`, `sort`, `flat`, `zip`, `uniq`, `sum`,
+`elem`, `set_at`, `empty?`, `size`,
+`split`, `concat`, `contains`, `upcase`, `downcase`, `slice`,
+`to_string`, `to_int`, `type_of`,
+`max`, `min`, `abs`, `rem`, `floor`, `ceil`, `round`, `random`,
+`not`, `nil?`,
+`put`, `lookup`, `keys`, `values`, `merge`,
+`print`, `now`
+
+**The main opportunity**: update the syntax notes in `eval.zig: evalHole()` to include lambdas, the higher-order functions, and the full builtin list. The source file context already helps a lot — Claude reads the actual actor structure and state fields from it.
 
 When Claude's response fails to parse as Blimp, the hole evaluates to `nil` and the file is NOT patched. No crash — silent fallback. The hole will trigger again on the next run.
-
-**Improving prompt quality**: The main lever is making the syntax notes section more accurate and comprehensive. The source file context helps a lot — Claude can read the actual actor structure and state fields.
 
 ---
 
