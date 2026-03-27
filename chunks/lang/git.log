@@ -49,3 +49,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
  7 files changed, 114 insertions(+), 30 deletions(-)
 [blimp-core/web-framework f0435a1] Typed lists and record types: [Item] and %{key: Type, key: Type}
  3 files changed, 168 insertions(+), 32 deletions(-)
+[blimp-core/web-framework 5238c23] docs: web framework handoff guide for next session
+ 1 file changed, 471 insertions(+)
+ create mode 100644 docs/web_framework.md
+[blimp-core/web-framework 4a847ab] Fix docs and hole prompt: lambdas/filter/reduce/map all exist and work
+ 2 files changed, 46 insertions(+), 14 deletions(-)
