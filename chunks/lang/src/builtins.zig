@@ -88,6 +88,13 @@ pub const BuiltinRegistry = struct {
         reg.register("video", &viewVideo);
         reg.register("canvas", &viewCanvas);
         reg.register("button", &viewButton);
+        // HTTP / TCP builtins (native only)
+        reg.register("to_html", &builtinToHtml);
+        reg.register("tcp_listen", &builtinTcpListen);
+        reg.register("tcp_accept", &builtinTcpAccept);
+        reg.register("tcp_read", &builtinTcpRead);
+        reg.register("tcp_write", &builtinTcpWrite);
+        reg.register("tcp_close", &builtinTcpClose);
         return reg;
     }
 
@@ -1344,6 +1351,209 @@ test "view code_block with lang" {
     try std.testing.expectEqualStrings("code_block", result.view_node.tag);
     try std.testing.expectEqualStrings("lang", result.view_node.attrs[0].key);
     try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .atom = "blimp" }));
+}
+
+// ============================================================
+// HTTP / TCP builtins
+// ============================================================
+
+/// to_html(view_node) -> String
+/// Renders a view_node tree to an HTML string.
+fn builtinToHtml(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    var buf = std.ArrayList(u8).init(allocator);
+    renderHtml(args[0], &buf) catch return error.OutOfMemory;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = buf.toOwnedSlice() catch return error.OutOfMemory };
+    return result;
+}
+
+fn renderHtml(val: *const Value, buf: *std.ArrayList(u8)) !void {
+    switch (val.*) {
+        .view_node => |node| {
+            // Map Blimp view tags to HTML elements
+            const tag = blimpTagToHtml(node.tag);
+            try buf.appendSlice("<");
+            try buf.appendSlice(tag);
+            // row gets a data-row attribute for CSS flexbox direction
+            if (std.mem.eql(u8, node.tag, "row")) {
+                try buf.appendSlice(" data-row");
+            }
+            // Render attributes
+            for (node.attrs) |attr| {
+                if (std.mem.eql(u8, attr.key, "href")) {
+                    var val_buf: [512]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    // Strip surrounding quotes from string values
+                    const href = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
+                    try buf.appendSlice(" href=\"");
+                    try buf.appendSlice(href);
+                    try buf.appendSlice("\"");
+                } else if (std.mem.eql(u8, attr.key, "src")) {
+                    var val_buf: [512]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    const src = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
+                    try buf.appendSlice(" src=\"");
+                    try buf.appendSlice(src);
+                    try buf.appendSlice("\"");
+                } else if (std.mem.eql(u8, attr.key, "sends")) {
+                    // button sends attr -> data-sends for JS to pick up
+                    var val_buf: [256]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    // Strip leading colon from atom
+                    const msg = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
+                    try buf.appendSlice(" data-sends=\"");
+                    try buf.appendSlice(msg);
+                    try buf.appendSlice("\" onclick=\"blimpSend(this)\"");
+                } else if (std.mem.eql(u8, attr.key, "level")) {
+                    // heading level - handled in tag mapping, skip here
+                } else if (std.mem.eql(u8, attr.key, "lang")) {
+                    var val_buf: [64]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    const lang = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
+                    try buf.appendSlice(" data-lang=\"");
+                    try buf.appendSlice(lang);
+                    try buf.appendSlice("\"");
+                }
+            }
+            // Self-closing tags
+            if (std.mem.eql(u8, node.tag, "divider") or
+                std.mem.eql(u8, node.tag, "image"))
+            {
+                try buf.appendSlice(" />");
+                return;
+            }
+            try buf.appendSlice(">");
+            // Children
+            for (node.children) |child| {
+                try renderHtml(child, buf);
+            }
+            try buf.appendSlice("</");
+            try buf.appendSlice(tag);
+            try buf.appendSlice(">");
+        },
+        .string => |s| {
+            // HTML-escape the string content
+            for (s) |c| {
+                switch (c) {
+                    '<' => try buf.appendSlice("&lt;"),
+                    '>' => try buf.appendSlice("&gt;"),
+                    '&' => try buf.appendSlice("&amp;"),
+                    '"' => try buf.appendSlice("&quot;"),
+                    else => try buf.append(c),
+                }
+            }
+        },
+        .integer => |n| {
+            var tmp: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{n}) catch return;
+            try buf.appendSlice(s);
+        },
+        .float => |f| {
+            var tmp: [64]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
+            try buf.appendSlice(s);
+        },
+        .boolean => |b| try buf.appendSlice(if (b) "true" else "false"),
+        .nil => {},
+        else => {
+            var tmp: [256]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&tmp);
+            val.format(fbs.writer());
+            try buf.appendSlice(fbs.getWritten());
+        },
+    }
+}
+
+fn blimpTagToHtml(tag: []const u8) []const u8 {
+    if (std.mem.eql(u8, tag, "stack")) return "div";
+    if (std.mem.eql(u8, tag, "row")) return "div"; // gets data-row attr below
+    if (std.mem.eql(u8, tag, "grid")) return "div";
+    if (std.mem.eql(u8, tag, "text")) return "span";
+    if (std.mem.eql(u8, tag, "heading")) return "h1";
+    if (std.mem.eql(u8, tag, "bold")) return "strong";
+    if (std.mem.eql(u8, tag, "italic")) return "em";
+    if (std.mem.eql(u8, tag, "code")) return "code";
+    if (std.mem.eql(u8, tag, "code_block")) return "pre";
+    if (std.mem.eql(u8, tag, "blockquote")) return "blockquote";
+    if (std.mem.eql(u8, tag, "divider")) return "hr";
+    if (std.mem.eql(u8, tag, "list")) return "ul";
+    if (std.mem.eql(u8, tag, "link")) return "a";
+    if (std.mem.eql(u8, tag, "image")) return "img";
+    if (std.mem.eql(u8, tag, "video")) return "video";
+    if (std.mem.eql(u8, tag, "canvas")) return "canvas";
+    if (std.mem.eql(u8, tag, "button")) return "button";
+    return "div";
+}
+
+/// tcp_listen(port: Int) -> Int  (server socket fd)
+fn builtinTcpListen(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const port: u16 = @intCast(@max(0, @min(65535, args[0].integer)));
+
+    const sock = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return error.NotSupported;
+    // Allow port reuse so we can restart quickly
+    const one: c_int = 1;
+    _ = std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
+    const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+    std.posix.bind(sock, &addr.any, addr.getOsSockLen()) catch return error.NotSupported;
+    std.posix.listen(sock, 128) catch return error.NotSupported;
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .integer = @intCast(sock) };
+    return result;
+}
+
+/// tcp_accept(server_fd: Int) -> Int  (client socket fd, blocks)
+fn builtinTcpAccept(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const server_fd: std.posix.socket_t = @intCast(args[0].integer);
+    var client_addr: std.posix.sockaddr = undefined;
+    var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+    const client_fd = std.posix.accept(server_fd, &client_addr, &addr_len, 0) catch return error.NotSupported;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .integer = @intCast(client_fd) };
+    return result;
+}
+
+/// tcp_read(fd: Int) -> String  (reads up to 64KB)
+fn builtinTcpRead(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+    var buf: [65536]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return error.NotSupported;
+    const owned = allocator.dupe(u8, buf[0..n]) catch return error.OutOfMemory;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = owned };
+    return result;
+}
+
+/// tcp_write(fd: Int, data: String) -> nil
+fn builtinTcpWrite(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+    _ = std.posix.write(fd, args[1].string) catch return error.NotSupported;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = .nil;
+    return result;
+}
+
+/// tcp_close(fd: Int) -> nil
+fn builtinTcpClose(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+    std.posix.close(fd);
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = .nil;
+    return result;
 }
 
 test "type_of view_node returns :view_node" {
