@@ -23,6 +23,8 @@ pub const Evaluator = struct {
     source: []const u8 = "",
     /// Absolute path of the source file being run, for Hole patching.
     source_path: ?[]const u8 = null,
+    /// Original argv for re-exec after Hole patching.
+    restart_argv: ?[]const [:0]const u8 = null,
     actor_ctx: ?*ActorContext = null,
     msg_log: [64]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
@@ -1587,7 +1589,8 @@ pub const Evaluator = struct {
 
         // Patch the source file: replace the `_ # directive` line with generated code
         if (self.source_path) |file_path| {
-            self.patchHole(file_path, loc.line, response) catch |err| {
+            const directive_display = hole.directive orelse "(no directive)";
+            self.patchHole(file_path, loc.line, response, directive_display) catch |err| {
                 std.debug.print("[Hole] Warning: could not patch source file: {}\n", .{err});
             };
         }
@@ -1597,7 +1600,7 @@ pub const Evaluator = struct {
 
     /// Replace the hole line in the source file with the generated code.
     /// Preserves the indentation of the original hole line.
-    fn patchHole(self: *Evaluator, file_path: []const u8, hole_line: u32, generated: []const u8) !void {
+    fn patchHole(self: *Evaluator, file_path: []const u8, hole_line: u32, generated: []const u8, directive: []const u8) !void {
         // Read the file
         const file_source = try std.fs.cwd().readFileAlloc(self.allocator, file_path, 4 * 1024 * 1024);
         defer self.allocator.free(file_source);
@@ -1654,8 +1657,26 @@ pub const Evaluator = struct {
         defer file.close();
         try file.writeAll(out.items);
 
-        std.debug.print("[Hole patched] {s}:{d} — replaced with generated code:\n", .{ file_path, hole_line });
-        std.debug.print("  {s}\n", .{std.mem.trim(u8, replacement.items, "\n")});
+        // Print a diff-style view of what changed
+        std.debug.print("\n╔═══ Hole filled: {s}:{d} ══════════════════\n", .{ file_path, hole_line });
+        std.debug.print("║ \x1b[31m- _ # {s}\x1b[0m\n", .{directive});
+        var diff_lines = std.mem.splitScalar(u8, replacement.items, '\n');
+        while (diff_lines.next()) |dl| {
+            if (dl.len == 0) continue;
+            std.debug.print("║ \x1b[32m+ {s}\x1b[0m\n", .{dl});
+        }
+        std.debug.print("╚══════════════════════════════════════════\n\n", .{});
+
+        // Re-exec: replace this process with a fresh run of the patched file.
+        // The OS starts us over from scratch with the updated source.
+        if (self.restart_argv) |argv| {
+            std.debug.print("[Hole] Re-running {s}...\n\n", .{file_path});
+            // Convert [:0]const u8 slice to []const u8 slice for execve
+            var plain_argv = self.allocator.alloc([]const u8, argv.len) catch return;
+            for (argv, 0..) |a, i| plain_argv[i] = a;
+            const exec_err = std.process.execv(self.allocator, plain_argv);
+            std.debug.print("[Hole] Re-exec failed: {} — continuing with current run\n", .{exec_err});
+        }
     }
 
     const PatternBinding = struct {

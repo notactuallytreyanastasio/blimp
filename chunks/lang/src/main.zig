@@ -99,6 +99,10 @@ pub fn main() !void {
     // Store the absolute path so the Hole operator can patch the source file
     const abs_path = std.fs.cwd().realpathAlloc(arena.allocator(), args[1]) catch args[1];
     evaluator.source_path = abs_path;
+    // Build null-terminated argv for re-exec after Hole patching
+    var restart_argv = try arena.allocator().alloc([:0]const u8, args.len);
+    for (args, 0..) |a, i| restart_argv[i] = try arena.allocator().dupeZ(u8, a);
+    evaluator.restart_argv = restart_argv;
     for (nodes) |node| {
         _ = evaluator.eval(node) catch |err| {
             if (evaluator.last_error) |blimp_err| {
