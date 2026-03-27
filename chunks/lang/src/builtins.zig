@@ -70,6 +70,7 @@ pub const BuiltinRegistry = struct {
         reg.register("zip", &builtinZip);
         reg.register("uniq", &builtinUniq);
         reg.register("sum", &builtinSum);
+        reg.register("set_at", &builtinSetAt);
         // View primitives
         reg.register("stack", &viewStack);
         reg.register("row", &viewRow);
@@ -792,6 +793,19 @@ fn builtinUniq(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     }
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .list = items.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+/// set_at(list, index, value) => new list with element at index replaced
+fn builtinSetAt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3 or args[0].* != .list or args[1].* != .integer) return error.TypeError;
+    const items = args[0].list;
+    const idx: usize = @intCast(@max(args[1].integer, 0));
+    if (idx >= items.len) return error.TypeError;
+    const new_items = allocator.dupe(*const Value, items) catch return error.OutOfMemory;
+    new_items[idx] = args[2];
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = new_items };
     return result;
 }
 

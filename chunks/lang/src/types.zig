@@ -134,6 +134,22 @@ pub fn parseTypeName(allocator: std.mem.Allocator, type_str: []const u8) !Type {
     if (std.mem.eql(u8, type_str, "Nil")) return .nil;
     if (std.mem.eql(u8, type_str, "Any")) return .any;
 
+    // Generic collection shorthands: List = [Any], Map = %{Any => Any}
+    if (std.mem.eql(u8, type_str, "List")) {
+        const inner = try allocator.create(Type);
+        inner.* = .any;
+        return Type{ .list = inner };
+    }
+    if (std.mem.eql(u8, type_str, "Map")) {
+        const k = try allocator.create(Type);
+        k.* = .any;
+        const v = try allocator.create(Type);
+        v.* = .any;
+        return Type{ .map = .{ .key = k, .value = v } };
+    }
+    // ViewNode is a first-class value but not yet in the type lattice — treat as Any
+    if (std.mem.eql(u8, type_str, "ViewNode")) return .any;
+
     // List type: [Item], [Int], etc.
     if (type_str.len >= 3 and type_str[0] == '[' and type_str[type_str.len - 1] == ']') {
         const inner_name = type_str[1 .. type_str.len - 1];

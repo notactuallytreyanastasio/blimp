@@ -20,11 +20,13 @@ actor Board do
     current = elem(cells, pos)
     situation current do
       0 ->
-        new_cells = replace_at(cells, pos, player)
+        # Rebuild the 9-cell list with the target position set to player
+        new_cells = set_at(cells, pos, player)
         become cells: new_cells,
                move_count: move_count + 1
         reply :ok
-      _ # Hole: the cell is already occupied — this is an illegal move.
+      _ ->
+        reply :illegal
         # Decide whether to reply with :illegal, raise an error, or
         # silently ignore it. Think about what's best for game UX.
     end
@@ -39,7 +41,31 @@ actor Board do
     ]
     situation move_count >= 5 do
       true ->
-        _ # Hole: check each line in lines — if all three cells in a line have
+        _ ->
+          winner = :no_winner
+          i = 0
+          situation i < length(lines) do
+          true ->
+          line = elem(lines, i)
+          a = elem(cells, elem(line, 0))
+          b = elem(cells, elem(line, 1))
+          c = elem(cells, elem(line, 2))
+          situation a > 0 do
+          true ->
+          situation a == b do
+          true ->
+          situation b == c do
+          true -> winner = {:winner, a}
+          _ -> :skip
+          end
+          _ -> :skip
+          end
+          _ -> :skip
+          end
+          i = i + 1
+          _ -> :skip
+          end
+          reply winner
           # the same non-zero player value, that player has won. Return
           # {:winner, player_id} or :no_winner. The cells list holds 0 for empty,
           # 1 for player one, 2 for player two.
@@ -77,7 +103,7 @@ end
 actor AIOpponent do
   state difficulty: Int :: 2
 
-  on :choose_move(board_state, player_id) do
+  on :choose_move(board_state: Map, player_id: Int) do
     cells = lookup(board_state, "cells")
     empty_cells = []
 

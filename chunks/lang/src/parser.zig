@@ -469,10 +469,16 @@ pub const Parser = struct {
     fn parseExpressionStatement(self: *Parser) ParseError!Node {
         const expr = try self.parseExpression();
         // Check for assignment: identifier = expression
+        // Also allows: identifier = case/situation ... end  (block expressions)
         if (self.current.kind == .eq) {
             if (expr.kind == .identifier) {
                 self.advance();
-                const value = try self.parseExpression();
+                // Allow case/situation on the RHS of an assignment
+                const value = switch (self.current.kind) {
+                    .kw_case => try self.parseCase(),
+                    .kw_situation => try self.parseSituation(),
+                    else => try self.parseExpression(),
+                };
                 const value_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
                 value_ptr.* = value;
                 return Node{
@@ -1209,8 +1215,10 @@ pub const Parser = struct {
     }
 
     fn parseMapLitBody(self: *Parser, loc: ast.Loc) ParseError!Node {
-        // Already consumed %, now expect {
+        // Already consumed %, now expect { (allow newline between % and {)
+        self.skipNewlines();
         try self.expect(.lbrace);
+        self.skipNewlines(); // allow entries to start on the next line
         var entries: std.ArrayList(ast.Node.KeyValue) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             if (self.current.kind != .identifier and self.current.kind != .string) return error.UnexpectedToken;

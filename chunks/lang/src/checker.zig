@@ -558,7 +558,11 @@ pub const Checker = struct {
                     return .hole;
                 }
                 const arg_type = self.inferExpr(args[0]);
-                if (arg_type != .list and arg_type != .hole and arg_type != .any and arg_type != .nil) {
+                const ok = switch (arg_type) {
+                    .list, .hole, .any, .nil, .string, .map, .tuple => true,
+                    else => false,
+                };
+                if (!ok) {
                     self.addError(loc, "length() expects a list, got {s}", .{arg_type.typeName()});
                 }
                 return .int;

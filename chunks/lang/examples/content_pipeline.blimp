@@ -10,7 +10,7 @@
 #   blimp examples/content_pipeline.blimp --no-type-check
 
 actor Sanitizer do
-  on :clean(text) do
+  on :clean(text: String) do
     # Strip leading/trailing whitespace, collapse internal spaces
     trimmed = split(text, " ")
     cleaned = concat(head(trimmed), "")
@@ -21,14 +21,36 @@ end
 actor Classifier do
   state categories: List :: ["spam", "hate", "safe", "promotional"]
 
-  on :classify(text) do
+  on :classify(text: String) do
     # Very rough heuristics — the Hole fills in the real logic
     word_count = length(split(text, " "))
     situation word_count do
       0 ->
         reply :empty
 
-      _ # Hole: classify text as one of :spam :hate :safe or :promotional
+      _ ->
+        caps_count = length(split(text, "AAAA"))
+        has_exclaim = length(split(text, "!!!")) > 1
+        situation word_count < 3 do
+        true ->
+        situation has_exclaim do
+        true -> reply %{label: :spam, confidence: 75}
+        _ -> reply %{label: :safe, confidence: 50}
+        end
+        _ ->
+        situation caps_count > 1 do
+        true ->
+        situation has_exclaim do
+        true -> reply %{label: :spam, confidence: 90}
+        _ -> reply %{label: :hate, confidence: 70}
+        end
+        _ ->
+        situation word_count > 20 do
+        true -> reply %{label: :promotional, confidence: 65}
+        _ -> reply %{label: :safe, confidence: 85}
+        end
+        end
+        end
         # based on its content and word_count. Check for suspicious patterns
         # like all-caps, excessive punctuation, or very short text.
         # Use the categories list as reference. Return a map with
@@ -40,7 +62,7 @@ end
 actor Scorer do
   state threshold: Int :: 60
 
-  on :score(classification) do
+  on :score(classification: Map) do
     label = lookup(classification, "label")
     confidence = lookup(classification, "confidence")
 
@@ -78,7 +100,7 @@ actor Publisher do
   state rejected: List :: []
   state review_queue: List :: []
 
-  on :process(text) do
+  on :process(text: String) do
     clean = Sanitizer <- :clean(text)
     classification = Classifier <- :classify(clean)
     decision = Scorer <- :score(classification)
