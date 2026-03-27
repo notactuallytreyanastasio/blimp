@@ -6,6 +6,10 @@ pub const Lexer = struct {
     pos: u32,
     line: u32,
     col: u32,
+    /// Text of the most recent comment (without the leading #), or empty slice.
+    /// Reset to empty on every non-comment token. Lets the parser capture
+    /// directives like `_ # Hole: fill this in`.
+    last_comment: []const u8 = "",
 
     pub fn init(source: []const u8) Lexer {
         return .{
@@ -13,6 +17,7 @@ pub const Lexer = struct {
             .pos = 0,
             .line = 1,
             .col = 1,
+            .last_comment = "",
         };
     }
 
@@ -25,9 +30,16 @@ pub const Lexer = struct {
 
         const c = self.peek();
 
-        // Comments
+        // Comments — capture text so parser can read hole directives
         if (c == '#') {
-            self.skipComment();
+            self.advance(); // skip #
+            // skip optional leading space
+            if (!self.isAtEnd() and self.peek() == ' ') self.advance();
+            const start = self.pos;
+            while (!self.isAtEnd() and self.peek() != '\n') {
+                self.advance();
+            }
+            self.last_comment = self.source[start..self.pos];
             return self.next();
         }
 
@@ -272,7 +284,11 @@ pub const Lexer = struct {
         return isAlpha(c) or isDigit(c);
     }
 
-    fn makeToken(self: *const Lexer, kind: Token.Kind, lexeme: []const u8) Token {
+    fn makeToken(self: *Lexer, kind: Token.Kind, lexeme: []const u8) Token {
+        // Reset last_comment on any token except newlines.
+        // Newlines don't reset it so the parser can read the comment that
+        // appeared on the same line as `_` even after skipping the newline.
+        if (kind != .newline) self.last_comment = "";
         return .{
             .kind = kind,
             .lexeme = lexeme,

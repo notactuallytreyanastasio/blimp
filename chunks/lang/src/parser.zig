@@ -392,16 +392,27 @@ pub const Parser = struct {
 
         if (self.current.kind == .hole) {
             // Hole branch (default/wildcard) -- pattern stays null
-            self.advance();
-            // If no arrow follows, this is a body-less hole directive
-            // (e.g. `_ # Hole: handle this case` where comment was eaten by lexer)
+            // Capture any directive comment on the same line BEFORE advancing,
+            // since advance() will get the newline token (comment is already
+            // stored in lexer.last_comment from the comment handler).
+            self.advance(); // consume `_`, now current = newline (or arrow)
+            // lexer.last_comment still holds the comment text from this line
+            const directive_text = self.lexer.last_comment;
+            const maybe_directive: ?[]const u8 = if (directive_text.len > 0) directive_text else null;
+
             self.skipNewlines();
             if (self.current.kind != .arrow) {
-                // Body-less hole: no arrow, no body - just the wildcard
-                const empty_body = self.allocator.alloc(Node, 0) catch return error.OutOfMemory;
+                // Body-less hole: directive-only, no body
+                const hole_node = self.allocator.create(Node) catch return error.OutOfMemory;
+                hole_node.* = Node{
+                    .kind = .{ .hole = .{ .directive = maybe_directive } },
+                    .loc = .{ .line = self.current.line, .col = self.current.col },
+                };
+                const body = self.allocator.alloc(Node, 1) catch return error.OutOfMemory;
+                body[0] = hole_node.*;
                 return .{
                     .pattern = null,
-                    .body = empty_body,
+                    .body = body,
                 };
             }
         } else {

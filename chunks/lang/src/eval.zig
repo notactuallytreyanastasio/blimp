@@ -1421,7 +1421,12 @@ pub const Evaluator = struct {
                     return result;
                 }
             } else {
-                // Wildcard/hole branch -- always matches
+                // Wildcard/hole branch -- always matches.
+                // If the body contains a Hole node (directive-only `_ # comment`),
+                // shell out to Claude to fill it in.
+                if (branch.body.len == 1 and branch.body[0].kind == .hole) {
+                    return self.evalHole(branch.body[0].kind.hole, subject);
+                }
                 return self.evalBody(branch.body);
             }
         }
@@ -1430,6 +1435,143 @@ pub const Evaluator = struct {
         const result = self.allocator.create(Value) catch return error.OutOfMemory;
         result.* = .nil;
         return result;
+    }
+
+    /// Hole operator: called when a situation hits a `_ # directive` branch.
+    /// Builds a prompt with available context, shells out to `claude -p <prompt>`,
+    /// parses the response as a Blimp expression, evaluates and returns it.
+    fn evalHole(self: *Evaluator, hole: @import("ast.zig").Node.Hole, subject: *const Value) EvalError!*const Value {
+        // Build context string: directive + subject value + visible bindings
+        var ctx_buf: std.ArrayListUnmanaged(u8) = .{};
+        defer ctx_buf.deinit(self.allocator);
+
+        ctx_buf.appendSlice(self.allocator,
+            "You are filling in a Hole in Blimp code. Blimp is an actor-model language.\n" ++
+            "Syntax notes:\n" ++
+            "  - Atoms: :ok :error :valid\n" ++
+            "  - case expr do :pat -> body ... end  (complete match)\n" ++
+            "  - situation expr do :pat -> body ... end  (match with holes)\n" ++
+            "  - become field: value  (state transition)\n" ++
+            "  - reply value  (return from handler)\n" ++
+            "  - Builtins: put(map, key, val), lookup(map, key), concat(a, b), to_string(v)\n\n" ++
+            "Return ONLY a single Blimp expression or statement that should fill the hole.\n" ++
+            "No explanation. No markdown. No code fences. Just raw Blimp.\n\n"
+        ) catch return error.OutOfMemory;
+
+        if (hole.directive) |dir| {
+            ctx_buf.appendSlice(self.allocator, "Directive: ") catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, dir) catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, "\n\n") catch return error.OutOfMemory;
+        }
+
+        // Subject value
+        {
+            var val_buf: [512]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&val_buf);
+            subject.format(fbs.writer());
+            ctx_buf.appendSlice(self.allocator, "Subject value: ") catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, fbs.getWritten()) catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, "\n\n") catch return error.OutOfMemory;
+        }
+
+        // Visible bindings
+        ctx_buf.appendSlice(self.allocator, "Variables in scope:\n") catch return error.OutOfMemory;
+        const bindings = self.env.allBindings(self.allocator);
+        for (bindings) |b| {
+            var val_buf: [256]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&val_buf);
+            b.val.format(fbs.writer());
+            ctx_buf.appendSlice(self.allocator, "  ") catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, b.name) catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, " = ") catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, fbs.getWritten()) catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, "\n") catch return error.OutOfMemory;
+        }
+
+        ctx_buf.appendSlice(self.allocator, "\nBlimp expression: ") catch return error.OutOfMemory;
+
+        // Null-terminate for shell
+        ctx_buf.append(self.allocator, 0) catch return error.OutOfMemory;
+        const prompt = ctx_buf.items[0 .. ctx_buf.items.len - 1]; // without null
+
+        // Announce the Hole to stderr
+        std.debug.print("\n[Hole] Calling Claude to fill in: {s}\n", .{
+            if (hole.directive) |d| d else "(no directive)"
+        });
+
+        // Shell out: claude -p "<prompt>"
+        var argv = [_][]const u8{ "claude", "-p", prompt };
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        child.spawn() catch {
+            std.debug.print("[Hole] claude not found — returning nil\n", .{});
+            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+            nil_val.* = .nil;
+            return nil_val;
+        };
+
+        // Read stdout
+        var response_buf: std.ArrayListUnmanaged(u8) = .{};
+        if (child.stdout) |out| {
+            var read_buf: [4096]u8 = undefined;
+            while (true) {
+                const n = out.read(&read_buf) catch break;
+                if (n == 0) break;
+                response_buf.appendSlice(self.allocator, read_buf[0..n]) catch break;
+            }
+        }
+        _ = child.wait() catch {};
+
+        var response = std.mem.trim(u8, response_buf.items, &std.ascii.whitespace);
+        // Strip markdown code fences if Claude wrapped the response
+        if (std.mem.startsWith(u8, response, "```")) {
+            const newline = std.mem.indexOfScalar(u8, response, '\n') orelse 3;
+            response = response[newline + 1 ..];
+            if (std.mem.endsWith(u8, response, "```")) {
+                response = response[0 .. response.len - 3];
+            }
+            response = std.mem.trim(u8, response, &std.ascii.whitespace);
+        }
+        std.debug.print("[Hole] Claude returned: {s}\n", .{response});
+
+        if (response.len == 0) {
+            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+            nil_val.* = .nil;
+            return nil_val;
+        }
+
+        // Parse and evaluate the response as Blimp statements
+        const src_copy = self.allocator.dupe(u8, response) catch return error.OutOfMemory;
+        var hole_parser = Parser.init(self.allocator, src_copy);
+        const nodes = hole_parser.parseFilePublic() catch {
+            std.debug.print("[Hole] Failed to parse Claude response as Blimp\n", .{});
+            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+            nil_val.* = .nil;
+            return nil_val;
+        };
+
+        if (nodes.len == 0) {
+            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+            nil_val.* = .nil;
+            return nil_val;
+        }
+
+        const saved_source = self.source;
+        self.source = src_copy;
+        var last: *const Value = blk: {
+            const v = self.allocator.create(Value) catch { self.source = saved_source; return error.OutOfMemory; };
+            v.* = .nil;
+            break :blk v;
+        };
+        for (nodes) |node| {
+            last = self.eval(node) catch {
+                std.debug.print("[Hole] Error evaluating Claude response\n", .{});
+                break;
+            };
+        }
+        self.source = saved_source;
+        return last;
     }
 
     const PatternBinding = struct {
