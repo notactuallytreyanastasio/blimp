@@ -1,0 +1,772 @@
+# Exhaustive operator tests
+# Run: ./blimp lib/operator_test.blimp --test
+
+# ============================================================
+# Arithmetic operators
+# ============================================================
+
+actor ArithmeticTests do
+  # -- Addition + --
+  test "add two integers" do
+    assert_eq(2 + 3, 5)
+  end
+
+  test "add zero" do
+    assert_eq(0 + 0, 0)
+  end
+
+  test "add negative integers" do
+    assert_eq(-3 + -2, -5)
+  end
+
+  test "add positive and negative" do
+    assert_eq(10 + -3, 7)
+  end
+
+  test "add large numbers" do
+    assert_eq(1000000 + 2000000, 3000000)
+  end
+
+  test "add two floats" do
+    result = 1.5 + 2.5
+    assert_eq(result, 4.0)
+  end
+
+  test "add int and float" do
+    result = 2 + 1.5
+    assert(result > 3.0)
+    assert(result < 4.0)
+  end
+
+  test "add float and int" do
+    result = 1.5 + 2
+    assert(result > 3.0)
+    assert(result < 4.0)
+  end
+
+  test "add strings with +" do
+    assert_eq("hello" + " world", "hello world")
+  end
+
+  test "add empty strings" do
+    assert_eq("" + "", "")
+  end
+
+  test "add string to empty" do
+    assert_eq("" + "abc", "abc")
+    assert_eq("abc" + "", "abc")
+  end
+
+  # -- Subtraction - --
+  test "subtract integers" do
+    assert_eq(10 - 3, 7)
+  end
+
+  test "subtract to zero" do
+    assert_eq(5 - 5, 0)
+  end
+
+  test "subtract to negative" do
+    assert_eq(3 - 5, -2)
+  end
+
+  test "subtract negatives" do
+    assert_eq(-3 - -2, -1)
+  end
+
+  test "subtract zero" do
+    assert_eq(42 - 0, 42)
+  end
+
+  test "subtract floats" do
+    result = 5.5 - 2.5
+    assert_eq(result, 3.0)
+  end
+
+  test "subtract int and float" do
+    result = 5 - 1.5
+    assert(result > 3.0)
+    assert(result < 4.0)
+  end
+
+  # -- Multiplication * --
+  test "multiply integers" do
+    assert_eq(6 * 7, 42)
+  end
+
+  test "multiply by zero" do
+    assert_eq(42 * 0, 0)
+  end
+
+  test "multiply by one" do
+    assert_eq(42 * 1, 42)
+  end
+
+  test "multiply negatives" do
+    assert_eq(-3 * -4, 12)
+  end
+
+  test "multiply positive by negative" do
+    assert_eq(5 * -3, -15)
+  end
+
+  test "multiply floats" do
+    result = 2.5 * 4.0
+    assert_eq(result, 10.0)
+  end
+
+  test "multiply int and float" do
+    result = 3 * 2.5
+    assert(result > 7.0)
+    assert(result < 8.0)
+  end
+
+  # -- Division / --
+  test "divide integers evenly" do
+    assert_eq(10 / 2, 5)
+  end
+
+  test "divide integers truncates" do
+    assert_eq(7 / 2, 3)
+  end
+
+  test "divide by one" do
+    assert_eq(42 / 1, 42)
+  end
+
+  test "divide zero by anything" do
+    assert_eq(0 / 5, 0)
+  end
+
+  test "divide negative" do
+    assert_eq(-10 / 2, -5)
+  end
+
+  test "divide floats" do
+    result = 10.0 / 4.0
+    assert_eq(result, 2.5)
+  end
+
+  test "divide int by float" do
+    result = 10 / 4.0
+    assert_eq(result, 2.5)
+  end
+
+  # -- Operator precedence --
+  test "multiply before add" do
+    assert_eq(2 + 3 * 4, 14)
+  end
+
+  test "multiply before subtract" do
+    assert_eq(10 - 2 * 3, 4)
+  end
+
+  test "parentheses override precedence" do
+    assert_eq((2 + 3) * 4, 20)
+  end
+
+  test "nested parentheses" do
+    assert_eq((2 + (3 * 4)) * 2, 28)
+  end
+
+  test "chained additions" do
+    assert_eq(1 + 2 + 3 + 4, 10)
+  end
+
+  test "mixed operations" do
+    assert_eq(2 * 3 + 4 * 5, 26)
+  end
+
+  # -- Unary negation --
+  test "unary minus" do
+    assert_eq(-42, 0 - 42)
+  end
+
+  test "double negation" do
+    x = 5
+    y = -x
+    assert_eq(y, -5)
+  end
+end
+
+# ============================================================
+# Comparison operators
+# ============================================================
+
+actor ComparisonTests do
+  # -- == --
+  test "equal integers" do
+    assert(1 == 1)
+  end
+
+  test "unequal integers" do
+    refute(1 == 2)
+  end
+
+  test "equal strings" do
+    assert("hello" == "hello")
+  end
+
+  test "unequal strings" do
+    refute("hello" == "world")
+  end
+
+  test "equal atoms" do
+    assert(:ok == :ok)
+  end
+
+  test "unequal atoms" do
+    refute(:ok == :error)
+  end
+
+  test "equal booleans" do
+    assert(true == true)
+    assert(false == false)
+  end
+
+  test "unequal booleans" do
+    refute(true == false)
+  end
+
+  test "nil equals nil" do
+    assert(nil == nil)
+  end
+
+  test "nil not equal to false" do
+    refute(nil == false)
+  end
+
+  test "nil not equal to zero" do
+    refute(nil == 0)
+  end
+
+  test "nil not equal to empty string" do
+    refute(nil == "")
+  end
+
+  test "zero equals zero" do
+    assert(0 == 0)
+  end
+
+  test "different types not equal" do
+    refute(1 == "1")
+    refute(0 == false)
+    refute(1 == true)
+  end
+
+  # -- != --
+  test "not equal integers" do
+    assert(1 != 2)
+  end
+
+  test "equal integers not ne" do
+    refute(1 != 1)
+  end
+
+  test "not equal strings" do
+    assert("a" != "b")
+  end
+
+  test "not equal types" do
+    assert(1 != "1")
+  end
+
+  test "not equal nil and false" do
+    assert(nil != false)
+  end
+
+  # -- < --
+  test "less than true" do
+    assert(1 < 2)
+  end
+
+  test "less than false" do
+    refute(2 < 1)
+  end
+
+  test "less than equal" do
+    refute(5 < 5)
+  end
+
+  test "less than negative" do
+    assert(-5 < -2)
+  end
+
+  test "less than zero" do
+    assert(-1 < 0)
+  end
+
+  test "less than with nil returns false" do
+    refute(nil < 5)
+    refute(5 < nil)
+  end
+
+  # -- > --
+  test "greater than true" do
+    assert(5 > 3)
+  end
+
+  test "greater than false" do
+    refute(3 > 5)
+  end
+
+  test "greater than equal" do
+    refute(5 > 5)
+  end
+
+  test "greater than negative" do
+    assert(-2 > -5)
+  end
+
+  test "greater than with nil returns false" do
+    refute(nil > 5)
+    refute(5 > nil)
+  end
+
+  # -- <= --
+  test "lte less" do
+    assert(1 <= 2)
+  end
+
+  test "lte equal" do
+    assert(5 <= 5)
+  end
+
+  test "lte greater" do
+    refute(5 <= 3)
+  end
+
+  test "lte with nil returns false" do
+    refute(nil <= 5)
+  end
+
+  # -- >= --
+  test "gte greater" do
+    assert(5 >= 3)
+  end
+
+  test "gte equal" do
+    assert(5 >= 5)
+  end
+
+  test "gte less" do
+    refute(3 >= 5)
+  end
+
+  test "gte with nil returns false" do
+    refute(nil >= 5)
+  end
+end
+
+# ============================================================
+# Logical operators
+# ============================================================
+
+actor LogicalTests do
+  # -- && --
+  test "and both true" do
+    assert(true && true)
+  end
+
+  test "and left false" do
+    refute(false && true)
+  end
+
+  test "and right false" do
+    refute(true && false)
+  end
+
+  test "and both false" do
+    refute(false && false)
+  end
+
+  test "and with truthy integer" do
+    assert(42 && true)
+  end
+
+  test "and with nil" do
+    refute(nil && true)
+  end
+
+  test "and with false left short-circuits" do
+    refute(false && 42)
+  end
+
+  # -- || --
+  test "or both true" do
+    assert(true || true)
+  end
+
+  test "or left false" do
+    assert(false || true)
+  end
+
+  test "or right false" do
+    assert(true || false)
+  end
+
+  test "or both false" do
+    refute(false || false)
+  end
+
+  test "or with truthy left" do
+    assert(42 || false)
+  end
+
+  test "or with nil left" do
+    assert(nil || true)
+  end
+
+  test "or both nil and false" do
+    refute(nil || false)
+  end
+
+  # -- and keyword --
+  test "and keyword both true" do
+    assert(true and true)
+  end
+
+  test "and keyword left false" do
+    refute(false and true)
+  end
+
+  test "and keyword right false" do
+    refute(true and false)
+  end
+
+  # -- or keyword --
+  test "or keyword both true" do
+    assert(true or true)
+  end
+
+  test "or keyword left false" do
+    assert(false or true)
+  end
+
+  test "or keyword both false" do
+    refute(false or false)
+  end
+
+  # -- Combining logical operators --
+  test "and with comparison" do
+    assert(5 > 3 && 10 < 20)
+  end
+
+  test "or with comparison" do
+    assert(5 > 10 || 3 < 7)
+  end
+
+  test "complex logical expression" do
+    x = 5
+    assert(x > 0 && x < 10)
+  end
+end
+
+# ============================================================
+# List concat operator ++
+# ============================================================
+
+actor ConcatOpTests do
+  test "concat two lists" do
+    result = [1, 2] ++ [3, 4]
+    assert_eq(length(result), 4)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 3), 4)
+  end
+
+  test "concat with empty left" do
+    result = [] ++ [1, 2]
+    assert_eq(length(result), 2)
+    assert_eq(head(result), 1)
+  end
+
+  test "concat with empty right" do
+    result = [1, 2] ++ []
+    assert_eq(length(result), 2)
+  end
+
+  test "concat both empty" do
+    result = [] ++ []
+    assert_eq(length(result), 0)
+  end
+
+  test "concat strings with ++" do
+    result = "hello" ++ " world"
+    assert_eq(result, "hello world")
+  end
+
+  test "concat preserves order" do
+    result = [1, 2, 3] ++ [4, 5, 6]
+    assert_eq(elem(result, 0), 1)
+    assert_eq(elem(result, 1), 2)
+    assert_eq(elem(result, 2), 3)
+    assert_eq(elem(result, 3), 4)
+    assert_eq(elem(result, 4), 5)
+    assert_eq(elem(result, 5), 6)
+  end
+
+  test "concat mixed types in list" do
+    result = [1, "two"] ++ [3, :four]
+    assert_eq(length(result), 4)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), "two")
+  end
+end
+
+# ============================================================
+# Assignment operator =
+# ============================================================
+
+actor AssignmentTests do
+  test "assign integer" do
+    x = 42
+    assert_eq(x, 42)
+  end
+
+  test "assign string" do
+    s = "hello"
+    assert_eq(s, "hello")
+  end
+
+  test "assign atom" do
+    a = :ok
+    assert_eq(a, :ok)
+  end
+
+  test "assign boolean" do
+    b = true
+    assert(b)
+  end
+
+  test "assign nil" do
+    n = nil
+    assert(nil?(n))
+  end
+
+  test "assign list" do
+    lst = [1, 2, 3]
+    assert_eq(length(lst), 3)
+  end
+
+  test "assign map" do
+    m = %{key: "value"}
+    assert_eq(lookup(m, "key"), "value")
+  end
+
+  test "assign expression result" do
+    x = 2 + 3 * 4
+    assert_eq(x, 14)
+  end
+
+  test "assign function call result" do
+    x = length([1, 2, 3])
+    assert_eq(x, 3)
+  end
+
+  test "assign from another variable" do
+    x = 42
+    y = x
+    assert_eq(y, 42)
+  end
+
+  test "reassign variable" do
+    x = 1
+    x = 2
+    assert_eq(x, 2)
+  end
+
+  test "assign lambda" do
+    f = fn(x: Int) do x * 2 end
+    result = f(5)
+    assert_eq(result, 10)
+  end
+
+  test "assign float" do
+    f = 3.14
+    assert(f > 3.0)
+    assert(f < 4.0)
+  end
+end
+
+# ============================================================
+# Message send operators <- and <--
+# ============================================================
+
+actor MessageCounter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+
+  on :add(n: Int) do
+    become count: count + n
+    reply count + n
+  end
+
+  on :get do
+    reply count
+  end
+
+  on :reset do
+    become count: 0
+    reply :ok
+  end
+end
+
+actor SyncSendTests do
+  state mc: MessageCounter :: spawn MessageCounter
+
+  # -- Sync send <- --
+  test "sync send returns reply" do
+    result = mc <- :increment
+    assert_eq(result, 1)
+  end
+
+  test "sync send with args" do
+    result = mc <- :add(10)
+    assert_eq(result, 10)
+  end
+
+  test "sync send assign to variable" do
+    mc <- :add(5)
+    count = mc <- :get
+    assert_eq(count, 5)
+  end
+
+  test "sync send chain" do
+    mc <- :increment
+    mc <- :increment
+    mc <- :increment
+    result = mc <- :get
+    assert_eq(result, 3)
+  end
+
+  test "sync send void reply" do
+    result = mc <- :reset
+    assert_eq(result, :ok)
+  end
+end
+
+actor AsyncHelper do
+  state value: Int :: 0
+
+  on :set(n: Int) do
+    become value: n
+    reply :ok
+  end
+
+  on :get do
+    reply value
+  end
+end
+
+actor AsyncSendTests do
+  state helper: AsyncHelper :: spawn AsyncHelper
+
+  test "async send fires message" do
+    helper <-- :set(42)
+    result = helper <- :get
+    assert_eq(result, 42)
+  end
+end
+
+# ============================================================
+# Pipe operator |>
+# ============================================================
+
+def double(n: Int) -> Int do
+  n * 2
+end
+
+def add_ten(n: Int) -> Int do
+  n + 10
+end
+
+def square(n: Int) -> Int do
+  n * n
+end
+
+actor PipeTests do
+  test "pipe into builtin with placeholder" do
+    result = [1, 2, 3] |> length(_)
+    assert_eq(result, 3)
+  end
+
+  test "pipe into head" do
+    result = [10, 20, 30] |> head
+    assert_eq(result, 10)
+  end
+
+  test "pipe into reverse then head" do
+    result = [1, 2, 3] |> reverse |> head
+    assert_eq(result, 3)
+  end
+
+  test "pipe chain with placeholder" do
+    result = [3, 1, 2] |> sort |> reverse |> head
+    assert_eq(result, 3)
+  end
+
+  test "pipe into user function" do
+    result = 5 |> double
+    assert_eq(result, 10)
+  end
+
+  test "pipe chain user functions" do
+    result = 5 |> double |> add_ten
+    assert_eq(result, 20)
+  end
+
+  test "pipe into concat with placeholder" do
+    result = "hello" |> concat(_, " world")
+    assert_eq(result, "hello world")
+  end
+
+  test "pipe into append with placeholder" do
+    result = [1, 2] |> append(_, 3)
+    assert_eq(length(result), 3)
+    assert_eq(elem(result, 2), 3)
+  end
+
+  test "pipe into sum" do
+    result = [1, 2, 3, 4, 5] |> sum
+    assert_eq(result, 15)
+  end
+
+  test "pipe into length" do
+    result = "hello" |> length
+    assert_eq(result, 5)
+  end
+
+  test "pipe into sort then sum" do
+    result = [3, 1, 2] |> sort |> sum
+    assert_eq(result, 6)
+  end
+
+  test "pipe with map and lambda" do
+    result = [1, 2, 3] |> map(_, fn(x: Int) do x * 2 end)
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 2)
+    assert_eq(elem(result, 2), 6)
+  end
+
+  test "pipe with filter and lambda" do
+    result = [1, 2, 3, 4, 5] |> filter(_, fn(x: Int) do x > 3 end)
+    assert_eq(length(result), 2)
+    assert_eq(head(result), 4)
+  end
+
+  test "pipe chain: filter then map then sum" do
+    evens = [1, 2, 3, 4, 5, 6] |> filter(_, fn(x: Int) do rem(x, 2) == 0 end)
+    squared = evens |> map(_, fn(x: Int) do x * x end)
+    result = squared |> sum
+    assert_eq(result, 56)
+  end
+
+  test "pipe with reduce" do
+    result = [1, 2, 3] |> reduce(_, 0, fn(acc: Int, x: Int) do acc + x end)
+    assert_eq(result, 6)
+  end
+end

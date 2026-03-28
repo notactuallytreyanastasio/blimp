@@ -1,0 +1,1166 @@
+# Exhaustive builtin function tests
+# Run: ./blimp lib/builtin_test.blimp --test
+
+# ============================================================
+# String builtins
+# ============================================================
+
+actor StringTests do
+  # -- concat --
+  test "concat two strings" do
+    assert_eq(concat("hello", " world"), "hello world")
+  end
+
+  test "concat empty strings" do
+    assert_eq(concat("", ""), "")
+  end
+
+  test "concat with empty left" do
+    assert_eq(concat("", "abc"), "abc")
+  end
+
+  test "concat with empty right" do
+    assert_eq(concat("abc", ""), "abc")
+  end
+
+  test "concat multiple strings" do
+    assert_eq(concat("a", "b", "c"), "abc")
+  end
+
+  test "concat string and integer" do
+    assert_eq(concat("count: ", 42), "count: 42")
+  end
+
+  test "concat string and atom" do
+    result = concat("status: ", :ok)
+    assert(contains(result, "ok"))
+  end
+
+  # -- split --
+  test "split on comma" do
+    result = split("a,b,c", ",")
+    assert_eq(length(result), 3)
+    assert_eq(head(result), "a")
+    assert_eq(elem(result, 1), "b")
+    assert_eq(elem(result, 2), "c")
+  end
+
+  test "split on space" do
+    result = split("hello world", " ")
+    assert_eq(length(result), 2)
+    assert_eq(head(result), "hello")
+    assert_eq(elem(result, 1), "world")
+  end
+
+  test "split no match returns whole string" do
+    result = split("hello", ",")
+    assert_eq(length(result), 1)
+    assert_eq(head(result), "hello")
+  end
+
+  test "split empty string" do
+    result = split("", ",")
+    assert_eq(length(result), 1)
+    assert_eq(head(result), "")
+  end
+
+  test "split multi-char separator" do
+    result = split("a::b::c", "::")
+    assert_eq(length(result), 3)
+    assert_eq(head(result), "a")
+  end
+
+  # -- contains --
+  test "contains finds substring" do
+    assert(contains("hello world", "world"))
+  end
+
+  test "contains finds at start" do
+    assert(contains("hello", "hel"))
+  end
+
+  test "contains finds at end" do
+    assert(contains("hello", "llo"))
+  end
+
+  test "contains empty needle" do
+    assert(contains("hello", ""))
+  end
+
+  test "contains no match" do
+    refute(contains("hello", "xyz"))
+  end
+
+  test "contains empty haystack" do
+    refute(contains("", "a"))
+  end
+
+  test "contains exact match" do
+    assert(contains("hello", "hello"))
+  end
+
+  # -- to_string --
+  test "to_string integer" do
+    assert_eq(to_string(42), "42")
+  end
+
+  test "to_string zero" do
+    assert_eq(to_string(0), "0")
+  end
+
+  test "to_string negative" do
+    assert_eq(to_string(-5), "-5")
+  end
+
+  test "to_string string passthrough" do
+    assert_eq(to_string("hello"), "hello")
+  end
+
+  test "to_string boolean true" do
+    assert_eq(to_string(true), "true")
+  end
+
+  test "to_string boolean false" do
+    assert_eq(to_string(false), "false")
+  end
+
+  test "to_string nil" do
+    assert_eq(to_string(nil), "nil")
+  end
+
+  test "to_string atom" do
+    assert_eq(to_string(:ok), "ok")
+  end
+
+  # -- to_int --
+  test "to_int from string" do
+    assert_eq(to_int("42"), 42)
+  end
+
+  test "to_int from string negative" do
+    assert_eq(to_int("-5"), -5)
+  end
+
+  test "to_int from string zero" do
+    assert_eq(to_int("0"), 0)
+  end
+
+  test "to_int passthrough integer" do
+    assert_eq(to_int(99), 99)
+  end
+
+  test "to_int from float" do
+    assert_eq(to_int(3.7), 3)
+  end
+
+  test "to_int from boolean true" do
+    assert_eq(to_int(true), 1)
+  end
+
+  test "to_int from boolean false" do
+    assert_eq(to_int(false), 0)
+  end
+
+  # -- slice --
+  test "slice middle of string" do
+    assert_eq(slice("hello", 1, 3), "ell")
+  end
+
+  test "slice from start" do
+    assert_eq(slice("hello", 0, 3), "hel")
+  end
+
+  test "slice to end" do
+    assert_eq(slice("hello", 3, 10), "lo")
+  end
+
+  test "slice empty result" do
+    assert_eq(slice("hello", 5, 1), "")
+  end
+
+  test "slice zero length" do
+    assert_eq(slice("hello", 0, 0), "")
+  end
+
+  test "slice entire string" do
+    assert_eq(slice("hello", 0, 5), "hello")
+  end
+
+  # -- upcase --
+  test "upcase lowercase" do
+    assert_eq(upcase("hello"), "HELLO")
+  end
+
+  test "upcase already upper" do
+    assert_eq(upcase("HELLO"), "HELLO")
+  end
+
+  test "upcase mixed" do
+    assert_eq(upcase("Hello World"), "HELLO WORLD")
+  end
+
+  test "upcase empty string" do
+    assert_eq(upcase(""), "")
+  end
+
+  # -- downcase --
+  test "downcase uppercase" do
+    assert_eq(downcase("HELLO"), "hello")
+  end
+
+  test "downcase already lower" do
+    assert_eq(downcase("hello"), "hello")
+  end
+
+  test "downcase mixed" do
+    assert_eq(downcase("Hello World"), "hello world")
+  end
+
+  test "downcase empty string" do
+    assert_eq(downcase(""), "")
+  end
+
+  # -- char_at --
+  test "char_at first" do
+    assert_eq(char_at("hello", 0), "h")
+  end
+
+  test "char_at middle" do
+    assert_eq(char_at("hello", 2), "l")
+  end
+
+  test "char_at last" do
+    assert_eq(char_at("hello", 4), "o")
+  end
+
+  test "char_at out of bounds returns nil" do
+    assert(nil?(char_at("hello", 10)))
+  end
+
+  # -- char_code --
+  test "char_code of A" do
+    assert_eq(char_code("A"), 65)
+  end
+
+  test "char_code of a" do
+    assert_eq(char_code("a"), 97)
+  end
+
+  test "char_code of 0" do
+    assert_eq(char_code("0"), 48)
+  end
+
+  test "char_code with index" do
+    assert_eq(char_code("AB", 1), 66)
+  end
+
+  test "char_code nil input returns nil" do
+    assert(nil?(char_code(nil)))
+  end
+
+  test "char_code empty string returns nil" do
+    assert(nil?(char_code("")))
+  end
+
+  # -- from_char_code --
+  test "from_char_code 65 is A" do
+    assert_eq(from_char_code(65), "A")
+  end
+
+  test "from_char_code 97 is a" do
+    assert_eq(from_char_code(97), "a")
+  end
+
+  test "from_char_code 48 is 0" do
+    assert_eq(from_char_code(48), "0")
+  end
+
+  test "from_char_code 95 is underscore" do
+    assert_eq(from_char_code(95), from_char_code(95))
+  end
+
+  test "from_char_code roundtrip" do
+    assert_eq(from_char_code(char_code("Z")), "Z")
+  end
+end
+
+# ============================================================
+# List builtins
+# ============================================================
+
+actor ListTests do
+  # -- length --
+  test "length of list" do
+    assert_eq(length([1, 2, 3]), 3)
+  end
+
+  test "length of empty list" do
+    assert_eq(length([]), 0)
+  end
+
+  test "length of single element" do
+    assert_eq(length([42]), 1)
+  end
+
+  test "length of string" do
+    assert_eq(length("hello"), 5)
+  end
+
+  test "length of empty string" do
+    assert_eq(length(""), 0)
+  end
+
+  # -- head --
+  test "head of list" do
+    assert_eq(head([10, 20, 30]), 10)
+  end
+
+  test "head of single element" do
+    assert_eq(head([42]), 42)
+  end
+
+  test "head of empty list returns nil" do
+    assert(nil?(head([])))
+  end
+
+  # -- tail --
+  test "tail of list" do
+    result = tail([1, 2, 3])
+    assert_eq(length(result), 2)
+    assert_eq(head(result), 2)
+    assert_eq(elem(result, 1), 3)
+  end
+
+  test "tail of single element" do
+    result = tail([42])
+    assert_eq(length(result), 0)
+  end
+
+  test "tail of empty list" do
+    result = tail([])
+    assert_eq(length(result), 0)
+  end
+
+  # -- append --
+  test "append to list" do
+    result = append([1, 2], 3)
+    assert_eq(length(result), 3)
+    assert_eq(elem(result, 2), 3)
+  end
+
+  test "append to empty list" do
+    result = append([], 1)
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 1)
+  end
+
+  test "append different types" do
+    result = append([1, 2], "three")
+    assert_eq(length(result), 3)
+    assert_eq(elem(result, 2), "three")
+  end
+
+  # -- reverse --
+  test "reverse list" do
+    result = reverse([1, 2, 3])
+    assert_eq(head(result), 3)
+    assert_eq(elem(result, 1), 2)
+    assert_eq(elem(result, 2), 1)
+  end
+
+  test "reverse empty list" do
+    result = reverse([])
+    assert_eq(length(result), 0)
+  end
+
+  test "reverse single element" do
+    result = reverse([42])
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 42)
+  end
+
+  # -- sort --
+  test "sort integers" do
+    result = sort([3, 1, 4, 1, 5])
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 1)
+    assert_eq(elem(result, 2), 3)
+    assert_eq(elem(result, 3), 4)
+    assert_eq(elem(result, 4), 5)
+  end
+
+  test "sort already sorted" do
+    result = sort([1, 2, 3])
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 2), 3)
+  end
+
+  test "sort empty list" do
+    result = sort([])
+    assert_eq(length(result), 0)
+  end
+
+  test "sort single element" do
+    result = sort([42])
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 42)
+  end
+
+  test "sort reverse order" do
+    result = sort([5, 4, 3, 2, 1])
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 4), 5)
+  end
+
+  # -- flat --
+  test "flat nested lists" do
+    result = flat([[1, 2], [3, 4]])
+    assert_eq(length(result), 4)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 3), 4)
+  end
+
+  test "flat already flat" do
+    result = flat([1, 2, 3])
+    assert_eq(length(result), 3)
+  end
+
+  test "flat empty list" do
+    result = flat([])
+    assert_eq(length(result), 0)
+  end
+
+  test "flat mixed nested and flat" do
+    result = flat([1, [2, 3], 4])
+    assert_eq(length(result), 4)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 2)
+    assert_eq(elem(result, 3), 4)
+  end
+
+  # -- zip --
+  test "zip two equal lists" do
+    result = zip([1, 2, 3], [:a, :b, :c])
+    assert_eq(length(result), 3)
+  end
+
+  test "zip unequal lists uses shorter" do
+    result = zip([1, 2], [:a, :b, :c])
+    assert_eq(length(result), 2)
+  end
+
+  test "zip empty lists" do
+    result = zip([], [])
+    assert_eq(length(result), 0)
+  end
+
+  test "zip one empty" do
+    result = zip([], [1, 2])
+    assert_eq(length(result), 0)
+  end
+
+  # -- uniq --
+  test "uniq removes duplicates" do
+    result = uniq([1, 2, 1, 3, 2])
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 2)
+    assert_eq(elem(result, 2), 3)
+  end
+
+  test "uniq no duplicates" do
+    result = uniq([1, 2, 3])
+    assert_eq(length(result), 3)
+  end
+
+  test "uniq empty list" do
+    result = uniq([])
+    assert_eq(length(result), 0)
+  end
+
+  test "uniq all same" do
+    result = uniq([5, 5, 5, 5])
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 5)
+  end
+
+  # -- sum --
+  test "sum of integers" do
+    assert_eq(sum([1, 2, 3, 4, 5]), 15)
+  end
+
+  test "sum of empty list" do
+    assert_eq(sum([]), 0)
+  end
+
+  test "sum of single element" do
+    assert_eq(sum([42]), 42)
+  end
+
+  test "sum with negatives" do
+    assert_eq(sum([10, -3, 5, -2]), 10)
+  end
+
+  test "sum all zeros" do
+    assert_eq(sum([0, 0, 0]), 0)
+  end
+
+  # -- elem --
+  test "elem list first" do
+    assert_eq(elem([10, 20, 30], 0), 10)
+  end
+
+  test "elem list middle" do
+    assert_eq(elem([10, 20, 30], 1), 20)
+  end
+
+  test "elem list last" do
+    assert_eq(elem([10, 20, 30], 2), 30)
+  end
+
+  test "elem out of bounds returns nil" do
+    assert(nil?(elem([1, 2], 5)))
+  end
+
+  # -- range --
+  test "range ascending" do
+    result = range(1, 5)
+    assert_eq(length(result), 5)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 4), 5)
+  end
+
+  test "range single element" do
+    result = range(3, 3)
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 3)
+  end
+
+  test "range zero to zero" do
+    result = range(0, 0)
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 0)
+  end
+
+  test "range negative" do
+    result = range(-2, 2)
+    assert_eq(length(result), 5)
+    assert_eq(head(result), -2)
+    assert_eq(elem(result, 4), 2)
+  end
+
+  test "range descending returns empty" do
+    result = range(5, 1)
+    assert_eq(length(result), 0)
+  end
+
+  # -- empty? --
+  test "empty? on empty list" do
+    assert(empty?([]))
+  end
+
+  test "empty? on non-empty list" do
+    refute(empty?([1]))
+  end
+
+  test "empty? on empty string" do
+    assert(empty?(""))
+  end
+
+  test "empty? on non-empty string" do
+    refute(empty?("a"))
+  end
+
+  test "empty? on nil" do
+    assert(empty?(nil))
+  end
+
+  test "empty? on empty map" do
+    assert(empty?(%{}))
+  end
+
+  test "empty? on non-empty map" do
+    refute(empty?(%{a: 1}))
+  end
+
+  # -- set_at --
+  test "set_at replaces element" do
+    result = set_at([1, 2, 3], 1, 99)
+    assert_eq(elem(result, 0), 1)
+    assert_eq(elem(result, 1), 99)
+    assert_eq(elem(result, 2), 3)
+  end
+
+  test "set_at first element" do
+    result = set_at([1, 2, 3], 0, 99)
+    assert_eq(head(result), 99)
+  end
+
+  test "set_at last element" do
+    result = set_at([1, 2, 3], 2, 99)
+    assert_eq(elem(result, 2), 99)
+  end
+
+  test "set_at preserves length" do
+    result = set_at([1, 2, 3], 1, 99)
+    assert_eq(length(result), 3)
+  end
+end
+
+# ============================================================
+# Map builtins
+# ============================================================
+
+actor MapTests do
+  # -- lookup --
+  test "lookup existing key" do
+    m = %{name: "alice", age: 30}
+    assert_eq(lookup(m, "name"), "alice")
+    assert_eq(lookup(m, "age"), 30)
+  end
+
+  test "lookup missing key returns nil" do
+    m = %{name: "alice"}
+    assert(nil?(lookup(m, "missing")))
+  end
+
+  test "lookup on empty map returns nil" do
+    m = %{}
+    assert(nil?(lookup(m, "key")))
+  end
+
+  # -- put --
+  test "put adds new key" do
+    m = %{a: 1}
+    result = put(m, "b", 2)
+    assert_eq(lookup(result, "b"), 2)
+    assert_eq(lookup(result, "a"), 1)
+  end
+
+  test "put replaces existing key" do
+    m = %{a: 1}
+    result = put(m, "a", 99)
+    assert_eq(lookup(result, "a"), 99)
+  end
+
+  test "put on empty map" do
+    m = %{}
+    result = put(m, "key", "value")
+    assert_eq(lookup(result, "key"), "value")
+  end
+
+  test "put multiple keys" do
+    m = %{}
+    m = put(m, "a", 1)
+    m = put(m, "b", 2)
+    m = put(m, "c", 3)
+    assert_eq(lookup(m, "a"), 1)
+    assert_eq(lookup(m, "b"), 2)
+    assert_eq(lookup(m, "c"), 3)
+  end
+
+  # -- keys --
+  test "keys of map" do
+    m = %{x: 1, y: 2, z: 3}
+    k = keys(m)
+    assert_eq(length(k), 3)
+  end
+
+  test "keys of empty map" do
+    k = keys(%{})
+    assert_eq(length(k), 0)
+  end
+
+  # -- values --
+  test "values of map" do
+    m = %{a: 10, b: 20}
+    v = values(m)
+    assert_eq(length(v), 2)
+    assert_eq(sum(v), 30)
+  end
+
+  test "values of empty map" do
+    v = values(%{})
+    assert_eq(length(v), 0)
+  end
+
+  # -- merge --
+  test "merge two maps" do
+    a = %{x: 1, y: 2}
+    b = %{y: 99, z: 3}
+    result = merge(a, b)
+    assert_eq(lookup(result, "x"), 1)
+    assert_eq(lookup(result, "y"), 99)
+    assert_eq(lookup(result, "z"), 3)
+  end
+
+  test "merge with empty right" do
+    a = %{x: 1}
+    result = merge(a, %{})
+    assert_eq(lookup(result, "x"), 1)
+  end
+
+  test "merge with empty left" do
+    result = merge(%{}, %{x: 1})
+    assert_eq(lookup(result, "x"), 1)
+  end
+
+  test "merge both empty" do
+    result = merge(%{}, %{})
+    assert_eq(length(keys(result)), 0)
+  end
+
+  # -- size --
+  test "size of map" do
+    assert_eq(size(%{a: 1, b: 2, c: 3}), 3)
+  end
+
+  test "size of empty map" do
+    assert_eq(size(%{}), 0)
+  end
+
+  test "size of list" do
+    assert_eq(size([1, 2, 3]), 3)
+  end
+
+  test "size of string" do
+    assert_eq(size("hello"), 5)
+  end
+end
+
+# ============================================================
+# Math builtins
+# ============================================================
+
+actor MathTests do
+  # -- max --
+  test "max of two positives" do
+    assert_eq(max(3, 7), 7)
+  end
+
+  test "max of equal values" do
+    assert_eq(max(5, 5), 5)
+  end
+
+  test "max with negative" do
+    assert_eq(max(-3, 2), 2)
+  end
+
+  test "max both negative" do
+    assert_eq(max(-5, -2), -2)
+  end
+
+  test "max with zero" do
+    assert_eq(max(0, 5), 5)
+  end
+
+  # -- min --
+  test "min of two positives" do
+    assert_eq(min(3, 7), 3)
+  end
+
+  test "min of equal values" do
+    assert_eq(min(5, 5), 5)
+  end
+
+  test "min with negative" do
+    assert_eq(min(-3, 2), -3)
+  end
+
+  test "min both negative" do
+    assert_eq(min(-5, -2), -5)
+  end
+
+  test "min with zero" do
+    assert_eq(min(0, 5), 0)
+  end
+
+  # -- rem --
+  test "rem basic" do
+    assert_eq(rem(10, 3), 1)
+  end
+
+  test "rem even division" do
+    assert_eq(rem(10, 5), 0)
+  end
+
+  test "rem with larger divisor" do
+    assert_eq(rem(3, 10), 3)
+  end
+
+  test "rem zero dividend" do
+    assert_eq(rem(0, 5), 0)
+  end
+
+  # -- abs --
+  test "abs positive" do
+    assert_eq(abs(5), 5)
+  end
+
+  test "abs negative" do
+    assert_eq(abs(-5), 5)
+  end
+
+  test "abs zero" do
+    assert_eq(abs(0), 0)
+  end
+
+  test "abs negative float" do
+    result = abs(-3.5)
+    assert(result > 3.0)
+    assert(result < 4.0)
+  end
+
+  # -- floor --
+  test "floor positive" do
+    assert_eq(floor(3.7), 3)
+  end
+
+  test "floor negative" do
+    assert_eq(floor(-2.3), -3)
+  end
+
+  test "floor integer passthrough" do
+    assert_eq(floor(5), 5)
+  end
+
+  test "floor exact" do
+    assert_eq(floor(4.0), 4)
+  end
+
+  # -- ceil --
+  test "ceil positive" do
+    assert_eq(ceil(3.2), 4)
+  end
+
+  test "ceil negative" do
+    assert_eq(ceil(-2.7), -2)
+  end
+
+  test "ceil integer passthrough" do
+    assert_eq(ceil(5), 5)
+  end
+
+  test "ceil exact" do
+    assert_eq(ceil(4.0), 4)
+  end
+
+  # -- round --
+  test "round up" do
+    assert_eq(round(3.7), 4)
+  end
+
+  test "round down" do
+    assert_eq(round(3.2), 3)
+  end
+
+  test "round integer passthrough" do
+    assert_eq(round(5), 5)
+  end
+
+  test "round negative" do
+    assert_eq(round(-2.7), -3)
+  end
+
+  # -- random --
+  test "random in range" do
+    r = random(1, 10)
+    assert(r >= 1)
+    assert(r <= 10)
+  end
+
+  test "random single value range" do
+    r = random(5, 5)
+    assert_eq(r, 5)
+  end
+
+  test "random produces integers" do
+    r = random(1, 100)
+    assert_eq(type_of(r), :integer)
+  end
+end
+
+# ============================================================
+# Logic builtins
+# ============================================================
+
+actor LogicTests do
+  # -- not --
+  test "not true" do
+    assert_eq(not(true), false)
+  end
+
+  test "not false" do
+    assert_eq(not(false), true)
+  end
+
+  test "not nil is truthy" do
+    assert(not(nil))
+  end
+
+  test "not integer is falsy" do
+    refute(not(42))
+  end
+
+  test "not zero is falsy" do
+    refute(not(0))
+  end
+
+  test "not empty string is falsy" do
+    refute(not(""))
+  end
+
+  # -- nil? --
+  test "nil? on nil" do
+    assert(nil?(nil))
+  end
+
+  test "nil? on false" do
+    refute(nil?(false))
+  end
+
+  test "nil? on zero" do
+    refute(nil?(0))
+  end
+
+  test "nil? on empty string" do
+    refute(nil?(""))
+  end
+
+  test "nil? on empty list" do
+    refute(nil?([]))
+  end
+
+  test "nil? on integer" do
+    refute(nil?(42))
+  end
+
+  # -- type_of --
+  test "type_of integer" do
+    assert_eq(type_of(42), :integer)
+  end
+
+  test "type_of float" do
+    assert_eq(type_of(3.14), :float)
+  end
+
+  test "type_of string" do
+    assert_eq(type_of("hello"), :string)
+  end
+
+  test "type_of atom" do
+    assert_eq(type_of(:ok), :atom)
+  end
+
+  test "type_of boolean" do
+    assert_eq(type_of(true), :boolean)
+  end
+
+  test "type_of nil" do
+    assert_eq(type_of(nil), :nil)
+  end
+
+  test "type_of list" do
+    assert_eq(type_of([1, 2]), :list)
+  end
+
+  test "type_of map" do
+    assert_eq(type_of(%{a: 1}), :map)
+  end
+
+  test "type_of closure" do
+    f = fn(x: Int) do x end
+    assert_eq(type_of(f), :closure)
+  end
+end
+
+# ============================================================
+# Higher-order function builtins
+# ============================================================
+
+actor HigherOrderTests do
+  # -- map --
+  test "map doubles values" do
+    result = map([1, 2, 3], fn(x: Int) do x * 2 end)
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 2)
+    assert_eq(elem(result, 1), 4)
+    assert_eq(elem(result, 2), 6)
+  end
+
+  test "map on empty list" do
+    result = map([], fn(x: Int) do x * 2 end)
+    assert_eq(length(result), 0)
+  end
+
+  test "map to_string" do
+    result = map([1, 2, 3], fn(x: Int) do to_string(x) end)
+    assert_eq(head(result), "1")
+    assert_eq(elem(result, 2), "3")
+  end
+
+  test "map single element" do
+    result = map([10], fn(x: Int) do x + 5 end)
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 15)
+  end
+
+  # -- filter --
+  test "filter even numbers" do
+    result = filter([1, 2, 3, 4, 5, 6], fn(x: Int) do rem(x, 2) == 0 end)
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 2)
+    assert_eq(elem(result, 1), 4)
+    assert_eq(elem(result, 2), 6)
+  end
+
+  test "filter all match" do
+    result = filter([2, 4, 6], fn(x: Int) do rem(x, 2) == 0 end)
+    assert_eq(length(result), 3)
+  end
+
+  test "filter none match" do
+    result = filter([1, 3, 5], fn(x: Int) do rem(x, 2) == 0 end)
+    assert_eq(length(result), 0)
+  end
+
+  test "filter on empty list" do
+    result = filter([], fn(x: Int) do true end)
+    assert_eq(length(result), 0)
+  end
+
+  test "filter positive numbers" do
+    result = filter([-2, -1, 0, 1, 2], fn(x: Int) do x > 0 end)
+    assert_eq(length(result), 2)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 2)
+  end
+
+  # -- reduce --
+  test "reduce sum" do
+    result = reduce([1, 2, 3, 4, 5], 0, fn(acc: Int, x: Int) do acc + x end)
+    assert_eq(result, 15)
+  end
+
+  test "reduce product" do
+    result = reduce([1, 2, 3, 4], 1, fn(acc: Int, x: Int) do acc * x end)
+    assert_eq(result, 24)
+  end
+
+  test "reduce on empty list returns initial" do
+    result = reduce([], 42, fn(acc: Int, x: Int) do acc + x end)
+    assert_eq(result, 42)
+  end
+
+  test "reduce single element" do
+    result = reduce([10], 5, fn(acc: Int, x: Int) do acc + x end)
+    assert_eq(result, 15)
+  end
+
+  test "reduce build string" do
+    result = reduce([1, 2, 3], "", fn(acc: String, x: Int) do concat(acc, to_string(x)) end)
+    assert_eq(result, "123")
+  end
+
+  # -- each --
+  test "each returns ok" do
+    result = each([1, 2, 3], fn(x: Int) do x end)
+    assert_eq(result, :ok)
+  end
+
+  test "each on empty list returns ok" do
+    result = each([], fn(x: Int) do x end)
+    assert_eq(result, :ok)
+  end
+end
+
+# ============================================================
+# Assertion builtins (testing the test framework)
+# ============================================================
+
+actor AssertionDetailTests do
+  # -- assert --
+  test "assert on true" do
+    assert(true)
+  end
+
+  test "assert on integer" do
+    assert(42)
+  end
+
+  test "assert on string" do
+    assert("hello")
+  end
+
+  test "assert on non-empty list" do
+    assert([1])
+  end
+
+  test "assert on atom" do
+    assert(:ok)
+  end
+
+  # -- refute --
+  test "refute on nil" do
+    refute(nil)
+  end
+
+  test "refute on false" do
+    refute(false)
+  end
+
+  # -- assert_eq --
+  test "assert_eq integers" do
+    assert_eq(1, 1)
+  end
+
+  test "assert_eq strings" do
+    assert_eq("hello", "hello")
+  end
+
+  test "assert_eq booleans" do
+    assert_eq(true, true)
+    assert_eq(false, false)
+  end
+
+  test "assert_eq atoms" do
+    assert_eq(:ok, :ok)
+  end
+
+  test "assert_eq nil" do
+    assert_eq(nil, nil)
+  end
+
+  test "assert_eq lists" do
+    assert_eq([1, 2, 3], [1, 2, 3])
+  end
+
+  test "assert_eq empty lists" do
+    assert_eq([], [])
+  end
+
+  # -- assert_ne --
+  test "assert_ne different integers" do
+    assert_ne(1, 2)
+  end
+
+  test "assert_ne different strings" do
+    assert_ne("a", "b")
+  end
+
+  test "assert_ne different types" do
+    assert_ne(1, "1")
+  end
+
+  test "assert_ne true and false" do
+    assert_ne(true, false)
+  end
+
+  test "assert_ne nil and false" do
+    assert_ne(nil, false)
+  end
+
+  test "assert_ne nil and zero" do
+    assert_ne(nil, 0)
+  end
+end

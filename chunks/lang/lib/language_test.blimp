@@ -1,0 +1,1205 @@
+# Exhaustive language feature tests
+# Run: ./blimp lib/language_test.blimp --test
+
+# ============================================================
+# Helper actors and functions used by tests
+# ============================================================
+
+actor SimpleCounter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+
+  on :decrement do
+    become count: count - 1
+    reply count - 1
+  end
+
+  on :add(n: Int) do
+    become count: count + n
+    reply count + n
+  end
+
+  on :get do
+    reply count
+  end
+
+  on :reset do
+    become count: 0
+    reply :ok
+  end
+end
+
+actor KeyValue do
+  state store: Map :: %{}
+
+  on :set(key: String, value: Any) do
+    become store: put(store, key, value)
+    reply :ok
+  end
+
+  on :get(key: String) do
+    reply lookup(store, key)
+  end
+
+  on :all do
+    reply store
+  end
+
+  on :count do
+    reply length(keys(store))
+  end
+end
+
+def add(a: Int, b: Int) -> Int do
+  a + b
+end
+
+def identity(x: Any) -> Any do
+  x
+end
+
+def greet(name: String) -> String do
+  concat("Hello, ", name)
+end
+
+# ============================================================
+# Actor definition and spawn
+# ============================================================
+
+actor ActorSpawnTests do
+  test "spawn creates actor" do
+    c = spawn SimpleCounter
+    result = c <- :get
+    assert_eq(result, 0)
+  end
+
+  test "multiple spawns are independent" do
+    a = spawn SimpleCounter
+    b = spawn SimpleCounter
+    a <- :increment
+    a <- :increment
+    a <- :increment
+    b <- :increment
+    assert_eq(a <- :get, 3)
+    assert_eq(b <- :get, 1)
+  end
+
+  test "spawn with initial state" do
+    c = spawn SimpleCounter
+    assert_eq(c <- :get, 0)
+  end
+
+  test "spawn key-value store" do
+    kv = spawn KeyValue
+    kv <- :set("name", "alice")
+    assert_eq(kv <- :get("name"), "alice")
+  end
+end
+
+# ============================================================
+# State with become
+# ============================================================
+
+actor BecomeTests do
+  state c: SimpleCounter :: spawn SimpleCounter
+
+  test "become updates state" do
+    c <- :increment
+    assert_eq(c <- :get, 1)
+  end
+
+  test "become multiple fields" do
+    c <- :add(10)
+    assert_eq(c <- :get, 10)
+  end
+
+  test "become resets state" do
+    c <- :increment
+    c <- :increment
+    c <- :reset
+    assert_eq(c <- :get, 0)
+  end
+
+  test "become preserves other state" do
+    kv = spawn KeyValue
+    kv <- :set("a", 1)
+    kv <- :set("b", 2)
+    assert_eq(kv <- :get("a"), 1)
+    assert_eq(kv <- :get("b"), 2)
+    assert_eq(kv <- :count, 2)
+  end
+end
+
+# ============================================================
+# Message handlers with typed params
+# ============================================================
+
+actor Adder do
+  state total: Int :: 0
+
+  on :add_int(n: Int) do
+    become total: total + n
+    reply total + n
+  end
+
+  on :add_str(s: String) do
+    n = to_int(s)
+    become total: total + n
+    reply total + n
+  end
+
+  on :get do
+    reply total
+  end
+end
+
+actor TypedParamTests do
+  test "handler with int param" do
+    a = spawn Adder
+    result = a <- :add_int(10)
+    assert_eq(result, 10)
+  end
+
+  test "handler with string param" do
+    a = spawn Adder
+    result = a <- :add_str("20")
+    assert_eq(result, 20)
+  end
+
+  test "handler accumulates typed params" do
+    a = spawn Adder
+    a <- :add_int(5)
+    a <- :add_int(10)
+    assert_eq(a <- :get, 15)
+  end
+end
+
+# ============================================================
+# Handler guards (when)
+# ============================================================
+
+actor GuardedAccount do
+  state balance: Int :: 0
+
+  on :deposit(amount: Int) when amount > 0 do
+    become balance: balance + amount
+    reply balance + amount
+  end
+
+  on :deposit(amount: Int) do
+    reply balance
+  end
+
+  on :withdraw(amount: Int) when amount > 0 do
+    become balance: balance - amount
+    reply balance - amount
+  end
+
+  on :get do
+    reply balance
+  end
+end
+
+actor GuardTests do
+  test "guard allows valid deposit" do
+    acct = spawn GuardedAccount
+    result = acct <- :deposit(100)
+    assert_eq(result, 100)
+  end
+
+  test "guard rejects zero deposit" do
+    acct = spawn GuardedAccount
+    result = acct <- :deposit(0)
+    assert_eq(result, 0)
+  end
+
+  test "guard rejects negative deposit" do
+    acct = spawn GuardedAccount
+    result = acct <- :deposit(-5)
+    assert_eq(result, 0)
+  end
+
+  test "guard allows valid withdraw" do
+    acct = spawn GuardedAccount
+    acct <- :deposit(100)
+    result = acct <- :withdraw(50)
+    assert_eq(result, 50)
+  end
+
+  test "guard and state interaction" do
+    acct = spawn GuardedAccount
+    acct <- :deposit(50)
+    acct <- :deposit(30)
+    assert_eq(acct <- :get, 80)
+  end
+end
+
+# ============================================================
+# Case expressions
+# ============================================================
+
+actor CaseTests do
+  test "case matches integer" do
+    x = 2
+    result = case x do
+      1 -> :one
+      2 -> :two
+      3 -> :three
+    end
+    assert_eq(result, :two)
+  end
+
+  test "case matches first branch" do
+    result = case 1 do
+      1 -> :first
+      2 -> :second
+    end
+    assert_eq(result, :first)
+  end
+
+  test "case matches wildcard" do
+    result = case 99 do
+      1 -> :one
+      2 -> :two
+      _ -> :other
+    end
+    assert_eq(result, :other)
+  end
+
+  test "case matches atom" do
+    status = :ok
+    result = case status do
+      :ok -> "success"
+      :error -> "failure"
+      _ -> "unknown"
+    end
+    assert_eq(result, "success")
+  end
+
+  test "case matches string" do
+    cmd = "quit"
+    result = case cmd do
+      "start" -> 1
+      "stop" -> 2
+      "quit" -> 3
+      _ -> 0
+    end
+    assert_eq(result, 3)
+  end
+
+  test "case matches boolean" do
+    result = case true do
+      true -> :yes
+      false -> :no
+    end
+    assert_eq(result, :yes)
+  end
+
+  test "case with expression subject" do
+    result = case 2 + 3 do
+      4 -> :four
+      5 -> :five
+      _ -> :other
+    end
+    assert_eq(result, :five)
+  end
+
+  test "case no match returns nil" do
+    result = case 99 do
+      1 -> :one
+      2 -> :two
+    end
+    assert(nil?(result))
+  end
+
+  test "case body with multiple statements" do
+    x = 2
+    result = case x do
+      1 -> :one
+      2 ->
+        y = x * 10
+        y + 1
+      _ -> :other
+    end
+    assert_eq(result, 21)
+  end
+
+  test "nested case expressions" do
+    x = 1
+    y = :a
+    result = case x do
+      1 ->
+        case y do
+          :a -> "1a"
+          _ -> "1other"
+        end
+      _ -> "other"
+    end
+    assert_eq(result, "1a")
+  end
+end
+
+# ============================================================
+# For loops
+# ============================================================
+
+actor ForLoopTests do
+  test "for over list" do
+    result = for x in [1, 2, 3] do
+      x * 2
+    end
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 2)
+    assert_eq(elem(result, 1), 4)
+    assert_eq(elem(result, 2), 6)
+  end
+
+  test "for over empty list" do
+    result = for x in [] do
+      x
+    end
+    assert_eq(length(result), 0)
+  end
+
+  test "for over range" do
+    result = for x in range(1, 5) do
+      x * x
+    end
+    assert_eq(length(result), 5)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 4)
+    assert_eq(elem(result, 2), 9)
+    assert_eq(elem(result, 3), 16)
+    assert_eq(elem(result, 4), 25)
+  end
+
+  test "for with string operations" do
+    result = for s in ["hello", "world"] do
+      upcase(s)
+    end
+    assert_eq(length(result), 2)
+    assert_eq(head(result), "HELLO")
+    assert_eq(elem(result, 1), "WORLD")
+  end
+
+  test "for collecting into list" do
+    names = ["alice", "bob", "carol"]
+    result = for name in names do
+      concat("Hi ", name)
+    end
+    assert_eq(length(result), 3)
+    assert_eq(head(result), "Hi alice")
+  end
+
+  test "for with complex body" do
+    result = for x in [1, 2, 3] do
+      doubled = x * 2
+      doubled + 1
+    end
+    assert_eq(head(result), 3)
+    assert_eq(elem(result, 1), 5)
+    assert_eq(elem(result, 2), 7)
+  end
+
+  test "for preserves element count" do
+    result = for x in range(1, 10) do
+      x
+    end
+    assert_eq(length(result), 10)
+  end
+
+  test "for with function call in body" do
+    result = for x in [3, 1, 2] do
+      to_string(x)
+    end
+    assert_eq(head(result), "3")
+    assert_eq(elem(result, 1), "1")
+  end
+end
+
+# ============================================================
+# def with typed params and return types
+# ============================================================
+
+def multiply(a: Int, b: Int) -> Int do
+  a * b
+end
+
+def is_positive(n: Int) -> Bool do
+  n > 0
+end
+
+def greet_with(greeting: String, name: String) -> String do
+  concat(greeting, concat(" ", name))
+end
+
+def factorial(n: Int) -> Int do
+  case n do
+    0 -> 1
+    1 -> 1
+    _ -> n * factorial(n - 1)
+  end
+end
+
+def fib(n: Int) -> Int do
+  case n do
+    0 -> 0
+    1 -> 1
+    _ -> fib(n - 1) + fib(n - 2)
+  end
+end
+
+actor DefTests do
+  test "def with return type" do
+    assert_eq(multiply(6, 7), 42)
+  end
+
+  test "def returns boolean" do
+    assert(is_positive(5))
+    refute(is_positive(-3))
+    refute(is_positive(0))
+  end
+
+  test "def with multiple string params" do
+    result = greet_with("Hey", "Alice")
+    assert_eq(result, "Hey Alice")
+  end
+
+  test "def recursive factorial" do
+    assert_eq(factorial(0), 1)
+    assert_eq(factorial(1), 1)
+    assert_eq(factorial(5), 120)
+    assert_eq(factorial(6), 720)
+  end
+
+  test "def recursive fibonacci" do
+    assert_eq(fib(0), 0)
+    assert_eq(fib(1), 1)
+    assert_eq(fib(2), 1)
+    assert_eq(fib(5), 5)
+    assert_eq(fib(8), 21)
+  end
+
+  test "def with nested calls" do
+    result = add(add(1, 2), add(3, 4))
+    assert_eq(result, 10)
+  end
+
+  test "def called from expression" do
+    result = multiply(3, 4) + multiply(5, 6)
+    assert_eq(result, 42)
+  end
+end
+
+# ============================================================
+# fn (lambda) expressions
+# ============================================================
+
+actor LambdaTests do
+  test "basic lambda" do
+    f = fn(x: Int) do x * 2 end
+    assert_eq(f(5), 10)
+  end
+
+  test "lambda with two params" do
+    f = fn(a: Int, b: Int) do a + b end
+    assert_eq(f(3, 4), 7)
+  end
+
+  test "lambda returning string" do
+    f = fn(name: String) do concat("Hello ", name) end
+    assert_eq(f("World"), "Hello World")
+  end
+
+  test "lambda as argument to map" do
+    doubled = map([1, 2, 3], fn(x: Int) do x * 2 end)
+    assert_eq(sum(doubled), 12)
+  end
+
+  test "lambda as argument to filter" do
+    evens = filter(range(1, 10), fn(x: Int) do rem(x, 2) == 0 end)
+    assert_eq(length(evens), 5)
+  end
+
+  test "lambda as argument to reduce" do
+    total = reduce([1, 2, 3, 4], 0, fn(acc: Int, x: Int) do acc + x end)
+    assert_eq(total, 10)
+  end
+
+  test "lambda stored in variable" do
+    square = fn(x: Int) do x * x end
+    assert_eq(square(3), 9)
+    assert_eq(square(4), 16)
+    assert_eq(square(5), 25)
+  end
+
+  test "lambda with boolean return" do
+    is_big = fn(n: Int) do n > 100 end
+    assert(is_big(200))
+    refute(is_big(50))
+  end
+
+  test "lambda with complex body" do
+    process = fn(x: Int) do
+      doubled = x * 2
+      doubled + 1
+    end
+    assert_eq(process(5), 11)
+  end
+
+  test "lambda calling builtins" do
+    to_upper = fn(s: String) do upcase(s) end
+    assert_eq(to_upper("hello"), "HELLO")
+  end
+end
+
+# ============================================================
+# Closures capturing outer variables
+# ============================================================
+
+actor ClosureTests do
+  test "closure captures variable" do
+    multiplier = 10
+    f = fn(x: Int) do x * multiplier end
+    assert_eq(f(5), 50)
+  end
+
+  test "closure captures multiple variables" do
+    a = 10
+    b = 20
+    f = fn(x: Int) do x + a + b end
+    assert_eq(f(5), 35)
+  end
+
+  test "closure captures string" do
+    prefix = "Hello"
+    f = fn(name: String) do concat(prefix, concat(" ", name)) end
+    assert_eq(f("World"), "Hello World")
+  end
+
+  test "closure used in map" do
+    offset = 100
+    result = map([1, 2, 3], fn(x: Int) do x + offset end)
+    assert_eq(head(result), 101)
+    assert_eq(elem(result, 2), 103)
+  end
+
+  test "closure used in filter" do
+    threshold = 3
+    result = filter([1, 2, 3, 4, 5], fn(x: Int) do x > threshold end)
+    assert_eq(length(result), 2)
+    assert_eq(head(result), 4)
+  end
+
+  test "closure captures list" do
+    items = [10, 20, 30]
+    f = fn(idx: Int) do elem(items, idx) end
+    assert_eq(f(0), 10)
+    assert_eq(f(1), 20)
+    assert_eq(f(2), 30)
+  end
+end
+
+# ============================================================
+# Cons lists: [h | t]
+# ============================================================
+
+actor ConsListTests do
+  test "cons prepend to list" do
+    result = [1 | [2, 3]]
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 2)
+    assert_eq(elem(result, 2), 3)
+  end
+
+  test "cons prepend to empty list" do
+    result = [42 | []]
+    assert_eq(length(result), 1)
+    assert_eq(head(result), 42)
+  end
+
+  test "cons with string" do
+    result = ["first" | ["second", "third"]]
+    assert_eq(length(result), 3)
+    assert_eq(head(result), "first")
+  end
+
+  test "cons with variable" do
+    x = 10
+    tail_list = [20, 30]
+    result = [x | tail_list]
+    assert_eq(head(result), 10)
+    assert_eq(length(result), 3)
+  end
+
+  test "cons chain" do
+    result = [1 | [2 | [3 | []]]]
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 2)
+    assert_eq(elem(result, 2), 3)
+  end
+end
+
+# ============================================================
+# Map literals
+# ============================================================
+
+actor MapLiteralTests do
+  test "empty map" do
+    m = %{}
+    assert_eq(length(keys(m)), 0)
+  end
+
+  test "map with string values" do
+    m = %{name: "alice", city: "nyc"}
+    assert_eq(lookup(m, "name"), "alice")
+    assert_eq(lookup(m, "city"), "nyc")
+  end
+
+  test "map with integer values" do
+    m = %{x: 10, y: 20, z: 30}
+    assert_eq(lookup(m, "x"), 10)
+    assert_eq(lookup(m, "z"), 30)
+  end
+
+  test "map with mixed value types" do
+    m = %{name: "alice", age: 30, active: true}
+    assert_eq(lookup(m, "name"), "alice")
+    assert_eq(lookup(m, "age"), 30)
+    assert_eq(lookup(m, "active"), true)
+  end
+
+  test "map with list value" do
+    m = %{items: [1, 2, 3]}
+    items = lookup(m, "items")
+    assert_eq(length(items), 3)
+  end
+
+  test "map with nested map value" do
+    m = %{inner: %{a: 1}}
+    inner = lookup(m, "inner")
+    assert_eq(lookup(inner, "a"), 1)
+  end
+
+  test "map with atom values" do
+    m = %{status: :ok, level: :high}
+    assert_eq(lookup(m, "status"), :ok)
+    assert_eq(lookup(m, "level"), :high)
+  end
+end
+
+# ============================================================
+# String interpolation
+# ============================================================
+
+actor StringInterpTests do
+  test "interpolate integer" do
+    x = 42
+    result = "value is #{x}"
+    assert_eq(result, "value is 42")
+  end
+
+  test "interpolate string variable" do
+    name = "World"
+    result = "Hello #{name}"
+    assert_eq(result, "Hello World")
+  end
+
+  test "interpolate expression" do
+    result = "sum is #{2 + 3}"
+    assert_eq(result, "sum is 5")
+  end
+
+  test "interpolate multiple values" do
+    a = 1
+    b = 2
+    result = "#{a} + #{b} = #{a + b}"
+    assert_eq(result, "1 + 2 = 3")
+  end
+
+  test "interpolate with no variables" do
+    result = "plain string"
+    assert_eq(result, "plain string")
+  end
+
+  test "interpolate function call" do
+    result = "len is #{length([1, 2, 3])}"
+    assert_eq(result, "len is 3")
+  end
+end
+
+# ============================================================
+# Nested function calls
+# ============================================================
+
+def inc(n: Int) -> Int do
+  n + 1
+end
+
+def double_it(n: Int) -> Int do
+  n * 2
+end
+
+actor NestedCallTests do
+  test "nested builtin calls" do
+    result = length(reverse([1, 2, 3]))
+    assert_eq(result, 3)
+  end
+
+  test "nested user function calls" do
+    result = double_it(inc(4))
+    assert_eq(result, 10)
+  end
+
+  test "deeply nested calls" do
+    result = add(add(1, 2), add(3, add(4, 5)))
+    assert_eq(result, 15)
+  end
+
+  test "nested with builtins" do
+    result = head(reverse([1, 2, 3]))
+    assert_eq(result, 3)
+  end
+
+  test "nested concat" do
+    result = concat(concat("a", "b"), concat("c", "d"))
+    assert_eq(result, "abcd")
+  end
+
+  test "function call in condition" do
+    result = length([1, 2, 3]) > 2
+    assert(result)
+  end
+end
+
+# ============================================================
+# Variable scoping
+# ============================================================
+
+actor ScopingTests do
+  test "variable in scope" do
+    x = 42
+    assert_eq(x, 42)
+  end
+
+  test "variable reassignment" do
+    x = 1
+    x = 2
+    x = 3
+    assert_eq(x, 3)
+  end
+
+  test "separate test scope isolation" do
+    x = 99
+    assert_eq(x, 99)
+  end
+
+  test "function scope does not leak" do
+    result = add(10, 20)
+    assert_eq(result, 30)
+  end
+
+  test "for loop creates inner scope" do
+    result = for x in [1, 2, 3] do
+      y = x * 10
+      y
+    end
+    assert_eq(length(result), 3)
+    assert_eq(head(result), 10)
+  end
+
+  test "case creates scope for body" do
+    x = 5
+    result = case x do
+      5 ->
+        y = x * 2
+        y
+      _ -> 0
+    end
+    assert_eq(result, 10)
+  end
+end
+
+# ============================================================
+# Dot notation: Namespace.Actor
+# ============================================================
+
+actor Shop do
+  state name: String :: "Test Shop"
+
+  on :name do
+    reply name
+  end
+end
+
+actor Shop.Checkout do
+  state total: Int :: 0
+
+  on :add(n: Int) do
+    become total: total + n
+    reply total + n
+  end
+
+  on :get do
+    reply total
+  end
+end
+
+actor Shop.Inventory do
+  state items: List :: []
+
+  on :add(item: String) do
+    become items: append(items, item)
+    reply length(items) + 1
+  end
+
+  on :list do
+    reply items
+  end
+
+  on :count do
+    reply length(items)
+  end
+end
+
+actor DotNotationTests do
+  test "spawn dotted actor" do
+    checkout = spawn Shop.Checkout
+    assert_eq(checkout <- :get, 0)
+  end
+
+  test "send to dotted actor" do
+    checkout = spawn Shop.Checkout
+    result = checkout <- :add(10)
+    assert_eq(result, 10)
+  end
+
+  test "multiple dotted actor instances" do
+    c1 = spawn Shop.Checkout
+    c2 = spawn Shop.Checkout
+    c1 <- :add(10)
+    c2 <- :add(20)
+    assert_eq(c1 <- :get, 10)
+    assert_eq(c2 <- :get, 20)
+  end
+
+  test "different dotted actors under same namespace" do
+    checkout = spawn Shop.Checkout
+    inv = spawn Shop.Inventory
+    checkout <- :add(100)
+    inv <- :add("widget")
+    inv <- :add("gadget")
+    assert_eq(checkout <- :get, 100)
+    assert_eq(inv <- :count, 2)
+  end
+end
+
+# ============================================================
+# Test blocks inside actors
+# ============================================================
+
+actor Accumulator do
+  state total: Int :: 0
+
+  on :add(n: Int) do
+    become total: total + n
+    reply total + n
+  end
+
+  on :get do
+    reply total
+  end
+
+  test "test inside actor with state" do
+    me = spawn Accumulator
+    me <- :add(5)
+    me <- :add(3)
+    assert_eq(me <- :get, 8)
+  end
+end
+
+# ============================================================
+# Multiple actors interacting
+# ============================================================
+
+actor Logger do
+  state log: List :: []
+
+  on :log(msg: String) do
+    become log: append(log, msg)
+    reply :ok
+  end
+
+  on :entries do
+    reply log
+  end
+
+  on :count do
+    reply length(log)
+  end
+end
+
+actor Worker do
+  state logger: Any :: nil
+  state jobs_done: Int :: 0
+
+  on :setup(l: Any) do
+    become logger: l
+    reply :ok
+  end
+
+  on :work(task: String) do
+    become jobs_done: jobs_done + 1
+    logger <- :log(task)
+    reply jobs_done + 1
+  end
+
+  on :status do
+    reply jobs_done
+  end
+end
+
+actor InteractionTests do
+  test "actor sends to another actor" do
+    log = spawn Logger
+    w = spawn Worker
+    w <- :setup(log)
+    w <- :work("task1")
+    w <- :work("task2")
+    assert_eq(log <- :count, 2)
+    assert_eq(w <- :status, 2)
+  end
+
+  test "multiple workers share logger" do
+    log = spawn Logger
+    w1 = spawn Worker
+    w2 = spawn Worker
+    w1 <- :setup(log)
+    w2 <- :setup(log)
+    w1 <- :work("alpha")
+    w2 <- :work("beta")
+    w1 <- :work("gamma")
+    assert_eq(log <- :count, 3)
+    assert_eq(w1 <- :status, 2)
+    assert_eq(w2 <- :status, 1)
+  end
+
+  test "actors pass data through messages" do
+    kv = spawn KeyValue
+    kv <- :set("x", 42)
+    kv <- :set("y", 58)
+    x = kv <- :get("x")
+    y = kv <- :get("y")
+    assert_eq(x + y, 100)
+  end
+
+  test "actor chain: counter feeds logger" do
+    log = spawn Logger
+    c = spawn SimpleCounter
+    c <- :increment
+    c <- :increment
+    count = c <- :get
+    log <- :log(concat("Final count: ", to_string(count)))
+    entries = log <- :entries
+    assert_eq(length(entries), 1)
+    assert_eq(head(entries), "Final count: 2")
+  end
+end
+
+# ============================================================
+# Comprehensive value type tests
+# ============================================================
+
+actor ValueTypeTests do
+  test "integer literal" do
+    assert_eq(42, 42)
+  end
+
+  test "negative integer" do
+    assert_eq(-5, -5)
+  end
+
+  test "zero" do
+    assert_eq(0, 0)
+  end
+
+  test "float literal" do
+    assert(3.14 > 3.0)
+    assert(3.14 < 4.0)
+  end
+
+  test "string literal" do
+    assert_eq("hello", "hello")
+  end
+
+  test "empty string" do
+    assert_eq("", "")
+  end
+
+  test "atom literal" do
+    assert_eq(:ok, :ok)
+  end
+
+  test "multi-word atom" do
+    assert_eq(:hello_world, :hello_world)
+  end
+
+  test "boolean true" do
+    assert_eq(true, true)
+  end
+
+  test "boolean false" do
+    assert_eq(false, false)
+  end
+
+  test "nil literal" do
+    assert(nil?(nil))
+  end
+
+  test "list of integers" do
+    lst = [1, 2, 3]
+    assert_eq(length(lst), 3)
+  end
+
+  test "list of strings" do
+    lst = ["a", "b", "c"]
+    assert_eq(length(lst), 3)
+    assert_eq(head(lst), "a")
+  end
+
+  test "list of mixed types" do
+    lst = [1, "two", :three, true, nil]
+    assert_eq(length(lst), 5)
+  end
+
+  test "nested list" do
+    lst = [[1, 2], [3, 4]]
+    assert_eq(length(lst), 2)
+    inner = head(lst)
+    assert_eq(length(inner), 2)
+    assert_eq(head(inner), 1)
+  end
+
+  test "empty list" do
+    assert_eq(length([]), 0)
+  end
+
+  test "map literal" do
+    m = %{a: 1, b: 2}
+    assert_eq(lookup(m, "a"), 1)
+  end
+
+  test "empty map" do
+    m = %{}
+    assert_eq(length(keys(m)), 0)
+  end
+end
+
+# ============================================================
+# Edge cases and combined features
+# ============================================================
+
+def max_of_three(a: Int, b: Int, c: Int) -> Int do
+  max(max(a, b), c)
+end
+
+def clamp(val: Int, lo: Int, hi: Int) -> Int do
+  min(max(val, lo), hi)
+end
+
+def count_positives(lst: List) -> Int do
+  positives = filter(lst, fn(x: Int) do x > 0 end)
+  length(positives)
+end
+
+actor EdgeCaseTests do
+  test "max of three" do
+    assert_eq(max_of_three(1, 3, 2), 3)
+    assert_eq(max_of_three(5, 5, 5), 5)
+    assert_eq(max_of_three(-1, -2, -3), -1)
+  end
+
+  test "clamp within range" do
+    assert_eq(clamp(5, 0, 10), 5)
+  end
+
+  test "clamp below range" do
+    assert_eq(clamp(-5, 0, 10), 0)
+  end
+
+  test "clamp above range" do
+    assert_eq(clamp(15, 0, 10), 10)
+  end
+
+  test "count positives" do
+    assert_eq(count_positives([1, -2, 3, -4, 5]), 3)
+    assert_eq(count_positives([-1, -2, -3]), 0)
+    assert_eq(count_positives([]), 0)
+  end
+
+  test "chained map and reduce" do
+    result = reduce(
+      map([1, 2, 3, 4], fn(x: Int) do x * x end),
+      0,
+      fn(acc: Int, x: Int) do acc + x end
+    )
+    assert_eq(result, 30)
+  end
+
+  test "for with case inside" do
+    result = for x in [1, 2, 3] do
+      case rem(x, 2) do
+        0 -> :even
+        _ -> :odd
+      end
+    end
+    assert_eq(length(result), 3)
+    assert_eq(head(result), :odd)
+    assert_eq(elem(result, 1), :even)
+    assert_eq(elem(result, 2), :odd)
+  end
+
+  test "map with case in lambda" do
+    result = map([1, 2, 3, 4], fn(x: Int) do
+      case rem(x, 2) do
+        0 -> x * 10
+        _ -> x
+      end
+    end)
+    assert_eq(head(result), 1)
+    assert_eq(elem(result, 1), 20)
+    assert_eq(elem(result, 2), 3)
+    assert_eq(elem(result, 3), 40)
+  end
+
+  test "reduce to build map" do
+    names = ["alice", "bob", "carol"]
+    result = reduce(names, %{}, fn(acc: Map, name: String) do
+      put(acc, name, length(name))
+    end)
+    assert_eq(lookup(result, "alice"), 5)
+    assert_eq(lookup(result, "bob"), 3)
+    assert_eq(lookup(result, "carol"), 5)
+  end
+
+  test "pipe through multiple transforms" do
+    multiples = range(1, 10) |> filter(_, fn(x: Int) do rem(x, 3) == 0 end)
+    squared = multiples |> map(_, fn(x: Int) do x * x end)
+    result = squared |> sum
+    assert_eq(result, 9 + 36 + 81)
+  end
+
+  test "for loop with accumulation via reduce" do
+    squares = for x in range(1, 5) do
+      x * x
+    end
+    total = reduce(squares, 0, fn(acc: Int, x: Int) do acc + x end)
+    assert_eq(total, 55)
+  end
+end
