@@ -155,17 +155,26 @@ end
 def lex_one(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map do
   case nil?(ch) do
     true -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
-    _ -> lex_one_dispatch(src, pos, line, col, ch, char_code(ch))
+    _ ->
+      code = char_code(ch)
+      case is_whitespace_code(code) do
+        true -> handle_whitespace(code, pos, line, col)
+        _ -> lex_one_char(src, pos, line, col, ch)
+      end
   end
 end
 
-def lex_one_dispatch(src: String, pos: Int, line: Int, col: Int, ch: String, code: Int) -> Map do
-  case code do
-    10 -> %{token: nil, pos: pos + 1, line: line + 1, col: 1}
-    32 -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
-    9  -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
-    13 -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
-    _  -> lex_one_char(src, pos, line, col, ch)
+def is_whitespace_code(code: Int) -> Bool do
+  case nil?(code) do
+    true -> false
+    _ -> code == 32 || code == 9 || code == 13 || code == 10
+  end
+end
+
+def handle_whitespace(code: Int, pos: Int, line: Int, col: Int) -> Map do
+  case code == 10 do
+    true -> %{token: nil, pos: pos + 1, line: line + 1, col: 1}
+    _ -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
   end
 end
 

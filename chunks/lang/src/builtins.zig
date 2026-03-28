@@ -510,13 +510,14 @@ fn builtinFromCharCode(allocator: std.mem.Allocator, args: []const *const Value)
     return result;
 }
 
-/// slice("hello", 1, 3) => "ell"
+/// slice("hello", 1, 3) => "ell" -- start index, length
 fn builtinSlice(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 3) return error.TypeError;
     if (args[0].* != .string or args[1].* != .integer or args[2].* != .integer) return error.TypeError;
     const str = args[0].string;
     const start: usize = @intCast(@max(args[1].integer, 0));
-    const end: usize = @intCast(@min(args[2].integer, @as(i64, @intCast(str.len))));
+    const len: usize = @intCast(@max(args[2].integer, 0));
+    const end = @min(start + len, str.len);
     if (start >= str.len or start >= end) {
         const result = allocator.create(Value) catch return error.OutOfMemory;
         result.* = Value{ .string = "" };
