@@ -18,13 +18,14 @@ actor Shop.Checkout do
   end
 end
 
-# Message send to a dotted actor name (this was the broken case)
-result = Shop.Checkout <- :add(10)
+# Spawn and send messages to dotted actor names
+checkout = spawn Shop.Checkout
+result = checkout <- :add(10)
 print(result)
-result2 = Shop.Checkout <- :add(5)
+result2 = checkout <- :add(5)
 print(result2)
 
-# Spawn a separate instance with dotted name
+# Spawn a second instance (independent state)
 checkout2 = spawn Shop.Checkout
 r3 = checkout2 <- :add(100)
 print(r3)

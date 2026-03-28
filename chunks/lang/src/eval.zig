@@ -766,24 +766,8 @@ pub const Evaluator = struct {
     fn evalMessageSend(self: *Evaluator, ms: ast.Node.MessageSend) EvalError!*const Value {
         const target_val = try self.eval(ms.target.*);
 
-        // If target is an atom (template name), auto-spawn singleton on first send
-        const resolved = blk: {
-            if (target_val.* == .atom) {
-                const name = target_val.atom;
-                const tmpl = self.registry.lookupTemplate(name) orelse {
-                    self.last_error = errors.notAnActor(self.source);
-                    return error.TypeError;
-                };
-                const spawned = self.registry.spawn(tmpl, &.{});
-                const ref_val = self.allocator.create(Value) catch return error.OutOfMemory;
-                ref_val.* = Value{ .actor_ref = spawned };
-                self.env.define(name, ref_val);
-                break :blk ref_val;
-            }
-            break :blk target_val;
-        };
-
-        switch (resolved.*) {
+        // Target must be a spawned actor_ref. Atoms (template names) are not instances.
+        switch (target_val.*) {
             .actor_ref => |ref| {
                 // Log for canvas rays
                 if (self.msg_log_count < 64) {

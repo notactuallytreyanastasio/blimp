@@ -195,10 +195,11 @@ names
   end
 end
 
-Counter <- :increment
-Counter <- :increment
-Counter <- :increment
-print(Counter <- :get)</textarea>
+c = spawn Counter
+c <- :increment
+c <- :increment
+c <- :increment
+print(c <- :get)</textarea>
     <button class="run-btn">Run</button>
   </div>
   <div class="output"></div>
@@ -243,11 +244,13 @@ actor Shop.Checkout do
   on :get_total do reply total end
 end
 
-Shop.Checkout <- :add(29.99)
-Shop.Checkout <- :add(9.99)
-Shop.Inventory <- :sell(2)
-print(Shop.Checkout <- :get_total)
-print(Shop.Inventory <- :check)</textarea>
+checkout = spawn Shop.Checkout
+inventory = spawn Shop.Inventory
+checkout <- :add(29.99)
+checkout <- :add(9.99)
+inventory <- :sell(2)
+print(checkout <- :get_total)
+print(inventory <- :check)</textarea>
     <button class="run-btn">Run</button>
   </div>
   <div class="output"></div>
@@ -316,10 +319,11 @@ print(Shop.Inventory <- :check)</textarea>
   end
 end
 
-ProfileCard <- :like
-ProfileCard <- :like
-ProfileCard <- :like
-ProfileCard <- :render</textarea>
+card = spawn ProfileCard
+card <- :like
+card <- :like
+card <- :like
+card <- :render</textarea>
     <button class="run-btn">Run</button>
   </div>
   <div class="output"></div>
