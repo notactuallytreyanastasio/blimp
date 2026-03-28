@@ -392,8 +392,8 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     },
     {
       title: "Pipes",
-      description: "The pipe operator <code>|></code> chains calls. Underscore <code>_</code> marks where the value goes. What does this return?",
-      showCode: '[1, 2, 3, 4, 5] |> filter(_, fn(x: Int) do x > 2 end) |> length',
+      description: "The pipe operator <code>|></code> passes a value through a chain of calls. What does this return?",
+      showCode: '[3, 1, 2] |> sort(_) |> reverse(_) |> length(_)',
       type: "predict", expected: "3"
     },
 
@@ -585,9 +585,13 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
       blimpInstance.reset();
       var evalResult = blimpInstance.eval(lesson.showCode);
       populateCanvas(canvas, evalResult, prints);
-      // Check the user's typed answer
+      // Check the user's typed answer (but fail if eval itself errored)
       var answer = document.getElementById('answer').value.trim();
-      result = (answer === lesson.expected) ? {pass:true} : {pass:false, msg:'Expected: ' + lesson.expected};
+      if (!evalResult.ok) {
+        result = {pass:false, msg:'Code error: ' + evalResult.error};
+      } else {
+        result = (answer === lesson.expected) ? {pass:true} : {pass:false, msg:'Expected: ' + lesson.expected};
+      }
     } else {
       var code = document.getElementById('code').value;
       // 1. Eval user code and paint the system state
