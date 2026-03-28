@@ -1,0 +1,37 @@
+# The Blimp compiler -- self-hosted
+# This file is loaded by the Zig bootstrap to provide the primary
+# execution path. The Zig runtime evaluates THIS file, which defines
+# the lexer, parser, evaluator, and codegen. Then user code is
+# processed by these Blimp-written components.
+#
+# Usage from Zig: load this file, then call blimp_self_eval(user_code)
+# or compile_to_wasm(user_code).
+#
+# Components:
+#   - Lexer (tokenizer)
+#   - Parser (recursive descent -> AST maps)
+#   - Evaluator (tree-walking interpreter)
+#   - Codegen (WASM bytecode emitter)
+#   - Completion engine
+
+# The individual components are loaded from separate files by the
+# bootstrap. This file just provides the top-level entry points.
+
+def blimp_compile(source: String, mode: Atom) -> Any do
+  case mode do
+    :eval -> blimp_self_eval(source)
+    :wasm -> compile_to_wasm(source)
+    :tokens ->
+      l = spawn Lexer
+      l <- :set_source(source)
+      l <- :tokenize
+    :ast ->
+      l = spawn Lexer
+      l <- :set_source(source)
+      tokens = l <- :tokenize
+      p = spawn Parser
+      p <- :set_tokens(tokens)
+      p <- :parse
+    _ -> blimp_self_eval(source)
+  end
+end

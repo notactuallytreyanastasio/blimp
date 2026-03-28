@@ -94,6 +94,12 @@ pub fn main() !void {
         return;
     }
 
+    // Check for --self-hosted flag: load Blimp compiler, then eval user code through it
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "--self-hosted")) {
+        runSelfHosted(allocator, source, nodes, arena.allocator());
+        return;
+    }
+
     // Check for --test flag (run test blocks)
     if (args.len >= 3 and std.mem.eql(u8, args[2], "--test")) {
         var evaluator = Evaluator.init(arena.allocator());
@@ -565,6 +571,85 @@ const HistoryEntry = struct {
 };
 
 /// Discover and run all *_test.blimp files in a directory.
+/// Run user code through the self-hosted Blimp compiler.
+/// The Zig evaluator loads the self-hosted compiler (lib/*.blimp),
+/// then calls blimp_self_eval(user_source) to execute user code
+/// through the Blimp-written pipeline.
+fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast.Node, arena_alloc: std.mem.Allocator) void {
+    const stderr = std.fs.File.stderr();
+    var evaluator = Evaluator.init(arena_alloc);
+
+    // Load self-hosted compiler components in order
+    const lib_files = [_][]const u8{
+        "lib/lexer.blimp",
+        "lib/parser.blimp",
+        "lib/eval.blimp",
+        "lib/complete.blimp",
+        "lib/codegen.blimp",
+        "lib/compiler.blimp",
+    };
+
+    for (lib_files) |lib_path| {
+        const lib_source = std.fs.cwd().readFileAlloc(gpa, lib_path, 1024 * 1024) catch {
+            stderr.writeAll("Failed to load: ") catch {};
+            stderr.writeAll(lib_path) catch {};
+            stderr.writeAll("\n") catch {};
+            std.process.exit(1);
+        };
+        var parser = Parser.init(arena_alloc, lib_source);
+        const lib_nodes = parser.parseFile() catch {
+            stderr.writeAll("Parse error in ") catch {};
+            stderr.writeAll(lib_path) catch {};
+            stderr.writeAll("\n") catch {};
+            std.process.exit(1);
+        };
+        for (lib_nodes) |node| {
+            _ = evaluator.eval(node) catch {};
+        }
+    }
+
+    stderr.writeAll("\x1b[33mself-hosted compiler loaded\x1b[0m\n") catch {};
+
+    // Now call blimp_self_eval with the user's source code
+    // We need to pass the source as a string value
+    const source_val = arena_alloc.create(Value) catch return;
+    source_val.* = Value{ .string = user_source };
+
+    // Build AST: blimp_compile(source, :eval)
+    const mode_val = arena_alloc.create(Value) catch return;
+    mode_val.* = Value{ .atom = "eval" };
+
+    // Call blimp_compile by evaluating it as a func_call
+    const source_node = ast.Node{ .kind = .{ .string_lit = .{ .value = user_source } }, .loc = .{ .line = 0, .col = 0 } };
+    const mode_node = ast.Node{ .kind = .{ .atom_lit = .{ .name = "eval" } }, .loc = .{ .line = 0, .col = 0 } };
+    const call_node = ast.Node{
+        .kind = .{ .func_call = .{ .name = "blimp_compile", .args = &.{ source_node, mode_node } } },
+        .loc = .{ .line = 0, .col = 0 },
+    };
+
+    const result = evaluator.eval(call_node) catch |err| {
+        if (evaluator.last_error) |blimp_err| {
+            var buf: [2048]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&buf);
+            blimp_err.format(fbs.writer());
+            stderr.writeAll(fbs.getWritten()) catch {};
+            stderr.writeAll("\n") catch {};
+        } else {
+            stderr.writeAll("Self-hosted eval error: ") catch {};
+            std.debug.print("{}\n", .{err});
+        }
+        std.process.exit(1);
+    };
+
+    // Print the result
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    result.format(fbs.writer());
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll(fbs.getWritten()) catch {};
+    stdout.writeAll("\n") catch {};
+}
+
 fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
     var test_arena = std.heap.ArenaAllocator.init(gpa);
     defer test_arena.deinit();
