@@ -235,8 +235,8 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     },
     {
       title: "Functions",
-      description: "Functions are defined with <code>def</code>. Write a function called <code>double</code> that returns n * 2:",
-      starter: "def double(n) do\n  \nend",
+      description: "Functions are defined with <code>def</code>. Parameters need type annotations. Write a function called <code>double</code> that returns n * 2:",
+      starter: "def double(n: Int) do\n  \nend",
       type: "write",
       validate: function(code, b) {
         b.reset(); var r = b.eval(code); if (!r.ok) return {pass:false, msg:r.error};
@@ -389,7 +389,7 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     {
       title: "Build a Profile Card",
       description: "Combine everything: a function that takes a name and role, returns a styled card view. Then call it:",
-      starter: 'def profile_card(name, role) do\n  stack(\n    \n  )\nend\n\nprofile_card("Ada Lovelace", "First Programmer")',
+      starter: 'def profile_card(name: String, role: String) do\n  stack(\n    \n  )\nend\n\nprofile_card("Ada Lovelace", "First Programmer")',
       type: "view",
       validate: function(code, b) {
         b.reset(); var r = b.eval(code);
