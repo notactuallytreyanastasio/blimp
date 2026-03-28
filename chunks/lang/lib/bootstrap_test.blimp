@@ -1,0 +1,54 @@
+# Bootstrap tests: blimp_self_eval runs the full
+# self-hosted compiler pipeline on source strings.
+# Source -> Lexer -> Parser -> Evaluator -> Result
+
+actor BootstrapTests do
+  test "integer" do
+    assert_eq(blimp_self_eval("42"), 42)
+  end
+
+  test "arithmetic with precedence" do
+    assert_eq(blimp_self_eval("2 + 3 * 4"), 14)
+  end
+
+  test "string" do
+    assert_eq(blimp_self_eval("\"hello\""), "hello")
+  end
+
+  test "variable assignment and lookup" do
+    assert_eq(blimp_self_eval("x = 99\nx"), 99)
+  end
+
+  test "function definition and call" do
+    assert_eq(blimp_self_eval("def double(n: Int) do n * 2 end\ndouble(21)"), 42)
+  end
+
+  test "builtin length" do
+    assert_eq(blimp_self_eval("length([1, 2, 3])"), 3)
+  end
+
+  test "builtin concat" do
+    assert_eq(blimp_self_eval("concat(\"a\", \"b\")"), "ab")
+  end
+
+  test "comparison" do
+    assert_eq(blimp_self_eval("10 > 3"), true)
+  end
+
+  test "case expression" do
+    assert_eq(blimp_self_eval("case 2 do\n1 -> :one\n2 -> :two\n_ -> :other\nend"), ":two")
+  end
+
+  test "nested function calls" do
+    assert_eq(blimp_self_eval("def add(a: Int, b: Int) do a + b end\nadd(add(1, 2), add(3, 4))"), 10)
+  end
+
+  test "list operations" do
+    assert_eq(blimp_self_eval("head([10, 20, 30])"), 10)
+  end
+
+  test "multi-line program" do
+    code = "x = 10\ny = 20\nz = x + y\nz * 2"
+    assert_eq(blimp_self_eval(code), 60)
+  end
+end
