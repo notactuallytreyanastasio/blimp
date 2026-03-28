@@ -1,0 +1,80 @@
+# Test the self-hosted lexer
+
+def lex(src: String) -> List do
+  lexer = spawn Lexer
+  lexer <- :set_source(src)
+  lexer <- :tokenize
+end
+
+actor LexerTests do
+  test "tokenizes integers" do
+    tokens = lex("42")
+    first = head(tokens)
+    assert_eq(lookup(first, "kind"), :integer)
+    assert_eq(lookup(first, "lexeme"), "42")
+  end
+
+  test "tokenizes identifiers" do
+    tokens = lex("foo")
+    assert_eq(lookup(head(tokens), "kind"), :identifier)
+    assert_eq(lookup(head(tokens), "lexeme"), "foo")
+  end
+
+  test "tokenizes upper identifiers" do
+    tokens = lex("Counter")
+    assert_eq(lookup(head(tokens), "kind"), :upper_identifier)
+  end
+
+  test "tokenizes keywords" do
+    tokens = lex("actor do end")
+    assert_eq(lookup(head(tokens), "kind"), :kw_actor)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :kw_do)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :kw_end)
+  end
+
+  test "tokenizes operators" do
+    tokens = lex("x <- :msg")
+    assert_eq(lookup(head(tokens), "kind"), :identifier)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :send)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :atom)
+  end
+
+  test "tokenizes atoms" do
+    tokens = lex(":ok")
+    assert_eq(lookup(head(tokens), "kind"), :atom)
+    assert_eq(lookup(head(tokens), "lexeme"), ":ok")
+  end
+
+  test "tokenizes a full expression" do
+    tokens = lex("x = 42 + 3")
+    assert_eq(length(tokens), 6)
+    assert_eq(lookup(head(tokens), "kind"), :identifier)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :eq)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :integer)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :plus)
+    assert_eq(lookup(elem(tokens, 4), "kind"), :integer)
+    assert_eq(lookup(elem(tokens, 5), "kind"), :eof)
+  end
+
+  test "tracks line numbers" do
+    tokens = lex("x\ny")
+    assert_eq(lookup(head(tokens), "line"), 1)
+    assert_eq(lookup(elem(tokens, 1), "line"), 2)
+  end
+
+  test "skips comments" do
+    tokens = lex("x # comment\ny")
+    assert_eq(length(tokens), 3)
+    assert_eq(lookup(head(tokens), "lexeme"), "x")
+    assert_eq(lookup(elem(tokens, 1), "lexeme"), "y")
+  end
+
+  test "tokenizes actor definition" do
+    tokens = lex("actor Counter do\n  state count: Int :: 0\nend")
+    assert_eq(lookup(head(tokens), "kind"), :kw_actor)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :upper_identifier)
+    assert_eq(lookup(elem(tokens, 1), "lexeme"), "Counter")
+    assert_eq(lookup(elem(tokens, 2), "kind"), :kw_do)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :kw_state)
+  end
+end

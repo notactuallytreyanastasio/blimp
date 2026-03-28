@@ -1,0 +1,392 @@
+# Blimp lexer written in Blimp
+# First step toward self-hosting: tokenize Blimp source code.
+#
+# Usage:
+#   lexer = spawn Lexer(source: "x = 42 + 3")
+#   tokens = lexer <- :tokenize
+#   # => [%{kind: :identifier, lexeme: "x", line: 1, col: 1}, ...]
+
+# -- Character classification helpers --
+
+def is_digit(ch: String) -> Bool do
+  code = char_code(ch)
+  code >= 48 && code <= 57
+end
+
+def is_upper_char(code: Int) -> Bool do
+  code >= 65 && code <= 90
+end
+
+def is_lower_char(code: Int) -> Bool do
+  code >= 97 && code <= 122
+end
+
+def is_alpha(ch: String) -> Bool do
+  code = char_code(ch)
+  case is_upper_char(code) do
+    true -> true
+    _ ->
+      case is_lower_char(code) do
+        true -> true
+        _ -> code == 95
+      end
+  end
+end
+
+def is_upper(ch: String) -> Bool do
+  is_upper_char(char_code(ch))
+end
+
+def is_alnum(ch: String) -> Bool do
+  case is_alpha(ch) do
+    true -> true
+    _ ->
+      case is_digit(ch) do
+        true -> true
+        _ -> ch == "?"
+      end
+  end
+end
+
+# -- Token constructor --
+
+def token(kind: Atom, lexeme: String, line: Int, col: Int) -> Map do
+  %{kind: kind, lexeme: lexeme, line: line, col: col}
+end
+
+# -- Keyword table --
+
+def keyword_kind(word: String) -> Atom do
+  case word do
+    "actor"     -> :kw_actor
+    "do"        -> :kw_do
+    "end"       -> :kw_end
+    "state"     -> :kw_state
+    "on"        -> :kw_on
+    "become"    -> :kw_become
+    "reply"     -> :kw_reply
+    "when"      -> :kw_when
+    "bubbles"   -> :kw_bubbles
+    "bubble"    -> :kw_bubble
+    "def"       -> :kw_def
+    "fn"        -> :kw_fn
+    "situation" -> :kw_situation
+    "case"      -> :kw_case
+    "orelse"    -> :kw_orelse
+    "spawn"     -> :kw_spawn
+    "self"      -> :kw_self
+    "try"       -> :kw_try
+    "catch"     -> :kw_catch
+    "for"       -> :kw_for
+    "in"        -> :kw_in
+    "test"      -> :kw_test
+    "true"      -> :true_lit
+    "false"     -> :false_lit
+    "nil"       -> :nil_lit
+    "and"       -> :kw_and
+    "or"        -> :kw_or
+    "not"       -> :kw_not
+    _           -> :none
+  end
+end
+
+# -- The Lexer actor --
+
+actor Lexer do
+  state source: String :: ""
+  state pos: Int :: 0
+  state line: Int :: 1
+  state col: Int :: 1
+
+  on :set_source(src: String) do
+    become source: src, pos: 0, line: 1, col: 1
+    reply :ok
+  end
+
+  # Main entry point: tokenize the entire source
+  on :tokenize do
+    tokens = lex_all(source, pos, line, col, [])
+    reply tokens
+  end
+end
+
+# -- Recursive lexer functions --
+# These are pure functions that take state explicitly.
+# Each returns the updated (pos, line, col, tokens).
+
+def lex_all(src: String, pos: Int, line: Int, col: Int, tokens: List) -> List do
+  case pos >= length(src) do
+    true ->
+      append(tokens, token(:eof, "", line, col))
+    _ ->
+      ch = char_at(src, pos)
+      result = lex_one(src, pos, line, col, ch)
+      # result is %{token: ..., pos: ..., line: ..., col: ...}
+      new_tok = lookup(result, "token")
+      new_pos = lookup(result, "pos")
+      new_line = lookup(result, "line")
+      new_col = lookup(result, "col")
+      case nil?(new_tok) do
+        true ->
+          # Skip (whitespace, comments)
+          lex_all(src, new_pos, new_line, new_col, tokens)
+        _ ->
+          lex_all(src, new_pos, new_line, new_col, append(tokens, new_tok))
+      end
+  end
+end
+
+def lex_one(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map do
+  code = char_code(ch)
+  # Newline (10), space (32), tab (9), CR (13)
+  case code == 10 do
+    true -> %{token: nil, pos: pos + 1, line: line + 1, col: 1}
+    _ ->
+  case code == 32 do
+    true -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
+    _ ->
+  case code == 9 do
+    true -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
+    _ ->
+  case code == 13 do
+    true -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
+    _ ->
+  lex_one_char(src, pos, line, col, ch)
+  end end end end
+end
+
+def lex_one_char(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map do
+  case ch do
+    "#" -> skip_comment(src, pos, line, col)
+
+    # Single-char tokens
+    "(" -> %{token: token(:lparen, "(", line, col), pos: pos + 1, line: line, col: col + 1}
+    ")" -> %{token: token(:rparen, ")", line, col), pos: pos + 1, line: line, col: col + 1}
+    "[" -> %{token: token(:lbracket, "[", line, col), pos: pos + 1, line: line, col: col + 1}
+    "]" -> %{token: token(:rbracket, "]", line, col), pos: pos + 1, line: line, col: col + 1}
+    "{" -> %{token: token(:lbrace, "{", line, col), pos: pos + 1, line: line, col: col + 1}
+    "}" -> %{token: token(:rbrace, "}", line, col), pos: pos + 1, line: line, col: col + 1}
+    "," -> %{token: token(:comma, ",", line, col), pos: pos + 1, line: line, col: col + 1}
+    "+" -> lex_plus(src, pos, line, col)
+    "-" -> lex_minus(src, pos, line, col)
+    "*" -> %{token: token(:star, "*", line, col), pos: pos + 1, line: line, col: col + 1}
+    "/" -> %{token: token(:slash, "/", line, col), pos: pos + 1, line: line, col: col + 1}
+    "%" -> %{token: token(:percent, "%", line, col), pos: pos + 1, line: line, col: col + 1}
+    "=" -> lex_eq(src, pos, line, col)
+    "!" -> lex_bang(src, pos, line, col)
+    "<" -> lex_lt(src, pos, line, col)
+    ">" -> lex_gt(src, pos, line, col)
+    "|" -> lex_pipe(src, pos, line, col)
+    "." -> lex_dot(src, pos, line, col)
+    ":" -> lex_colon(src, pos, line, col)
+
+    # String literal
+    "\"" -> lex_string(src, pos, line, col)
+
+    # Underscore (hole or identifier)
+    "_" -> lex_underscore(src, pos, line, col)
+
+    _ ->
+      case is_digit(ch) do
+        true -> lex_number(src, pos, line, col)
+        _ ->
+          case is_alpha(ch) do
+            true -> lex_identifier(src, pos, line, col)
+            _ -> %{token: token(:unknown, ch, line, col), pos: pos + 1, line: line, col: col + 1}
+          end
+      end
+  end
+end
+
+# -- Multi-char token helpers --
+
+def peek(src: String, pos: Int) -> String do
+  case pos < length(src) do
+    true -> char_at(src, pos)
+    _ -> ""
+  end
+end
+
+def skip_comment(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case pos >= length(src) do
+    true -> %{token: nil, pos: pos, line: line, col: col}
+    _ ->
+      case char_at(src, pos) == "\n" do
+        true -> %{token: nil, pos: pos, line: line, col: col}
+        _ -> skip_comment(src, pos + 1, line, col + 1)
+      end
+  end
+end
+
+def lex_plus(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    "+" -> %{token: token(:plus_plus, "++", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:plus, "+", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_minus(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    ">" -> %{token: token(:arrow, "->", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:minus, "-", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_eq(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    "=" -> %{token: token(:eq_eq, "==", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:eq, "=", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_bang(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    "=" -> %{token: token(:neq, "!=", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:bang, "!", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_lt(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    "=" -> %{token: token(:lte, "<=", line, col), pos: pos + 2, line: line, col: col + 2}
+    "-" -> %{token: token(:send, "<-", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:lt, "<", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_gt(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    "=" -> %{token: token(:gte, ">=", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:gt, ">", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_pipe(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    ">" -> %{token: token(:pipe, "|>", line, col), pos: pos + 2, line: line, col: col + 2}
+    "|" -> %{token: token(:or_op, "||", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:pipe_single, "|", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_dot(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    "." ->
+      case peek(src, pos + 2) do
+        "." -> %{token: token(:dot_dot_dot, "...", line, col), pos: pos + 3, line: line, col: col + 3}
+        _   -> %{token: token(:dot_dot, "..", line, col), pos: pos + 2, line: line, col: col + 2}
+      end
+    _ -> %{token: token(:dot, ".", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_colon(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    ":" -> %{token: token(:colon_colon, "::", line, col), pos: pos + 2, line: line, col: col + 2}
+    _ ->
+      # Check for atom: :name
+      next = peek(src, pos + 1)
+      case is_alpha(next) do
+        true ->
+          # Lex the atom name
+          end_pos = scan_alnum(src, pos + 1)
+          lexeme = slice(src, pos, end_pos - pos)
+          %{token: token(:atom, lexeme, line, col), pos: end_pos, line: line, col: col + end_pos - pos}
+        _ -> %{token: token(:colon, ":", line, col), pos: pos + 1, line: line, col: col + 1}
+      end
+  end
+end
+
+def lex_underscore(src: String, pos: Int, line: Int, col: Int) -> Map do
+  next = peek(src, pos + 1)
+  case is_alnum(next) do
+    true ->
+      # Part of an identifier like _private
+      lex_identifier(src, pos, line, col)
+    _ ->
+      %{token: token(:hole, "_", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_number(src: String, pos: Int, line: Int, col: Int) -> Map do
+  end_pos = scan_digits(src, pos)
+  # Check for float: digit followed by . followed by digit
+  is_float = check_float(src, end_pos)
+  case is_float do
+    true ->
+      fend = scan_digits(src, end_pos + 1)
+      lexeme = slice(src, pos, fend - pos)
+      %{token: token(:float, lexeme, line, col), pos: fend, line: line, col: col + fend - pos}
+    _ ->
+      lexeme = slice(src, pos, end_pos - pos)
+      %{token: token(:integer, lexeme, line, col), pos: end_pos, line: line, col: col + end_pos - pos}
+  end
+end
+
+def check_float(src: String, pos: Int) -> Bool do
+  case peek(src, pos) == "." do
+    true -> is_digit(peek(src, pos + 1))
+    _ -> false
+  end
+end
+
+def lex_identifier(src: String, pos: Int, line: Int, col: Int) -> Map do
+  end_pos = scan_alnum(src, pos)
+  lexeme = slice(src, pos, end_pos - pos)
+
+  # Check keywords
+  kw = keyword_kind(lexeme)
+  kind = case kw do
+    :none ->
+      case is_upper(char_at(lexeme, 0)) do
+        true -> :upper_identifier
+        _    -> :identifier
+      end
+    _ -> kw
+  end
+
+  %{token: token(kind, lexeme, line, col), pos: end_pos, line: line, col: col + end_pos - pos}
+end
+
+def lex_string(src: String, pos: Int, line: Int, col: Int) -> Map do
+  # pos is at the opening quote
+  end_pos = pos + 1
+  end_pos = scan_string(src, end_pos)
+  lexeme = slice(src, pos, end_pos + 1 - pos)
+  %{token: token(:string, lexeme, line, col), pos: end_pos + 1, line: line, col: col + end_pos + 1 - pos}
+end
+
+def scan_string(src: String, pos: Int) -> Int do
+  case pos >= length(src) do
+    true -> pos
+    _ ->
+      ch = char_at(src, pos)
+      case ch do
+        "\"" -> pos
+        "\\" -> scan_string(src, pos + 2)
+        _    -> scan_string(src, pos + 1)
+      end
+  end
+end
+
+def scan_digits(src: String, pos: Int) -> Int do
+  case pos >= length(src) do
+    true -> pos
+    _ ->
+      case is_digit(char_at(src, pos)) do
+        true -> scan_digits(src, pos + 1)
+        _ -> pos
+      end
+  end
+end
+
+def scan_alnum(src: String, pos: Int) -> Int do
+  case pos >= length(src) do
+    true -> pos
+    _ ->
+      case is_alnum(char_at(src, pos)) do
+        true -> scan_alnum(src, pos + 1)
+        _ -> pos
+      end
+  end
+end

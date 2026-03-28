@@ -46,6 +46,9 @@ pub const BuiltinRegistry = struct {
         reg.register("contains", &builtinContains);
         reg.register("to_string", &builtinToString);
         reg.register("to_int", &builtinToInt);
+        reg.register("char_at", &builtinCharAt);
+        reg.register("char_code", &builtinCharCode);
+        reg.register("from_char_code", &builtinFromCharCode);
         reg.register("slice", &builtinSlice);
         reg.register("upcase", &builtinUpcase);
         reg.register("downcase", &builtinDowncase);
@@ -450,6 +453,53 @@ fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
         },
         else => return error.TypeError,
     }
+    return result;
+}
+
+/// char_at("hello", 1) => "e" -- single character at index
+fn builtinCharAt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .integer) return error.TypeError;
+    const s = args[0].string;
+    const idx: usize = @intCast(@max(0, args[1].integer));
+    if (idx >= s.len) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+    const ch = allocator.alloc(u8, 1) catch return error.OutOfMemory;
+    ch[0] = s[idx];
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = ch };
+    return result;
+}
+
+/// char_code("A", 0) => 65 -- ASCII/byte value at index
+/// char_code("A") => 65 -- first char if no index
+fn builtinCharCode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1 or args.len > 2 or args[0].* != .string) return error.TypeError;
+    const s = args[0].string;
+    const idx: usize = if (args.len == 2 and args[1].* == .integer)
+        @intCast(@max(0, args[1].integer))
+    else
+        0;
+    if (s.len == 0 or idx >= s.len) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .integer = @intCast(s[idx]) };
+    return result;
+}
+
+/// from_char_code(65) => "A" -- integer to single-byte string
+fn builtinFromCharCode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const code: u8 = @intCast(@max(0, @min(255, args[0].integer)));
+    const ch = allocator.alloc(u8, 1) catch return error.OutOfMemory;
+    ch[0] = code;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = ch };
     return result;
 }
 
