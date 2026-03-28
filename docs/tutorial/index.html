@@ -512,7 +512,7 @@ body {
     inputEl.spellcheck = false;
     inputEl.autocomplete = 'off';
     inputEl.addEventListener('keydown', handleKey);
-    inputEl.addEventListener('input', autoResize);
+    inputEl.addEventListener('input', function() { autoResize.call(this); autoComplete(); });
     inputRow.appendChild(prompt);
     inputRow.appendChild(inputEl);
     repl.appendChild(inputRow);
@@ -568,10 +568,7 @@ body {
       autoResize.call(inputEl);
     }
 
-    // Close autocomplete on other keys
-    if (acMenu && e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Meta' && e.key !== 'Alt') {
-      closeAc();
-    }
+    // Don't close on regular typing -- autoComplete on input event handles it
   }
 
   function getPrefix() {
@@ -647,6 +644,24 @@ body {
     if (acMenu) { acMenu.remove(); acMenu = null; }
     acItems = [];
     acIdx = -1;
+  }
+
+  function autoComplete() {
+    var prefix = getPrefix();
+    if (prefix.length < 2) { closeAc(); return; }
+    var completions = blimp.complete(prefix);
+    if (!completions || completions.length === 0) { closeAc(); return; }
+    // Don't show if the only completion is an exact match
+    if (completions.length === 1 && (completions[0].insert === prefix || completions[0].label === prefix)) { closeAc(); return; }
+    acItems = completions;
+    acIdx = 0;
+    if (!acMenu) {
+      acMenu = document.createElement('div');
+      acMenu.className = 'ac-menu';
+      document.body.appendChild(acMenu);
+    }
+    renderAc();
+    positionAc();
   }
 
   function autoResize() { this.style.height = 'auto'; this.style.height = Math.min(this.scrollHeight, 320) + 'px'; }
