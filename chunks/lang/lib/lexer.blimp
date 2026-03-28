@@ -205,6 +205,7 @@ def lex_one_char(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map 
     "<" -> lex_lt(src, pos, line, col)
     ">" -> lex_gt(src, pos, line, col)
     "|" -> lex_pipe(src, pos, line, col)
+    "&" -> lex_amp(src, pos, line, col)
     "." -> lex_dot(src, pos, line, col)
     ":" -> lex_colon(src, pos, line, col)
 
@@ -293,6 +294,13 @@ def lex_pipe(src: String, pos: Int, line: Int, col: Int) -> Map do
     ">" -> %{token: token(:pipe, "|>", line, col), pos: pos + 2, line: line, col: col + 2}
     "|" -> %{token: token(:or_op, "||", line, col), pos: pos + 2, line: line, col: col + 2}
     _   -> %{token: token(:pipe_single, "|", line, col), pos: pos + 1, line: line, col: col + 1}
+  end
+end
+
+def lex_amp(src: String, pos: Int, line: Int, col: Int) -> Map do
+  case peek(src, pos + 1) do
+    "&" -> %{token: token(:and_op, "&&", line, col), pos: pos + 2, line: line, col: col + 2}
+    _   -> %{token: token(:unknown, "&", line, col), pos: pos + 1, line: line, col: col + 1}
   end
 end
 

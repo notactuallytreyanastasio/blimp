@@ -210,14 +210,9 @@ def parse_handler(tokens: List, pos: Int) -> Map do
   msg_name = tok_lexeme(tokens, p)
   p = p + 1
   # parse params if lparen
-  params = []
-  case tok_kind(tokens, p) == :lparen do
-    true ->
-      pr = parse_params(tokens, p + 1, [])
-      params = lookup(pr, "params")
-      p = lookup(pr, "pos")
-    _ -> :ok
-  end
+  params_result = parse_optional_params(tokens, p)
+  params = lookup(params_result, "params")
+  p = lookup(params_result, "pos")
   # expect 'do'
   r = expect(tokens, p, :kw_do)
   case lookup(r, "ok") do
@@ -298,6 +293,22 @@ end
 
 # -- Function definition --
 
+def parse_optional_params(tokens: List, pos: Int) -> Map do
+  case tok_kind(tokens, pos) == :lparen do
+    true ->
+      pr = parse_params(tokens, pos + 1, [])
+      %{params: lookup(pr, "params"), pos: lookup(pr, "pos")}
+    _ -> %{params: [], pos: pos}
+  end
+end
+
+def parse_optional_return_type(tokens: List, pos: Int) -> Map do
+  case tok_kind(tokens, pos) == :arrow do
+    true -> %{type: tok_lexeme(tokens, pos + 1), pos: pos + 2}
+    _ -> %{type: nil, pos: pos}
+  end
+end
+
 def parse_def(tokens: List, pos: Int) -> Map do
   line = tok_line(tokens, pos)
   p = pos + 1
@@ -314,13 +325,9 @@ def parse_def(tokens: List, pos: Int) -> Map do
   params = lookup(pr, "params")
   p = lookup(pr, "pos")
   # optional return type: -> Type
-  ret_type = nil
-  case tok_kind(tokens, p) == :arrow do
-    true ->
-      ret_type = tok_lexeme(tokens, p + 1)
-      p = p + 2
-    _ -> :ok
-  end
+  ret_result = parse_optional_return_type(tokens, p)
+  ret_type = lookup(ret_result, "type")
+  p = lookup(ret_result, "pos")
   # expect 'do'
   r2 = expect(tokens, p, :kw_do)
   case lookup(r2, "ok") do
@@ -432,7 +439,47 @@ def parse_expression_stmt(tokens: List, pos: Int) -> Map do
 end
 
 def parse_expression(tokens: List, pos: Int) -> Map do
-  parse_comparison(tokens, pos)
+  parse_or(tokens, pos)
+end
+
+def parse_or(tokens: List, pos: Int) -> Map do
+  left_result = parse_and(tokens, pos)
+  case lookup(left_result, "ok") do
+    false -> left_result
+    _ ->
+      left = lookup(left_result, "node")
+      p = lookup(left_result, "pos")
+      kind = tok_kind(tokens, p)
+      case kind == :or_op || kind == :kw_or do
+        true ->
+          right_result = parse_and(tokens, p + 1)
+          case lookup(right_result, "ok") do
+            true -> %{ok: true, node: %{kind: :binary_op, op: "||", left: left, right: lookup(right_result, "node")}, pos: lookup(right_result, "pos")}
+            _ -> right_result
+          end
+        _ -> left_result
+      end
+  end
+end
+
+def parse_and(tokens: List, pos: Int) -> Map do
+  left_result = parse_comparison(tokens, pos)
+  case lookup(left_result, "ok") do
+    false -> left_result
+    _ ->
+      left = lookup(left_result, "node")
+      p = lookup(left_result, "pos")
+      kind = tok_kind(tokens, p)
+      case kind == :and_op || kind == :kw_and do
+        true ->
+          right_result = parse_comparison(tokens, p + 1)
+          case lookup(right_result, "ok") do
+            true -> %{ok: true, node: %{kind: :binary_op, op: "&&", left: left, right: lookup(right_result, "node")}, pos: lookup(right_result, "pos")}
+            _ -> right_result
+          end
+        _ -> left_result
+      end
+  end
 end
 
 def parse_comparison(tokens: List, pos: Int) -> Map do
@@ -554,15 +601,19 @@ def parse_message_send(tokens: List, pos: Int, target: Map) -> Map do
   msg_name = tok_lexeme(tokens, p)
   p = p + 1
   # optional args
-  args = []
-  case tok_kind(tokens, p) == :lparen do
-    true ->
-      args_result = parse_args(tokens, p + 1, [])
-      args = lookup(args_result, "args")
-      p = lookup(args_result, "pos")
-    _ -> :ok
-  end
+  args_result = parse_optional_call_args(tokens, p)
+  args = lookup(args_result, "args")
+  p = lookup(args_result, "pos")
   %{ok: true, node: %{kind: :message_send, target: target, message: msg_name, args: args}, pos: p}
+end
+
+def parse_optional_call_args(tokens: List, pos: Int) -> Map do
+  case tok_kind(tokens, pos) == :lparen do
+    true ->
+      result = parse_args(tokens, pos + 1, [])
+      %{args: lookup(result, "args"), pos: lookup(result, "pos")}
+    _ -> %{args: [], pos: pos}
+  end
 end
 
 def parse_args(tokens: List, pos: Int, args: List) -> Map do

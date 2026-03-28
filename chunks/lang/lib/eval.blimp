@@ -208,6 +208,8 @@ def eval_binary(node: Map, env: Env, registry: ActorRegistry) -> Any do
     ">"  -> left > right
     "<=" -> left <= right
     ">=" -> left >= right
+    "&&" -> left and right
+    "||" -> left or right
     _    -> nil
   end
 end

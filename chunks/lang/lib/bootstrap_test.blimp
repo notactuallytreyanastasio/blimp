@@ -1,54 +1,43 @@
-# Bootstrap tests: blimp_self_eval runs the full
-# self-hosted compiler pipeline on source strings.
-# Source -> Lexer -> Parser -> Evaluator -> Result
+# Bootstrap tests: Blimp compiling Blimp
 
 actor BootstrapTests do
-  test "integer" do
-    assert_eq(blimp_self_eval("42"), 42)
+  test "integer" do assert_eq(blimp_self_eval("42"), 42) end
+  test "arithmetic precedence" do assert_eq(blimp_self_eval("2 + 3 * 4"), 14) end
+  test "string" do assert_eq(blimp_self_eval("\"hello\""), "hello") end
+  test "variable" do assert_eq(blimp_self_eval("x = 99\nx"), 99) end
+  test "function def and call" do assert_eq(blimp_self_eval("def double(n: Int) do n * 2 end\ndouble(21)"), 42) end
+  test "builtin length" do assert_eq(blimp_self_eval("length([1, 2, 3])"), 3) end
+  test "builtin concat" do assert_eq(blimp_self_eval("concat(\"a\", \"b\")"), "ab") end
+  test "comparison" do assert_eq(blimp_self_eval("10 > 3"), true) end
+  test "case expression" do assert_eq(blimp_self_eval("case 2 do\n1 -> :one\n2 -> :two\n_ -> :other\nend"), ":two") end
+  test "nested calls" do assert_eq(blimp_self_eval("def add(a: Int, b: Int) do a + b end\nadd(add(1, 2), add(3, 4))"), 10) end
+  test "head of list" do assert_eq(blimp_self_eval("head([10, 20, 30])"), 10) end
+  test "multi-line program" do assert_eq(blimp_self_eval("x = 10\ny = 20\nz = x + y\nz * 2"), 60) end
+
+  # Boolean operators
+  test "&& operator" do
+    assert_eq(blimp_self_eval("def is_digit(ch: String) -> Bool do\ncode = char_code(ch)\ncode >= 48 && code <= 57\nend\nis_digit(\"5\")"), true)
+  end
+  test "|| operator" do assert_eq(blimp_self_eval("true || false"), true) end
+
+  # Return type annotations
+  test "return type annotation" do
+    assert_eq(blimp_self_eval("def sw(s: String, p: String) -> Bool do\ncase length(p) > length(s) do\ntrue -> false\n_ -> slice(s, 0, length(p)) == p\nend\nend\nsw(\"hello\", \"hel\")"), true)
   end
 
-  test "arithmetic with precedence" do
-    assert_eq(blimp_self_eval("2 + 3 * 4"), 14)
-  end
-
-  test "string" do
-    assert_eq(blimp_self_eval("\"hello\""), "hello")
-  end
-
-  test "variable assignment and lookup" do
-    assert_eq(blimp_self_eval("x = 99\nx"), 99)
-  end
-
-  test "function definition and call" do
-    assert_eq(blimp_self_eval("def double(n: Int) do n * 2 end\ndouble(21)"), 42)
-  end
-
-  test "builtin length" do
-    assert_eq(blimp_self_eval("length([1, 2, 3])"), 3)
-  end
-
-  test "builtin concat" do
-    assert_eq(blimp_self_eval("concat(\"a\", \"b\")"), "ab")
-  end
-
-  test "comparison" do
-    assert_eq(blimp_self_eval("10 > 3"), true)
-  end
-
-  test "case expression" do
-    assert_eq(blimp_self_eval("case 2 do\n1 -> :one\n2 -> :two\n_ -> :other\nend"), ":two")
-  end
-
-  test "nested function calls" do
-    assert_eq(blimp_self_eval("def add(a: Int, b: Int) do a + b end\nadd(add(1, 2), add(3, 4))"), 10)
-  end
-
-  test "list operations" do
-    assert_eq(blimp_self_eval("head([10, 20, 30])"), 10)
-  end
-
-  test "multi-line program" do
-    code = "x = 10\ny = 20\nz = x + y\nz * 2"
-    assert_eq(blimp_self_eval(code), 60)
+  # The real bootstrap: compile a program that defines functions,
+  # calls them with complex args, and produces the right result
+  test "bootstrap: self-hosted compiler compiles a mini-compiler" do
+    code = concat(
+      "def tokenize(src: String) -> List do\n",
+      concat("case length(src) == 0 do\n",
+      concat("true -> []\n",
+      concat("_ -> append([], src)\n",
+      concat("end\n",
+      concat("end\n",
+      concat("tokenize(\"hello\")\n", "")))))))
+    result = blimp_self_eval(code)
+    assert_eq(length(result), 1)
+    assert_eq(head(result), "hello")
   end
 end
