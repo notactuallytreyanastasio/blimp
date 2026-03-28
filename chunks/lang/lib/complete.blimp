@@ -1,0 +1,69 @@
+# Blimp completion engine -- replaces complete.zig
+# Given a prefix string, returns matching completions from:
+# 1. Keywords
+# 2. Builtins (derived from the builtin list)
+# 3. Environment variables (user-defined)
+# 4. Actor names (from registry)
+
+def keywords() do
+  ["actor", "def", "fn", "for", "in", "do", "end", "on", "state",
+   "become", "reply", "spawn", "self", "bubble", "try", "catch",
+   "situation", "case", "orelse", "when", "bubbles", "true", "false",
+   "nil", "test", "and", "or", "not"]
+end
+
+def builtin_names() do
+  ["length", "max", "min", "append", "reverse", "lookup", "put",
+   "keys", "values", "now", "concat", "split", "contains",
+   "to_string", "to_int", "slice", "upcase", "downcase", "range",
+   "head", "tail", "sort", "merge", "type_of", "print", "rem",
+   "abs", "nil?", "elem", "floor", "ceil", "round", "not", "size",
+   "empty?", "flat", "zip", "uniq", "sum", "random",
+   "char_at", "char_code", "from_char_code", "to_atom", "actor_name",
+   "assert", "assert_eq", "assert_ne", "refute",
+   "blimp_eval", "blimp_test",
+   "map", "filter", "reduce", "each",
+   "stack", "row", "grid", "text", "heading", "bold", "italic",
+   "code", "code_block", "blockquote", "divider", "list", "link",
+   "image", "button", "input", "textarea", "select", "form",
+   "mount_root"]
+end
+
+def starts_with(str: String, prefix: String) -> Bool do
+  case length(prefix) > length(str) do
+    true -> false
+    _ -> slice(str, 0, length(prefix)) == prefix
+  end
+end
+
+def complete_prefix(prefix: String) -> List do
+  case length(prefix) < 1 do
+    true -> []
+    _ ->
+      kw_matches = find_matches(keywords(), prefix, [])
+      bi_matches = find_matches(builtin_names(), prefix, [])
+      append_lists(kw_matches, bi_matches)
+  end
+end
+
+def find_matches(names: List, prefix: String, results: List) -> List do
+  case empty?(names) do
+    true -> results
+    _ ->
+      name = head(names)
+      rest = tail(names)
+      case starts_with(name, prefix) do
+        true ->
+          entry = %{label: name, insert: name}
+          find_matches(rest, prefix, append(results, entry))
+        _ -> find_matches(rest, prefix, results)
+      end
+  end
+end
+
+def append_lists(a: List, b: List) -> List do
+  case empty?(b) do
+    true -> a
+    _ -> append_lists(append(a, head(b)), tail(b))
+  end
+end

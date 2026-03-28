@@ -1,0 +1,65 @@
+# Tests for the self-hosted completion engine
+
+def has_label(results: List, name: String) -> Bool do
+  check_labels(results, name)
+end
+
+def check_labels(results: List, name: String) -> Bool do
+  case empty?(results) do
+    true -> false
+    _ ->
+      label = lookup(head(results), "label")
+      case label == name do
+        true -> true
+        _ -> check_labels(tail(results), name)
+      end
+  end
+end
+
+actor CompleteTests do
+  test "matches actor keyword" do
+    results = complete_prefix("ac")
+    assert(has_label(results, "actor"))
+  end
+
+  test "matches stack and state" do
+    results = complete_prefix("sta")
+    assert(has_label(results, "stack"))
+    assert(has_label(results, "state"))
+  end
+
+  test "matches concat and contains" do
+    results = complete_prefix("co")
+    assert(has_label(results, "concat"))
+    assert(has_label(results, "contains"))
+    assert(has_label(results, "code"))
+  end
+
+  test "empty prefix returns nothing" do
+    results = complete_prefix("")
+    assert_eq(length(results), 0)
+  end
+
+  test "no matches returns empty" do
+    results = complete_prefix("zzz")
+    assert_eq(length(results), 0)
+  end
+
+  test "matches filter" do
+    results = complete_prefix("fi")
+    assert(has_label(results, "filter"))
+  end
+
+  test "matches heading and head" do
+    results = complete_prefix("head")
+    assert(has_label(results, "heading"))
+    assert(has_label(results, "head"))
+  end
+
+  test "starts_with works" do
+    assert(starts_with("hello", "hel"))
+    assert(starts_with("hello", "hello"))
+    refute(starts_with("hello", "world"))
+    refute(starts_with("hi", "hello"))
+  end
+end
