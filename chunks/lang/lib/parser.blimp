@@ -1,0 +1,699 @@
+# Blimp parser written in Blimp
+# Recursive descent parser: tokens -> AST (maps)
+#
+# AST nodes are maps: %{kind: :integer_lit, value: 42, line: 1, col: 1}
+# The parser uses a token list + position index for state.
+
+# -- Parser actor --
+
+actor Parser do
+  state tokens: List :: []
+  state pos: Int :: 0
+
+  on :set_tokens(toks: List) do
+    become tokens: toks, pos: 0
+    reply :ok
+  end
+
+  on :parse do
+    result = parse_file(tokens, 0)
+    reply result
+  end
+end
+
+# -- Token helpers --
+
+def tok_at(tokens: List, pos: Int) -> Map do
+  case pos < length(tokens) do
+    true -> elem(tokens, pos)
+    _ -> %{kind: :eof, lexeme: "", line: 0, col: 0}
+  end
+end
+
+def tok_kind(tokens: List, pos: Int) -> Atom do
+  lookup(tok_at(tokens, pos), "kind")
+end
+
+def tok_lexeme(tokens: List, pos: Int) -> String do
+  lookup(tok_at(tokens, pos), "lexeme")
+end
+
+def tok_line(tokens: List, pos: Int) -> Int do
+  lookup(tok_at(tokens, pos), "line")
+end
+
+def tok_col(tokens: List, pos: Int) -> Int do
+  lookup(tok_at(tokens, pos), "col")
+end
+
+# Expect a token kind, return new pos or error
+def expect(tokens: List, pos: Int, kind: Atom) -> Map do
+  case tok_kind(tokens, pos) == kind do
+    true -> %{ok: true, pos: pos + 1}
+    _ -> %{ok: false, error: concat("expected ", concat(to_string(kind), concat(" got ", to_string(tok_kind(tokens, pos))))), pos: pos}
+  end
+end
+
+# Skip newline tokens (not in our lexer but good practice)
+def skip_newlines(tokens: List, pos: Int) -> Int do
+  pos
+end
+
+# -- Top level: parse a file into a list of nodes --
+
+def parse_file(tokens: List, pos: Int) -> Map do
+  parse_file_loop(tokens, pos, [])
+end
+
+def parse_file_loop(tokens: List, pos: Int, nodes: List) -> Map do
+  kind = tok_kind(tokens, pos)
+  case kind do
+    :eof -> %{ok: true, nodes: nodes, pos: pos}
+    :kw_actor ->
+      result = parse_actor_def(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_file_loop(tokens, lookup(result, "pos"), append(nodes, lookup(result, "node")))
+        _ -> result
+      end
+    :kw_def ->
+      result = parse_def(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_file_loop(tokens, lookup(result, "pos"), append(nodes, lookup(result, "node")))
+        _ -> result
+      end
+    _ ->
+      result = parse_expression_stmt(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_file_loop(tokens, lookup(result, "pos"), append(nodes, lookup(result, "node")))
+        _ -> result
+      end
+  end
+end
+
+# -- Actor definition --
+
+def parse_actor_def(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  col = tok_col(tokens, pos)
+  # expect 'actor'
+  r1 = expect(tokens, pos, :kw_actor)
+  case lookup(r1, "ok") do
+    false -> r1
+    _ ->
+  p = lookup(r1, "pos")
+  # actor name (upper identifier, possibly dotted)
+  name = tok_lexeme(tokens, p)
+  p = p + 1
+  # Check for dot notation: Shop.Checkout
+  p = parse_dotted_name(tokens, p, name)
+  name = lookup(p, "name")
+  p = lookup(p, "pos")
+  # expect 'do'
+  r2 = expect(tokens, p, :kw_do)
+  case lookup(r2, "ok") do
+    false -> r2
+    _ ->
+  p = lookup(r2, "pos")
+  # parse body
+  body_result = parse_actor_body(tokens, p, [])
+  case lookup(body_result, "ok") do
+    false -> body_result
+    _ ->
+  p = lookup(body_result, "pos")
+  body = lookup(body_result, "nodes")
+  # expect 'end'
+  r3 = expect(tokens, p, :kw_end)
+  case lookup(r3, "ok") do
+    false -> r3
+    _ ->
+  %{ok: true, node: %{kind: :actor_def, name: name, body: body, line: line, col: col}, pos: lookup(r3, "pos")}
+  end end end end
+end
+
+def parse_dotted_name(tokens: List, pos: Int, name: String) -> Map do
+  case tok_kind(tokens, pos) == :dot do
+    true ->
+      next_name = tok_lexeme(tokens, pos + 1)
+      full = concat(name, concat(".", next_name))
+      parse_dotted_name(tokens, pos + 2, full)
+    _ -> %{name: name, pos: pos}
+  end
+end
+
+def parse_actor_body(tokens: List, pos: Int, nodes: List) -> Map do
+  kind = tok_kind(tokens, pos)
+  case kind do
+    :kw_end -> %{ok: true, nodes: nodes, pos: pos}
+    :eof -> %{ok: false, error: "unexpected EOF in actor body", pos: pos}
+    :kw_state ->
+      result = parse_state_def(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_actor_body(tokens, lookup(result, "pos"), append(nodes, lookup(result, "node")))
+        _ -> result
+      end
+    :kw_on ->
+      result = parse_handler(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_actor_body(tokens, lookup(result, "pos"), append(nodes, lookup(result, "node")))
+        _ -> result
+      end
+    :kw_test ->
+      result = parse_test_def(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_actor_body(tokens, lookup(result, "pos"), append(nodes, lookup(result, "node")))
+        _ -> result
+      end
+    _ -> %{ok: false, error: concat("unexpected token in actor body: ", to_string(kind)), pos: pos}
+  end
+end
+
+# -- State definition --
+
+def parse_state_def(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  p = pos + 1
+  # field name
+  name = tok_lexeme(tokens, p)
+  p = p + 1
+  # expect colon
+  r = expect(tokens, p, :colon)
+  case lookup(r, "ok") do
+    false -> r
+    _ ->
+  p = lookup(r, "pos")
+  # type name
+  type_name = tok_lexeme(tokens, p)
+  p = p + 1
+  # expect ::
+  r2 = expect(tokens, p, :colon_colon)
+  case lookup(r2, "ok") do
+    false ->
+      # No default
+      %{ok: true, node: %{kind: :state_def, name: name, type_name: type_name, default: nil, line: line}, pos: p}
+    _ ->
+  p = lookup(r2, "pos")
+  # parse default expression
+  expr_result = parse_expression(tokens, p)
+  case lookup(expr_result, "ok") do
+    false -> expr_result
+    _ ->
+  %{ok: true, node: %{kind: :state_def, name: name, type_name: type_name, default: lookup(expr_result, "node"), line: line}, pos: lookup(expr_result, "pos")}
+  end end end
+end
+
+# -- Message handler --
+
+def parse_handler(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  p = pos + 1
+  # expect atom (message name)
+  msg_name = tok_lexeme(tokens, p)
+  p = p + 1
+  # parse params if lparen
+  params = []
+  case tok_kind(tokens, p) == :lparen do
+    true ->
+      pr = parse_params(tokens, p + 1, [])
+      params = lookup(pr, "params")
+      p = lookup(pr, "pos")
+    _ -> :ok
+  end
+  # expect 'do'
+  r = expect(tokens, p, :kw_do)
+  case lookup(r, "ok") do
+    false -> r
+    _ ->
+  p = lookup(r, "pos")
+  # parse body
+  body_result = parse_body(tokens, p, [])
+  case lookup(body_result, "ok") do
+    false -> body_result
+    _ ->
+  p = lookup(body_result, "pos")
+  # expect 'end'
+  r2 = expect(tokens, p, :kw_end)
+  case lookup(r2, "ok") do
+    false -> r2
+    _ ->
+  %{ok: true, node: %{kind: :handler, name: msg_name, params: params, body: lookup(body_result, "nodes"), line: line}, pos: lookup(r2, "pos")}
+  end end end
+end
+
+def parse_params(tokens: List, pos: Int, params: List) -> Map do
+  case tok_kind(tokens, pos) == :rparen do
+    true -> %{params: params, pos: pos + 1}
+    _ ->
+      name = tok_lexeme(tokens, pos)
+      p = pos + 1
+      # expect colon
+      r = expect(tokens, p, :colon)
+      case lookup(r, "ok") do
+        true ->
+          p = lookup(r, "pos")
+          type_name = tok_lexeme(tokens, p)
+          p = p + 1
+          param = %{name: name, type_name: type_name}
+          # comma?
+          case tok_kind(tokens, p) == :comma do
+            true -> parse_params(tokens, p + 1, append(params, param))
+            _ -> parse_params(tokens, p, append(params, param))
+          end
+        _ ->
+          # untyped param
+          param = %{name: name, type_name: nil}
+          case tok_kind(tokens, p) == :comma do
+            true -> parse_params(tokens, p + 1, append(params, param))
+            _ -> parse_params(tokens, p, append(params, param))
+          end
+      end
+  end
+end
+
+# -- Test definition --
+
+def parse_test_def(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  p = pos + 1
+  # test name (string)
+  name = tok_lexeme(tokens, p)
+  p = p + 1
+  # expect 'do'
+  r = expect(tokens, p, :kw_do)
+  case lookup(r, "ok") do
+    false -> r
+    _ ->
+  p = lookup(r, "pos")
+  body_result = parse_body(tokens, p, [])
+  case lookup(body_result, "ok") do
+    false -> body_result
+    _ ->
+  p = lookup(body_result, "pos")
+  r2 = expect(tokens, p, :kw_end)
+  case lookup(r2, "ok") do
+    false -> r2
+    _ ->
+  %{ok: true, node: %{kind: :test_def, name: name, body: lookup(body_result, "nodes"), line: line}, pos: lookup(r2, "pos")}
+  end end end
+end
+
+# -- Function definition --
+
+def parse_def(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  p = pos + 1
+  # function name
+  name = tok_lexeme(tokens, p)
+  p = p + 1
+  # expect lparen
+  r = expect(tokens, p, :lparen)
+  case lookup(r, "ok") do
+    false -> r
+    _ ->
+  p = lookup(r, "pos")
+  pr = parse_params(tokens, p, [])
+  params = lookup(pr, "params")
+  p = lookup(pr, "pos")
+  # optional return type: -> Type
+  ret_type = nil
+  case tok_kind(tokens, p) == :arrow do
+    true ->
+      ret_type = tok_lexeme(tokens, p + 1)
+      p = p + 2
+    _ -> :ok
+  end
+  # expect 'do'
+  r2 = expect(tokens, p, :kw_do)
+  case lookup(r2, "ok") do
+    false -> r2
+    _ ->
+  p = lookup(r2, "pos")
+  body_result = parse_body(tokens, p, [])
+  case lookup(body_result, "ok") do
+    false -> body_result
+    _ ->
+  p = lookup(body_result, "pos")
+  r3 = expect(tokens, p, :kw_end)
+  case lookup(r3, "ok") do
+    false -> r3
+    _ ->
+  %{ok: true, node: %{kind: :def, name: name, params: params, return_type: ret_type, body: lookup(body_result, "nodes"), line: line}, pos: lookup(r3, "pos")}
+  end end end end
+end
+
+# -- Body (handler/def/test body) --
+
+def parse_body(tokens: List, pos: Int, stmts: List) -> Map do
+  kind = tok_kind(tokens, pos)
+  case kind do
+    :kw_end -> %{ok: true, nodes: stmts, pos: pos}
+    :eof -> %{ok: false, error: "unexpected EOF in body", pos: pos}
+    :kw_become ->
+      result = parse_become(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_body(tokens, lookup(result, "pos"), append(stmts, lookup(result, "node")))
+        _ -> result
+      end
+    :kw_reply ->
+      result = parse_reply(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_body(tokens, lookup(result, "pos"), append(stmts, lookup(result, "node")))
+        _ -> result
+      end
+    _ ->
+      result = parse_expression_stmt(tokens, pos)
+      case lookup(result, "ok") do
+        true -> parse_body(tokens, lookup(result, "pos"), append(stmts, lookup(result, "node")))
+        _ -> result
+      end
+  end
+end
+
+# -- Statements --
+
+def parse_become(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  p = pos + 1
+  # parse field: value pairs
+  fields_result = parse_kv_list(tokens, p, [])
+  %{ok: true, node: %{kind: :become, fields: lookup(fields_result, "fields"), line: line}, pos: lookup(fields_result, "pos")}
+end
+
+def parse_reply(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  p = pos + 1
+  expr_result = parse_expression(tokens, p)
+  case lookup(expr_result, "ok") do
+    false -> expr_result
+    _ ->
+  %{ok: true, node: %{kind: :reply, value: lookup(expr_result, "node"), line: line}, pos: lookup(expr_result, "pos")}
+  end
+end
+
+def parse_kv_list(tokens: List, pos: Int, fields: List) -> Map do
+  # field_name: expression
+  name = tok_lexeme(tokens, pos)
+  r = expect(tokens, pos + 1, :colon)
+  case lookup(r, "ok") do
+    false -> %{fields: fields, pos: pos}
+    _ ->
+  p = lookup(r, "pos")
+  expr_result = parse_expression(tokens, p)
+  case lookup(expr_result, "ok") do
+    false -> %{fields: fields, pos: pos}
+    _ ->
+  field = %{key: name, value: lookup(expr_result, "node")}
+  p = lookup(expr_result, "pos")
+  case tok_kind(tokens, p) == :comma do
+    true -> parse_kv_list(tokens, p + 1, append(fields, field))
+    _ -> %{fields: append(fields, field), pos: p}
+  end
+  end end
+end
+
+# -- Expressions --
+
+def parse_expression_stmt(tokens: List, pos: Int) -> Map do
+  # Check for assignment: identifier = expr
+  case tok_kind(tokens, pos) == :identifier do
+    true ->
+      case tok_kind(tokens, pos + 1) == :eq do
+        true ->
+          name = tok_lexeme(tokens, pos)
+          line = tok_line(tokens, pos)
+          expr_result = parse_expression(tokens, pos + 2)
+          case lookup(expr_result, "ok") do
+            true -> %{ok: true, node: %{kind: :assign, name: name, value: lookup(expr_result, "node"), line: line}, pos: lookup(expr_result, "pos")}
+            _ -> expr_result
+          end
+        _ -> parse_expression(tokens, pos)
+      end
+    _ -> parse_expression(tokens, pos)
+  end
+end
+
+def parse_expression(tokens: List, pos: Int) -> Map do
+  parse_comparison(tokens, pos)
+end
+
+def parse_comparison(tokens: List, pos: Int) -> Map do
+  left_result = parse_addition(tokens, pos)
+  case lookup(left_result, "ok") do
+    false -> left_result
+    _ ->
+  left = lookup(left_result, "node")
+  p = lookup(left_result, "pos")
+  kind = tok_kind(tokens, p)
+  case kind == :eq_eq || kind == :neq || kind == :lt || kind == :gt || kind == :lte || kind == :gte do
+    true ->
+      op = tok_lexeme(tokens, p)
+      right_result = parse_addition(tokens, p + 1)
+      case lookup(right_result, "ok") do
+        true -> %{ok: true, node: %{kind: :binary_op, op: op, left: left, right: lookup(right_result, "node")}, pos: lookup(right_result, "pos")}
+        _ -> right_result
+      end
+    _ -> left_result
+  end end
+end
+
+def parse_addition(tokens: List, pos: Int) -> Map do
+  left_result = parse_multiplication(tokens, pos)
+  case lookup(left_result, "ok") do
+    false -> left_result
+    _ ->
+  parse_addition_loop(tokens, lookup(left_result, "pos"), lookup(left_result, "node"))
+  end
+end
+
+def parse_addition_loop(tokens: List, pos: Int, left: Map) -> Map do
+  kind = tok_kind(tokens, pos)
+  case kind == :plus || kind == :minus do
+    true ->
+      op = tok_lexeme(tokens, pos)
+      right_result = parse_multiplication(tokens, pos + 1)
+      case lookup(right_result, "ok") do
+        true ->
+          node = %{kind: :binary_op, op: op, left: left, right: lookup(right_result, "node")}
+          parse_addition_loop(tokens, lookup(right_result, "pos"), node)
+        _ -> right_result
+      end
+    _ -> %{ok: true, node: left, pos: pos}
+  end
+end
+
+def parse_multiplication(tokens: List, pos: Int) -> Map do
+  left_result = parse_unary(tokens, pos)
+  case lookup(left_result, "ok") do
+    false -> left_result
+    _ ->
+  parse_multiplication_loop(tokens, lookup(left_result, "pos"), lookup(left_result, "node"))
+  end
+end
+
+def parse_multiplication_loop(tokens: List, pos: Int, left: Map) -> Map do
+  kind = tok_kind(tokens, pos)
+  case kind == :star || kind == :slash do
+    true ->
+      op = tok_lexeme(tokens, pos)
+      right_result = parse_unary(tokens, pos + 1)
+      case lookup(right_result, "ok") do
+        true ->
+          node = %{kind: :binary_op, op: op, left: left, right: lookup(right_result, "node")}
+          parse_multiplication_loop(tokens, lookup(right_result, "pos"), node)
+        _ -> right_result
+      end
+    _ -> %{ok: true, node: left, pos: pos}
+  end
+end
+
+def parse_unary(tokens: List, pos: Int) -> Map do
+  case tok_kind(tokens, pos) == :minus do
+    true ->
+      result = parse_primary(tokens, pos + 1)
+      case lookup(result, "ok") do
+        true -> %{ok: true, node: %{kind: :unary_op, op: "-", operand: lookup(result, "node")}, pos: lookup(result, "pos")}
+        _ -> result
+      end
+    _ -> parse_call(tokens, pos)
+  end
+end
+
+# -- Function calls and postfix --
+
+def parse_call(tokens: List, pos: Int) -> Map do
+  result = parse_primary(tokens, pos)
+  case lookup(result, "ok") do
+    false -> result
+    _ ->
+  node = lookup(result, "node")
+  p = lookup(result, "pos")
+  # Check for function call: name(args)
+  case lookup(node, "kind") == :identifier do
+    true ->
+      case tok_kind(tokens, p) == :lparen do
+        true ->
+          args_result = parse_args(tokens, p + 1, [])
+          name = lookup(node, "name")
+          %{ok: true, node: %{kind: :func_call, name: name, args: lookup(args_result, "args")}, pos: lookup(args_result, "pos")}
+        _ ->
+          # Check for message send: expr <- :msg
+          case tok_kind(tokens, p) == :send do
+            true -> parse_message_send(tokens, p, node)
+            _ -> %{ok: true, node: node, pos: p}
+          end
+      end
+    _ ->
+      case tok_kind(tokens, p) == :send do
+        true -> parse_message_send(tokens, p, node)
+        _ -> %{ok: true, node: node, pos: p}
+      end
+  end end
+end
+
+def parse_message_send(tokens: List, pos: Int, target: Map) -> Map do
+  p = pos + 1
+  msg_name = tok_lexeme(tokens, p)
+  p = p + 1
+  # optional args
+  args = []
+  case tok_kind(tokens, p) == :lparen do
+    true ->
+      args_result = parse_args(tokens, p + 1, [])
+      args = lookup(args_result, "args")
+      p = lookup(args_result, "pos")
+    _ -> :ok
+  end
+  %{ok: true, node: %{kind: :message_send, target: target, message: msg_name, args: args}, pos: p}
+end
+
+def parse_args(tokens: List, pos: Int, args: List) -> Map do
+  case tok_kind(tokens, pos) == :rparen do
+    true -> %{args: args, pos: pos + 1}
+    _ ->
+      expr_result = parse_expression(tokens, pos)
+      case lookup(expr_result, "ok") do
+        false -> %{args: args, pos: pos}
+        _ ->
+          p = lookup(expr_result, "pos")
+          case tok_kind(tokens, p) == :comma do
+            true -> parse_args(tokens, p + 1, append(args, lookup(expr_result, "node")))
+            _ -> parse_args(tokens, p, append(args, lookup(expr_result, "node")))
+          end
+      end
+  end
+end
+
+# -- Primary expressions --
+
+def parse_primary(tokens: List, pos: Int) -> Map do
+  kind = tok_kind(tokens, pos)
+  lexeme = tok_lexeme(tokens, pos)
+  line = tok_line(tokens, pos)
+
+  case kind do
+    :integer -> %{ok: true, node: %{kind: :integer_lit, value: to_int(lexeme), line: line}, pos: pos + 1}
+    :float -> %{ok: true, node: %{kind: :float_lit, value: lexeme, line: line}, pos: pos + 1}
+    :string -> %{ok: true, node: %{kind: :string_lit, value: lexeme, line: line}, pos: pos + 1}
+    :atom -> %{ok: true, node: %{kind: :atom_lit, name: lexeme, line: line}, pos: pos + 1}
+    :true_lit -> %{ok: true, node: %{kind: :bool_lit, value: true, line: line}, pos: pos + 1}
+    :false_lit -> %{ok: true, node: %{kind: :bool_lit, value: false, line: line}, pos: pos + 1}
+    :nil_lit -> %{ok: true, node: %{kind: :nil_lit, line: line}, pos: pos + 1}
+    :identifier -> %{ok: true, node: %{kind: :identifier, name: lexeme, line: line}, pos: pos + 1}
+    :upper_identifier -> %{ok: true, node: %{kind: :identifier, name: lexeme, line: line}, pos: pos + 1}
+    :hole -> %{ok: true, node: %{kind: :hole, line: line}, pos: pos + 1}
+    :lparen ->
+      result = parse_expression(tokens, pos + 1)
+      case lookup(result, "ok") do
+        true ->
+          r = expect(tokens, lookup(result, "pos"), :rparen)
+          case lookup(r, "ok") do
+            true -> %{ok: true, node: lookup(result, "node"), pos: lookup(r, "pos")}
+            _ -> r
+          end
+        _ -> result
+      end
+    :lbracket -> parse_list_lit(tokens, pos)
+    :kw_spawn ->
+      name = tok_lexeme(tokens, pos + 1)
+      %{ok: true, node: %{kind: :spawn, actor_name: name, line: line}, pos: pos + 2}
+    :kw_case -> parse_case(tokens, pos)
+    _ -> %{ok: false, error: concat("unexpected token: ", to_string(kind)), pos: pos}
+  end
+end
+
+def parse_list_lit(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  parse_list_items(tokens, pos + 1, [], line)
+end
+
+def parse_list_items(tokens: List, pos: Int, items: List, line: Int) -> Map do
+  case tok_kind(tokens, pos) == :rbracket do
+    true -> %{ok: true, node: %{kind: :list_lit, elements: items, line: line}, pos: pos + 1}
+    _ ->
+      expr_result = parse_expression(tokens, pos)
+      case lookup(expr_result, "ok") do
+        false -> expr_result
+        _ ->
+          p = lookup(expr_result, "pos")
+          case tok_kind(tokens, p) == :comma do
+            true -> parse_list_items(tokens, p + 1, append(items, lookup(expr_result, "node")), line)
+            _ -> parse_list_items(tokens, p, append(items, lookup(expr_result, "node")), line)
+          end
+      end
+  end
+end
+
+def parse_case(tokens: List, pos: Int) -> Map do
+  line = tok_line(tokens, pos)
+  p = pos + 1
+  # subject
+  subj_result = parse_expression(tokens, p)
+  case lookup(subj_result, "ok") do
+    false -> subj_result
+    _ ->
+  p = lookup(subj_result, "pos")
+  r = expect(tokens, p, :kw_do)
+  case lookup(r, "ok") do
+    false -> r
+    _ ->
+  p = lookup(r, "pos")
+  branches_result = parse_branches(tokens, p, [])
+  case lookup(branches_result, "ok") do
+    false -> branches_result
+    _ ->
+  p = lookup(branches_result, "pos")
+  r2 = expect(tokens, p, :kw_end)
+  case lookup(r2, "ok") do
+    false -> r2
+    _ ->
+  %{ok: true, node: %{kind: :case_expr, subject: lookup(subj_result, "node"), branches: lookup(branches_result, "branches")}, pos: lookup(r2, "pos")}
+  end end end end
+end
+
+def parse_branches(tokens: List, pos: Int, branches: List) -> Map do
+  kind = tok_kind(tokens, pos)
+  case kind do
+    :kw_end -> %{ok: true, branches: branches, pos: pos}
+    :eof -> %{ok: false, error: "unexpected EOF in case", pos: pos}
+    _ ->
+      # parse pattern
+      pat_result = parse_expression(tokens, pos)
+      case lookup(pat_result, "ok") do
+        false -> pat_result
+        _ ->
+      p = lookup(pat_result, "pos")
+      # expect ->
+      r = expect(tokens, p, :arrow)
+      case lookup(r, "ok") do
+        false -> r
+        _ ->
+      p = lookup(r, "pos")
+      # parse body (single expression for now)
+      body_result = parse_expression(tokens, p)
+      case lookup(body_result, "ok") do
+        false -> body_result
+        _ ->
+      branch = %{pattern: lookup(pat_result, "node"), body: lookup(body_result, "node")}
+      parse_branches(tokens, lookup(body_result, "pos"), append(branches, branch))
+      end end end
+  end
+end

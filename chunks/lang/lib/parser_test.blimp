@@ -1,0 +1,109 @@
+# Tests for the self-hosted parser
+
+def parse(src: String) -> Map do
+  l = spawn Lexer
+  l <- :set_source(src)
+  tokens = l <- :tokenize
+  p = spawn Parser
+  p <- :set_tokens(tokens)
+  p <- :parse
+end
+
+def first_node(result: Map) -> Map do
+  head(lookup(result, "nodes"))
+end
+
+actor ParserTests do
+  test "parses integer literal" do
+    result = parse("42")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :integer_lit)
+    assert_eq(lookup(node, "value"), 42)
+  end
+
+  test "parses string literal" do
+    result = parse("\"hello\"")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :string_lit)
+  end
+
+  test "parses variable assignment" do
+    result = parse("x = 42")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :assign)
+    assert_eq(lookup(node, "name"), "x")
+  end
+
+  test "parses binary operation" do
+    result = parse("2 + 3")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :binary_op)
+    assert_eq(lookup(node, "op"), "+")
+  end
+
+  test "parses function call" do
+    result = parse("print(42)")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :func_call)
+    assert_eq(lookup(node, "name"), "print")
+  end
+
+  test "parses function definition" do
+    result = parse("def double(n: Int) do n * 2 end")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :def)
+    assert_eq(lookup(node, "name"), "double")
+    params = lookup(node, "params")
+    assert_eq(length(params), 1)
+    assert_eq(lookup(head(params), "name"), "n")
+    assert_eq(lookup(head(params), "type_name"), "Int")
+  end
+
+  test "parses actor definition" do
+    result = parse("actor Counter do state count: Int :: 0 end")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :actor_def)
+    assert_eq(lookup(node, "name"), "Counter")
+    body = lookup(node, "body")
+    assert_eq(length(body), 1)
+    assert_eq(lookup(head(body), "kind"), :state_def)
+  end
+
+  test "parses message send" do
+    result = parse("c <- :increment")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :message_send)
+    assert_eq(lookup(node, "message"), ":increment")
+  end
+
+  test "parses list literal" do
+    result = parse("[1, 2, 3]")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :list_lit)
+    assert_eq(length(lookup(node, "elements")), 3)
+  end
+
+  test "parses case expression" do
+    result = parse("case x do 1 -> :one _ -> :other end")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :case_expr)
+  end
+
+  test "parses spawn" do
+    result = parse("spawn Counter")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :spawn)
+    assert_eq(lookup(node, "actor_name"), "Counter")
+  end
+end

@@ -159,7 +159,12 @@ def lex_one(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map do
       code = char_code(ch)
       case is_whitespace_code(code) do
         true -> handle_whitespace(code, pos, line, col)
-        _ -> lex_one_char(src, pos, line, col, ch)
+        _ ->
+          # String literal (char code 34 = double quote)
+          case code == 34 do
+            true -> lex_string(src, pos, line, col)
+            _ -> lex_one_char(src, pos, line, col, ch)
+          end
       end
   end
 end
@@ -203,8 +208,7 @@ def lex_one_char(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map 
     "." -> lex_dot(src, pos, line, col)
     ":" -> lex_colon(src, pos, line, col)
 
-    # String literal
-    "\"" -> lex_string(src, pos, line, col)
+    # String literal handled by char code (34) in lex_one above
 
     # Underscore (hole or identifier)
     "_" -> lex_underscore(src, pos, line, col)
@@ -383,11 +387,11 @@ def scan_string(src: String, pos: Int) -> Int do
   case pos >= length(src) do
     true -> pos
     _ ->
-      ch = char_at(src, pos)
-      case ch do
-        "\"" -> pos
-        "\\" -> scan_string(src, pos + 2)
-        _    -> scan_string(src, pos + 1)
+      code = char_code(src, pos)
+      case code do
+        34 -> pos
+        92 -> scan_string(src, pos + 2)
+        _  -> scan_string(src, pos + 1)
       end
   end
 end
