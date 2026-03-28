@@ -93,6 +93,25 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 /* View pane (from REPL) */
 .canvas .view-pane { padding: 0.75rem 1rem; border-top: 1px solid #2a2a3e; }
 .canvas .view-pane:empty { display: none; }
+/* Actor diagram canvas */
+.actor-canvas { position: relative; min-height: 100px; padding: 16px; }
+.actor-canvas svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+.actor-node {
+  display: inline-flex; flex-direction: column; background: #12122a; border: 2px solid #a855f7;
+  border-radius: 10px; padding: 10px 16px; position: absolute; min-width: 120px;
+  box-shadow: 0 0 12px rgba(168,85,247,0.15);
+}
+.actor-node .aname { color: #a855f7; font-weight: 700; font-size: 12px; margin-bottom: 4px; letter-spacing: 0.02em; }
+.actor-node .afield { font-size: 11px; margin: 1px 0; }
+.actor-node .afield .ak { color: #666; }
+.actor-node .afield .av { color: #4ade80; }
+/* Message ray */
+@keyframes dash-flow { to { stroke-dashoffset: -20; } }
+@keyframes ray-glow { 0%{stroke-opacity:0} 20%{stroke-opacity:1} 100%{stroke-opacity:0.3} }
+.msg-ray { stroke: #facc15; stroke-width: 2; fill: none; stroke-dasharray: 6 4; animation: dash-flow 0.6s linear infinite, ray-glow 1s ease-out forwards; }
+.msg-label { font-size: 9px; fill: #facc15; font-family: inherit; }
+.origin-dot { fill: #3f3f46; stroke: #71717a; stroke-width: 1; }
+.origin-label { font-size: 8px; fill: #52525b; font-family: inherit; }
 /* REPL view DSL rendering classes */
 .blimp-stack { display: flex; flex-direction: column; gap: 0.5rem; }
 .blimp-row { display: flex; flex-direction: row; gap: 0.5rem; align-items: center; }
@@ -624,115 +643,143 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     }
   }
 
-  // Reuses the same rendering as the REPL artifact (index.html)
   function populateCanvas(canvas, evalResult, prints) {
     canvas.innerHTML = '';
+    var state = blimpInstance.getState();
+    var actors = state.actors || [];
+    var messages = state.messages || [];
+    var vars = state.vars || [];
 
-    // 1. REPL-style output lines (prints, result, error)
-    var outputDiv = document.createElement('div');
-    outputDiv.className = 'repl-output';
-
-    for (var i = 0; i < prints.length; i++) {
-      var pl = document.createElement('div');
-      pl.className = 'line print-line';
-      pl.textContent = prints[i];
-      outputDiv.appendChild(pl);
-    }
-
+    // -- Error --
     if (!evalResult.ok) {
-      var el = document.createElement('div');
-      el.className = 'line error-line';
-      el.textContent = evalResult.error;
-      outputDiv.appendChild(el);
-      canvas.appendChild(outputDiv);
+      canvas.innerHTML = '<div class="repl-output"><div class="line error-line">' + esc(evalResult.error) + '</div></div>';
       return;
     }
 
-    if (evalResult.value && evalResult.value !== 'nil') {
-      var rl = document.createElement('div');
-      rl.className = 'line result-line';
-      rl.textContent = '=> ' + evalResult.value;
-      outputDiv.appendChild(rl);
-    }
+    // -- Actor diagram (visual boxes + message rays) --
+    if (actors.length > 0) {
+      var diagram = document.createElement('div');
+      diagram.className = 'actor-canvas';
 
-    if (outputDiv.children.length > 0) canvas.appendChild(outputDiv);
+      // Layout actors in a row
+      var spacing = Math.min(180, (canvas.offsetWidth || 600) / (actors.length + 1));
+      var nodePositions = [];
+      var totalH = 0;
 
-    // 2. View pane -- renders view_node tree as DOM (same as REPL view-pane)
-    if (evalResult.view) {
-      var viewPane = document.createElement('div');
-      viewPane.className = 'view-pane';
-      viewPane.appendChild(renderView(evalResult.view));
-      canvas.appendChild(viewPane);
-    }
+      for (var i = 0; i < actors.length; i++) {
+        var a = actors[i];
+        var keys = Object.keys(a.state || {});
+        var nodeH = 30 + keys.length * 16;
+        var x = 60 + i * spacing;
+        var y = 20;
+        nodePositions.push({x: x, y: y, w: 120, h: nodeH, cx: x + 60, cy: y + nodeH/2});
 
-    // 3. State pane -- shows vars + actors (same as REPL state sidebar)
-    var state = blimpInstance.getState();
-    var hasContent = (state.vars && state.vars.length) || (state.actors && state.actors.length);
-
-    if (hasContent) {
-      var statePane = document.createElement('div');
-      statePane.className = 'state-pane';
-
-      // Variables
-      if (state.vars && state.vars.length) {
-        var vh = document.createElement('h2');
-        vh.textContent = 'State';
-        statePane.appendChild(vh);
-        for (var v = 0; v < state.vars.length; v++) {
-          var vd = document.createElement('div');
-          vd.className = 'var';
-          vd.innerHTML = '<span class="var-name">' + esc(state.vars[v].name) + '</span>' +
-            ' <span class="var-eq">=</span> ' +
-            '<span class="var-val">' + esc(state.vars[v].value) + '</span>';
-          statePane.appendChild(vd);
+        var node = document.createElement('div');
+        node.className = 'actor-node';
+        node.style.left = x + 'px';
+        node.style.top = y + 'px';
+        node.innerHTML = '<div class="aname">' + esc(a.type) + '</div>';
+        for (var k = 0; k < keys.length; k++) {
+          node.innerHTML += '<div class="afield"><span class="ak">' + esc(keys[k]) + ':</span> <span class="av">' + esc(String(a.state[keys[k]])) + '</span></div>';
         }
+        diagram.appendChild(node);
+        totalH = Math.max(totalH, y + nodeH + 20);
       }
 
-      // Actors
-      if (state.actors && state.actors.length) {
-        var ah = document.createElement('h2');
-        ah.textContent = 'Actors';
-        if (state.vars && state.vars.length) ah.style.marginTop = '0.75rem';
-        statePane.appendChild(ah);
-        for (var a = 0; a < state.actors.length; a++) {
-          var actor = state.actors[a];
-          var rd = document.createElement('div');
-          rd.className = 'var';
-          rd.innerHTML = '<span class="var-name">' + esc(actor.type) + '</span>';
-          statePane.appendChild(rd);
-          var keys = Object.keys(actor.state || {});
-          for (var k = 0; k < keys.length; k++) {
-            var fd = document.createElement('div');
-            fd.className = 'var';
-            fd.style.paddingLeft = '1rem';
-            fd.innerHTML = '<span class="var-eq">' + esc(keys[k]) + ':</span> ' +
-              '<span class="var-val">' + esc(String(actor.state[keys[k]])) + '</span>';
-            statePane.appendChild(fd);
+      // SVG overlay for message rays
+      if (messages.length > 0) {
+        var svgNS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('viewBox', '0 0 ' + (60 + actors.length * spacing + 60) + ' ' + totalH);
+        svg.style.width = '100%';
+        svg.style.height = totalH + 'px';
+        svg.style.position = 'absolute';
+        svg.style.top = '0';
+        svg.style.left = '0';
+        svg.style.pointerEvents = 'none';
+
+        // Origin point (you/REPL)
+        var originX = 20, originY = totalH / 2;
+        var circle = document.createElementNS(svgNS, 'circle');
+        circle.setAttribute('cx', originX); circle.setAttribute('cy', originY);
+        circle.setAttribute('r', '6'); circle.setAttribute('class', 'origin-dot');
+        svg.appendChild(circle);
+        var olabel = document.createElementNS(svgNS, 'text');
+        olabel.setAttribute('x', originX); olabel.setAttribute('y', originY + 16);
+        olabel.setAttribute('text-anchor', 'middle'); olabel.setAttribute('class', 'origin-label');
+        olabel.textContent = 'you';
+        svg.appendChild(olabel);
+
+        // Draw rays
+        for (var m = 0; m < messages.length; m++) {
+          var msg = messages[m];
+          // Find target actor position
+          var target = null;
+          for (var t = 0; t < actors.length; t++) {
+            if (actors[t].ref === msg.target) { target = nodePositions[t]; break; }
           }
+          if (!target) continue;
+
+          var line = document.createElementNS(svgNS, 'line');
+          line.setAttribute('x1', originX); line.setAttribute('y1', originY);
+          line.setAttribute('x2', target.cx); line.setAttribute('y2', target.cy);
+          line.setAttribute('class', 'msg-ray');
+          line.style.animationDelay = (m * 0.2) + 's';
+          svg.appendChild(line);
+
+          // Label
+          var label = document.createElementNS(svgNS, 'text');
+          label.setAttribute('x', (originX + target.cx) / 2);
+          label.setAttribute('y', (originY + target.cy) / 2 - 6);
+          label.setAttribute('text-anchor', 'middle');
+          label.setAttribute('class', 'msg-label');
+          label.textContent = ':' + msg.message;
+          svg.appendChild(label);
         }
+
+        diagram.insertBefore(svg, diagram.firstChild);
       }
 
-      // Messages
-      if (state.messages && state.messages.length) {
-        var mh = document.createElement('h2');
-        mh.textContent = 'Messages';
-        mh.style.marginTop = '0.75rem';
-        statePane.appendChild(mh);
-        for (var m = 0; m < state.messages.length; m++) {
-          var msg = state.messages[m];
-          var md = document.createElement('div');
-          md.className = 'var';
-          md.innerHTML = '<span class="var-eq">\u2192</span> <span class="var-name">' +
-            esc(msg.target) + '</span> <span class="var-eq">\u2190</span> <span class="var-val">:' +
-            esc(msg.message) + '</span>';
-          statePane.appendChild(md);
-        }
-      }
-
-      canvas.appendChild(statePane);
+      diagram.style.height = totalH + 'px';
+      canvas.appendChild(diagram);
     }
 
-    // Empty state
+    // -- REPL output (prints + result) --
+    var hasOutput = prints.length > 0 || (evalResult.value && evalResult.value !== 'nil');
+    if (hasOutput) {
+      var out = document.createElement('div');
+      out.className = 'repl-output';
+      for (var i = 0; i < prints.length; i++) {
+        out.innerHTML += '<div class="line print-line">' + esc(prints[i]) + '</div>';
+      }
+      if (evalResult.value && evalResult.value !== 'nil') {
+        out.innerHTML += '<div class="line result-line">=> ' + esc(evalResult.value) + '</div>';
+      }
+      canvas.appendChild(out);
+    }
+
+    // -- View pane --
+    if (evalResult.view) {
+      var vp = document.createElement('div');
+      vp.className = 'view-pane';
+      vp.appendChild(renderView(evalResult.view));
+      canvas.appendChild(vp);
+    }
+
+    // -- State text (vars) --
+    if (vars.length > 0) {
+      var sp = document.createElement('div');
+      sp.className = 'state-pane';
+      var sh = document.createElement('h2'); sh.textContent = 'State'; sp.appendChild(sh);
+      for (var v = 0; v < vars.length; v++) {
+        var vd = document.createElement('div'); vd.className = 'var';
+        vd.innerHTML = '<span class="var-name">' + esc(vars[v].name) + '</span> <span class="var-eq">=</span> <span class="var-val">' + esc(vars[v].value) + '</span>';
+        sp.appendChild(vd);
+      }
+      canvas.appendChild(sp);
+    }
+
+    // -- Empty --
     if (canvas.children.length === 0) {
       canvas.innerHTML = '<div class="canvas-empty">Hit Run to see output</div>';
     }
