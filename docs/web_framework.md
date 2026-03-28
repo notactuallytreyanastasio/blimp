@@ -62,7 +62,7 @@ The `blimpSend()` JavaScript function (inlined in the page) submits buttons as f
 
 Two actors and a collection of pure functions:
 
-**`Sessions` actor** — in-memory session store, maps session id (String) to session data (Map). Currently everyone gets session id `"1"` (single-session — see open issues).
+**`Sessions` actor** — in-memory session store, maps session id (String) to session data (Map). Sessions are identified by cookies (`blimp_session=<token>`). New visitors get a generated token; returning visitors are looked up by cookie.
 
 **`HTTPServer` actor** — the accept loop:
 1. `tcp_listen(8080)` on `:start`
@@ -390,14 +390,26 @@ WebSocket support has been partially implemented. The full design is in `docs/la
 - No WS close frame sent on server shutdown
 - Session identity not integrated with WS connections (hardcoded to session "1")
 
-### 2. Session identity (cookies)
+### 2. Session identity (cookies) — DONE
 
-Currently hardcoded to session `"1"` — everyone shares state. Needs:
-- Parse the `Cookie:` header from the raw HTTP request
-- If `blimp_session=<id>` cookie exists, use that session id
-- Otherwise, create a new session and set `Set-Cookie` in the response
+Implemented cookie-based session identity in `web/server.blimp`. Each browser gets its own session with independent state. Pure Blimp string parsing, no Zig changes.
 
-This is pure Blimp string parsing — no Zig changes needed.
+**What was built:**
+- `parse_cookie(raw)` — extracts `blimp_session=<id>` from HTTP Cookie header
+- `find_header(raw, name)` / `find_header_line()` — generic header parsing
+- `find_cookie_value()` / `find_cookie_in_pairs()` — cookie pair parsing
+- `generate_session_token()` — random token via `random()` + `now()`
+- `http_ok_with_cookie()` / `http_redirect_with_cookie()` — Set-Cookie response builders
+- Updated `dispatch()` and accept loop for cookie-based session lookup
+
+**Cookie format:** `Set-Cookie: blimp_session=<r1>-<r2>-<ts>; Path=/; HttpOnly; SameSite=Lax`
+
+**Known limitations:**
+- Token is not cryptographically secure (xorshift PRNG + timestamp)
+- Cookie matching uses `contains()` not `starts_with()` (no builtin for that)
+- No session expiry or cleanup yet
+
+See `docs/lang_design/sessions.md` for the full design doc including WebSocket affinity and expiry plans.
 
 ### 3. Concurrent connections
 

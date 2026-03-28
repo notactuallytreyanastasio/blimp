@@ -27,12 +27,38 @@ def http_ok(body) do
   )
 end
 
+# Build an HTTP 200 response with Set-Cookie header
+def http_ok_with_cookie(body, session_id) do
+  len = length(body)
+  cookie = concat("Set-Cookie: blimp_session=", concat(session_id,
+    "; Path=/; HttpOnly; SameSite=Lax\r\n"))
+  concat(
+    "HTTP/1.1 200 OK\r\n",
+    concat("Content-Type: text/html; charset=utf-8\r\n",
+    concat(cookie,
+    concat("Content-Length: ", concat(to_string(len),
+    concat("\r\nConnection: close\r\n\r\n", body)))))
+  )
+end
+
 # Build an HTTP 302 redirect
 def http_redirect(location) do
   concat(
     "HTTP/1.1 302 Found\r\n",
     concat("Location: ", concat(location,
     "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+  )
+end
+
+# Build an HTTP 302 redirect with Set-Cookie header
+def http_redirect_with_cookie(location, session_id) do
+  cookie = concat("Set-Cookie: blimp_session=", concat(session_id,
+    "; Path=/; HttpOnly; SameSite=Lax\r\n"))
+  concat(
+    "HTTP/1.1 302 Found\r\n",
+    concat("Location: ", concat(location,
+    concat("\r\n", concat(cookie,
+    "Content-Length: 0\r\nConnection: close\r\n\r\n"))))
   )
 end
 
@@ -174,15 +200,86 @@ def blimp_script() do
   </script>"
 end
 
+# -- Cookie / session helpers -----------------------------------------
+
+# Find a header value from raw HTTP request
+# e.g., find_header(raw, "Cookie:") -> "blimp_session=abc123; other=val"
+def find_header(raw: String, header_name: String) -> String do
+  lines = split(raw, "\r\n")
+  find_header_line(lines, header_name)
+end
+
+def find_header_line(lines: List, header_name: String) -> String do
+  case empty?(lines) do
+    true -> ""
+    _ ->
+      line = head(lines)
+      case contains(line, header_name) do
+        true ->
+          # Split on ": " to get the value part after "Header: value"
+          parts = split(line, ": ")
+          case length(parts) do
+            1 -> ""
+            _ -> head(tail(parts))
+          end
+        _ -> find_header_line(tail(lines), header_name)
+      end
+  end
+end
+
+# Parse blimp_session cookie value from raw HTTP request
+# Returns session_id string or "" if no cookie
+def parse_cookie(raw: String) -> String do
+  cookie_header = find_header(raw, "Cookie:")
+  case cookie_header do
+    "" -> ""
+    _ -> find_cookie_value(cookie_header, "blimp_session=")
+  end
+end
+
+# Search cookie pairs for a specific cookie name
+# Cookie header value looks like: "blimp_session=abc123; other=val"
+def find_cookie_value(cookie_str: String, cookie_prefix: String) -> String do
+  # Split on "; " (semicolon-space) to get individual cookies
+  pairs = split(cookie_str, "; ")
+  find_cookie_in_pairs(pairs, cookie_prefix)
+end
+
+def find_cookie_in_pairs(pairs: List, prefix: String) -> String do
+  case empty?(pairs) do
+    true -> ""
+    _ ->
+      pair = head(pairs)
+      case contains(pair, prefix) do
+        true ->
+          # Split on "=" and take the value
+          parts = split(pair, "=")
+          case length(parts) do
+            1 -> ""
+            _ -> head(tail(parts))
+          end
+        _ -> find_cookie_in_pairs(tail(pairs), prefix)
+      end
+  end
+end
+
+# Generate a unique session token using random numbers and timestamp
+# Format: "<random1>-<random2>-<timestamp>"
+# Not cryptographically secure, but unique enough for a dev server
+def generate_session_token() -> String do
+  r1 = random(100000, 999999)
+  r2 = random(100000, 999999)
+  ts = now()
+  concat(to_string(r1), concat("-", concat(to_string(r2), concat("-", to_string(ts)))))
+end
+
 # -- Session store ----------------------------------------------------
 
 actor Sessions do
   state store: Map :: %{}
-  state next_id: Int :: 1
 
   on :new_session do
-    id = to_string(next_id)
-    become next_id: next_id + 1
+    id = generate_session_token()
     reply id
   end
 
@@ -529,7 +626,7 @@ end
 
 # -- Dispatcher -------------------------------------------------------
 
-def dispatch(method: String, raw: String, session_id: String, data: Map) -> String do
+def dispatch(method: String, raw: String, session_id: String, data: Map, is_new: String) -> String do
   case method do
     "POST" ->
       # Extract body: everything after the \r\n\r\n header/body separator
@@ -543,11 +640,18 @@ def dispatch(method: String, raw: String, session_id: String, data: Map) -> Stri
       msg = string_to_msg(msg_str)
       new_data = handle_event(data, msg, form_data)
       Sessions <- :put(session_id, new_data)
-      http_redirect("/")
+      case is_new do
+        "yes" -> http_redirect_with_cookie("/", session_id)
+        _     -> http_redirect("/")
+      end
     _ ->
       view = render_app(data)
       html = to_html(view)
-      http_ok(html_page("Todo", concat("<div class='page'>", concat(html, "</div>"))))
+      page = html_page("Todo", concat("<div class='page'>", concat(html, "</div>")))
+      case is_new do
+        "yes" -> http_ok_with_cookie(page, session_id)
+        _     -> http_ok(page)
+      end
   end
 end
 
@@ -607,11 +711,26 @@ def handle_http_request(client_fd: Int, raw: String) do
   req = parse_request_line(first_line)
   method = lookup(req, "method")
 
-  session_id = "1"
+  # Cookie-based session identity
+  cookie_session = parse_cookie(raw)
+  session_id = case cookie_session do
+    "" -> Sessions <- :new_session
+    _ -> cookie_session
+  end
+  is_new = case cookie_session do
+    "" -> "yes"
+    _  -> "no"
+  end
+
   existing = Sessions <- :get(session_id)
   data = existing orelse initial_state()
 
-  response = dispatch(method, raw, session_id, data)
+  case is_new do
+    "yes" -> Sessions <- :put(session_id, data)
+    _     -> :ok
+  end
+
+  response = dispatch(method, raw, session_id, data, is_new)
 
   tcp_write(client_fd, response)
   tcp_close(client_fd)
