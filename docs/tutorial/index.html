@@ -69,15 +69,39 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 .tab:hover { color: #e4e4e7; }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
-/* Canvas: running system output */
+/* Canvas: running system visualization */
 .canvas {
-  background: #fafafa; color: #111; border-radius: 0 0 8px 8px; padding: 16px; min-height: 120px;
-  font-family: system-ui, sans-serif; border: 1px solid #3f3f46; border-top: none;
+  background: #0f0f12; color: #e4e4e7; border-radius: 0 0 8px 8px; padding: 16px; min-height: 160px;
+  font-family: inherit; border: 1px solid #3f3f46; border-top: none; display: flex; flex-direction: column; gap: 12px;
 }
-.canvas-empty { color: #a1a1aa; font-style: italic; font-size: 14px; text-align: center; padding: 32px 0; }
-.canvas .result-value { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #18181b; font-size: 15px; }
-.canvas .result-error { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #dc2626; font-size: 14px; }
-.canvas .result-prints { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #2563eb; font-size: 13px; margin-bottom: 8px; white-space: pre-wrap; }
+.canvas-empty { color: #52525b; font-style: italic; font-size: 14px; text-align: center; padding: 40px 0; }
+.canvas-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: #52525b; margin-bottom: 2px; }
+/* Actor boxes */
+.actor-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.actor-box {
+  background: #1a1a2e; border: 1px solid #2d2d44; border-radius: 8px; padding: 10px 14px;
+  min-width: 140px; flex: 1; max-width: 280px;
+}
+.actor-name { color: #a855f7; font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+.actor-state { font-size: 12px; color: #a1a1aa; }
+.actor-field { display: flex; gap: 6px; margin: 2px 0; }
+.actor-field-key { color: #71717a; }
+.actor-field-val { color: #4ade80; }
+/* Messages */
+.msg-log { display: flex; flex-direction: column; gap: 3px; }
+.msg-entry { font-size: 12px; color: #71717a; }
+.msg-entry .msg-target { color: #a855f7; }
+.msg-entry .msg-name { color: #facc15; }
+.msg-entry .msg-arrow { color: #52525b; }
+/* Result value */
+.result-value { font-size: 14px; color: #4ade80; padding: 8px 0; }
+.result-error { font-size: 14px; color: #f87171; }
+.result-prints { font-size: 13px; color: #60a5fa; white-space: pre-wrap; }
+/* Variables */
+.var-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.var-pill { background: #1a1a2e; border: 1px solid #2d2d44; border-radius: 6px; padding: 4px 10px; font-size: 12px; }
+.var-pill .var-name { color: #71717a; }
+.var-pill .var-val { color: #e4e4e7; }
 /* View rendering inside canvas */
 .view-preview {
   background: #fafafa; color: #111; border-radius: 8px; padding: 16px; margin: 12px 0;
@@ -581,16 +605,11 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
   function populateCanvas(canvas, evalResult, prints) {
     canvas.innerHTML = '';
 
-    // Show prints first
-    if (prints.length > 0) {
-      var printEl = document.createElement('div');
-      printEl.className = 'result-prints';
-      printEl.textContent = prints.join('\n');
-      canvas.appendChild(printEl);
-    }
+    // Get full system state from WASM
+    var state = blimpInstance.getState();
 
+    // 1. Errors
     if (!evalResult.ok) {
-      // Error
       var errEl = document.createElement('div');
       errEl.className = 'result-error';
       errEl.textContent = evalResult.error;
@@ -598,29 +617,122 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
       return;
     }
 
-    // View output
+    // 2. Print output
+    if (prints.length > 0) {
+      var printEl = document.createElement('div');
+      printEl.className = 'result-prints';
+      printEl.textContent = prints.join('\n');
+      canvas.appendChild(printEl);
+    }
+
+    // 3. Actors -- the running system
+    if (state.actors && state.actors.length > 0) {
+      var label = document.createElement('div');
+      label.className = 'canvas-section-label';
+      label.textContent = 'Actors';
+      canvas.appendChild(label);
+
+      var grid = document.createElement('div');
+      grid.className = 'actor-grid';
+      for (var i = 0; i < state.actors.length; i++) {
+        var actor = state.actors[i];
+        var box = document.createElement('div');
+        box.className = 'actor-box';
+
+        var name = document.createElement('div');
+        name.className = 'actor-name';
+        name.textContent = actor.type;
+        box.appendChild(name);
+
+        var stateDiv = document.createElement('div');
+        stateDiv.className = 'actor-state';
+        var keys = Object.keys(actor.state || {});
+        for (var k = 0; k < keys.length; k++) {
+          var field = document.createElement('div');
+          field.className = 'actor-field';
+          field.innerHTML = '<span class="actor-field-key">' + esc(keys[k]) + ':</span> <span class="actor-field-val">' + esc(String(actor.state[keys[k]])) + '</span>';
+          stateDiv.appendChild(field);
+        }
+        box.appendChild(stateDiv);
+        grid.appendChild(box);
+      }
+      canvas.appendChild(grid);
+    }
+
+    // 4. Messages sent
+    if (state.messages && state.messages.length > 0) {
+      var mlabel = document.createElement('div');
+      mlabel.className = 'canvas-section-label';
+      mlabel.textContent = 'Messages';
+      canvas.appendChild(mlabel);
+
+      var msgLog = document.createElement('div');
+      msgLog.className = 'msg-log';
+      for (var m = 0; m < state.messages.length; m++) {
+        var msg = state.messages[m];
+        var entry = document.createElement('div');
+        entry.className = 'msg-entry';
+        entry.innerHTML = '<span class="msg-arrow">\u2192</span> <span class="msg-target">' + esc(msg.target) + '</span> <span class="msg-arrow">\u2190</span> <span class="msg-name">:' + esc(msg.message) + '</span>';
+        msgLog.appendChild(entry);
+      }
+      canvas.appendChild(msgLog);
+    }
+
+    // 5. View output
     if (evalResult.view) {
+      var vlabel = document.createElement('div');
+      vlabel.className = 'canvas-section-label';
+      vlabel.textContent = 'Rendered View';
+      canvas.appendChild(vlabel);
+
       var preview = document.createElement('div');
       preview.className = 'view-preview';
       preview.appendChild(renderView(evalResult.view));
       canvas.appendChild(preview);
     }
 
-    // Value output (show if not a view, or show alongside)
+    // 6. Return value (if not a view and not nil)
     if (evalResult.value && evalResult.value !== 'nil' && !evalResult.view) {
+      var rlabel = document.createElement('div');
+      rlabel.className = 'canvas-section-label';
+      rlabel.textContent = 'Result';
+      canvas.appendChild(rlabel);
+
       var valEl = document.createElement('div');
       valEl.className = 'result-value';
       valEl.textContent = evalResult.value;
       canvas.appendChild(valEl);
     }
 
-    // If canvas is still empty, show nil
+    // 7. Variables (filter out actor refs and internal stuff)
+    if (state.vars && state.vars.length > 0) {
+      var userVars = state.vars.filter(function(v) {
+        return v.value && v.value.indexOf('ref<') === -1 && v.value.indexOf('fn(') === -1;
+      });
+      if (userVars.length > 0) {
+        var varlabel = document.createElement('div');
+        varlabel.className = 'canvas-section-label';
+        varlabel.textContent = 'Variables';
+        canvas.appendChild(varlabel);
+
+        var varGrid = document.createElement('div');
+        varGrid.className = 'var-grid';
+        for (var vi = 0; vi < userVars.length; vi++) {
+          var pill = document.createElement('span');
+          pill.className = 'var-pill';
+          pill.innerHTML = '<span class="var-name">' + esc(userVars[vi].name) + '</span> = <span class="var-val">' + esc(userVars[vi].value) + '</span>';
+          varGrid.appendChild(pill);
+        }
+        canvas.appendChild(varGrid);
+      }
+    }
+
+    // If canvas still empty
     if (canvas.children.length === 0) {
-      var nilEl = document.createElement('div');
-      nilEl.className = 'result-value';
-      nilEl.style.color = '#71717a';
-      nilEl.textContent = 'nil';
-      canvas.appendChild(nilEl);
+      var empty = document.createElement('div');
+      empty.className = 'canvas-empty';
+      empty.textContent = 'No output';
+      canvas.appendChild(empty);
     }
   }
 
