@@ -1,17 +1,29 @@
-# Test the self-hosted lexer
+# Comprehensive lexer tests
 
 def lex(src: String) -> List do
-  lexer = spawn Lexer
-  lexer <- :set_source(src)
-  lexer <- :tokenize
+  l = spawn Lexer
+  l <- :set_source(src)
+  l <- :tokenize
 end
 
 actor LexerTests do
+  # -- Literals --
   test "tokenizes integers" do
     tokens = lex("42")
-    first = head(tokens)
-    assert_eq(lookup(first, "kind"), :integer)
-    assert_eq(lookup(first, "lexeme"), "42")
+    assert_eq(lookup(head(tokens), "kind"), :integer)
+    assert_eq(lookup(head(tokens), "lexeme"), "42")
+  end
+
+  test "tokenizes multi-digit integers" do
+    tokens = lex("12345")
+    assert_eq(lookup(head(tokens), "kind"), :integer)
+    assert_eq(lookup(head(tokens), "lexeme"), "12345")
+  end
+
+  test "tokenizes zero" do
+    tokens = lex("0")
+    assert_eq(lookup(head(tokens), "kind"), :integer)
+    assert_eq(lookup(head(tokens), "lexeme"), "0")
   end
 
   test "tokenizes identifiers" do
@@ -20,23 +32,21 @@ actor LexerTests do
     assert_eq(lookup(head(tokens), "lexeme"), "foo")
   end
 
+  test "tokenizes snake_case identifiers" do
+    tokens = lex("my_var")
+    assert_eq(lookup(head(tokens), "kind"), :identifier)
+    assert_eq(lookup(head(tokens), "lexeme"), "my_var")
+  end
+
+  test "tokenizes identifiers with question mark" do
+    tokens = lex("empty?")
+    assert_eq(lookup(head(tokens), "kind"), :identifier)
+    assert_eq(lookup(head(tokens), "lexeme"), "empty?")
+  end
+
   test "tokenizes upper identifiers" do
     tokens = lex("Counter")
     assert_eq(lookup(head(tokens), "kind"), :upper_identifier)
-  end
-
-  test "tokenizes keywords" do
-    tokens = lex("actor do end")
-    assert_eq(lookup(head(tokens), "kind"), :kw_actor)
-    assert_eq(lookup(elem(tokens, 1), "kind"), :kw_do)
-    assert_eq(lookup(elem(tokens, 2), "kind"), :kw_end)
-  end
-
-  test "tokenizes operators" do
-    tokens = lex("x <- :msg")
-    assert_eq(lookup(head(tokens), "kind"), :identifier)
-    assert_eq(lookup(elem(tokens, 1), "kind"), :send)
-    assert_eq(lookup(elem(tokens, 2), "kind"), :atom)
   end
 
   test "tokenizes atoms" do
@@ -45,6 +55,159 @@ actor LexerTests do
     assert_eq(lookup(head(tokens), "lexeme"), ":ok")
   end
 
+  test "tokenizes multi-word atoms" do
+    tokens = lex(":hello_world")
+    assert_eq(lookup(head(tokens), "kind"), :atom)
+    assert_eq(lookup(head(tokens), "lexeme"), ":hello_world")
+  end
+
+  # -- Keywords --
+  test "tokenizes all keywords" do
+    tokens = lex("actor do end state on become reply")
+    assert_eq(lookup(head(tokens), "kind"), :kw_actor)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :kw_do)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :kw_end)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :kw_state)
+    assert_eq(lookup(elem(tokens, 4), "kind"), :kw_on)
+    assert_eq(lookup(elem(tokens, 5), "kind"), :kw_become)
+    assert_eq(lookup(elem(tokens, 6), "kind"), :kw_reply)
+  end
+
+  test "tokenizes control flow keywords" do
+    tokens = lex("def fn case spawn for in test")
+    assert_eq(lookup(head(tokens), "kind"), :kw_def)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :kw_fn)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :kw_case)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :kw_spawn)
+    assert_eq(lookup(elem(tokens, 4), "kind"), :kw_for)
+    assert_eq(lookup(elem(tokens, 5), "kind"), :kw_in)
+    assert_eq(lookup(elem(tokens, 6), "kind"), :kw_test)
+  end
+
+  test "tokenizes boolean keywords" do
+    tokens = lex("true false nil and or not")
+    assert_eq(lookup(head(tokens), "kind"), :true_lit)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :false_lit)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :nil_lit)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :kw_and)
+    assert_eq(lookup(elem(tokens, 4), "kind"), :kw_or)
+    assert_eq(lookup(elem(tokens, 5), "kind"), :kw_not)
+  end
+
+  # -- Operators --
+  test "tokenizes arithmetic operators" do
+    tokens = lex("+ - * /")
+    assert_eq(lookup(head(tokens), "kind"), :plus)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :minus)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :star)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :slash)
+  end
+
+  test "tokenizes comparison operators" do
+    tokens = lex("== != < > <= >=")
+    assert_eq(lookup(head(tokens), "kind"), :eq_eq)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :neq)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :lt)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :gt)
+    assert_eq(lookup(elem(tokens, 4), "kind"), :lte)
+    assert_eq(lookup(elem(tokens, 5), "kind"), :gte)
+  end
+
+  test "tokenizes logical operators" do
+    tokens = lex("&& ||")
+    assert_eq(lookup(head(tokens), "kind"), :and_op)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :or_op)
+  end
+
+  test "tokenizes message send" do
+    tokens = lex("x <- :msg")
+    assert_eq(lookup(elem(tokens, 1), "kind"), :send)
+  end
+
+  test "tokenizes arrow" do
+    tokens = lex("-> Type")
+    assert_eq(lookup(head(tokens), "kind"), :arrow)
+  end
+
+  test "tokenizes pipe" do
+    tokens = lex("|>")
+    assert_eq(lookup(head(tokens), "kind"), :pipe)
+  end
+
+  test "tokenizes double colon" do
+    tokens = lex("::")
+    assert_eq(lookup(head(tokens), "kind"), :colon_colon)
+  end
+
+  test "tokenizes dot" do
+    tokens = lex(".")
+    assert_eq(lookup(head(tokens), "kind"), :dot)
+  end
+
+  test "tokenizes dot dot" do
+    tokens = lex("..")
+    assert_eq(lookup(head(tokens), "kind"), :dot_dot)
+  end
+
+  test "tokenizes dot dot dot" do
+    tokens = lex("...")
+    assert_eq(lookup(head(tokens), "kind"), :dot_dot_dot)
+  end
+
+  test "tokenizes plus plus" do
+    tokens = lex("++")
+    assert_eq(lookup(head(tokens), "kind"), :plus_plus)
+  end
+
+  test "tokenizes percent" do
+    tokens = lex("%")
+    assert_eq(lookup(head(tokens), "kind"), :percent)
+  end
+
+  test "tokenizes assignment" do
+    tokens = lex("=")
+    assert_eq(lookup(head(tokens), "kind"), :eq)
+  end
+
+  test "tokenizes underscore as hole" do
+    src = concat(from_char_code(95), " x")
+    tokens = lex(src)
+    assert_eq(lookup(head(tokens), "kind"), :hole)
+  end
+
+  # -- Delimiters --
+  test "tokenizes all delimiters" do
+    tokens = lex("( ) [ ] { } ,")
+    assert_eq(lookup(head(tokens), "kind"), :lparen)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :rparen)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :lbracket)
+    assert_eq(lookup(elem(tokens, 3), "kind"), :rbracket)
+    assert_eq(lookup(elem(tokens, 4), "kind"), :lbrace)
+    assert_eq(lookup(elem(tokens, 5), "kind"), :rbrace)
+    assert_eq(lookup(elem(tokens, 6), "kind"), :comma)
+  end
+
+  # -- Whitespace and comments --
+  test "skips comments" do
+    tokens = lex("x # this is a comment\ny")
+    assert_eq(length(tokens), 3)
+    assert_eq(lookup(head(tokens), "lexeme"), "x")
+    assert_eq(lookup(elem(tokens, 1), "lexeme"), "y")
+  end
+
+  test "tracks line numbers" do
+    tokens = lex("x\ny")
+    assert_eq(lookup(head(tokens), "line"), 1)
+    assert_eq(lookup(elem(tokens, 1), "line"), 2)
+  end
+
+  test "tracks column numbers" do
+    tokens = lex("ab cd")
+    assert_eq(lookup(head(tokens), "col"), 1)
+    assert_eq(lookup(elem(tokens, 1), "col"), 4)
+  end
+
+  # -- Complex inputs --
   test "tokenizes a full expression" do
     tokens = lex("x = 42 + 3")
     assert_eq(length(tokens), 6)
@@ -56,19 +219,6 @@ actor LexerTests do
     assert_eq(lookup(elem(tokens, 5), "kind"), :eof)
   end
 
-  test "tracks line numbers" do
-    tokens = lex("x\ny")
-    assert_eq(lookup(head(tokens), "line"), 1)
-    assert_eq(lookup(elem(tokens, 1), "line"), 2)
-  end
-
-  test "skips comments" do
-    tokens = lex("x # comment\ny")
-    assert_eq(length(tokens), 3)
-    assert_eq(lookup(head(tokens), "lexeme"), "x")
-    assert_eq(lookup(elem(tokens, 1), "lexeme"), "y")
-  end
-
   test "tokenizes actor definition" do
     tokens = lex("actor Counter do\n  state count: Int :: 0\nend")
     assert_eq(lookup(head(tokens), "kind"), :kw_actor)
@@ -76,5 +226,32 @@ actor LexerTests do
     assert_eq(lookup(elem(tokens, 1), "lexeme"), "Counter")
     assert_eq(lookup(elem(tokens, 2), "kind"), :kw_do)
     assert_eq(lookup(elem(tokens, 3), "kind"), :kw_state)
+  end
+
+  test "tokenizes function definition" do
+    tokens = lex("def add(a: Int, b: Int) -> Int do a + b end")
+    assert_eq(lookup(head(tokens), "kind"), :kw_def)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :identifier)
+    assert_eq(lookup(elem(tokens, 1), "lexeme"), "add")
+  end
+
+  test "tokenizes message send with args" do
+    tokens = lex("counter <- :increment(5)")
+    assert_eq(lookup(head(tokens), "kind"), :identifier)
+    assert_eq(lookup(elem(tokens, 1), "kind"), :send)
+    assert_eq(lookup(elem(tokens, 2), "kind"), :atom)
+  end
+
+  test "tokenizes empty input" do
+    tokens = lex("")
+    assert_eq(length(tokens), 1)
+    assert_eq(lookup(head(tokens), "kind"), :eof)
+  end
+
+  test "handles multiple spaces" do
+    tokens = lex("a    b")
+    assert_eq(length(tokens), 3)
+    assert_eq(lookup(head(tokens), "lexeme"), "a")
+    assert_eq(lookup(elem(tokens, 1), "lexeme"), "b")
   end
 end

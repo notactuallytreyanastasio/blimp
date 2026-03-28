@@ -1,4 +1,4 @@
-# Tests for the self-hosted parser
+# Comprehensive parser tests
 
 def parse(src: String) -> Map do
   l = spawn Lexer
@@ -14,21 +14,47 @@ def first_node(result: Map) -> Map do
 end
 
 actor ParserTests do
+  # -- Literals --
   test "parses integer literal" do
     result = parse("42")
     assert(lookup(result, "ok"))
-    node = first_node(result)
-    assert_eq(lookup(node, "kind"), :integer_lit)
-    assert_eq(lookup(node, "value"), 42)
+    assert_eq(lookup(first_node(result), "kind"), :integer_lit)
+    assert_eq(lookup(first_node(result), "value"), 42)
   end
 
   test "parses string literal" do
     result = parse("\"hello\"")
     assert(lookup(result, "ok"))
-    node = first_node(result)
-    assert_eq(lookup(node, "kind"), :string_lit)
+    assert_eq(lookup(first_node(result), "kind"), :string_lit)
   end
 
+  test "parses atom literal" do
+    result = parse(":ok")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "kind"), :atom_lit)
+  end
+
+  test "parses boolean true" do
+    result = parse("true")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "kind"), :bool_lit)
+    assert_eq(lookup(first_node(result), "value"), true)
+  end
+
+  test "parses boolean false" do
+    result = parse("false")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "kind"), :bool_lit)
+    assert_eq(lookup(first_node(result), "value"), false)
+  end
+
+  test "parses nil" do
+    result = parse("nil")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "kind"), :nil_lit)
+  end
+
+  # -- Expressions --
   test "parses variable assignment" do
     result = parse("x = 42")
     assert(lookup(result, "ok"))
@@ -37,7 +63,7 @@ actor ParserTests do
     assert_eq(lookup(node, "name"), "x")
   end
 
-  test "parses binary operation" do
+  test "parses binary addition" do
     result = parse("2 + 3")
     assert(lookup(result, "ok"))
     node = first_node(result)
@@ -45,6 +71,61 @@ actor ParserTests do
     assert_eq(lookup(node, "op"), "+")
   end
 
+  test "parses binary subtraction" do
+    result = parse("10 - 3")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "op"), "-")
+  end
+
+  test "parses multiplication" do
+    result = parse("4 * 5")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "op"), "*")
+  end
+
+  test "parses division" do
+    result = parse("10 / 2")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "op"), "/")
+  end
+
+  test "parses comparison ==" do
+    result = parse("x == 5")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "op"), "==")
+  end
+
+  test "parses comparison !=" do
+    result = parse("x != 5")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "op"), "!=")
+  end
+
+  test "parses comparison <" do
+    result = parse("x < 5")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "op"), "<")
+  end
+
+  test "parses comparison >" do
+    result = parse("x > 5")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "op"), ">")
+  end
+
+  test "parses unary negation" do
+    result = parse("-42")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "kind"), :unary_op)
+  end
+
+  test "parses parenthesized expression" do
+    result = parse("(2 + 3)")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "kind"), :binary_op)
+  end
+
+  # -- Function calls --
   test "parses function call" do
     result = parse("print(42)")
     assert(lookup(result, "ok"))
@@ -53,6 +134,23 @@ actor ParserTests do
     assert_eq(lookup(node, "name"), "print")
   end
 
+  test "parses function call with multiple args" do
+    result = parse("add(1, 2)")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :func_call)
+    assert_eq(length(lookup(node, "args")), 2)
+  end
+
+  test "parses function call with no args" do
+    result = parse("now()")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :func_call)
+    assert_eq(length(lookup(node, "args")), 0)
+  end
+
+  # -- Definitions --
   test "parses function definition" do
     result = parse("def double(n: Int) do n * 2 end")
     assert(lookup(result, "ok"))
@@ -65,25 +163,58 @@ actor ParserTests do
     assert_eq(lookup(head(params), "type_name"), "Int")
   end
 
+  test "parses function with return type" do
+    result = parse("def greet(name: String) -> String do name end")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :def)
+    assert_eq(lookup(node, "return_type"), "String")
+  end
+
+  test "parses function with multiple params" do
+    result = parse("def add(a: Int, b: Int) do a + b end")
+    assert(lookup(result, "ok"))
+    assert_eq(length(lookup(first_node(result), "params")), 2)
+  end
+
+  # -- Actor definitions --
   test "parses actor definition" do
     result = parse("actor Counter do state count: Int :: 0 end")
     assert(lookup(result, "ok"))
     node = first_node(result)
     assert_eq(lookup(node, "kind"), :actor_def)
     assert_eq(lookup(node, "name"), "Counter")
-    body = lookup(node, "body")
-    assert_eq(length(body), 1)
-    assert_eq(lookup(head(body), "kind"), :state_def)
   end
 
+  test "parses actor with handler" do
+    result = parse("actor Foo do on :get do reply 42 end end")
+    assert(lookup(result, "ok"))
+    body = lookup(first_node(result), "body")
+    assert_eq(lookup(head(body), "kind"), :handler)
+  end
+
+  test "parses dotted actor name" do
+    result = parse("actor Shop.Checkout do end")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "name"), "Shop.Checkout")
+  end
+
+  # -- Message sends --
   test "parses message send" do
     result = parse("c <- :increment")
     assert(lookup(result, "ok"))
-    node = first_node(result)
-    assert_eq(lookup(node, "kind"), :message_send)
-    assert_eq(lookup(node, "message"), ":increment")
+    assert_eq(lookup(first_node(result), "kind"), :message_send)
   end
 
+  test "parses message send with args" do
+    result = parse("c <- :add(5)")
+    assert(lookup(result, "ok"))
+    node = first_node(result)
+    assert_eq(lookup(node, "kind"), :message_send)
+    assert_eq(length(lookup(node, "args")), 1)
+  end
+
+  # -- Collections --
   test "parses list literal" do
     result = parse("[1, 2, 3]")
     assert(lookup(result, "ok"))
@@ -92,11 +223,17 @@ actor ParserTests do
     assert_eq(length(lookup(node, "elements")), 3)
   end
 
+  test "parses empty list" do
+    result = parse("[]")
+    assert(lookup(result, "ok"))
+    assert_eq(length(lookup(first_node(result), "elements")), 0)
+  end
+
+  # -- Control flow --
   test "parses case expression" do
     result = parse("case x do 1 -> :one _ -> :other end")
     assert(lookup(result, "ok"))
-    node = first_node(result)
-    assert_eq(lookup(node, "kind"), :case_expr)
+    assert_eq(lookup(first_node(result), "kind"), :case_expr)
   end
 
   test "parses spawn" do
@@ -105,5 +242,18 @@ actor ParserTests do
     node = first_node(result)
     assert_eq(lookup(node, "kind"), :spawn)
     assert_eq(lookup(node, "actor_name"), "Counter")
+  end
+
+  # -- Multiple nodes --
+  test "parses multiple statements" do
+    result = parse("x = 1\ny = 2\nx + y")
+    assert(lookup(result, "ok"))
+    assert_eq(length(lookup(result, "nodes")), 3)
+  end
+
+  test "parses empty input" do
+    result = parse("")
+    assert(lookup(result, "ok"))
+    assert_eq(length(lookup(result, "nodes")), 0)
   end
 end

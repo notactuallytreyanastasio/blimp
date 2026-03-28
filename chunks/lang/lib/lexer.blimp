@@ -163,7 +163,12 @@ def lex_one(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map do
           # String literal (char code 34 = double quote)
           case code == 34 do
             true -> lex_string(src, pos, line, col)
-            _ -> lex_one_char(src, pos, line, col, ch)
+            _ ->
+              # Underscore (char code 95 = _)
+              case code == 95 do
+                true -> lex_underscore(src, pos, line, col)
+                _ -> lex_one_char(src, pos, line, col, ch)
+              end
           end
       end
   end
@@ -211,8 +216,7 @@ def lex_one_char(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map 
 
     # String literal handled by char code (34) in lex_one above
 
-    # Underscore (hole or identifier)
-    "_" -> lex_underscore(src, pos, line, col)
+    # Underscore handled by char code (95) in lex_one above
 
     _ ->
       case is_digit(ch) do

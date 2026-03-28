@@ -1,124 +1,247 @@
-# Tests for the self-hosted evaluator
-# Uses blimp_eval to load lexer+parser+eval to avoid type checker bug
-
-def self_eval(code: String) -> Any do
-  # Load the self-hosted compiler and eval the code
-  loader = concat(
-    "def is_digit(ch: String) -> Bool do case nil?(ch) do true -> false _ -> c = char_code(ch)\nc >= 48 && c <= 57 end end\n",
-    "def is_upper_char(c: Int) -> Bool do c >= 65 && c <= 90 end\n"
-  )
-  # This approach won't work -- too much code to inline.
-  # Instead: test eval_node directly with pre-built AST maps
-  nil
-end
-
-# Test the evaluator functions directly with hand-crafted AST nodes
+# Comprehensive evaluator tests
 
 actor EvalTests do
-  test "eval integer literal" do
+  # -- Literals --
+  test "eval integer" do
     env = spawn Env
-    registry = spawn ActorRegistry
-    node = %{kind: :integer_lit, value: 42, line: 1}
-    result = eval_node(node, env, registry)
-    assert_eq(result, 42)
+    reg = spawn ActorRegistry
+    assert_eq(eval_node(%{kind: :integer_lit, value: 42}, env, reg), 42)
   end
 
-  test "eval string literal" do
+  test "eval zero" do
     env = spawn Env
-    registry = spawn ActorRegistry
-    node = %{kind: :string_lit, value: "hello", line: 1}
-    result = eval_node(node, env, registry)
-    assert_eq(result, "hello")
+    reg = spawn ActorRegistry
+    assert_eq(eval_node(%{kind: :integer_lit, value: 0}, env, reg), 0)
   end
 
-  test "eval binary add" do
+  test "eval negative via unary" do
     env = spawn Env
-    registry = spawn ActorRegistry
+    reg = spawn ActorRegistry
+    node = %{kind: :unary_op, op: "-", operand: %{kind: :integer_lit, value: 5}}
+    assert_eq(eval_node(node, env, reg), -5)
+  end
+
+  test "eval string" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    assert_eq(eval_node(%{kind: :string_lit, value: "hello"}, env, reg), "hello")
+  end
+
+  test "eval atom" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    assert_eq(eval_node(%{kind: :atom_lit, name: ":ok"}, env, reg), ":ok")
+  end
+
+  test "eval bool true" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    assert_eq(eval_node(%{kind: :bool_lit, value: true}, env, reg), true)
+  end
+
+  test "eval bool false" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    assert_eq(eval_node(%{kind: :bool_lit, value: false}, env, reg), false)
+  end
+
+  test "eval nil" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    result = eval_node(%{kind: :nil_lit}, env, reg)
+    assert(nil?(result))
+  end
+
+  # -- Arithmetic --
+  test "eval add" do
+    env = spawn Env
+    reg = spawn ActorRegistry
     node = %{kind: :binary_op, op: "+", left: %{kind: :integer_lit, value: 2}, right: %{kind: :integer_lit, value: 3}}
-    result = eval_node(node, env, registry)
-    assert_eq(result, 5)
+    assert_eq(eval_node(node, env, reg), 5)
   end
 
-  test "eval binary multiply" do
+  test "eval subtract" do
     env = spawn Env
-    registry = spawn ActorRegistry
-    node = %{kind: :binary_op, op: "*", left: %{kind: :integer_lit, value: 6}, right: %{kind: :integer_lit, value: 7}}
-    result = eval_node(node, env, registry)
-    assert_eq(result, 42)
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "-", left: %{kind: :integer_lit, value: 10}, right: %{kind: :integer_lit, value: 3}}
+    assert_eq(eval_node(node, env, reg), 7)
   end
 
+  test "eval multiply" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "*", left: %{kind: :integer_lit, value: 6}, right: %{kind: :integer_lit, value: 7}}
+    assert_eq(eval_node(node, env, reg), 42)
+  end
+
+  test "eval divide" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "/", left: %{kind: :integer_lit, value: 10}, right: %{kind: :integer_lit, value: 2}}
+    assert_eq(eval_node(node, env, reg), 5)
+  end
+
+  # -- Comparisons --
+  test "eval ==" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "==", left: %{kind: :integer_lit, value: 5}, right: %{kind: :integer_lit, value: 5}}
+    assert_eq(eval_node(node, env, reg), true)
+  end
+
+  test "eval != " do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "!=", left: %{kind: :integer_lit, value: 5}, right: %{kind: :integer_lit, value: 3}}
+    assert_eq(eval_node(node, env, reg), true)
+  end
+
+  test "eval <" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "<", left: %{kind: :integer_lit, value: 3}, right: %{kind: :integer_lit, value: 5}}
+    assert_eq(eval_node(node, env, reg), true)
+  end
+
+  test "eval >" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: ">", left: %{kind: :integer_lit, value: 5}, right: %{kind: :integer_lit, value: 3}}
+    assert_eq(eval_node(node, env, reg), true)
+  end
+
+  test "eval &&" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "&&", left: %{kind: :bool_lit, value: true}, right: %{kind: :bool_lit, value: false}}
+    assert_eq(eval_node(node, env, reg), false)
+  end
+
+  test "eval ||" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "||", left: %{kind: :bool_lit, value: false}, right: %{kind: :bool_lit, value: true}}
+    assert_eq(eval_node(node, env, reg), true)
+  end
+
+  # -- Variables --
   test "eval variable assignment and lookup" do
     env = spawn Env
-    registry = spawn ActorRegistry
-    assign = %{kind: :assign, name: "x", value: %{kind: :integer_lit, value: 99}}
-    eval_node(assign, env, registry)
-    lookup_node = %{kind: :identifier, name: "x"}
-    result = eval_node(lookup_node, env, registry)
-    assert_eq(result, 99)
+    reg = spawn ActorRegistry
+    eval_node(%{kind: :assign, name: "x", value: %{kind: :integer_lit, value: 99}}, env, reg)
+    assert_eq(eval_node(%{kind: :identifier, name: "x"}, env, reg), 99)
   end
 
+  test "eval multiple assignments" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    eval_node(%{kind: :assign, name: "a", value: %{kind: :integer_lit, value: 10}}, env, reg)
+    eval_node(%{kind: :assign, name: "b", value: %{kind: :integer_lit, value: 20}}, env, reg)
+    node = %{kind: :binary_op, op: "+", left: %{kind: :identifier, name: "a"}, right: %{kind: :identifier, name: "b"}}
+    assert_eq(eval_node(node, env, reg), 30)
+  end
+
+  # -- Functions --
   test "eval function def and call" do
     env = spawn Env
-    registry = spawn ActorRegistry
-    # def double(n: Int) do n * 2 end
+    reg = spawn ActorRegistry
     def_node = %{kind: :def, name: "double", params: [%{name: "n", type_name: "Int"}], body: [%{kind: :binary_op, op: "*", left: %{kind: :identifier, name: "n"}, right: %{kind: :integer_lit, value: 2}}]}
-    eval_node(def_node, env, registry)
-    # double(21)
+    eval_node(def_node, env, reg)
     call_node = %{kind: :func_call, name: "double", args: [%{kind: :integer_lit, value: 21}]}
-    result = eval_node(call_node, env, registry)
-    assert_eq(result, 42)
+    assert_eq(eval_node(call_node, env, reg), 42)
   end
 
-  test "eval builtin concat" do
+  test "eval nested function calls" do
     env = spawn Env
-    registry = spawn ActorRegistry
-    call = %{kind: :func_call, name: "concat", args: [%{kind: :string_lit, value: "hello"}, %{kind: :string_lit, value: " world"}]}
-    result = eval_node(call, env, registry)
-    assert_eq(result, "hello world")
-  end
-
-  test "eval list literal" do
-    env = spawn Env
-    registry = spawn ActorRegistry
-    list_node = %{kind: :list_lit, elements: [%{kind: :integer_lit, value: 1}, %{kind: :integer_lit, value: 2}, %{kind: :integer_lit, value: 3}]}
-    result = eval_node(list_node, env, registry)
-    assert_eq(length(result), 3)
-  end
-
-  test "eval comparison" do
-    env = spawn Env
-    registry = spawn ActorRegistry
-    node = %{kind: :binary_op, op: ">", left: %{kind: :integer_lit, value: 5}, right: %{kind: :integer_lit, value: 3}}
-    result = eval_node(node, env, registry)
-    assert_eq(result, true)
-  end
-
-  test "eval case expression" do
-    env = spawn Env
-    registry = spawn ActorRegistry
-    # case 2 do 1 -> :one 2 -> :two _ -> :other end
-    case_node = %{kind: :case_expr,
-      subject: %{kind: :integer_lit, value: 2},
-      branches: [
-        %{pattern: %{kind: :integer_lit, value: 1}, body: %{kind: :atom_lit, name: ":one"}},
-        %{pattern: %{kind: :integer_lit, value: 2}, body: %{kind: :atom_lit, name: ":two"}},
-        %{pattern: %{kind: :hole}, body: %{kind: :atom_lit, name: ":other"}}
-      ]}
-    result = eval_node(case_node, env, registry)
-    assert_eq(result, ":two")
-  end
-
-  test "eval function with multiple calls" do
-    env = spawn Env
-    registry = spawn ActorRegistry
-    # def add(a: Int, b: Int) do a + b end
+    reg = spawn ActorRegistry
     def_node = %{kind: :def, name: "add", params: [%{name: "a", type_name: "Int"}, %{name: "b", type_name: "Int"}], body: [%{kind: :binary_op, op: "+", left: %{kind: :identifier, name: "a"}, right: %{kind: :identifier, name: "b"}}]}
-    eval_node(def_node, env, registry)
-    # add(add(1, 2), add(3, 4))
+    eval_node(def_node, env, reg)
     inner1 = %{kind: :func_call, name: "add", args: [%{kind: :integer_lit, value: 1}, %{kind: :integer_lit, value: 2}]}
     inner2 = %{kind: :func_call, name: "add", args: [%{kind: :integer_lit, value: 3}, %{kind: :integer_lit, value: 4}]}
     outer = %{kind: :func_call, name: "add", args: [inner1, inner2]}
-    result = eval_node(outer, env, registry)
-    assert_eq(result, 10)
+    assert_eq(eval_node(outer, env, reg), 10)
+  end
+
+  # -- Builtins --
+  test "eval builtin concat" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    call = %{kind: :func_call, name: "concat", args: [%{kind: :string_lit, value: "hello"}, %{kind: :string_lit, value: " world"}]}
+    assert_eq(eval_node(call, env, reg), "hello world")
+  end
+
+  test "eval builtin length" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    list_node = %{kind: :list_lit, elements: [%{kind: :integer_lit, value: 1}, %{kind: :integer_lit, value: 2}, %{kind: :integer_lit, value: 3}]}
+    call = %{kind: :func_call, name: "length", args: [list_node]}
+    assert_eq(eval_node(call, env, reg), 3)
+  end
+
+  test "eval builtin head" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    list_node = %{kind: :list_lit, elements: [%{kind: :integer_lit, value: 10}, %{kind: :integer_lit, value: 20}]}
+    call = %{kind: :func_call, name: "head", args: [list_node]}
+    assert_eq(eval_node(call, env, reg), 10)
+  end
+
+  # -- Collections --
+  test "eval list literal" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    list_node = %{kind: :list_lit, elements: [%{kind: :integer_lit, value: 1}, %{kind: :integer_lit, value: 2}, %{kind: :integer_lit, value: 3}]}
+    result = eval_node(list_node, env, reg)
+    assert_eq(length(result), 3)
+  end
+
+  test "eval empty list" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    list_node = %{kind: :list_lit, elements: []}
+    result = eval_node(list_node, env, reg)
+    assert_eq(length(result), 0)
+  end
+
+  # -- Case expressions --
+  test "eval case match first" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    case_node = %{kind: :case_expr, subject: %{kind: :integer_lit, value: 1}, branches: [
+      %{pattern: %{kind: :integer_lit, value: 1}, body: %{kind: :atom_lit, name: ":one"}},
+      %{pattern: %{kind: :hole}, body: %{kind: :atom_lit, name: ":other"}}
+    ]}
+    assert_eq(eval_node(case_node, env, reg), ":one")
+  end
+
+  test "eval case match wildcard" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    case_node = %{kind: :case_expr, subject: %{kind: :integer_lit, value: 99}, branches: [
+      %{pattern: %{kind: :integer_lit, value: 1}, body: %{kind: :atom_lit, name: ":one"}},
+      %{pattern: %{kind: :hole}, body: %{kind: :atom_lit, name: ":other"}}
+    ]}
+    assert_eq(eval_node(case_node, env, reg), ":other")
+  end
+
+  test "eval case no match returns nil" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    case_node = %{kind: :case_expr, subject: %{kind: :integer_lit, value: 99}, branches: [
+      %{pattern: %{kind: :integer_lit, value: 1}, body: %{kind: :atom_lit, name: ":one"}}
+    ]}
+    result = eval_node(case_node, env, reg)
+    assert(nil?(result))
+  end
+
+  # -- Spawn --
+  test "eval spawn returns ref" do
+    env = spawn Env
+    reg = spawn ActorRegistry
+    tmpl = %{default_state: %{x: 0}, handlers: []}
+    reg <- :register("Foo", tmpl)
+    spawn_node = %{kind: :spawn, actor_name: "Foo"}
+    result = eval_node(spawn_node, env, reg)
+    assert_eq(lookup(result, "id"), 1)
   end
 end
