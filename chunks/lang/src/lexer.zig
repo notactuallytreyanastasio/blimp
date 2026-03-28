@@ -189,6 +189,15 @@ pub const Lexer = struct {
         const c = self.peek();
         self.advance();
 
+        // Three-character operators: <--
+        if (self.pos + 1 < self.source.len) {
+            if (c == '<' and self.source[self.pos] == '-' and self.source[self.pos + 1] == '-') {
+                self.advance();
+                self.advance();
+                return .{ .kind = .async_send, .lexeme = self.source[start..self.pos], .line = self.line, .col = start_col };
+            }
+        }
+
         // Two-character operators
         if (!self.isAtEnd()) {
             const next_c = self.peek();

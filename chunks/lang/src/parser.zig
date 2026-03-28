@@ -608,7 +608,8 @@ pub const Parser = struct {
     /// Second-lowest precedence. Left side is a normal expression, right side is atom + optional args.
     fn parseSendExpr(self: *Parser) ParseError!Node {
         var left = try self.parseBinaryOr();
-        if (self.current.kind == .send_arrow) {
+        const is_async = self.current.kind == .async_send;
+        if (self.current.kind == .send_arrow or self.current.kind == .async_send) {
             self.advance();
             // Expect atom for message name
             if (self.current.kind != .atom) return error.UnexpectedToken;
@@ -635,6 +636,7 @@ pub const Parser = struct {
                     .target = left_ptr,
                     .message = name,
                     .args = args.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                    .is_async = is_async,
                 } },
                 .loc = left.loc,
             };

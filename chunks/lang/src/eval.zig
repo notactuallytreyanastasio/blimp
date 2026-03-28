@@ -864,6 +864,25 @@ pub const Evaluator = struct {
                     self.msg_log_count += 1;
                 }
 
+                // Async send (<--): enqueue in mailbox, return :queued
+                if (ms.is_async) {
+                    const entry = self.registry.getInstance(ref) orelse return error.TypeError;
+                    // Evaluate args
+                    const args = self.allocator.alloc(*const Value, ms.args.len) catch return error.OutOfMemory;
+                    for (ms.args, 0..) |arg, i| {
+                        args[i] = try self.eval(arg);
+                    }
+                    const MailboxMsg = @import("mailbox.zig").Message;
+                    entry.mailbox.enqueue(self.allocator, MailboxMsg{
+                        .name = ms.message,
+                        .args = args,
+                        .reply_slot = null,
+                    });
+                    const queued = self.allocator.create(Value) catch return error.OutOfMemory;
+                    queued.* = Value{ .atom = "queued" };
+                    return queued;
+                }
+
                 // Look up the instance in the registry
                 const entry = self.registry.getInstance(ref) orelse {
                     self.last_error = errors.notAnActor(self.source);
@@ -1298,7 +1317,7 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, call.name, "blimp_eval")) return self.runtimeEval(call.args);
         if (std.mem.eql(u8, call.name, "blimp_test")) return self.runtimeTest(call.args);
         if (std.mem.eql(u8, call.name, "schedule")) return self.builtinSchedule(call.args);
-        if (std.mem.eql(u8, call.name, "send_async")) return self.builtinSendAsync(call.args);
+        // send_async removed: use <-- operator instead
 
         // Otherwise, look up the builtin
         const func = self.builtins.get(call.name) orelse {

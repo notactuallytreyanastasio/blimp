@@ -203,6 +203,7 @@ pub const Node = struct {
         target: *const Node,
         message: []const u8, // atom name without :
         args: []const Node,
+        is_async: bool = false, // <-- (async) vs <- (sync)
     };
 
     pub const OrElseExpr = struct {

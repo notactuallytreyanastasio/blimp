@@ -62,6 +62,7 @@ pub const Token = struct {
         gt_eq,
         pipe_arrow, // |>
         send_arrow, // <-
+        async_send, // <--
         arrow, // ->
         pipe_pipe, // ||
         amp_amp, // &&
