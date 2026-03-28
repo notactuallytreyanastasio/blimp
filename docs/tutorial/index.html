@@ -69,39 +69,32 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 .tab:hover { color: #e4e4e7; }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
-/* Canvas: running system visualization */
+/* System canvas */
 .canvas {
-  background: #0f0f12; color: #e4e4e7; border-radius: 0 0 8px 8px; padding: 16px; min-height: 160px;
-  font-family: inherit; border: 1px solid #3f3f46; border-top: none; display: flex; flex-direction: column; gap: 12px;
+  background: #0f0f12; color: #e4e4e7; border-radius: 0 0 8px 8px;
+  border: 1px solid #3f3f46; border-top: none; overflow: hidden; position: relative;
 }
-.canvas-empty { color: #52525b; font-style: italic; font-size: 14px; text-align: center; padding: 40px 0; }
+.canvas-empty { color: #52525b; font-style: italic; font-size: 14px; text-align: center; padding: 48px 16px; }
+/* SVG actor graph */
+.system-svg { width: 100%; display: block; }
+/* Below-canvas sections */
+.canvas-sections { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
 .canvas-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: #52525b; margin-bottom: 2px; }
-/* Actor boxes */
-.actor-grid { display: flex; flex-wrap: wrap; gap: 10px; }
-.actor-box {
-  background: #1a1a2e; border: 1px solid #2d2d44; border-radius: 8px; padding: 10px 14px;
-  min-width: 140px; flex: 1; max-width: 280px;
-}
-.actor-name { color: #a855f7; font-weight: 700; font-size: 13px; margin-bottom: 4px; }
-.actor-state { font-size: 12px; color: #a1a1aa; }
-.actor-field { display: flex; gap: 6px; margin: 2px 0; }
-.actor-field-key { color: #71717a; }
-.actor-field-val { color: #4ade80; }
-/* Messages */
-.msg-log { display: flex; flex-direction: column; gap: 3px; }
-.msg-entry { font-size: 12px; color: #71717a; }
-.msg-entry .msg-target { color: #a855f7; }
-.msg-entry .msg-name { color: #facc15; }
-.msg-entry .msg-arrow { color: #52525b; }
-/* Result value */
-.result-value { font-size: 14px; color: #4ade80; padding: 8px 0; }
-.result-error { font-size: 14px; color: #f87171; }
+.result-value { font-size: 14px; color: #4ade80; padding: 4px 0; }
+.result-error { font-size: 14px; color: #f87171; padding: 4px 0; }
 .result-prints { font-size: 13px; color: #60a5fa; white-space: pre-wrap; }
 /* Variables */
-.var-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-.var-pill { background: #1a1a2e; border: 1px solid #2d2d44; border-radius: 6px; padding: 4px 10px; font-size: 12px; }
-.var-pill .var-name { color: #71717a; }
-.var-pill .var-val { color: #e4e4e7; }
+.var-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.var-pill { background: #1a1a2e; border: 1px solid #2d2d44; border-radius: 6px; padding: 3px 8px; font-size: 11px; }
+.var-pill .vn { color: #71717a; }
+.var-pill .vv { color: #e4e4e7; }
+/* Ray animation */
+@keyframes ray-pulse {
+  0% { stroke-opacity: 1; stroke-width: 2; }
+  50% { stroke-opacity: 0.6; stroke-width: 3; }
+  100% { stroke-opacity: 0; stroke-width: 1; }
+}
+.ray { animation: ray-pulse 0.8s ease-out forwards; }
 /* View rendering inside canvas */
 .view-preview {
   background: #fafafa; color: #111; border-radius: 8px; padding: 16px; margin: 12px 0;
@@ -555,22 +548,37 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     blimpInstance.onPrint(function(s) { prints.push(s); });
 
     if (lesson.type === 'predict') {
-      // For predict: eval the shown code to populate the canvas, then check the answer
+      // Eval the shown code to populate the canvas
       blimpInstance.reset();
       var evalResult = blimpInstance.eval(lesson.showCode);
       populateCanvas(canvas, evalResult, prints);
+      // Check the user's typed answer
       var answer = document.getElementById('answer').value.trim();
       result = (answer === lesson.expected) ? {pass:true} : {pass:false, msg:'Expected: ' + lesson.expected};
     } else {
-      // For write/fill/view: eval the user's code, show output in canvas, then validate
       var code = document.getElementById('code').value;
+      // 1. Eval user code and paint the system state
       blimpInstance.reset();
       var evalResult = blimpInstance.eval(code);
       populateCanvas(canvas, evalResult, prints);
+      // 2. Validate separately (may reset, but canvas is already painted)
       if (lesson.validate) {
         result = lesson.validate(code, blimpInstance);
-        // If validate returned a view, re-render the canvas with it
-        if (result.view) populateCanvas(canvas, {ok:true, view:result.view, value:''}, []);
+        // If validate found a view (e.g. from actor <- :render), paint it too
+        if (result.view) {
+          var mount = document.getElementById('view-mount');
+          if (!mount) {
+            // Add view section if not already present
+            var sections = canvas.querySelector('.canvas-sections');
+            if (sections) {
+              var vd = document.createElement('div');
+              vd.innerHTML = '<div class="canvas-section-label">Rendered View</div><div class="view-preview" id="view-mount"></div>';
+              sections.insertBefore(vd, sections.firstChild);
+              mount = document.getElementById('view-mount');
+            }
+          }
+          if (mount) { mount.innerHTML = ''; mount.appendChild(renderView(result.view)); }
+        }
       } else {
         result = {pass:false, msg:'No validator'};
       }
@@ -604,135 +612,114 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 
   function populateCanvas(canvas, evalResult, prints) {
     canvas.innerHTML = '';
-
-    // Get full system state from WASM
     var state = blimpInstance.getState();
+    var actors = (state.actors || []);
+    var messages = (state.messages || []);
+    var vars = (state.vars || []).filter(function(v) {
+      return v.value && v.value.indexOf('ref<') === -1 && v.value.indexOf('fn(') === -1;
+    });
 
-    // 1. Errors
+    // Error state
     if (!evalResult.ok) {
-      var errEl = document.createElement('div');
-      errEl.className = 'result-error';
-      errEl.textContent = evalResult.error;
-      canvas.appendChild(errEl);
+      canvas.innerHTML = '<div class="canvas-sections"><div class="result-error">' + esc(evalResult.error) + '</div></div>';
       return;
     }
 
-    // 2. Print output
+    // -- SVG system diagram: actors as rounded rects, message rays between them --
+    if (actors.length > 0) {
+      var nodeW = 150, nodeH = 60, padX = 30, padY = 20;
+      var cols = Math.min(actors.length, 4);
+      var rows = Math.ceil(actors.length / cols);
+      var svgW = cols * (nodeW + padX) + padX;
+      var svgH = rows * (nodeH + padY) + padY + 30;
+      var positions = {};
+
+      var svg = '<svg class="system-svg" viewBox="0 0 ' + svgW + ' ' + svgH + '" xmlns="http://www.w3.org/2000/svg">';
+      svg += '<defs><filter id="glow"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>';
+
+      // Place actor nodes
+      for (var i = 0; i < actors.length; i++) {
+        var col = i % cols, row = Math.floor(i / cols);
+        var x = padX + col * (nodeW + padX);
+        var y = padY + row * (nodeH + padY);
+        var a = actors[i];
+        positions[a.ref] = { x: x + nodeW/2, y: y + nodeH/2 };
+
+        // Box
+        svg += '<rect x="' + x + '" y="' + y + '" width="' + nodeW + '" height="' + nodeH + '" rx="8" fill="#1a1a2e" stroke="#a855f7" stroke-width="1.5"/>';
+        // Name
+        svg += '<text x="' + (x + nodeW/2) + '" y="' + (y + 16) + '" text-anchor="middle" fill="#a855f7" font-size="12" font-weight="700" font-family="inherit">' + esc(a.type) + '</text>';
+        // State fields
+        var keys = Object.keys(a.state || {});
+        for (var k = 0; k < Math.min(keys.length, 3); k++) {
+          svg += '<text x="' + (x + 8) + '" y="' + (y + 32 + k * 13) + '" fill="#a1a1aa" font-size="10" font-family="inherit">';
+          svg += '<tspan fill="#71717a">' + esc(keys[k]) + ':</tspan> <tspan fill="#4ade80">' + esc(String(a.state[keys[k]])) + '</tspan></text>';
+        }
+      }
+
+      // Message rays with animation
+      for (var m = 0; m < messages.length; m++) {
+        var msg = messages[m];
+        var to = positions[msg.target];
+        if (!to) continue;
+        // Source: leftmost point or REPL origin
+        var fromX = padX / 2, fromY = svgH / 2;
+        // Find if there's a "from" actor (use center of SVG as REPL)
+        svg += '<line x1="' + fromX + '" y1="' + fromY + '" x2="' + to.x + '" y2="' + to.y + '" stroke="#facc15" stroke-width="2" class="ray" style="animation-delay:' + (m * 0.15) + 's"/>';
+        // Message label at midpoint
+        var mx = (fromX + to.x) / 2, my = (fromY + to.y) / 2 - 6;
+        svg += '<text x="' + mx + '" y="' + my + '" text-anchor="middle" fill="#facc15" font-size="9" font-family="inherit" opacity="0.8">:' + esc(msg.message) + '</text>';
+      }
+
+      // REPL node (origin of messages from top-level code)
+      if (messages.length > 0) {
+        svg += '<circle cx="' + (padX/2) + '" cy="' + (svgH/2) + '" r="6" fill="#3f3f46" stroke="#71717a" stroke-width="1"/>';
+        svg += '<text x="' + (padX/2) + '" y="' + (svgH/2 + 18) + '" text-anchor="middle" fill="#52525b" font-size="8" font-family="inherit">you</text>';
+      }
+
+      svg += '</svg>';
+      canvas.innerHTML += svg;
+    }
+
+    // -- Below the graph: sections --
+    var sections = '<div class="canvas-sections">';
+
+    // Prints
     if (prints.length > 0) {
-      var printEl = document.createElement('div');
-      printEl.className = 'result-prints';
-      printEl.textContent = prints.join('\n');
-      canvas.appendChild(printEl);
+      sections += '<div><div class="canvas-section-label">Output</div><div class="result-prints">' + esc(prints.join('\n')) + '</div></div>';
     }
 
-    // 3. Actors -- the running system
-    if (state.actors && state.actors.length > 0) {
-      var label = document.createElement('div');
-      label.className = 'canvas-section-label';
-      label.textContent = 'Actors';
-      canvas.appendChild(label);
-
-      var grid = document.createElement('div');
-      grid.className = 'actor-grid';
-      for (var i = 0; i < state.actors.length; i++) {
-        var actor = state.actors[i];
-        var box = document.createElement('div');
-        box.className = 'actor-box';
-
-        var name = document.createElement('div');
-        name.className = 'actor-name';
-        name.textContent = actor.type;
-        box.appendChild(name);
-
-        var stateDiv = document.createElement('div');
-        stateDiv.className = 'actor-state';
-        var keys = Object.keys(actor.state || {});
-        for (var k = 0; k < keys.length; k++) {
-          var field = document.createElement('div');
-          field.className = 'actor-field';
-          field.innerHTML = '<span class="actor-field-key">' + esc(keys[k]) + ':</span> <span class="actor-field-val">' + esc(String(actor.state[keys[k]])) + '</span>';
-          stateDiv.appendChild(field);
-        }
-        box.appendChild(stateDiv);
-        grid.appendChild(box);
-      }
-      canvas.appendChild(grid);
-    }
-
-    // 4. Messages sent
-    if (state.messages && state.messages.length > 0) {
-      var mlabel = document.createElement('div');
-      mlabel.className = 'canvas-section-label';
-      mlabel.textContent = 'Messages';
-      canvas.appendChild(mlabel);
-
-      var msgLog = document.createElement('div');
-      msgLog.className = 'msg-log';
-      for (var m = 0; m < state.messages.length; m++) {
-        var msg = state.messages[m];
-        var entry = document.createElement('div');
-        entry.className = 'msg-entry';
-        entry.innerHTML = '<span class="msg-arrow">\u2192</span> <span class="msg-target">' + esc(msg.target) + '</span> <span class="msg-arrow">\u2190</span> <span class="msg-name">:' + esc(msg.message) + '</span>';
-        msgLog.appendChild(entry);
-      }
-      canvas.appendChild(msgLog);
-    }
-
-    // 5. View output
+    // View
     if (evalResult.view) {
-      var vlabel = document.createElement('div');
-      vlabel.className = 'canvas-section-label';
-      vlabel.textContent = 'Rendered View';
-      canvas.appendChild(vlabel);
-
-      var preview = document.createElement('div');
-      preview.className = 'view-preview';
-      preview.appendChild(renderView(evalResult.view));
-      canvas.appendChild(preview);
+      sections += '<div><div class="canvas-section-label">Rendered View</div><div class="view-preview" id="view-mount"></div></div>';
     }
 
-    // 6. Return value (if not a view and not nil)
+    // Result value
     if (evalResult.value && evalResult.value !== 'nil' && !evalResult.view) {
-      var rlabel = document.createElement('div');
-      rlabel.className = 'canvas-section-label';
-      rlabel.textContent = 'Result';
-      canvas.appendChild(rlabel);
-
-      var valEl = document.createElement('div');
-      valEl.className = 'result-value';
-      valEl.textContent = evalResult.value;
-      canvas.appendChild(valEl);
+      sections += '<div><div class="canvas-section-label">Result</div><div class="result-value">' + esc(evalResult.value) + '</div></div>';
     }
 
-    // 7. Variables (filter out actor refs and internal stuff)
-    if (state.vars && state.vars.length > 0) {
-      var userVars = state.vars.filter(function(v) {
-        return v.value && v.value.indexOf('ref<') === -1 && v.value.indexOf('fn(') === -1;
-      });
-      if (userVars.length > 0) {
-        var varlabel = document.createElement('div');
-        varlabel.className = 'canvas-section-label';
-        varlabel.textContent = 'Variables';
-        canvas.appendChild(varlabel);
-
-        var varGrid = document.createElement('div');
-        varGrid.className = 'var-grid';
-        for (var vi = 0; vi < userVars.length; vi++) {
-          var pill = document.createElement('span');
-          pill.className = 'var-pill';
-          pill.innerHTML = '<span class="var-name">' + esc(userVars[vi].name) + '</span> = <span class="var-val">' + esc(userVars[vi].value) + '</span>';
-          varGrid.appendChild(pill);
-        }
-        canvas.appendChild(varGrid);
+    // Variables
+    if (vars.length > 0) {
+      sections += '<div><div class="canvas-section-label">Variables</div><div class="var-grid">';
+      for (var vi = 0; vi < vars.length; vi++) {
+        sections += '<span class="var-pill"><span class="vn">' + esc(vars[vi].name) + '</span> = <span class="vv">' + esc(vars[vi].value) + '</span></span>';
       }
+      sections += '</div></div>';
     }
 
-    // If canvas still empty
-    if (canvas.children.length === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'canvas-empty';
-      empty.textContent = 'No output';
-      canvas.appendChild(empty);
+    // Nothing at all
+    if (actors.length === 0 && vars.length === 0 && prints.length === 0 && !evalResult.view && (!evalResult.value || evalResult.value === 'nil')) {
+      sections += '<div class="canvas-empty">No output</div>';
+    }
+
+    sections += '</div>';
+    canvas.innerHTML += sections;
+
+    // Mount the rendered view (needs DOM, can't be innerHTML)
+    if (evalResult.view) {
+      var mount = document.getElementById('view-mount');
+      if (mount) mount.appendChild(renderView(evalResult.view));
     }
   }
 
