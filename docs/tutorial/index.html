@@ -124,31 +124,45 @@ body {
   margin: 0;
 }
 
-.state-pane {
+.right-col {
   width: 280px;
   border-left: 1px solid #2a2a3e;
-  padding: 1rem;
-  overflow-y: auto;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.right-tabs {
+  display: flex;
+  border-bottom: 1px solid #2a2a3e;
   flex-shrink: 0;
 }
-
-.state-pane h2 {
-  font-size: 0.8rem;
-  color: #666;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  margin-bottom: 0.75rem;
+.rt {
+  flex: 1; padding: 0.5rem; background: transparent; border: none;
+  color: #666; font: inherit; font-size: 0.7rem; cursor: pointer;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  border-bottom: 2px solid transparent;
 }
+.rt.active { color: #a855f7; border-bottom-color: #a855f7; }
+.rt:hover { color: #d4d4d4; }
+.right-panel { display: none; overflow-y: auto; padding: 0.75rem 1rem; flex: 1; }
+.right-panel.active { display: block; }
 
 .state-pane .var { margin-bottom: 0.3rem; font-size: 12px; }
 .state-pane .var-name { color: #a6e22e; }
 .state-pane .var-eq { color: #666; }
 .state-pane .var-val { color: #d4d4d4; }
 
+.ref-pane { font-size: 11px; line-height: 1.5; }
+.ref-section { margin-bottom: 1rem; }
+.ref-section h3 { color: #a855f7; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem; }
+.ref-item { color: #999; margin-bottom: 0.15rem; }
+.ref-item b { color: #a6e22e; font-weight: 500; }
+
 @media (max-width: 700px) {
-  .state-pane { display: none; }
+  .right-col { display: none; }
   .repl-pane { padding: 0.75rem 1rem; }
-  .input-row textarea { font-size: 16px; } /* prevent iOS zoom */
+  .input-row textarea { font-size: 16px; }
 }
 </style>
 </head>
@@ -165,9 +179,111 @@ body {
     <div class="repl-pane" id="repl"></div>
     <div class="view-pane" id="view-pane"></div>
   </div>
-  <div class="state-pane">
-    <h2>State</h2>
-    <div id="state-content"></div>
+  <div class="right-col">
+    <div class="right-tabs">
+      <button class="rt active" id="rt-state">State</button>
+      <button class="rt" id="rt-ref">Reference</button>
+    </div>
+    <div class="state-pane right-panel active" id="panel-state">
+      <div id="state-content"></div>
+    </div>
+    <div class="ref-pane right-panel" id="panel-ref">
+      <div class="ref-section">
+        <h3>Math</h3>
+        <div class="ref-item"><b>+ - * /</b> arithmetic</div>
+        <div class="ref-item"><b>rem(a, b)</b> remainder</div>
+        <div class="ref-item"><b>abs(n)</b> absolute value</div>
+        <div class="ref-item"><b>max(a, b)</b> <b>min(a, b)</b></div>
+        <div class="ref-item"><b>floor(n)</b> <b>ceil(n)</b> <b>round(n)</b></div>
+        <div class="ref-item"><b>random(lo, hi)</b> random int</div>
+      </div>
+      <div class="ref-section">
+        <h3>Strings</h3>
+        <div class="ref-item"><b>concat(a, b)</b> join strings</div>
+        <div class="ref-item"><b>split(s, delim)</b> &rarr; list</div>
+        <div class="ref-item"><b>contains(s, sub)</b> &rarr; bool</div>
+        <div class="ref-item"><b>length(s)</b> string length</div>
+        <div class="ref-item"><b>upcase(s)</b> <b>downcase(s)</b></div>
+        <div class="ref-item"><b>slice(s, start, len)</b></div>
+        <div class="ref-item"><b>to_string(v)</b> any &rarr; string</div>
+        <div class="ref-item"><b>to_int(s)</b> string &rarr; int</div>
+      </div>
+      <div class="ref-section">
+        <h3>Lists</h3>
+        <div class="ref-item"><b>length(list)</b> count</div>
+        <div class="ref-item"><b>head(list)</b> first element</div>
+        <div class="ref-item"><b>tail(list)</b> rest</div>
+        <div class="ref-item"><b>append(list, val)</b></div>
+        <div class="ref-item"><b>reverse(list)</b></div>
+        <div class="ref-item"><b>sort(list)</b></div>
+        <div class="ref-item"><b>flat(list)</b> flatten nested</div>
+        <div class="ref-item"><b>zip(a, b)</b> pair up</div>
+        <div class="ref-item"><b>uniq(list)</b> deduplicate</div>
+        <div class="ref-item"><b>sum(list)</b> add all ints</div>
+        <div class="ref-item"><b>elem(list, idx)</b> get by index</div>
+        <div class="ref-item"><b>range(a, b)</b> a..b list</div>
+        <div class="ref-item"><b>empty?(list)</b> &rarr; bool</div>
+      </div>
+      <div class="ref-section">
+        <h3>Higher-Order</h3>
+        <div class="ref-item"><b>map(list, fn)</b> transform each</div>
+        <div class="ref-item"><b>filter(list, fn)</b> keep matches</div>
+        <div class="ref-item"><b>reduce(list, acc, fn)</b> fold</div>
+        <div class="ref-item"><b>each(list, fn)</b> side effects</div>
+      </div>
+      <div class="ref-section">
+        <h3>Maps</h3>
+        <div class="ref-item"><b>%{key: val}</b> literal</div>
+        <div class="ref-item"><b>lookup(map, key)</b></div>
+        <div class="ref-item"><b>put(map, key, val)</b></div>
+        <div class="ref-item"><b>keys(map)</b> <b>values(map)</b></div>
+        <div class="ref-item"><b>merge(a, b)</b></div>
+        <div class="ref-item"><b>size(map)</b> count entries</div>
+      </div>
+      <div class="ref-section">
+        <h3>Views</h3>
+        <div class="ref-item"><b>text(s)</b> span</div>
+        <div class="ref-item"><b>heading(s)</b> <b>heading(s, n)</b></div>
+        <div class="ref-item"><b>stack(...)</b> vertical layout</div>
+        <div class="ref-item"><b>row(...)</b> horizontal layout</div>
+        <div class="ref-item"><b>button(label)</b></div>
+        <div class="ref-item"><b>button(label, :msg)</b></div>
+        <div class="ref-item"><b>bold(s)</b> <b>italic(s)</b></div>
+        <div class="ref-item"><b>code(s)</b> <b>code_block(s)</b></div>
+        <div class="ref-item"><b>divider()</b> horizontal rule</div>
+        <div class="ref-item"><b>list(...)</b> bullet list</div>
+        <div class="ref-item"><b>link(label, url)</b></div>
+        <div class="ref-item"><b>image(src)</b></div>
+        <div class="ref-item"><b>input(name, placeholder)</b></div>
+        <div class="ref-item"><b>textarea(name, placeholder)</b></div>
+      </div>
+      <div class="ref-section">
+        <h3>Actors</h3>
+        <div class="ref-item"><b>actor Name do ... end</b></div>
+        <div class="ref-item"><b>state field: Type :: default</b></div>
+        <div class="ref-item"><b>on :msg do ... end</b></div>
+        <div class="ref-item"><b>become field: val</b></div>
+        <div class="ref-item"><b>reply expr</b></div>
+        <div class="ref-item"><b>Actor <- :msg</b> send</div>
+        <div class="ref-item"><b>spawn Actor</b> new instance</div>
+        <div class="ref-item"><b>actor_name(ref)</b> &rarr; string</div>
+      </div>
+      <div class="ref-section">
+        <h3>Control Flow</h3>
+        <div class="ref-item"><b>case expr do ... end</b></div>
+        <div class="ref-item"><b>for x in list do ... end</b></div>
+        <div class="ref-item"><b>fn(x: T) do ... end</b> lambda</div>
+        <div class="ref-item"><b>|></b> pipe operator</div>
+        <div class="ref-item"><b>orelse</b> nil fallback</div>
+      </div>
+      <div class="ref-section">
+        <h3>Utility</h3>
+        <div class="ref-item"><b>print(v)</b> stdout</div>
+        <div class="ref-item"><b>type_of(v)</b> &rarr; atom</div>
+        <div class="ref-item"><b>nil?(v)</b> <b>not(v)</b></div>
+        <div class="ref-item"><b>now()</b> unix timestamp</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -252,6 +368,20 @@ body {
   createPrompt();
 
   repl.addEventListener('click', function() { if (inputEl) inputEl.focus(); });
+
+  // Right panel tabs
+  var rtState = document.getElementById('rt-state');
+  var rtRef = document.getElementById('rt-ref');
+  var panelState = document.getElementById('panel-state');
+  var panelRef = document.getElementById('panel-ref');
+  rtState.addEventListener('click', function() {
+    rtState.classList.add('active'); rtRef.classList.remove('active');
+    panelState.classList.add('active'); panelRef.classList.remove('active');
+  });
+  rtRef.addEventListener('click', function() {
+    rtRef.classList.add('active'); rtState.classList.remove('active');
+    panelRef.classList.add('active'); panelState.classList.remove('active');
+  });
 
   // ── Show current lesson ────────────────────────────────
 
