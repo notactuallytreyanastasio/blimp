@@ -213,6 +213,62 @@ pub const Evaluator = struct {
                     }
                 }
             }
+
+            // Property-based tests: run each property 100 times with random inputs
+            for (def.body) |body_node| {
+                if (body_node.kind != .property_def) continue;
+                const prop = body_node.kind.property_def;
+                total += 1;
+
+                const raw_name = prop.name;
+                const prop_name = if (raw_name.len >= 2 and raw_name[0] == '"' and raw_name[raw_name.len - 1] == '"')
+                    raw_name[1 .. raw_name.len - 1]
+                else
+                    raw_name;
+
+                var prop_passed = true;
+                var run: u32 = 0;
+                const num_runs: u32 = 100;
+                while (run < num_runs) : (run += 1) {
+                    self.env.pushScope();
+                    // Evaluate state defaults
+                    for (def.body) |state_node| {
+                        if (state_node.kind != .state_def) continue;
+                        for (state_node.kind.state_def.fields) |field| {
+                            if (field.default_value) |default_ptr| {
+                                const val = self.eval(default_ptr.*) catch continue;
+                                self.env.define(field.key, val);
+                            }
+                        }
+                    }
+
+                    // Run property body (given + assertions)
+                    for (prop.body) |stmt| {
+                        _ = self.eval(stmt) catch {
+                            prop_passed = false;
+                            break;
+                        };
+                    }
+                    self.env.popScope();
+                    if (!prop_passed) break;
+                }
+
+                if (prop_passed) {
+                    stderr.writeAll("\x1b[32m.\x1b[0m") catch {};
+                    passed += 1;
+                } else {
+                    stderr.writeAll("\x1b[31mF\x1b[0m") catch {};
+                    failed += 1;
+                    if (failure_count < 256) {
+                        failure_details[failure_count] = .{
+                            .actor_name = def.name,
+                            .test_name = prop_name,
+                            .error_msg = "property falsified",
+                        };
+                        failure_count += 1;
+                    }
+                }
+            }
         }
 
         // Summary
@@ -342,6 +398,13 @@ pub const Evaluator = struct {
             },
 
             // Assignment
+            .given_stmt => |given| {
+                // Evaluate generator expression and bind result
+                const val = try self.eval(given.generator.*);
+                self.env.define(given.name, val);
+                return val;
+            },
+
             .assign_stmt => |assign| {
                 const val = try self.eval(assign.value.*);
                 self.env.define(assign.name, val);
@@ -394,8 +457,8 @@ pub const Evaluator = struct {
             // Actor definition
             .actor_def => |def| return self.evalActorDef(def),
 
-            // Test def is stored during actor eval; standalone is skipped in normal mode
-            .test_def => {
+            // Test/property defs stored during actor eval; standalone is skipped
+            .test_def, .property_def => {
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = .nil;
                 return v;

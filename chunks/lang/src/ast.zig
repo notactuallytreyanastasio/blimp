@@ -56,6 +56,8 @@ pub const Node = struct {
         spread_each: SpreadExpr,  // ..list, fn -> each
         self_ref: void,
         test_def: TestDef,
+        property_def: PropertyDef,
+        given_stmt: GivenStmt,
     };
 
     pub const ActorDef = struct {
@@ -252,6 +254,18 @@ pub const Node = struct {
     pub const TestDef = struct {
         name: []const u8, // test description string
         body: []const Node,
+    };
+
+    /// Property test: property "name" do given x: gen ... assert ... end
+    pub const PropertyDef = struct {
+        name: []const u8, // property description
+        body: []const Node, // contains given_stmt + assertions
+    };
+
+    /// given x: generator -- binds a generated value
+    pub const GivenStmt = struct {
+        name: []const u8, // variable name
+        generator: *const Node, // generator expression (func_call)
     };
 
     /// For loop: for x in list do ... end

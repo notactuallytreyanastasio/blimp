@@ -62,6 +62,12 @@ pub const BuiltinRegistry = struct {
         reg.register("print", &builtinPrint);
         // Test assertions
         reg.register("assert", &builtinAssert);
+        // Generators for property-based testing
+        reg.register("gen_integer", &builtinGenInteger);
+        reg.register("gen_string", &builtinGenString);
+        reg.register("gen_boolean", &builtinGenBoolean);
+        reg.register("gen_list", &builtinGenList);
+        reg.register("gen_one_of", &builtinGenOneOf);
         reg.register("assert_eq", &builtinAssertEq);
         reg.register("assert_ne", &builtinAssertNe);
         reg.register("refute", &builtinRefute);
@@ -1027,6 +1033,85 @@ fn builtinRandom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = val };
     return result;
+}
+
+// ============================================================
+// Property-based testing generators
+// ============================================================
+
+fn nextRandom() u64 {
+    random_state ^= random_state << 13;
+    random_state ^= random_state >> 7;
+    random_state ^= random_state << 17;
+    return random_state;
+}
+
+/// gen_integer(min, max) -> random Int in [min, max]
+fn builtinGenInteger(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .integer or args[1].* != .integer) return error.TypeError;
+    const lo = args[0].integer;
+    const hi = args[1].integer;
+    const range: u64 = @intCast(@max(hi - lo + 1, 1));
+    const val = lo + @as(i64, @intCast(nextRandom() % range));
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .integer = val };
+    return result;
+}
+
+/// gen_string(max_len) -> random String of printable ASCII
+fn builtinGenString(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const max_len: usize = @intCast(@max(0, args[0].integer));
+    const len = nextRandom() % (max_len + 1);
+    const buf = allocator.alloc(u8, len) catch return error.OutOfMemory;
+    for (buf) |*c| {
+        c.* = @intCast(32 + nextRandom() % 95); // printable ASCII 32-126
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = buf };
+    return result;
+}
+
+/// gen_boolean() -> random true or false
+fn builtinGenBoolean(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .boolean = nextRandom() % 2 == 0 };
+    return result;
+}
+
+/// gen_list(gen_fn_name_not_used, max_len) -> random list of integers
+/// For now generates lists of random integers. Full generator composition later.
+fn builtinGenList(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    // gen_list(max_len) or gen_list(max_len, min_val, max_val)
+    if (args.len < 1 or args[0].* != .integer) return error.TypeError;
+    const max_len: usize = @intCast(@max(0, args[0].integer));
+    const min_val: i64 = if (args.len >= 2 and args[1].* == .integer) args[1].integer else -100;
+    const max_val: i64 = if (args.len >= 3 and args[2].* == .integer) args[2].integer else 100;
+    const len = nextRandom() % (max_len + 1);
+    const items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
+    const range: u64 = @intCast(@max(max_val - min_val + 1, 1));
+    for (items) |*item| {
+        const v = allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .integer = min_val + @as(i64, @intCast(nextRandom() % range)) };
+        item.* = v;
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = items };
+    return result;
+}
+
+/// gen_one_of([a, b, c]) -> random element from the list
+fn builtinGenOneOf(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    const items = args[0].list;
+    if (items.len == 0) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+    const idx = nextRandom() % items.len;
+    return items[idx];
 }
 
 // ============================================================

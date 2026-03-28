@@ -101,7 +101,8 @@ pub const Parser = struct {
             .kw_state => self.parseStateDef(),
             .kw_on => self.parseMessageHandler(),
             .kw_test => self.parseTestDef(),
-            // Reject anything else - actor definition bodies should only have state, on, and test
+            .kw_property => self.parsePropertyDef(),
+            // Reject anything else - actor definition bodies should only have state, on, test, property
             else => error.UnexpectedToken,
         };
     }
@@ -156,6 +157,48 @@ pub const Parser = struct {
         try self.expect(.kw_end);
         return Node{
             .kind = .{ .test_def = .{
+                .name = name,
+                .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            } },
+            .loc = loc,
+        };
+    }
+
+    /// Parse: property "description" do ... end
+    fn parsePropertyDef(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_property);
+        if (self.current.kind != .string) return error.UnexpectedToken;
+        const name = self.current.lexeme;
+        self.advance();
+        try self.expect(.kw_do);
+        self.skipNewlines();
+        var body: std.ArrayList(Node) = .empty;
+        while (self.current.kind != .kw_end and self.current.kind != .eof) {
+            if (self.current.kind == .kw_given) {
+                // Parse: given name: generator_expr
+                const given_loc = self.currentLoc();
+                self.advance(); // skip 'given'
+                if (self.current.kind != .identifier) return error.UnexpectedToken;
+                const var_name = self.current.lexeme;
+                self.advance();
+                try self.expect(.colon);
+                const gen_expr = try self.parseExpression();
+                const gen_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
+                gen_ptr.* = gen_expr;
+                body.append(self.allocator, Node{
+                    .kind = .{ .given_stmt = .{ .name = var_name, .generator = gen_ptr } },
+                    .loc = given_loc,
+                }) catch return error.OutOfMemory;
+            } else {
+                const stmt = try self.parseHandlerBody();
+                body.append(self.allocator, stmt) catch return error.OutOfMemory;
+            }
+            self.skipNewlines();
+        }
+        try self.expect(.kw_end);
+        return Node{
+            .kind = .{ .property_def = .{
                 .name = name,
                 .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
