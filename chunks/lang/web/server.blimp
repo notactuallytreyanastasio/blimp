@@ -65,22 +65,39 @@ def html_styles() do
     hr { border: none; border-top: 1px solid rgb(221,221,221); margin: 16px 0; }
     img, video { max-width: 100%; }
     .page { max-width: 800px; margin: 40px auto; padding: 24px; }
+    div[data-actor] { border: 1px solid rgb(221,221,221); border-radius: 8px; padding: 16px; background: white; }
   </style>"
 end
 
-# Tiny JS: button clicks become form POSTs
+# JS: button clicks become form POSTs with actor routing
+# Walks up the DOM to find the nearest data-actor boundary,
+# so messages go to the right actor in a multi-actor page.
 def blimp_script() do
   "<script>
     function blimpSend(btn) {
       var msg = btn.getAttribute('data-sends');
+      var actor = '';
+      var el = btn;
+      while (el) {
+        if (el.getAttribute && el.getAttribute('data-actor')) {
+          actor = el.getAttribute('data-actor');
+          break;
+        }
+        el = el.parentElement;
+      }
       var form = document.createElement('form');
       form.method = 'POST';
       form.action = window.location.pathname;
-      var input = document.createElement('input');
-      input.type = 'hidden';
-      input.name = 'msg';
-      input.value = msg;
-      form.appendChild(input);
+      var msgInput = document.createElement('input');
+      msgInput.type = 'hidden';
+      msgInput.name = 'msg';
+      msgInput.value = msg;
+      form.appendChild(msgInput);
+      var actorInput = document.createElement('input');
+      actorInput.type = 'hidden';
+      actorInput.name = 'actor';
+      actorInput.value = actor;
+      form.appendChild(actorInput);
       document.body.appendChild(form);
       form.submit();
     }
@@ -109,34 +126,85 @@ actor Sessions do
   end
 end
 
-# -- App: Counter -----------------------------------------------------
+# -- View Composition -------------------------------------------------
+#
+# mount(actor_ref) sends :render to an actor and wraps the result
+# in a mount boundary (div with data-actor attr). This lets
+# buttons inside a mounted actor's view route messages back to
+# that actor, not the parent.
 
-# Initial state for a new session
-def initial_state() do
-  %{count: 0}
+def mount(actor_ref) do
+  name = actor_name(actor_ref)
+  view = actor_ref <- :render
+  mount_root(name, view)
 end
 
-# Pure event handler: state x message -> new state
-def handle_event(data: Map, msg: Atom) -> Map do
-  case msg do
-    :increment -> put(data, "count", lookup(data, "count") + 1)
-    :decrement -> put(data, "count", lookup(data, "count") - 1)
-    :reset     -> put(data, "count", 0)
-    _          -> data
+# -- Counter actor ----------------------------------------------------
+
+actor Counter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+  end
+
+  on :decrement do
+    become count: count - 1
+  end
+
+  on :reset do
+    become count: 0
+  end
+
+  on :render do
+    reply stack(
+      heading("Counter", 2),
+      text(concat("Count: ", to_string(count))),
+      row(
+        button("- 1", :decrement),
+        button("Reset", :reset),
+        button("+ 1", :increment)
+      )
+    )
   end
 end
 
-# Pure render: state -> view_node
-def render_app(data: Map) -> ViewNode do
-  count = lookup(data, "count")
-  stack(
-    heading("Blimp Counter"),
-    text(concat("Count: ", to_string(count))),
-    row(
-      button("- 1", :decrement),
-      button("Reset", :reset),
-      button("+ 1", :increment)
+# -- Greeter actor ----------------------------------------------------
+
+actor Greeter do
+  state name: String :: "World"
+  state excited: Int :: 0
+
+  on :toggle_excitement do
+    case excited do
+      0 -> become excited: 1
+      _ -> become excited: 0
+    end
+  end
+
+  on :render do
+    greeting = case excited do
+      0 -> concat("Hello, ", concat(name, "."))
+      _ -> concat("Hello, ", concat(name, "!!!"))
+    end
+    reply stack(
+      heading("Greeter", 2),
+      text(greeting),
+      button("Toggle excitement", :toggle_excitement)
     )
+  end
+end
+
+# -- Root page render (composes both actors) --------------------------
+
+def render_app() do
+  stack(
+    heading("Blimp Multi-Actor Demo"),
+    text("Two independent actors composed in one page:"),
+    divider(),
+    mount(Counter),
+    divider(),
+    mount(Greeter)
   )
 end
 
@@ -174,31 +242,48 @@ def last_elem(items: List) -> String do
   end
 end
 
-def string_to_msg(s: String) -> Atom do
-  case s do
-    "increment" -> :increment
-    "decrement" -> :decrement
-    "reset"     -> :reset
+# Route a message to the Counter actor
+def route_counter(msg_str: String) do
+  case msg_str do
+    "increment" -> Counter <- :increment
+    "decrement" -> Counter <- :decrement
+    "reset"     -> Counter <- :reset
     _           -> :unknown
+  end
+end
+
+# Route a message to the Greeter actor
+def route_greeter(msg_str: String) do
+  case msg_str do
+    "toggle_excitement" -> Greeter <- :toggle_excitement
+    _                   -> :unknown
+  end
+end
+
+# Route a message to the correct actor based on data-actor name
+def route_message(target_actor: String, msg_str: String) do
+  case target_actor do
+    "Counter"  -> route_counter(msg_str)
+    "Greeter"  -> route_greeter(msg_str)
+    _          -> :unknown
   end
 end
 
 # -- Dispatcher -------------------------------------------------------
 
-def dispatch(method: String, raw: String, session_id: String, data: Map) -> String do
+def dispatch(method: String, raw: String) -> String do
   case method do
     "POST" ->
       lines = split(raw, "\r\n")
       body = last_elem(lines)
       msg_str = form_value(body, "msg")
-      msg = string_to_msg(msg_str)
-      new_data = handle_event(data, msg)
-      Sessions <- :put(session_id, new_data)
+      target = form_value(body, "actor")
+      route_message(target, msg_str)
       http_redirect("/")
     _ ->
-      view = render_app(data)
+      view = render_app()
       html = to_html(view)
-      http_ok(html_page("Counter", concat("<div class='page'>", concat(html, "</div>"))))
+      http_ok(html_page("Blimp App", concat("<div class='page'>", concat(html, "</div>"))))
   end
 end
 
@@ -223,11 +308,9 @@ actor HTTPServer do
     req = parse_request_line(first_line)
     method = lookup(req, "method")
 
-    session_id = "1"
-    existing = Sessions <- :get(session_id)
-    data = existing orelse initial_state()
-
-    response = dispatch(method, raw, session_id, data)
+    # Actors manage their own state via become,
+    # no session store needed for single-user mode
+    response = dispatch(method, raw)
 
     tcp_write(client_fd, response)
     tcp_close(client_fd)

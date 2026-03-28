@@ -43,6 +43,7 @@ pub const BuiltinRegistry = struct {
         reg.register("split", &builtinSplit);
         reg.register("contains", &builtinContains);
         reg.register("to_string", &builtinToString);
+        reg.register("to_atom", &builtinToAtom);
         reg.register("to_int", &builtinToInt);
         reg.register("slice", &builtinSlice);
         reg.register("upcase", &builtinUpcase);
@@ -54,6 +55,7 @@ pub const BuiltinRegistry = struct {
         reg.register("merge", &builtinMerge);
         reg.register("values", &builtinValues);
         reg.register("type_of", &builtinTypeOf);
+        reg.register("actor_name", &builtinActorName);
         reg.register("print", &builtinPrint);
         reg.register("rem", &builtinRem);
         reg.register("abs", &builtinAbs);
@@ -89,6 +91,7 @@ pub const BuiltinRegistry = struct {
         reg.register("video", &viewVideo);
         reg.register("canvas", &viewCanvas);
         reg.register("button", &viewButton);
+        reg.register("mount_root", &viewMountRoot);
         // HTTP / TCP builtins (native only)
         reg.register("to_html", &builtinToHtml);
         reg.register("tcp_listen", &builtinTcpListen);
@@ -394,6 +397,20 @@ fn builtinToString(allocator: std.mem.Allocator, args: []const *const Value) Eva
     return result;
 }
 
+/// to_atom("hello") => :hello — converts a string to an atom
+fn builtinToAtom(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    switch (args[0].*) {
+        .string => |s| {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .atom = s };
+            return result;
+        },
+        .atom => return args[0],
+        else => return error.TypeError,
+    }
+}
+
 /// to_int("42") => 42
 fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
@@ -601,6 +618,20 @@ fn builtinTypeOf(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     };
     result.* = Value{ .atom = type_name };
     return result;
+}
+
+/// actor_name(actor_ref) -> String: returns the type name of an actor reference
+/// e.g. actor_name(Counter) => "Counter", actor_name(Shop.Checkout) => "Shop.Checkout"
+fn builtinActorName(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    switch (args[0].*) {
+        .actor_ref => |ref| {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .string = ref.type_name };
+            return result;
+        },
+        else => return error.TypeError,
+    }
 }
 
 /// print(value) => prints to stdout, returns the value (identity)
@@ -993,6 +1024,19 @@ fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
         return makeViewNode(allocator, "button", attrs, args[0..1]);
     }
     return makeViewNode(allocator, "button", &.{}, args[0..1]);
+}
+
+/// mount_root("ActorName", view_node) — wraps a child actor's view in a mount boundary
+/// Creates a ViewNode with tag "mount" and data-actor attr for message routing.
+/// Used by the Blimp-level mount() helper: mount(Actor) calls Actor <- :render
+/// and wraps the result with mount_root(name, view).
+fn viewMountRoot(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    if (args[1].* != .view_node) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "data-actor", .val = args[0] };
+    return makeViewNode(allocator, "mount", attrs, args[1..2]);
 }
 
 // ============================================================
@@ -1430,6 +1474,16 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
                     try buf.appendSlice(allocator, " data-lang=\"");
                     try buf.appendSlice(allocator, lang);
                     try buf.appendSlice(allocator, "\"");
+                } else if (std.mem.eql(u8, attr.key, "data-actor")) {
+                    // Mount boundary: wrap child views with actor identity for message routing
+                    var val_buf: [256]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    const name = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
+                    try buf.appendSlice(allocator, " data-actor=\"");
+                    try buf.appendSlice(allocator, name);
+                    try buf.appendSlice(allocator, "\"");
                 }
             }
             if (std.mem.eql(u8, node.tag, "divider") or std.mem.eql(u8, node.tag, "image")) {
@@ -1494,6 +1548,7 @@ fn blimpTagToHtml(tag: []const u8) []const u8 {
     if (std.mem.eql(u8, tag, "video")) return "video";
     if (std.mem.eql(u8, tag, "canvas")) return "canvas";
     if (std.mem.eql(u8, tag, "button")) return "button";
+    if (std.mem.eql(u8, tag, "mount")) return "div"; // mount boundary renders as div with data-actor
     return "div";
 }
 
@@ -1570,4 +1625,100 @@ test "type_of view_node returns :view_node" {
     args[0] = node;
     const result = try builtinTypeOf(alloc, args);
     try std.testing.expect(result.eql(Value{ .atom = "view_node" }));
+}
+
+test "mount_root creates mount ViewNode with data-actor attr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const name = try alloc.create(Value);
+    name.* = Value{ .string = "Counter" };
+
+    const child = try alloc.create(Value);
+    child.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{} } };
+
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = name;
+    args[1] = child;
+
+    const result = try viewMountRoot(alloc, args);
+    try std.testing.expect(result.* == .view_node);
+    try std.testing.expectEqualStrings("mount", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 1), result.view_node.attrs.len);
+    try std.testing.expectEqualStrings("data-actor", result.view_node.attrs[0].key);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .string = "Counter" }));
+    try std.testing.expectEqual(@as(usize, 1), result.view_node.children.len);
+}
+
+test "mount_root rejects non-string name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const name = try alloc.create(Value);
+    name.* = Value{ .integer = 42 };
+
+    const child = try alloc.create(Value);
+    child.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{} } };
+
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = name;
+    args[1] = child;
+
+    const result = viewMountRoot(alloc, args);
+    try std.testing.expectError(error.TypeError, result);
+}
+
+test "mount_root rejects non-view child" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const name = try alloc.create(Value);
+    name.* = Value{ .string = "Counter" };
+
+    const child = try alloc.create(Value);
+    child.* = Value{ .string = "not a view" };
+
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = name;
+    args[1] = child;
+
+    const result = viewMountRoot(alloc, args);
+    try std.testing.expectError(error.TypeError, result);
+}
+
+test "to_html renders mount as div with data-actor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build a mount node: mount_root("Counter", text("hello"))
+    const text_str = try alloc.create(Value);
+    text_str.* = Value{ .string = "hello" };
+    const text_node = try alloc.create(Value);
+    text_node.* = Value{ .view_node = .{
+        .tag = "text",
+        .attrs = &.{},
+        .children = @as([]const *const Value, &.{text_str}),
+    } };
+
+    const actor_name = try alloc.create(Value);
+    actor_name.* = Value{ .string = "Counter" };
+    const mount_attrs = try alloc.alloc(ViewAttr, 1);
+    mount_attrs[0] = .{ .key = "data-actor", .val = actor_name };
+    const mount_children = try alloc.alloc(*const Value, 1);
+    mount_children[0] = text_node;
+    const mount_node = try alloc.create(Value);
+    mount_node.* = Value{ .view_node = .{
+        .tag = "mount",
+        .attrs = mount_attrs,
+        .children = mount_children,
+    } };
+
+    const html_args = try alloc.alloc(*const Value, 1);
+    html_args[0] = mount_node;
+    const result = try builtinToHtml(alloc, html_args);
+    try std.testing.expectEqualStrings("<div data-actor=\"Counter\"><span>hello</span></div>", result.string);
 }
