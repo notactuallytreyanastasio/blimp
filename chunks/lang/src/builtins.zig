@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Value = @import("value.zig").Value;
+const is_wasm = builtin.target.cpu.arch == .wasm32;
 
 pub const EvalError = error{
     UndefinedVariable,
@@ -103,26 +105,22 @@ pub const BuiltinRegistry = struct {
         // Actor introspection
         reg.register("actor_name", &builtinActorName);
         reg.register("to_atom", &builtinToAtom);
-        // HTTP / TCP builtins (native only)
-        reg.register("to_html", &builtinToHtml);
-        reg.register("tcp_listen", &builtinTcpListen);
-        reg.register("tcp_accept", &builtinTcpAccept);
-        reg.register("tcp_read", &builtinTcpRead);
-        reg.register("tcp_write", &builtinTcpWrite);
-        reg.register("tcp_close", &builtinTcpClose);
-        // WebSocket builtins
-        reg.register("ws_accept_key", &builtinWsAcceptKey);
-        reg.register("ws_read_frame", &builtinWsReadFrame);
-        reg.register("ws_write_frame", &builtinWsWriteFrame);
-        // View diffing
-        reg.register("view_diff", &builtinViewDiff);
-        // Process builtins (native only)
-        reg.register("fork", &builtinFork);
-        reg.register("waitpid", &builtinWaitpid);
-        reg.register("exit", &builtinExit);
-        // Non-blocking IO builtins (native only)
-        reg.register("tcp_set_nonblocking", &builtinTcpSetNonblocking);
-        reg.register("tcp_poll", &builtinTcpPoll);
+        // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
+        reg.register("to_html", &builtinToHtml_impl);
+        reg.register("tcp_listen", &builtinTcpListen_impl);
+        reg.register("tcp_accept", &builtinTcpAccept_impl);
+        reg.register("tcp_read", &builtinTcpRead_impl);
+        reg.register("tcp_write", &builtinTcpWrite_impl);
+        reg.register("tcp_close", &builtinTcpClose_impl);
+        reg.register("ws_accept_key", &builtinWsAcceptKey_impl);
+        reg.register("ws_read_frame", &builtinWsReadFrame_impl);
+        reg.register("ws_write_frame", &builtinWsWriteFrame_impl);
+        reg.register("view_diff", &builtinViewDiff_impl);
+        reg.register("fork", &builtinFork_impl);
+        reg.register("waitpid", &builtinWaitpid_impl);
+        reg.register("exit", &builtinExit_impl);
+        reg.register("tcp_set_nonblocking", &builtinTcpSetNonblocking_impl);
+        reg.register("tcp_poll", &builtinTcpPoll_impl);
         return reg;
     }
 
@@ -303,8 +301,7 @@ fn builtinKeys(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
 
 fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
-    const builtin = @import("builtin");
-    const timestamp: i64 = if (builtin.target.cpu.arch == .wasm32)
+    const timestamp: i64 = if (is_wasm)
         0 // TODO: import JS Date.now() via extern
     else
         std.time.timestamp();
@@ -664,8 +661,7 @@ fn builtinPrint(_: std.mem.Allocator, args: []const *const Value) EvalError!*con
     var buf: [4096]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     args[0].format(fbs.writer());
-    const builtin = @import("builtin");
-    if (builtin.target.cpu.arch != .wasm32) {
+    if (!is_wasm) {
         const stdout = std.fs.File.stdout();
         stdout.writeAll(fbs.getWritten()) catch {};
         stdout.writeAll("\n") catch {};
@@ -679,7 +675,7 @@ fn builtinPrint(_: std.mem.Allocator, args: []const *const Value) EvalError!*con
 fn builtinAssert(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     if (!args[0].truthy()) {
-        const stderr = std.fs.File.stderr();
+        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
         stderr.writeAll("\x1b[31mAssertion failed: value is falsy\x1b[0m\n") catch {};
         var buf: [256]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buf);
@@ -696,7 +692,7 @@ fn builtinAssert(_: std.mem.Allocator, args: []const *const Value) EvalError!*co
 fn builtinAssertEq(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
     if (!args[0].eql(args[1].*)) {
-        const stderr = std.fs.File.stderr();
+        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
         stderr.writeAll("\x1b[31mAssertion failed: values not equal\x1b[0m\n") catch {};
         var buf: [256]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buf);
@@ -718,7 +714,7 @@ fn builtinAssertEq(_: std.mem.Allocator, args: []const *const Value) EvalError!*
 fn builtinAssertNe(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
     if (args[0].eql(args[1].*)) {
-        const stderr = std.fs.File.stderr();
+        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
         stderr.writeAll("\x1b[31mAssertion failed: values should not be equal\x1b[0m\n") catch {};
         var buf: [256]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buf);
@@ -735,7 +731,7 @@ fn builtinAssertNe(_: std.mem.Allocator, args: []const *const Value) EvalError!*
 fn builtinRefute(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     if (args[0].truthy()) {
-        const stderr = std.fs.File.stderr();
+        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
         stderr.writeAll("\x1b[31mRefute failed: value is truthy\x1b[0m\n") catch {};
         var buf: [256]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buf);
@@ -1596,9 +1592,36 @@ test "view code_block with lang" {
 // HTTP / TCP builtins
 // ============================================================
 
+// ============================================================
+// Native-only stub: on WASM, these functions return error.NotSupported
+// so the compiler doesn't try to resolve std.posix symbols.
+// ============================================================
+
+const native_stub = if (is_wasm) struct {
+    fn stub(_: std.mem.Allocator, _: []const *const Value) EvalError!*const Value {
+        return error.NotSupported;
+    }
+} else struct {};
+
+const builtinToHtml_impl = if (is_wasm) native_stub.stub else builtinToHtmlNative;
+const builtinTcpListen_impl = if (is_wasm) native_stub.stub else builtinTcpListenNative;
+const builtinTcpAccept_impl = if (is_wasm) native_stub.stub else builtinTcpAcceptNative;
+const builtinTcpRead_impl = if (is_wasm) native_stub.stub else builtinTcpReadNative;
+const builtinTcpWrite_impl = if (is_wasm) native_stub.stub else builtinTcpWriteNative;
+const builtinTcpClose_impl = if (is_wasm) native_stub.stub else builtinTcpCloseNative;
+const builtinWsAcceptKey_impl = if (is_wasm) native_stub.stub else builtinWsAcceptKeyNative;
+const builtinWsReadFrame_impl = if (is_wasm) native_stub.stub else builtinWsReadFrameNative;
+const builtinWsWriteFrame_impl = if (is_wasm) native_stub.stub else builtinWsWriteFrameNative;
+const builtinViewDiff_impl = if (is_wasm) native_stub.stub else builtinViewDiffNative;
+const builtinFork_impl = if (is_wasm) native_stub.stub else builtinForkNative;
+const builtinWaitpid_impl = if (is_wasm) native_stub.stub else builtinWaitpidNative;
+const builtinExit_impl = if (is_wasm) native_stub.stub else builtinExitNative;
+const builtinTcpSetNonblocking_impl = if (is_wasm) native_stub.stub else builtinTcpSetNonblockingNative;
+const builtinTcpPoll_impl = if (is_wasm) native_stub.stub else builtinTcpPollNative;
+
 /// to_html(view_node) -> String
 /// Renders a view_node tree to an HTML string.
-fn builtinToHtml(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinToHtmlNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     var buf: std.ArrayListUnmanaged(u8) = .{};
     renderHtml(allocator, args[0], &buf) catch return error.OutOfMemory;
@@ -1764,7 +1787,7 @@ fn blimpTagToHtml(tag: []const u8) []const u8 {
 }
 
 /// tcp_listen(port: Int) -> Int  (server socket fd)
-fn builtinTcpListen(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const port: u16 = @intCast(@max(0, @min(65535, args[0].integer)));
 
@@ -1784,7 +1807,7 @@ fn builtinTcpListen(allocator: std.mem.Allocator, args: []const *const Value) Ev
 /// tcp_accept(server_fd: Int) -> Int | nil
 /// Blocking accept by default. Returns nil if socket is non-blocking and
 /// no connection is pending (WouldBlock/EAGAIN).
-fn builtinTcpAccept(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinTcpAcceptNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const server_fd: std.posix.socket_t = @intCast(args[0].integer);
     var client_addr: std.posix.sockaddr = undefined;
@@ -1806,7 +1829,7 @@ fn builtinTcpAccept(allocator: std.mem.Allocator, args: []const *const Value) Ev
 /// tcp_read(fd: Int) -> String | nil
 /// Reads up to 64KB. Returns nil if socket is non-blocking and no data
 /// is available (WouldBlock/EAGAIN).
-fn builtinTcpRead(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     var buf: [65536]u8 = undefined;
@@ -1826,7 +1849,7 @@ fn builtinTcpRead(allocator: std.mem.Allocator, args: []const *const Value) Eval
 }
 
 /// tcp_write(fd: Int, data: String) -> nil
-fn builtinTcpWrite(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     _ = std.posix.write(fd, args[1].string) catch return error.NotSupported;
@@ -1836,7 +1859,7 @@ fn builtinTcpWrite(allocator: std.mem.Allocator, args: []const *const Value) Eva
 }
 
 /// tcp_close(fd: Int) -> nil
-fn builtinTcpClose(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinTcpCloseNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     std.posix.close(fd);
@@ -1854,7 +1877,7 @@ const ws_magic_guid = "258EAFA5-E914-47DA-95CA-5AB9DC80CB65";
 /// ws_accept_key(client_key: String) -> String
 /// Computes the Sec-WebSocket-Accept value for the WS handshake.
 /// SHA-1(client_key + magic_guid) then Base64-encoded.
-fn builtinWsAcceptKey(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinWsAcceptKeyNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     const client_key = args[0].string;
 
@@ -1886,7 +1909,7 @@ fn builtinWsAcceptKey(allocator: std.mem.Allocator, args: []const *const Value) 
 /// Returns nil if the connection is closed or a close frame is received.
 /// Handles client masking. Only supports text frames (opcode 0x1).
 /// Auto-responds to Ping with Pong.
-fn builtinWsReadFrame(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinWsReadFrameNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
 
@@ -2003,11 +2026,11 @@ fn builtinWsReadFrame(allocator: std.mem.Allocator, args: []const *const Value) 
         0x9 => {
             // Ping -- send Pong with same payload, then read next frame
             wsWriteFrame(fd, 0xA, payload) catch {};
-            return builtinWsReadFrame(allocator, args);
+            return builtinWsReadFrameNative(allocator, args);
         },
         0xA => {
             // Pong -- ignore, read next frame
-            return builtinWsReadFrame(allocator, args);
+            return builtinWsReadFrameNative(allocator, args);
         },
         else => {
             // Unsupported opcode -- return nil
@@ -2020,7 +2043,7 @@ fn builtinWsReadFrame(allocator: std.mem.Allocator, args: []const *const Value) 
 
 /// ws_write_frame(fd: Int, data: String) -> nil
 /// Writes a WebSocket text frame (server-to-client, unmasked).
-fn builtinWsWriteFrame(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinWsWriteFrameNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     const data = args[1].string;
@@ -2068,7 +2091,7 @@ fn wsWriteFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) !void {
 /// view_diff(old_tree, new_tree) -> List of patch maps
 /// Compares two view_node trees and returns a list of patches.
 /// Each patch is %{op: "replace"|"text"|"attrs", path: "0.1.2", value: "..."}
-fn builtinViewDiff(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinViewDiffNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
 
     var patches: std.ArrayListUnmanaged(*const Value) = .{};
@@ -2239,7 +2262,7 @@ fn makePatchMap(
 /// fork() -> Int
 /// Returns 0 in the child process, the child PID in the parent.
 /// Returns -1 on error.
-fn builtinFork(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinForkNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
     const result_val = allocator.create(Value) catch return error.OutOfMemory;
     const fork_result = std.posix.fork() catch {
@@ -2259,7 +2282,7 @@ fn builtinFork(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
 /// waitpid(pid: Int, nohang: Bool) -> Int
 /// Waits for a child process. If nohang is true, returns immediately.
 /// Returns the pid if the child exited, 0 if nohang and child still running, -1 on error.
-fn builtinWaitpid(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinWaitpidNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len < 1 or args[0].* != .integer) return error.TypeError;
     const pid: std.posix.pid_t = @intCast(args[0].integer);
     const nohang = if (args.len >= 2) switch (args[1].*) {
@@ -2276,7 +2299,7 @@ fn builtinWaitpid(allocator: std.mem.Allocator, args: []const *const Value) Eval
 
 /// exit(code: Int) -> never returns
 /// Exits the current process with the given status code.
-fn builtinExit(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinExitNative(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const code: u8 = @intCast(@max(0, @min(255, args[0].integer)));
     std.process.exit(code);
@@ -2289,7 +2312,7 @@ fn builtinExit(_: std.mem.Allocator, args: []const *const Value) EvalError!*cons
 /// tcp_set_nonblocking(fd: Int) -> :ok
 /// Sets a socket to non-blocking mode. After this, tcp_accept and tcp_read
 /// will return nil instead of blocking when no data/connection is ready.
-fn builtinTcpSetNonblocking(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinTcpSetNonblockingNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
 
@@ -2306,7 +2329,7 @@ fn builtinTcpSetNonblocking(allocator: std.mem.Allocator, args: []const *const V
 /// Polls a list of file descriptors for readability.
 /// Returns a list of fds that are ready to read (or accept).
 /// timeout_ms: -1 = block forever, 0 = return immediately, >0 = wait up to N ms.
-fn builtinTcpPoll(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+fn builtinTcpPollNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
     if (args[0].* != .list or args[1].* != .integer) return error.TypeError;
 
@@ -2372,7 +2395,7 @@ test "ws_accept_key produces correct accept value for RFC example" {
     const args = try alloc.alloc(*const Value, 1);
     args[0] = key_val;
 
-    const result = try builtinWsAcceptKey(alloc, args);
+    const result = try builtinWsAcceptKeyNative(alloc, args);
     try std.testing.expectEqualStrings("kHmeXU03Cu63H3svTFHa4eO+ylQ=", result.string);
 }
 
@@ -2386,7 +2409,7 @@ test "ws_accept_key rejects non-string arg" {
     const args = try alloc.alloc(*const Value, 1);
     args[0] = int_val;
 
-    const result = builtinWsAcceptKey(alloc, args);
+    const result = builtinWsAcceptKeyNative(alloc, args);
     try std.testing.expectError(error.TypeError, result);
 }
 
@@ -2420,7 +2443,7 @@ test "view_diff identical trees returns empty list" {
     args[0] = node1;
     args[1] = node2;
 
-    const result = try builtinViewDiff(alloc, args);
+    const result = try builtinViewDiffNative(alloc, args);
     try std.testing.expect(result.* == .list);
     try std.testing.expectEqual(@as(usize, 0), result.list.len);
 }
@@ -2450,7 +2473,7 @@ test "view_diff detects text change in child" {
     args[0] = old_node;
     args[1] = new_node;
 
-    const result = try builtinViewDiff(alloc, args);
+    const result = try builtinViewDiffNative(alloc, args);
     try std.testing.expect(result.* == .list);
     // Should have exactly 1 patch for the text change
     try std.testing.expectEqual(@as(usize, 1), result.list.len);
@@ -2486,7 +2509,7 @@ test "view_diff detects tag change as replace" {
     args[0] = old_node;
     args[1] = new_node;
 
-    const result = try builtinViewDiff(alloc, args);
+    const result = try builtinViewDiffNative(alloc, args);
     try std.testing.expect(result.* == .list);
     try std.testing.expectEqual(@as(usize, 1), result.list.len);
 

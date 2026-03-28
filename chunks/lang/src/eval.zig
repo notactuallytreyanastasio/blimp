@@ -1784,6 +1784,12 @@ pub const Evaluator = struct {
     /// Builds a prompt with available context, shells out to `claude -p <prompt>`,
     /// parses the response as a Blimp expression, evaluates and returns it.
     fn evalHole(self: *Evaluator, hole: @import("ast.zig").Node.Hole, loc: @import("ast.zig").Loc, subject: *const Value) EvalError!*const Value {
+        // Hole operator is not available on WASM (needs filesystem + subprocess)
+        if (comptime @import("builtin").target.cpu.arch == .wasm32) {
+            const v = self.allocator.create(Value) catch return error.OutOfMemory;
+            v.* = .nil;
+            return v;
+        }
         // Build context string: directive + subject value + visible bindings
         var ctx_buf: std.ArrayListUnmanaged(u8) = .{};
         defer ctx_buf.deinit(self.allocator);

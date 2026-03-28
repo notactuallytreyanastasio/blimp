@@ -54,7 +54,7 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 .feedback.pass { background: rgba(74,222,128,0.1); color: #4ade80; border: 1px solid rgba(74,222,128,0.2); }
 .feedback.fail { background: rgba(248,113,113,0.1); color: #f87171; border: 1px solid rgba(248,113,113,0.2); }
 .hidden { display: none; }
-.loading { text-align: center; padding: 48px; color: #71717a; }
+.loading { text-align: center; padding: 48px; color: #a1a1aa; font-size: 16px; }
 .progress-bar { height: 4px; background: #27272a; border-radius: 2px; margin: 16px 0; overflow: hidden; }
 .progress-fill { height: 100%; background: #a855f7; border-radius: 2px; transition: width 0.3s; }
 @media (max-width: 480px) {
@@ -237,14 +237,18 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 
   // Load WASM
   var blimp = new Blimp();
+  loading.textContent = 'Loading Blimp interpreter (130KB)...';
   blimp.init('blimp.wasm').then(function() {
     blimpInstance = blimp;
     loading.classList.add('hidden');
     app.classList.remove('hidden');
-    render();
+    try { render(); } catch(e) {
+      app.innerHTML = '<p style="color:#f87171;padding:24px">Render error: ' + e.message + '</p>';
+    }
   }).catch(function(e) {
-    loading.textContent = 'Failed to load: ' + e.message;
+    loading.textContent = 'Failed to load WASM: ' + e.message;
     loading.style.color = '#f87171';
+    loading.style.fontSize = '16px';
   });
 
   function render() {
