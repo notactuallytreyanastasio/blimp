@@ -260,6 +260,7 @@ pub const Checker = struct {
             .assign_stmt => |a| self.checkAssignStmt(a),
             .message_handler => |h| self.checkMessageHandler(h, node.loc),
             .def_stmt => |d| self.checkDefStmt(d, node.loc),
+            .fn_expr => |f| self.checkFnExpr(f, node.loc),
             // Expression statements: infer type to trigger any errors (e.g., message sends)
             .message_send, .func_call, .pipe_expr, .dot_access => {
                 _ = self.inferExpr(node);
@@ -402,6 +403,15 @@ pub const Checker = struct {
         self.env.popScope();
     }
 
+    /// Check an fn expression: parameters must have type annotations.
+    fn checkFnExpr(self: *Checker, f: Node.FnExpr, loc: Loc) void {
+        for (f.params) |param| {
+            if (param.type_name == null) {
+                self.addError(loc, "lambda parameter '{s}' is missing a type annotation", .{param.name});
+            }
+        }
+    }
+
     // ============================================================
     // Type inference for expressions
     // ============================================================
@@ -429,6 +439,10 @@ pub const Checker = struct {
             .orelse_expr => |oe| self.inferExpr(oe.try_expr.*),
             .spawn_expr => |se| Type{ .actor = se.actor_name },
             .struct_lit => |sl| Type{ .actor = sl.type_name },
+            .fn_expr => |f| blk: {
+                self.checkFnExpr(f, node.loc);
+                break :blk .any; // closures are opaque at the type level
+            },
             .situation => .hole, // Cannot infer situation results yet
             else => .hole,
         };
@@ -562,7 +576,11 @@ pub const Checker = struct {
 
     /// Infer the return type of a function call using built-in signatures.
     fn inferFuncCall(self: *Checker, fc: Node.FuncCall, loc: Loc) Type {
-        // Check if it's a known built-in function
+        // Always infer all arguments (catches untyped lambdas in map/filter/reduce/etc.)
+        for (fc.args) |arg| {
+            _ = self.inferExpr(arg);
+        }
+        // Check if it's a known built-in function for return type
         if (lookupBuiltin(fc.name)) |kind| {
             return self.resolveBuiltinReturn(kind, fc.args, loc);
         }
