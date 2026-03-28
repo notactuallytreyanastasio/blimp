@@ -94,6 +94,39 @@ pub const CompletionEngine = struct {
             .{ .name = "reduce", .sig = "reduce(list: List, init, fn: Function)" },
             .{ .name = "each", .sig = "each(list: List, fn: Function) -> :ok" },
             .{ .name = "random", .sig = "random(min: Int, max: Int) -> Int" },
+            .{ .name = "char_at", .sig = "char_at(str: String, idx: Int) -> String" },
+            .{ .name = "char_code", .sig = "char_code(str: String) -> Int" },
+            .{ .name = "from_char_code", .sig = "from_char_code(code: Int) -> String" },
+            .{ .name = "set_at", .sig = "set_at(list: List, idx: Int, val) -> List" },
+            .{ .name = "to_atom", .sig = "to_atom(str: String) -> Atom" },
+            .{ .name = "actor_name", .sig = "actor_name(ref: ActorRef) -> String" },
+            .{ .name = "assert", .sig = "assert(val) -- test assertion" },
+            .{ .name = "assert_eq", .sig = "assert_eq(a, b) -- test equality" },
+            .{ .name = "assert_ne", .sig = "assert_ne(a, b) -- test inequality" },
+            .{ .name = "refute", .sig = "refute(val) -- test falsy" },
+            .{ .name = "blimp_eval", .sig = "blimp_eval(code: String) -> Any" },
+            .{ .name = "blimp_test", .sig = "blimp_test(code: String) -> Map" },
+            // View primitives
+            .{ .name = "stack", .sig = "stack(children...) -> ViewNode" },
+            .{ .name = "row", .sig = "row(children...) -> ViewNode" },
+            .{ .name = "grid", .sig = "grid(children...) -> ViewNode" },
+            .{ .name = "text", .sig = "text(str: String) -> ViewNode" },
+            .{ .name = "heading", .sig = "heading(str: String, level?: Int) -> ViewNode" },
+            .{ .name = "bold", .sig = "bold(str: String) -> ViewNode" },
+            .{ .name = "italic", .sig = "italic(str: String) -> ViewNode" },
+            .{ .name = "code", .sig = "code(str: String) -> ViewNode" },
+            .{ .name = "code_block", .sig = "code_block(str: String, lang?: Atom) -> ViewNode" },
+            .{ .name = "blockquote", .sig = "blockquote(str: String) -> ViewNode" },
+            .{ .name = "divider", .sig = "divider() -> ViewNode" },
+            .{ .name = "list", .sig = "list(items...) -> ViewNode" },
+            .{ .name = "link", .sig = "link(label: String, url: String) -> ViewNode" },
+            .{ .name = "image", .sig = "image(src: String, alt?: String) -> ViewNode" },
+            .{ .name = "button", .sig = "button(label: String, msg?: Atom) -> ViewNode" },
+            .{ .name = "input", .sig = "input(name: String, placeholder: String) -> ViewNode" },
+            .{ .name = "textarea", .sig = "textarea(name: String, placeholder: String) -> ViewNode" },
+            .{ .name = "select", .sig = "select(name: String, options...) -> ViewNode" },
+            .{ .name = "form", .sig = "form(children...) -> ViewNode" },
+            .{ .name = "mount_root", .sig = "mount_root(name: String, view: ViewNode) -> ViewNode" },
         };
         for (builtin_sigs) |b| {
             if (startsWith(b.name, prefix)) {
@@ -111,6 +144,7 @@ pub const CompletionEngine = struct {
             "actor", "def", "fn", "for", "in", "do", "end", "on", "state",
             "become", "reply", "spawn", "self", "bubble", "try", "catch",
             "situation", "case", "orelse", "when", "bubbles", "true", "false", "nil",
+            "test", "and", "or", "not",
         };
         for (keywords) |kw| {
             if (startsWith(kw, prefix) and prefix.len > 0) {
