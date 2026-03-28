@@ -94,6 +94,10 @@ pub const BuiltinRegistry = struct {
         reg.register("select", &viewSelect);
         reg.register("option", &viewOption);
         reg.register("form", &viewForm);
+        reg.register("mount_root", &viewMountRoot);
+        // Actor introspection
+        reg.register("actor_name", &builtinActorName);
+        reg.register("to_atom", &builtinToAtom);
         // HTTP / TCP builtins (native only)
         reg.register("to_html", &builtinToHtml);
         reg.register("tcp_listen", &builtinTcpListen);
@@ -412,6 +416,20 @@ fn builtinToString(allocator: std.mem.Allocator, args: []const *const Value) Eva
     return result;
 }
 
+/// to_atom("hello") => :hello — converts a string to an atom
+fn builtinToAtom(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    switch (args[0].*) {
+        .string => |s| {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .atom = s };
+            return result;
+        },
+        .atom => return args[0],
+        else => return error.TypeError,
+    }
+}
+
 /// to_int("42") => 42
 fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
@@ -619,6 +637,19 @@ fn builtinTypeOf(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     };
     result.* = Value{ .atom = type_name };
     return result;
+}
+
+/// actor_name(actor_ref) -> String: returns the type name of an actor reference
+fn builtinActorName(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    switch (args[0].*) {
+        .actor_ref => |ref| {
+            const result = allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .string = ref.type_name };
+            return result;
+        },
+        else => return error.TypeError,
+    }
 }
 
 /// print(value) => prints to stdout, returns the value (identity)
@@ -1097,6 +1128,16 @@ fn viewForm(allocator: std.mem.Allocator, args: []const *const Value) EvalError!
     return makeViewNode(allocator, "form", &.{}, args);
 }
 
+/// mount_root("ActorName", view_node) — wraps a child actor's view in a mount boundary
+fn viewMountRoot(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string) return error.TypeError;
+    if (args[1].* != .view_node) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "data-actor", .val = args[0] };
+    return makeViewNode(allocator, "mount", attrs, args[1..2]);
+}
+
 // ============================================================
 // Tests
 // ============================================================
@@ -1535,6 +1576,15 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
                     try buf.appendSlice(allocator, " data-lang=\"");
                     try buf.appendSlice(allocator, lang);
                     try buf.appendSlice(allocator, "\"");
+                } else if (std.mem.eql(u8, attr.key, "data-actor")) {
+                    var val_buf: [256]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&val_buf);
+                    attr.val.format(fbs.writer());
+                    const raw = fbs.getWritten();
+                    const name = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
+                    try buf.appendSlice(allocator, " data-actor=\"");
+                    try buf.appendSlice(allocator, name);
+                    try buf.appendSlice(allocator, "\"");
                 } else if (std.mem.eql(u8, attr.key, "name") or
                     std.mem.eql(u8, attr.key, "placeholder") or
                     std.mem.eql(u8, attr.key, "value"))
@@ -1622,6 +1672,7 @@ fn blimpTagToHtml(tag: []const u8) []const u8 {
     if (std.mem.eql(u8, tag, "video")) return "video";
     if (std.mem.eql(u8, tag, "canvas")) return "canvas";
     if (std.mem.eql(u8, tag, "button")) return "button";
+    if (std.mem.eql(u8, tag, "mount")) return "div";
     if (std.mem.eql(u8, tag, "input")) return "input";
     if (std.mem.eql(u8, tag, "textarea")) return "textarea";
     if (std.mem.eql(u8, tag, "select")) return "select";

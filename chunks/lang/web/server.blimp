@@ -27,38 +27,12 @@ def http_ok(body) do
   )
 end
 
-# Build an HTTP 200 response with Set-Cookie header
-def http_ok_with_cookie(body, session_id) do
-  len = length(body)
-  cookie = concat("Set-Cookie: blimp_session=", concat(session_id,
-    "; Path=/; HttpOnly; SameSite=Lax\r\n"))
-  concat(
-    "HTTP/1.1 200 OK\r\n",
-    concat("Content-Type: text/html; charset=utf-8\r\n",
-    concat(cookie,
-    concat("Content-Length: ", concat(to_string(len),
-    concat("\r\nConnection: close\r\n\r\n", body)))))
-  )
-end
-
 # Build an HTTP 302 redirect
 def http_redirect(location) do
   concat(
     "HTTP/1.1 302 Found\r\n",
     concat("Location: ", concat(location,
     "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-  )
-end
-
-# Build an HTTP 302 redirect with Set-Cookie header
-def http_redirect_with_cookie(location, session_id) do
-  cookie = concat("Set-Cookie: blimp_session=", concat(session_id,
-    "; Path=/; HttpOnly; SameSite=Lax\r\n"))
-  concat(
-    "HTTP/1.1 302 Found\r\n",
-    concat("Location: ", concat(location,
-    concat("\r\n", concat(cookie,
-    "Content-Length: 0\r\nConnection: close\r\n\r\n"))))
   )
 end
 
@@ -77,20 +51,11 @@ def html_styles() do
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: rgb(249,249,249); color: rgb(17,17,17); }
     div { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
-    div[data-row] { flex-direction: row; align-items: center; }
+    div[data-row] { flex-direction: row; }
     h1,h2,h3,h4,h5,h6 { margin: 8px 0; }
     button { padding: 8px 16px; background: rgb(0,112,243); color: white; border: none;
              border-radius: 4px; cursor: pointer; font-size: 16px; }
     button:hover { background: rgb(0,81,179); }
-    input[type=text], input[type=email], input[type=password], input[type=number], input:not([type]) {
-      padding: 8px 12px; border: 1px solid rgb(204,204,204); border-radius: 4px;
-      font-size: 16px; width: 100%; max-width: 400px; }
-    input:focus, textarea:focus, select:focus { outline: none; border-color: rgb(0,112,243); box-shadow: 0 0 0 2px rgba(0,112,243,0.2); }
-    textarea { padding: 8px 12px; border: 1px solid rgb(204,204,204); border-radius: 4px;
-               font-size: 16px; width: 100%; max-width: 400px; min-height: 80px; resize: vertical; font-family: system-ui, sans-serif; }
-    select { padding: 8px 12px; border: 1px solid rgb(204,204,204); border-radius: 4px;
-             font-size: 16px; background: white; }
-    form { display: flex; flex-direction: column; gap: 8px; }
     span { display: inline; }
     ul { padding-left: 24px; }
     pre { background: rgb(30,30,30); color: rgb(212,212,212); padding: 16px; border-radius: 4px;
@@ -100,186 +65,54 @@ def html_styles() do
     hr { border: none; border-top: 1px solid rgb(221,221,221); margin: 16px 0; }
     img, video { max-width: 100%; }
     .page { max-width: 800px; margin: 40px auto; padding: 24px; }
+    div[data-actor] { border: 1px solid rgb(221,221,221); border-radius: 8px; padding: 16px; background: white; }
   </style>"
 end
 
-# Client JS: WebSocket with form POST fallback
+# JS: button clicks become form POSTs with actor routing
+# Walks up the DOM to find the nearest data-actor boundary,
+# so messages go to the right actor in a multi-actor page.
 def blimp_script() do
   "<script>
-    (function() {
-      var ws = null;
-      var rd = 1000;
-
-      function connect() {
-        try { ws = new WebSocket('ws://' + location.host + '/ws'); }
-        catch(e) { return; }
-
-        ws.onopen = function() { rd = 1000; };
-        ws.onmessage = function(e) {
-          try {
-            var m = JSON.parse(e.data);
-            if (m.type === 'patches') m.patches.forEach(applyPatch);
-            else if (m.type === 'full') {
-              var p = document.querySelector('.page');
-              if (p) p.innerHTML = m.html;
-            }
-          } catch(err) {}
-        };
-        ws.onclose = function() {
-          setTimeout(connect, rd);
-          rd = Math.min(rd * 2, 30000);
-        };
+    function blimpSend(btn) {
+      var msg = btn.getAttribute('data-sends');
+      var actor = '';
+      var el = btn;
+      while (el) {
+        if (el.getAttribute && el.getAttribute('data-actor')) {
+          actor = el.getAttribute('data-actor');
+          break;
+        }
+        el = el.parentElement;
       }
-
-      function applyPatch(patch) {
-        var page = document.querySelector('.page');
-        if (!page) return;
-        var el = navPath(page, patch.path);
-        if (!el) return;
-        if (patch.op === 'replace') el.outerHTML = patch.value;
-        else if (patch.op === 'text') el.textContent = patch.value;
-      }
-
-      function navPath(root, path) {
-        if (!path || path === '') return root;
-        var idx = path.split('.').map(Number);
-        var n = root;
-        for (var i = 0; i < idx.length; i++) {
-          if (!n || !n.children) return null;
-          n = n.children[idx[i]];
-        }
-        return n;
-      }
-
-      window.blimpSend = function(btn) {
-        var msg = btn.getAttribute('data-sends');
-        if (ws && ws.readyState === 1) {
-          var pf = btn.closest('form');
-          var payload = {type: 'event', msg: msg};
-          if (pf) {
-            var fd = {};
-            new FormData(pf).forEach(function(v, k) { fd[k] = v; });
-            payload.form_data = fd;
-          }
-          ws.send(JSON.stringify(payload));
-          return;
-        }
-        var pf2 = btn.closest('form');
-        if (pf2) {
-          var h = document.createElement('input');
-          h.type = 'hidden'; h.name = 'msg'; h.value = msg;
-          pf2.appendChild(h);
-          pf2.action = window.location.pathname;
-          pf2.submit();
-          return;
-        }
-        var f = document.createElement('form');
-        f.method = 'POST';
-        f.action = window.location.pathname;
-        var inp = document.createElement('input');
-        inp.type = 'hidden'; inp.name = 'msg'; inp.value = msg;
-        f.appendChild(inp);
-        document.body.appendChild(f);
-        f.submit();
-      };
-
-      window.blimpSubmit = function(e) {
-        e.preventDefault();
-        if (ws && ws.readyState === 1) {
-          var fd = {};
-          new FormData(e.target).forEach(function(v, k) { fd[k] = v; });
-          ws.send(JSON.stringify({type: 'form', data: fd}));
-          return;
-        }
-        e.target.action = window.location.pathname;
-        e.target.submit();
-      };
-
-      connect();
-    })();
+      var form = document.createElement('form');
+      form.method = 'POST';
+      form.action = window.location.pathname;
+      var msgInput = document.createElement('input');
+      msgInput.type = 'hidden';
+      msgInput.name = 'msg';
+      msgInput.value = msg;
+      form.appendChild(msgInput);
+      var actorInput = document.createElement('input');
+      actorInput.type = 'hidden';
+      actorInput.name = 'actor';
+      actorInput.value = actor;
+      form.appendChild(actorInput);
+      document.body.appendChild(form);
+      form.submit();
+    }
   </script>"
-end
-
-# -- Cookie / session helpers -----------------------------------------
-
-# Find a header value from raw HTTP request
-# e.g., find_header(raw, "Cookie:") -> "blimp_session=abc123; other=val"
-def find_header(raw: String, header_name: String) -> String do
-  lines = split(raw, "\r\n")
-  find_header_line(lines, header_name)
-end
-
-def find_header_line(lines: List, header_name: String) -> String do
-  case empty?(lines) do
-    true -> ""
-    _ ->
-      line = head(lines)
-      case contains(line, header_name) do
-        true ->
-          # Split on ": " to get the value part after "Header: value"
-          parts = split(line, ": ")
-          case length(parts) do
-            1 -> ""
-            _ -> head(tail(parts))
-          end
-        _ -> find_header_line(tail(lines), header_name)
-      end
-  end
-end
-
-# Parse blimp_session cookie value from raw HTTP request
-# Returns session_id string or "" if no cookie
-def parse_cookie(raw: String) -> String do
-  cookie_header = find_header(raw, "Cookie:")
-  case cookie_header do
-    "" -> ""
-    _ -> find_cookie_value(cookie_header, "blimp_session=")
-  end
-end
-
-# Search cookie pairs for a specific cookie name
-# Cookie header value looks like: "blimp_session=abc123; other=val"
-def find_cookie_value(cookie_str: String, cookie_prefix: String) -> String do
-  # Split on "; " (semicolon-space) to get individual cookies
-  pairs = split(cookie_str, "; ")
-  find_cookie_in_pairs(pairs, cookie_prefix)
-end
-
-def find_cookie_in_pairs(pairs: List, prefix: String) -> String do
-  case empty?(pairs) do
-    true -> ""
-    _ ->
-      pair = head(pairs)
-      case contains(pair, prefix) do
-        true ->
-          # Split on "=" and take the value
-          parts = split(pair, "=")
-          case length(parts) do
-            1 -> ""
-            _ -> head(tail(parts))
-          end
-        _ -> find_cookie_in_pairs(tail(pairs), prefix)
-      end
-  end
-end
-
-# Generate a unique session token using random numbers and timestamp
-# Format: "<random1>-<random2>-<timestamp>"
-# Not cryptographically secure, but unique enough for a dev server
-def generate_session_token() -> String do
-  r1 = random(100000, 999999)
-  r2 = random(100000, 999999)
-  ts = now()
-  concat(to_string(r1), concat("-", concat(to_string(r2), concat("-", to_string(ts)))))
 end
 
 # -- Session store ----------------------------------------------------
 
 actor Sessions do
   state store: Map :: %{}
+  state next_id: Int :: 1
 
   on :new_session do
-    id = generate_session_token()
+    id = to_string(next_id)
+    become next_id: next_id + 1
     reply id
   end
 
@@ -293,78 +126,85 @@ actor Sessions do
   end
 end
 
-# -- App: Todo List ---------------------------------------------------
+# -- View Composition -------------------------------------------------
+#
+# mount(actor_ref) sends :render to an actor and wraps the result
+# in a mount boundary (div with data-actor attr). This lets
+# buttons inside a mounted actor's view route messages back to
+# that actor, not the parent.
 
-# Initial state for a new session
-def initial_state() do
-  %{todos: [], next_id: 1}
+def mount(actor_ref) do
+  name = actor_name(actor_ref)
+  view = actor_ref <- :render
+  mount_root(name, view)
 end
 
-# Pure event handler: state x message x form_data -> new state
-def handle_event(data: Map, msg: Atom, form_data: Map) -> Map do
-  case msg do
-    :add_todo ->
-      todo_text = lookup(form_data, "todo_text")
-      case todo_text do
-        "" -> data
-        _  ->
-          todo = %{id: lookup(data, "next_id"), text: todo_text, done: false}
-          new_todos = append(lookup(data, "todos"), todo)
-          data |> put("todos", new_todos) |> put("next_id", lookup(data, "next_id") + 1)
-      end
-    :clear_done ->
-      todos = lookup(data, "todos")
-      kept = filter(todos, fn(t: Map) do not(lookup(t, "done")) end)
-      put(data, "todos", kept)
-    :toggle_all ->
-      todos = lookup(data, "todos")
-      toggled = map(todos, fn(t: Map) do put(t, "done", not(lookup(t, "done"))) end)
-      put(data, "todos", toggled)
-    _ -> data
+# -- Counter actor ----------------------------------------------------
+
+actor Counter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
   end
-end
 
-# Render a single todo item
-def render_todo(todo: Map) -> ViewNode do
-  done = lookup(todo, "done")
-  todo_text = lookup(todo, "text")
-  display = case done do
-    true -> concat("[x] ", todo_text)
-    _    -> concat("[ ] ", todo_text)
+  on :decrement do
+    become count: count - 1
   end
-  text(display)
-end
 
-# Render the todo items list
-def render_todo_list(todos: List) -> ViewNode do
-  case empty?(todos) do
-    true -> text("No todos yet. Add one above!")
-    _    ->
-      items = map(todos, fn(t: Map) do render_todo(t) end)
-      stack(items)
+  on :reset do
+    become count: 0
   end
-end
 
-# Pure render: state -> view_node
-def render_app(data: Map) -> ViewNode do
-  todos = lookup(data, "todos")
-  todo_count = length(todos)
-  done_count = length(filter(todos, fn(t: Map) do lookup(t, "done") end))
-  stack(
-    heading("Blimp Todo List"),
-    text(concat(to_string(todo_count), concat(" items, ", concat(to_string(done_count), " done")))),
-    form(
+  on :render do
+    reply stack(
+      heading("Counter", 2),
+      text(concat("Count: ", to_string(count))),
       row(
-        input("todo_text", "What needs to be done?"),
-        button("Add", :add_todo)
+        button("- 1", :decrement),
+        button("Reset", :reset),
+        button("+ 1", :increment)
       )
-    ),
-    divider(),
-    render_todo_list(todos),
-    row(
-      button("Toggle All", :toggle_all),
-      button("Clear Done", :clear_done)
     )
+  end
+end
+
+# -- Greeter actor ----------------------------------------------------
+
+actor Greeter do
+  state name: String :: "World"
+  state excited: Int :: 0
+
+  on :toggle_excitement do
+    case excited do
+      0 -> become excited: 1
+      _ -> become excited: 0
+    end
+  end
+
+  on :render do
+    greeting = case excited do
+      0 -> concat("Hello, ", concat(name, "."))
+      _ -> concat("Hello, ", concat(name, "!!!"))
+    end
+    reply stack(
+      heading("Greeter", 2),
+      text(greeting),
+      button("Toggle excitement", :toggle_excitement)
+    )
+  end
+end
+
+# -- Root page render (composes both actors) --------------------------
+
+def render_app() do
+  stack(
+    heading("Blimp Multi-Actor Demo"),
+    text("Two independent actors composed in one page:"),
+    divider(),
+    mount(Counter),
+    divider(),
+    mount(Greeter)
   )
 end
 
@@ -391,53 +231,6 @@ def find_pair(pairs: List, prefix: String) -> String do
   end
 end
 
-# Parse form body into a map: "key=val&key2=val2" -> %{key: val, key2: val2}
-def parse_form_data(body: String) -> Map do
-  pairs = split(body, "&")
-  build_form_map(pairs, %{})
-end
-
-def build_form_map(pairs: List, acc: Map) -> Map do
-  case empty?(pairs) do
-    true -> acc
-    _    ->
-      pair = head(pairs)
-      parts = split(pair, "=")
-      case empty?(parts) do
-        true -> build_form_map(tail(pairs), acc)
-        _    ->
-          key = head(parts)
-          val = case empty?(tail(parts)) do
-            true -> ""
-            _    -> head(tail(parts))
-          end
-          decoded = url_decode(val)
-          build_form_map(tail(pairs), put(acc, key, decoded))
-      end
-  end
-end
-
-# Basic URL decoding: + becomes space
-def url_decode(s: String) -> String do
-  replace_plus(s)
-end
-
-def replace_plus(s: String) -> String do
-  parts = split(s, "+")
-  join_with_space(parts)
-end
-
-def join_with_space(parts: List) -> String do
-  case empty?(parts) do
-    true -> ""
-    _    ->
-      case empty?(tail(parts)) do
-        true -> head(parts)
-        _    -> concat(head(parts), concat(" ", join_with_space(tail(parts))))
-      end
-  end
-end
-
 def last_elem(items: List) -> String do
   case empty?(items) do
     true -> ""
@@ -449,219 +242,52 @@ def last_elem(items: List) -> String do
   end
 end
 
-def string_to_msg(s: String) -> Atom do
-  case s do
-    "add_todo"   -> :add_todo
-    "clear_done" -> :clear_done
-    "toggle_all" -> :toggle_all
-    _            -> :unknown
+# Route a message to the Counter actor
+def route_counter(msg_str: String) do
+  case msg_str do
+    "increment" -> Counter <- :increment
+    "decrement" -> Counter <- :decrement
+    "reset"     -> Counter <- :reset
+    _           -> :unknown
   end
 end
 
-# -- WebSocket helpers ------------------------------------------------
-
-# Check if request is a WebSocket upgrade
-def is_ws_upgrade(raw: String) -> Bool do
-  contains(raw, "Upgrade: websocket")
-end
-
-# Parse the Sec-WebSocket-Key header value
-def parse_ws_key(raw: String) -> String do
-  lines = split(raw, "\r\n")
-  find_ws_key_line(lines)
-end
-
-def find_ws_key_line(lines: List) -> String do
-  case empty?(lines) do
-    true -> ""
-    _ -> try_ws_key_line(head(lines), tail(lines))
+# Route a message to the Greeter actor
+def route_greeter(msg_str: String) do
+  case msg_str do
+    "toggle_excitement" -> Greeter <- :toggle_excitement
+    _                   -> :unknown
   end
 end
 
-def try_ws_key_line(line: String, rest: List) -> String do
-  case contains(line, "Sec-WebSocket-Key: ") do
-    true ->
-      parts = split(line, "Sec-WebSocket-Key: ")
-      head(tail(parts))
-    _ -> find_ws_key_line(rest)
-  end
-end
-
-# Build the 101 Switching Protocols response
-def ws_upgrade_response(accept_key: String) -> String do
-  concat(
-    "HTTP/1.1 101 Switching Protocols\r\n",
-    concat("Upgrade: websocket\r\n",
-    concat("Connection: Upgrade\r\n",
-    concat("Sec-WebSocket-Accept: ", concat(accept_key, "\r\n\r\n"))))
-  )
-end
-
-# Minimal JSON escape (identity for now -- TODO: escape quotes properly)
-def escape_json(s: String) -> String do
-  s
-end
-
-# Convert view_diff patches to JSON string
-def patches_to_json(patches: List) -> String do
-  items = map(patches, fn(p: Map) do patch_to_json(p) end)
-  joined = join_list(items, ",")
-  concat("{\"type\":\"patches\",\"patches\":[", concat(joined, "]}"))
-end
-
-def patch_to_json(p: Map) -> String do
-  op = lookup(p, "op")
-  path = lookup(p, "path")
-  val = lookup(p, "value")
-  concat("{\"op\":\"", concat(op, concat("\",\"path\":\"", concat(path, concat("\",\"value\":\"", concat(escape_json(val), "\"}"))))))
-end
-
-def join_list(items: List, sep: String) -> String do
-  case empty?(items) do
-    true -> ""
-    _ -> join_list_acc(head(items), tail(items), sep)
-  end
-end
-
-def join_list_acc(first: String, rest: List, sep: String) -> String do
-  case empty?(rest) do
-    true -> first
-    _ -> concat(first, concat(sep, join_list_acc(head(rest), tail(rest), sep)))
-  end
-end
-
-# Parse "msg" field from WS JSON: {"type":"event","msg":"increment"}
-def parse_ws_msg(frame: String) -> Atom do
-  parts = split(frame, "\"msg\":\"")
-  extract_msg_str(parts)
-end
-
-def extract_msg_str(parts: List) -> Atom do
-  case empty?(tail(parts)) do
-    true -> :unknown
-    _ ->
-      after_msg = head(tail(parts))
-      msg_str = head(split(after_msg, "\""))
-      string_to_msg(msg_str)
-  end
-end
-
-# Parse form_data from WS JSON (simplified: single key-value)
-def parse_ws_form_data(frame: String) -> Map do
-  case contains(frame, "form_data") do
-    true -> extract_form_data_from_json(frame)
-    _ -> %{}
-  end
-end
-
-def extract_form_data_from_json(frame: String) -> Map do
-  parts = split(frame, "\"form_data\":{")
-  rest = head(tail(parts))
-  inner = head(split(rest, "}"))
-  parse_simple_json_obj(inner)
-end
-
-# Parse "key":"value" pairs from a simple JSON object interior
-def parse_simple_json_obj(s: String) -> Map do
-  case s do
-    "" -> %{}
-    _ -> parse_json_kv(s, %{})
-  end
-end
-
-def parse_json_kv(s: String, acc: Map) -> Map do
-  parts = split(s, "\":\"")
-  case empty?(tail(parts)) do
-    true -> acc
-    _ ->
-      key = extract_last_quoted(head(parts))
-      val_rest = head(tail(parts))
-      val = head(split(val_rest, "\""))
-      new_acc = put(acc, key, url_decode(val))
-      parse_json_kv(after_comma(val_rest), new_acc)
-  end
-end
-
-def extract_last_quoted(s: String) -> String do
-  parts = split(s, "\"")
-  last_elem(parts)
-end
-
-def after_comma(s: String) -> String do
-  case contains(s, ",") do
-    true -> head(tail(split(s, ",")))
-    _ -> ""
-  end
-end
-
-# -- WebSocket event loop (recursive) -----------------------------------
-
-def ws_loop(ws_fd: Int, data: Map, old_view: ViewNode) do
-  frame = ws_read_frame(ws_fd)
-  case frame do
-    nil -> tcp_close(ws_fd)
-    _ -> handle_ws_frame(ws_fd, frame, data, old_view)
-  end
-end
-
-def handle_ws_frame(ws_fd: Int, frame: String, data: Map, old_view: ViewNode) do
-  msg = parse_ws_msg(frame)
-  form_data = parse_ws_form_data(frame)
-  new_data = handle_event(data, msg, form_data)
-  Sessions <- :put("1", new_data)
-  new_view = render_app(new_data)
-  patches = view_diff(old_view, new_view)
-  send_patches_if_changed(ws_fd, patches)
-  ws_loop(ws_fd, new_data, new_view)
-end
-
-def send_patches_if_changed(ws_fd: Int, patches: List) do
-  case empty?(patches) do
-    true -> :noop
-    _ ->
-      json = patches_to_json(patches)
-      ws_write_frame(ws_fd, json)
+# Route a message to the correct actor based on data-actor name
+def route_message(target_actor: String, msg_str: String) do
+  case target_actor do
+    "Counter"  -> route_counter(msg_str)
+    "Greeter"  -> route_greeter(msg_str)
+    _          -> :unknown
   end
 end
 
 # -- Dispatcher -------------------------------------------------------
 
-def dispatch(method: String, raw: String, session_id: String, data: Map, is_new: String) -> String do
+def dispatch(method: String, raw: String) -> String do
   case method do
     "POST" ->
-      # Extract body: everything after the \r\n\r\n header/body separator
-      body_parts = split(raw, "\r\n\r\n")
-      body = case empty?(tail(body_parts)) do
-        true -> ""
-        _    -> head(tail(body_parts))
-      end
-      form_data = parse_form_data(body)
-      msg_str = lookup(form_data, "msg") orelse ""
-      msg = string_to_msg(msg_str)
-      new_data = handle_event(data, msg, form_data)
-      Sessions <- :put(session_id, new_data)
-      case is_new do
-        "yes" -> http_redirect_with_cookie("/", session_id)
-        _     -> http_redirect("/")
-      end
+      lines = split(raw, "\r\n")
+      body = last_elem(lines)
+      msg_str = form_value(body, "msg")
+      target = form_value(body, "actor")
+      route_message(target, msg_str)
+      http_redirect("/")
     _ ->
-      view = render_app(data)
+      view = render_app()
       html = to_html(view)
-      page = html_page("Todo", concat("<div class='page'>", concat(html, "</div>")))
-      case is_new do
-        "yes" -> http_ok_with_cookie(page, session_id)
-        _     -> http_ok(page)
-      end
+      http_ok(html_page("Blimp App", concat("<div class='page'>", concat(html, "</div>"))))
   end
 end
 
 # -- HTTP Server actor ------------------------------------------------
-#
-# Sequential accept loop: handles one connection at a time.
-# This keeps Sessions state shared across requests (required for forms/state).
-#
-# TODO: When the actor scheduler from actor-runtime.md lands, switch to
-# actor-per-connection for true concurrency with shared state.
 
 actor HTTPServer do
   state port: Int :: 8080
@@ -671,7 +297,6 @@ actor HTTPServer do
     server_fd = tcp_listen(port)
     become fd: server_fd
     print(concat("Blimp HTTP server listening on http://localhost:", to_string(port)))
-    print("  WebSocket: ws://localhost:8080/ws")
     HTTPServer <- :accept
   end
 
@@ -679,61 +304,19 @@ actor HTTPServer do
     client_fd = tcp_accept(fd)
     raw = tcp_read(client_fd)
 
-    case is_ws_upgrade(raw) do
-      true -> handle_ws_connection(client_fd, raw)
-      _ -> handle_http_request(client_fd, raw)
-    end
+    first_line = head(split(raw, "\r\n"))
+    req = parse_request_line(first_line)
+    method = lookup(req, "method")
+
+    # Actors manage their own state via become,
+    # no session store needed for single-user mode
+    response = dispatch(method, raw)
+
+    tcp_write(client_fd, response)
+    tcp_close(client_fd)
 
     HTTPServer <- :accept
   end
-end
-
-def handle_ws_connection(client_fd: Int, raw: String) do
-  key = parse_ws_key(raw)
-  accept = ws_accept_key(key)
-  response = ws_upgrade_response(accept)
-  tcp_write(client_fd, response)
-
-  # Send initial full render
-  existing = Sessions <- :get("1")
-  data = existing orelse initial_state()
-  view = render_app(data)
-  html = to_html(view)
-  full_msg = concat("{\"type\":\"full\",\"html\":\"", concat(escape_json(html), "\"}"))
-  ws_write_frame(client_fd, full_msg)
-
-  # Enter WS event loop (blocks until disconnect)
-  ws_loop(client_fd, data, view)
-end
-
-def handle_http_request(client_fd: Int, raw: String) do
-  first_line = head(split(raw, "\r\n"))
-  req = parse_request_line(first_line)
-  method = lookup(req, "method")
-
-  # Cookie-based session identity
-  cookie_session = parse_cookie(raw)
-  session_id = case cookie_session do
-    "" -> Sessions <- :new_session
-    _ -> cookie_session
-  end
-  is_new = case cookie_session do
-    "" -> "yes"
-    _  -> "no"
-  end
-
-  existing = Sessions <- :get(session_id)
-  data = existing orelse initial_state()
-
-  case is_new do
-    "yes" -> Sessions <- :put(session_id, data)
-    _     -> :ok
-  end
-
-  response = dispatch(method, raw, session_id, data, is_new)
-
-  tcp_write(client_fd, response)
-  tcp_close(client_fd)
 end
 
 # -- Boot -------------------------------------------------------------

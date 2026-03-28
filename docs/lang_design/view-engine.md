@@ -145,7 +145,7 @@ The canvas and the rendered view are two representations of the same system. Swi
 ## What's Not Here Yet
 
 - **Input fields**: No `input(placeholder)` or `text_input(binding)` yet. Buttons-only for now.
-- **Multi-actor views**: Currently renders the view of one actor. Composing views from multiple actors needs a layout/mount system.
+- **Multi-actor views**: Implemented via `mount()`. See `view-composition.md` for the full design.
 - **Conditional rendering**: Works via `if/else` in the view handler, but no `:if` attribute on view nodes.
 - **Animation**: State changes re-render immediately. No transition system between view states.
 - **CSS/styling**: View nodes map to fixed CSS classes. No inline style attribute yet.
