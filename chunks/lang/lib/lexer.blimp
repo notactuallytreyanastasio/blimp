@@ -9,8 +9,12 @@
 # -- Character classification helpers --
 
 def is_digit(ch: String) -> Bool do
-  code = char_code(ch)
-  code >= 48 && code <= 57
+  case nil?(ch) do
+    true -> false
+    _ ->
+      code = char_code(ch)
+      code >= 48 && code <= 57
+  end
 end
 
 def is_upper_char(code: Int) -> Bool do
@@ -22,6 +26,9 @@ def is_lower_char(code: Int) -> Bool do
 end
 
 def is_alpha(ch: String) -> Bool do
+  case nil?(ch) do
+    true -> false
+    _ ->
   code = char_code(ch)
   case is_upper_char(code) do
     true -> true
@@ -31,6 +38,7 @@ def is_alpha(ch: String) -> Bool do
         _ -> code == 95
       end
   end
+  end
 end
 
 def is_upper(ch: String) -> Bool do
@@ -38,12 +46,16 @@ def is_upper(ch: String) -> Bool do
 end
 
 def is_alnum(ch: String) -> Bool do
-  case is_alpha(ch) do
-    true -> true
+  case nil?(ch) do
+    true -> false
     _ ->
-      case is_digit(ch) do
+      case is_alpha(ch) do
         true -> true
-        _ -> ch == "?"
+        _ ->
+          case is_digit(ch) do
+            true -> true
+            _ -> ch == "?"
+          end
       end
   end
 end
@@ -120,6 +132,9 @@ def lex_all(src: String, pos: Int, line: Int, col: Int, tokens: List) -> List do
       append(tokens, token(:eof, "", line, col))
     _ ->
       ch = char_at(src, pos)
+      case nil?(ch) do
+        true -> append(tokens, token(:eof, "", line, col))
+        _ ->
       result = lex_one(src, pos, line, col, ch)
       # result is %{token: ..., pos: ..., line: ..., col: ...}
       new_tok = lookup(result, "token")
@@ -133,26 +148,25 @@ def lex_all(src: String, pos: Int, line: Int, col: Int, tokens: List) -> List do
         _ ->
           lex_all(src, new_pos, new_line, new_col, append(tokens, new_tok))
       end
+      end
   end
 end
 
 def lex_one(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map do
-  code = char_code(ch)
-  # Newline (10), space (32), tab (9), CR (13)
-  case code == 10 do
-    true -> %{token: nil, pos: pos + 1, line: line + 1, col: 1}
-    _ ->
-  case code == 32 do
+  case nil?(ch) do
     true -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
-    _ ->
-  case code == 9 do
-    true -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
-    _ ->
-  case code == 13 do
-    true -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
-    _ ->
-  lex_one_char(src, pos, line, col, ch)
-  end end end end
+    _ -> lex_one_dispatch(src, pos, line, col, ch, char_code(ch))
+  end
+end
+
+def lex_one_dispatch(src: String, pos: Int, line: Int, col: Int, ch: String, code: Int) -> Map do
+  case code do
+    10 -> %{token: nil, pos: pos + 1, line: line + 1, col: 1}
+    32 -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
+    9  -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
+    13 -> %{token: nil, pos: pos + 1, line: line, col: col + 1}
+    _  -> lex_one_char(src, pos, line, col, ch)
+  end
 end
 
 def lex_one_char(src: String, pos: Int, line: Int, col: Int, ch: String) -> Map do
@@ -373,9 +387,14 @@ def scan_digits(src: String, pos: Int) -> Int do
   case pos >= length(src) do
     true -> pos
     _ ->
-      case is_digit(char_at(src, pos)) do
-        true -> scan_digits(src, pos + 1)
-        _ -> pos
+      ch = char_at(src, pos)
+      case nil?(ch) do
+        true -> pos
+        _ ->
+          case is_digit(ch) do
+            true -> scan_digits(src, pos + 1)
+            _ -> pos
+          end
       end
   end
 end
@@ -384,9 +403,14 @@ def scan_alnum(src: String, pos: Int) -> Int do
   case pos >= length(src) do
     true -> pos
     _ ->
-      case is_alnum(char_at(src, pos)) do
-        true -> scan_alnum(src, pos + 1)
-        _ -> pos
+      ch = char_at(src, pos)
+      case nil?(ch) do
+        true -> pos
+        _ ->
+          case is_alnum(ch) do
+            true -> scan_alnum(src, pos + 1)
+            _ -> pos
+          end
       end
   end
 end

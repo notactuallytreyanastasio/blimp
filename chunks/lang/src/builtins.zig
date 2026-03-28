@@ -476,7 +476,14 @@ fn builtinCharAt(allocator: std.mem.Allocator, args: []const *const Value) EvalE
 /// char_code("A", 0) => 65 -- ASCII/byte value at index
 /// char_code("A") => 65 -- first char if no index
 fn builtinCharCode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
-    if (args.len < 1 or args.len > 2 or args[0].* != .string) return error.TypeError;
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    // Return nil for nil input (char_at past end returns nil)
+    if (args[0].* == .nil) {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    }
+    if (args[0].* != .string) return error.TypeError;
     const s = args[0].string;
     const idx: usize = if (args.len == 2 and args[1].* == .integer)
         @intCast(@max(0, args[1].integer))

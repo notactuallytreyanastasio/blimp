@@ -1023,10 +1023,23 @@ pub const Evaluator = struct {
                 result.* = Value{ .boolean = !left.eql(right.*) };
                 return result;
             },
-            .lt => return self.evalCompareOp(left.*, right.*, result, .lt),
-            .gt => return self.evalCompareOp(left.*, right.*, result, .gt),
-            .lte => return self.evalCompareOp(left.*, right.*, result, .lte),
-            .gte => return self.evalCompareOp(left.*, right.*, result, .gte),
+            // Comparisons: nil on either side returns false instead of TypeError
+            .lt => {
+                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                return self.evalCompareOp(left.*, right.*, result, .lt);
+            },
+            .gt => {
+                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                return self.evalCompareOp(left.*, right.*, result, .gt);
+            },
+            .lte => {
+                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                return self.evalCompareOp(left.*, right.*, result, .lte);
+            },
+            .gte => {
+                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                return self.evalCompareOp(left.*, right.*, result, .gte);
+            },
             .and_op => {
                 result.* = Value{ .boolean = left.truthy() and right.truthy() };
                 return result;

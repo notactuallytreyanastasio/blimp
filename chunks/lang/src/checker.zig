@@ -512,9 +512,10 @@ pub const Checker = struct {
     /// Check if two types can be compared.
     fn areComparable(self: *Checker, left: Type, right: Type) bool {
         _ = self;
-        // Holes and any are always comparable (unknown type)
+        // Holes, any, and nil are always comparable
         if (left == .hole or right == .hole) return true;
         if (left == .any or right == .any) return true;
+        if (left == .nil or right == .nil) return true;
         // Same type tag is always comparable
         if (std.meta.activeTag(left) == std.meta.activeTag(right)) return true;
         // Numeric types are cross-comparable
