@@ -1201,6 +1201,10 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, call.name, "reduce")) return self.builtinReduce(call.args);
         if (std.mem.eql(u8, call.name, "each")) return self.builtinEach(call.args);
 
+        // Runtime eval/test -- needs evaluator context, can't be a plain builtin
+        if (std.mem.eql(u8, call.name, "blimp_eval")) return self.runtimeEval(call.args);
+        if (std.mem.eql(u8, call.name, "blimp_test")) return self.runtimeTest(call.args);
+
         // Otherwise, look up the builtin
         const func = self.builtins.get(call.name) orelse {
             self.last_error = errors.unknownFunction(call.name, self.source);
@@ -1328,6 +1332,160 @@ pub const Evaluator = struct {
             },
             else => return error.TypeError,
         }
+    }
+
+    // ── Runtime eval/test ──────────────────────────────
+
+    /// blimp_eval("code string") -> last expression value
+    /// Parses and evaluates a string of Blimp code in a fresh scope.
+    /// Actors/functions defined in the code are registered in the current evaluator.
+    fn runtimeEval(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        if (arg_nodes.len != 1) return error.TypeError;
+        const code_val = try self.eval(arg_nodes[0]);
+        if (code_val.* != .string) return error.TypeError;
+        const code = code_val.string;
+
+        var parser = Parser.init(self.allocator, code);
+        const nodes = parser.parseFile() catch {
+            // Parse error -- return error map
+            const result = self.allocator.create(Value) catch return error.OutOfMemory;
+            const entries = self.allocator.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
+            const ok_val = self.allocator.create(Value) catch return error.OutOfMemory;
+            ok_val.* = Value{ .boolean = false };
+            entries[0] = .{ .key = "ok", .val = ok_val };
+            const err_val = self.allocator.create(Value) catch return error.OutOfMemory;
+            err_val.* = Value{ .string = "parse error" };
+            entries[1] = .{ .key = "error", .val = err_val };
+            result.* = Value{ .map = entries };
+            return result;
+        };
+
+        // Evaluate all nodes, track last value
+        self.env.pushScope();
+        var last: *const Value = undefined;
+        var has_val = false;
+        for (nodes) |node| {
+            last = self.eval(node) catch {
+                self.env.popScope();
+                // Eval error -- return error map
+                const result = self.allocator.create(Value) catch return error.OutOfMemory;
+                const entries = self.allocator.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
+                const ok_val = self.allocator.create(Value) catch return error.OutOfMemory;
+                ok_val.* = Value{ .boolean = false };
+                entries[0] = .{ .key = "ok", .val = ok_val };
+                const err_val = self.allocator.create(Value) catch return error.OutOfMemory;
+                err_val.* = Value{ .string = "runtime error" };
+                entries[1] = .{ .key = "error", .val = err_val };
+                result.* = Value{ .map = entries };
+                return result;
+            };
+            has_val = true;
+        }
+        self.env.popScope();
+
+        if (has_val) return last;
+        const nil = self.allocator.create(Value) catch return error.OutOfMemory;
+        nil.* = .nil;
+        return nil;
+    }
+
+    /// blimp_test("code string") -> %{passed: Bool, total: Int, failures: [...]}
+    /// Parses code, evaluates it, runs any test blocks, returns results as a map.
+    fn runtimeTest(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        if (arg_nodes.len != 1) return error.TypeError;
+        const code_val = try self.eval(arg_nodes[0]);
+        if (code_val.* != .string) return error.TypeError;
+        const code = code_val.string;
+
+        var parser = Parser.init(self.allocator, code);
+        const nodes = parser.parseFile() catch {
+            return self.makeTestResult(false, 0, 0, "parse error");
+        };
+
+        // Evaluate all top-level nodes (register actors, functions)
+        self.env.pushScope();
+        for (nodes) |node| {
+            _ = self.eval(node) catch {};
+        }
+
+        // Run tests: same logic as runTests but returns data instead of printing
+        var total: u32 = 0;
+        var passed: u32 = 0;
+        var first_failure: ?[]const u8 = null;
+
+        for (nodes) |node| {
+            if (node.kind != .actor_def) continue;
+            const def = node.kind.actor_def;
+
+            for (def.body) |body_node| {
+                if (body_node.kind != .test_def) continue;
+                const test_def = body_node.kind.test_def;
+                total += 1;
+
+                // Fresh scope per test with re-evaluated state defaults
+                self.env.pushScope();
+                for (def.body) |state_node| {
+                    if (state_node.kind != .state_def) continue;
+                    for (state_node.kind.state_def.fields) |field| {
+                        if (field.default_value) |default_ptr| {
+                            const val = self.eval(default_ptr.*) catch continue;
+                            self.env.define(field.key, val);
+                        }
+                    }
+                }
+
+                var test_passed = true;
+                for (test_def.body) |stmt| {
+                    _ = self.eval(stmt) catch {
+                        test_passed = false;
+                        break;
+                    };
+                }
+
+                self.env.popScope();
+
+                if (test_passed) {
+                    passed += 1;
+                } else {
+                    if (first_failure == null) {
+                        const raw = test_def.name;
+                        first_failure = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
+                            raw[1 .. raw.len - 1]
+                        else
+                            raw;
+                    }
+                }
+            }
+        }
+
+        self.env.popScope();
+
+        const all_passed = passed == total;
+        return self.makeTestResult(all_passed, total, passed, first_failure orelse "");
+    }
+
+    fn makeTestResult(self: *Evaluator, all_passed: bool, total: u32, passed_count: u32, failure_msg: []const u8) EvalError!*const Value {
+        const entries = self.allocator.alloc(Value.MapEntry, 4) catch return error.OutOfMemory;
+
+        const passed_val = self.allocator.create(Value) catch return error.OutOfMemory;
+        passed_val.* = Value{ .boolean = all_passed };
+        entries[0] = .{ .key = "passed", .val = passed_val };
+
+        const total_val = self.allocator.create(Value) catch return error.OutOfMemory;
+        total_val.* = Value{ .integer = @intCast(total) };
+        entries[1] = .{ .key = "total", .val = total_val };
+
+        const count_val = self.allocator.create(Value) catch return error.OutOfMemory;
+        count_val.* = Value{ .integer = @intCast(passed_count) };
+        entries[2] = .{ .key = "passed_count", .val = count_val };
+
+        const fail_val = self.allocator.create(Value) catch return error.OutOfMemory;
+        fail_val.* = Value{ .string = failure_msg };
+        entries[3] = .{ .key = "failure", .val = fail_val };
+
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .map = entries };
+        return result;
     }
 
     fn evalPipe(self: *Evaluator, pipe: ast.Node.PipeExpr) EvalError!*const Value {

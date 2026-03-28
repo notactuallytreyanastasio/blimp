@@ -1,0 +1,472 @@
+# Blimp Interactive Tutorial
+# Learn Blimp by writing code that makes tests pass.
+# Boot: ./blimp web/tutorial.blimp
+# Open: http://localhost:8080
+
+# -- Lessons ----------------------------------------------------------
+# Each lesson is a map with:
+#   title, description, starter (pre-filled code), test (hidden),
+#   step_type (:predict, :fill, :write), expected (for predict/fill)
+
+def lessons() do
+  [
+    %{
+      title: "Values: Integers",
+      description: "Blimp has integers. Type the value that this expression evaluates to:",
+      show_code: "2 + 3",
+      step_type: "predict",
+      expected: "5"
+    },
+    %{
+      title: "Values: Strings",
+      description: "Strings use double quotes. What does this evaluate to?",
+      show_code: "concat(\"hello\", \" world\")",
+      step_type: "predict",
+      expected: "hello world"
+    },
+    %{
+      title: "Values: Atoms",
+      description: "Atoms are constants that represent themselves. They start with a colon. What is this?",
+      show_code: ":ok",
+      step_type: "predict",
+      expected: ":ok"
+    },
+    %{
+      title: "Values: Booleans",
+      description: "true and false. What does this return?",
+      show_code: "3 > 2",
+      step_type: "predict",
+      expected: "true"
+    },
+    %{
+      title: "Variables",
+      description: "Variables are assigned with =. Fill in the blank so x equals 42:",
+      starter: "x = ___",
+      step_type: "fill",
+      expected: "42",
+      test_code: "actor T do test \"x is 42\" do assert_eq(x, 42) end end"
+    },
+    %{
+      title: "Functions: def",
+      description: "Functions are defined with def. Write a function called double that takes n and returns n * 2:",
+      starter: "def double(n) do\n  ___\nend",
+      step_type: "write",
+      test_code: "actor T do test \"double works\" do assert_eq(double(5), 10) end test \"double zero\" do assert_eq(double(0), 0) end end"
+    },
+    %{
+      title: "Functions: Multiple args",
+      description: "Write a function called add that takes a and b and returns their sum:",
+      starter: "",
+      step_type: "write",
+      test_code: "actor T do test \"add works\" do assert_eq(add(3, 4), 7) end test \"add negatives\" do assert_eq(add(-1, 1), 0) end end"
+    },
+    %{
+      title: "Your First Actor",
+      description: "Actors hold state and respond to messages. Define a Greeter actor with a name state field defaulting to \"World\":",
+      starter: "actor Greeter do\n  state name: String :: ___\n  on :greet do\n    reply concat(\"Hello, \", name)\n  end\nend",
+      step_type: "fill",
+      expected: "\"World\"",
+      test_code: "actor T do test \"greets world\" do result = Greeter <- :greet\nassert_eq(result, \"Hello, World\") end end"
+    },
+    %{
+      title: "Actor State: become",
+      description: "Actors change state with become. Write a Counter actor with :increment and :get_count handlers:",
+      starter: "",
+      step_type: "write",
+      test_code: "actor T do state c: Counter :: spawn Counter test \"starts at zero\" do assert_eq(c <- :get_count, 0) end test \"increments\" do c <- :increment\nassert_eq(c <- :get_count, 1) end end"
+    },
+    %{
+      title: "Builtins: map",
+      description: "map transforms every element in a list. What does this return?",
+      show_code: "map([1, 2, 3], fn(x: Int) do x * 2 end)",
+      step_type: "predict",
+      expected: "[2, 4, 6]"
+    },
+    %{
+      title: "Builtins: filter",
+      description: "filter keeps elements that pass a test. What does this return?",
+      show_code: "filter([1, 2, 3, 4, 5], fn(x: Int) do x > 3 end)",
+      step_type: "predict",
+      expected: "[4, 5]"
+    },
+    %{
+      title: "Builtins: reduce",
+      description: "reduce folds a list into a single value. Write the function to sum a list:",
+      starter: "",
+      step_type: "write",
+      test_code: "def sum_list(items) do reduce(items, 0, fn(acc: Int, x: Int) do acc + x end) end\nactor T do test \"sums\" do assert_eq(sum_list([1, 2, 3, 4]), 10) end test \"empty\" do assert_eq(sum_list([]), 0) end end"
+    }
+  ]
+end
+
+# -- Session state ----------------------------------------------------
+
+actor Sessions do
+  state store: Map :: %{}
+
+  on :get(id: String) do
+    reply lookup(store, id)
+  end
+
+  on :put(id: String, data: Map) do
+    become store: put(store, id, data)
+    reply :ok
+  end
+end
+
+def initial_state() do
+  %{lesson_idx: 0, feedback: "", feedback_type: "none", user_code: ""}
+end
+
+# -- Event handling ---------------------------------------------------
+
+def handle_event(data: Map, msg: String, form_data: Map) -> Map do
+  case msg do
+    "submit" ->
+      user_code = lookup(form_data, "code") orelse ""
+      handle_submit(data, user_code)
+    "next" ->
+      idx = lookup(data, "lesson_idx")
+      all = lessons()
+      case idx + 1 < length(all) do
+        true -> put(put(put(data, "lesson_idx", idx + 1), "feedback", ""), "user_code", "")
+        _ -> data
+      end
+    "prev" ->
+      idx = lookup(data, "lesson_idx")
+      case idx > 0 do
+        true -> put(put(put(data, "lesson_idx", idx - 1), "feedback", ""), "user_code", "")
+        _ -> data
+      end
+    _ -> data
+  end
+end
+
+def handle_submit(data: Map, user_code: String) -> Map do
+  all = lessons()
+  idx = lookup(data, "lesson_idx")
+  lesson = elem(all, idx)
+  step_type = lookup(lesson, "step_type")
+  data_with_code = put(data, "user_code", user_code)
+
+  case step_type do
+    "predict" ->
+      expected = lookup(lesson, "expected")
+      # Evaluate the shown code and compare user's typed answer to the result
+      case user_code == expected do
+        true -> put(put(data_with_code, "feedback", "Correct!"), "feedback_type", "pass")
+        _ -> put(put(data_with_code, "feedback", concat("Not quite. Expected: ", expected)), "feedback_type", "fail")
+      end
+    "fill" ->
+      expected = lookup(lesson, "expected")
+      case contains(user_code, expected) do
+        true ->
+          # Run the test with the filled-in code
+          test_code = lookup(lesson, "test_code") orelse ""
+          combined = concat(user_code, concat("\n", test_code))
+          result = blimp_test(combined)
+          case lookup(result, "passed") do
+            true -> put(put(data_with_code, "feedback", "Correct!"), "feedback_type", "pass")
+            _ -> put(put(data_with_code, "feedback", concat("Tests failed: ", lookup(result, "failure") orelse "unknown")), "feedback_type", "fail")
+          end
+        _ -> put(put(data_with_code, "feedback", concat("Hint: try ", expected)), "feedback_type", "fail")
+      end
+    "write" ->
+      test_code = lookup(lesson, "test_code") orelse ""
+      combined = concat(user_code, concat("\n", test_code))
+      result = blimp_test(combined)
+      case lookup(result, "passed") do
+        true ->
+          passed_count = lookup(result, "passed_count") orelse 0
+          total = lookup(result, "total") orelse 0
+          msg = concat(to_string(passed_count), concat("/", concat(to_string(total), " tests passed!")))
+          put(put(data_with_code, "feedback", msg), "feedback_type", "pass")
+        _ ->
+          put(put(data_with_code, "feedback", concat("Tests failed: ", lookup(result, "failure") orelse "unknown error")), "feedback_type", "fail")
+      end
+    _ -> data_with_code
+  end
+end
+
+# -- Rendering --------------------------------------------------------
+
+def render_app(data: Map) -> ViewNode do
+  all = lessons()
+  idx = lookup(data, "lesson_idx")
+  lesson = elem(all, idx)
+  title = lookup(lesson, "title")
+  description = lookup(lesson, "description")
+  step_type = lookup(lesson, "step_type")
+  feedback = lookup(data, "feedback") orelse ""
+  feedback_type = lookup(data, "feedback_type") orelse "none"
+  user_code = lookup(data, "user_code") orelse ""
+
+  stack(
+    row(
+      heading("Blimp Tutorial"),
+      text(concat("Lesson ", concat(to_string(idx + 1), concat(" of ", to_string(length(all))))))
+    ),
+    divider(),
+    heading(title, 2),
+    text(description),
+    render_lesson_body(lesson, step_type, user_code),
+    render_feedback(feedback, feedback_type),
+    divider(),
+    render_nav(idx, length(all), feedback_type)
+  )
+end
+
+def render_lesson_body(lesson: Map, step_type: String, user_code: String) -> ViewNode do
+  case step_type do
+    "predict" ->
+      show_code = lookup(lesson, "show_code") orelse ""
+      stack(
+        code_block(show_code, :blimp),
+        form(
+          input("code", "Type your answer..."),
+          button("Check", :submit)
+        )
+      )
+    "fill" ->
+      starter = lookup(lesson, "starter") orelse ""
+      stack(
+        form(
+          textarea("code", starter),
+          button("Check", :submit)
+        )
+      )
+    "write" ->
+      starter = lookup(lesson, "starter") orelse ""
+      stack(
+        form(
+          textarea("code", starter),
+          button("Run Tests", :submit)
+        )
+      )
+    _ -> text("Unknown step type")
+  end
+end
+
+def render_feedback(feedback: String, feedback_type: String) -> ViewNode do
+  case feedback do
+    "" -> text("")
+    _ ->
+      case feedback_type do
+        "pass" -> bold(concat("  ", feedback))
+        "fail" -> bold(concat("  ", feedback))
+        _ -> text(feedback)
+      end
+  end
+end
+
+def render_nav(idx: Int, total: Int, feedback_type: String) -> ViewNode do
+  case feedback_type do
+    "pass" ->
+      case idx + 1 < total do
+        true -> row(
+          button("Previous", :prev),
+          button("Next Lesson  >>", :next)
+        )
+        _ -> row(
+          button("Previous", :prev),
+          text("You completed all lessons!")
+        )
+      end
+    _ ->
+      case idx > 0 do
+        true -> row(button("Previous", :prev))
+        _ -> text("")
+      end
+  end
+end
+
+# -- HTTP plumbing (same pattern as server.blimp) ---------------------
+
+def parse_request_line(raw) do
+  parts = split(raw, " ")
+  method = head(parts)
+  path_part = head(tail(parts))
+  path = split(path_part, "?") |> head
+  %{method: method, path: path}
+end
+
+def http_ok(body) do
+  len = length(body)
+  concat("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ",
+    concat(to_string(len), concat("\r\nConnection: close\r\n\r\n", body)))
+end
+
+def http_redirect(location) do
+  concat("HTTP/1.1 302 Found\r\nLocation: ", concat(location, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+end
+
+def html_page(title, body_html) do
+  concat("<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\"><title>",
+    concat(title, concat("</title>", concat(tutorial_styles(),
+    concat("</head><body><div class='page'>", concat(body_html,
+    concat(tutorial_script(), "</div></body></html>")))))))
+end
+
+def tutorial_styles() do
+  "<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; background: rgb(24,24,27); color: rgb(228,228,231); line-height: 1.6; -webkit-text-size-adjust: 100%; }
+    .page { max-width: 720px; margin: 0 auto; padding: 16px; padding-top: 24px; padding-bottom: 48px; }
+    div { display: flex; flex-direction: column; gap: 12px; }
+    div[data-row] { flex-direction: row; align-items: center; gap: 12px; flex-wrap: wrap; }
+    h1 { color: rgb(168,85,247); font-size: 22px; }
+    h2 { color: rgb(228,228,231); font-size: 18px; margin-top: 8px; }
+    span { display: inline; color: rgb(161,161,170); }
+    strong { color: rgb(74,222,128); }
+    pre { background: rgb(39,39,42); color: rgb(228,228,231); padding: 14px; border-radius: 8px;
+          font-family: inherit; font-size: 14px; overflow-x: auto; border: 1px solid rgb(63,63,70);
+          -webkit-overflow-scrolling: touch; word-break: break-word; white-space: pre-wrap; }
+    code { font-family: inherit; background: rgb(39,39,42); padding: 2px 6px; border-radius: 4px; }
+    hr { border: none; border-top: 1px solid rgb(63,63,70); margin: 16px 0; }
+    button { padding: 12px 24px; background: rgb(168,85,247); color: white; border: none;
+             border-radius: 8px; cursor: pointer; font-size: 16px; font-family: inherit;
+             font-weight: 600; min-height: 44px; -webkit-appearance: none; touch-action: manipulation; }
+    button:hover { background: rgb(147,51,234); }
+    button:active { background: rgb(126,34,206); transform: scale(0.98); }
+    input[type=text], input:not([type]) {
+      padding: 12px 14px; background: rgb(39,39,42); border: 1px solid rgb(63,63,70); border-radius: 8px;
+      color: rgb(228,228,231); font-size: 16px; font-family: inherit; width: 100%;
+      min-height: 44px; -webkit-appearance: none; }
+    input:focus, textarea:focus { outline: none; border-color: rgb(168,85,247); box-shadow: 0 0 0 2px rgba(168,85,247,0.3); }
+    textarea { padding: 12px 14px; background: rgb(39,39,42); border: 1px solid rgb(63,63,70); border-radius: 8px;
+               color: rgb(228,228,231); font-size: 16px; font-family: inherit; width: 100%;
+               min-height: 140px; resize: vertical; tab-size: 2; -webkit-appearance: none; }
+    form { display: flex; flex-direction: column; gap: 12px; }
+    @media (max-width: 480px) {
+      .page { padding: 12px; padding-top: 16px; }
+      h1 { font-size: 20px; }
+      h2 { font-size: 16px; }
+      pre { font-size: 13px; padding: 12px; }
+      button { width: 100%; }
+      div[data-row] { flex-direction: column; align-items: stretch; }
+    }
+  </style>"
+end
+
+def tutorial_script() do
+  "<script>
+    function blimpSend(btn) {
+      var msg = btn.getAttribute('data-sends');
+      var form = btn.closest('form') || document.createElement('form');
+      if (!form.parentElement) {
+        form.method = 'POST';
+        form.action = window.location.pathname;
+        document.body.appendChild(form);
+      }
+      var msgInput = document.createElement('input');
+      msgInput.type = 'hidden';
+      msgInput.name = 'msg';
+      msgInput.value = msg;
+      form.appendChild(msgInput);
+      form.method = 'POST';
+      form.action = window.location.pathname;
+      form.submit();
+    }
+  </script>"
+end
+
+def form_value(body: String, key: String) -> String do
+  pairs = split(body, "&")
+  find_pair(pairs, concat(key, "="))
+end
+
+def find_pair(pairs: List, prefix: String) -> String do
+  case empty?(pairs) do
+    true -> ""
+    _ ->
+      pair = head(pairs)
+      case contains(pair, prefix) do
+        true -> head(tail(split(pair, "=")))
+        _ -> find_pair(tail(pairs), prefix)
+      end
+  end
+end
+
+def url_decode(s: String) -> String do
+  # Minimal: convert + to space
+  parts = split(s, "+")
+  join_with_space(parts)
+end
+
+def join_with_space(parts: List) -> String do
+  case empty?(parts) do
+    true -> ""
+    _ ->
+      case empty?(tail(parts)) do
+        true -> head(parts)
+        _ -> concat(head(parts), concat(" ", join_with_space(tail(parts))))
+      end
+  end
+end
+
+def last_elem(items: List) -> String do
+  case empty?(items) do
+    true -> ""
+    _ ->
+      case empty?(tail(items)) do
+        true -> head(items)
+        _ -> last_elem(tail(items))
+      end
+  end
+end
+
+def dispatch(method: String, raw: String, session_id: String, data: Map) -> String do
+  case method do
+    "POST" ->
+      body_parts = split(raw, "\r\n\r\n")
+      body = case empty?(tail(body_parts)) do
+        true -> ""
+        _ -> head(tail(body_parts))
+      end
+      msg_str = form_value(body, "msg")
+      code_raw = form_value(body, "code")
+      code = url_decode(code_raw)
+      form_data = %{code: code}
+      new_data = handle_event(data, msg_str, form_data)
+      Sessions <- :put(session_id, new_data)
+      http_redirect("/")
+    _ ->
+      view = render_app(data)
+      html = to_html(view)
+      http_ok(html_page("Learn Blimp", html))
+  end
+end
+
+# -- Server -----------------------------------------------------------
+
+actor HTTPServer do
+  state port: Int :: 8080
+  state fd: Int :: -1
+
+  on :start do
+    server_fd = tcp_listen(port)
+    become fd: server_fd
+    print(concat("Blimp Tutorial running at http://localhost:", to_string(port)))
+    HTTPServer <- :accept
+  end
+
+  on :accept do
+    client_fd = tcp_accept(fd)
+    raw = tcp_read(client_fd)
+    first_line = head(split(raw, "\r\n"))
+    req = parse_request_line(first_line)
+    method = lookup(req, "method")
+
+    session_id = "1"
+    existing = Sessions <- :get(session_id)
+    data = existing orelse initial_state()
+
+    response = dispatch(method, raw, session_id, data)
+
+    tcp_write(client_fd, response)
+    tcp_close(client_fd)
+    HTTPServer <- :accept
+  end
+end
+
+HTTPServer <- :start
