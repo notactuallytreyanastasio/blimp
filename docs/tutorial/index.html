@@ -70,6 +70,7 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 <body>
 
 <div class="page">
+  <noscript><p style="color:#f87171;padding:24px">JavaScript is required for the Blimp tutorial.</p></noscript>
   <div id="loading" class="loading">Loading Blimp WASM module...</div>
   <div id="app" class="hidden"></div>
 </div>
@@ -236,20 +237,27 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
   var loading = document.getElementById('loading');
 
   // Load WASM
-  var blimp = new Blimp();
-  loading.textContent = 'Loading Blimp interpreter (130KB)...';
-  blimp.init('blimp.wasm').then(function() {
-    blimpInstance = blimp;
-    loading.classList.add('hidden');
-    app.classList.remove('hidden');
-    try { render(); } catch(e) {
-      app.innerHTML = '<p style="color:#f87171;padding:24px">Render error: ' + e.message + '</p>';
-    }
-  }).catch(function(e) {
-    loading.textContent = 'Failed to load WASM: ' + e.message;
+  loading.textContent = 'Loading Blimp interpreter (178KB)...';
+  try {
+    var blimp = new Blimp();
+    blimp.init('blimp.wasm').then(function() {
+      loading.textContent = 'WASM loaded, initializing...';
+      blimpInstance = blimp;
+      loading.classList.add('hidden');
+      app.classList.remove('hidden');
+      try { render(); } catch(e) {
+        app.innerHTML = '<p style="color:#f87171;padding:24px">Render error: ' + e.message + '<br><pre>' + e.stack + '</pre></p>';
+      }
+    }).catch(function(e) {
+      loading.textContent = 'WASM init failed: ' + e.message;
+      loading.style.color = '#f87171';
+      loading.style.fontSize = '16px';
+    });
+  } catch(e) {
+    loading.textContent = 'Script error: ' + e.message;
     loading.style.color = '#f87171';
     loading.style.fontSize = '16px';
-  });
+  }
 
   function render() {
     var lesson = lessons[currentLesson];
