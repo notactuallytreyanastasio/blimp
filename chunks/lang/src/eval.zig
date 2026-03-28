@@ -254,9 +254,13 @@ pub const Evaluator = struct {
 
     /// Evaluate a single AST node to a runtime Value.
     pub fn eval(self: *Evaluator, node: ast.Node) EvalError!*const Value {
-        // Reduction counting: each eval costs 1 reduction
+        // Reduction counting + auto-schedule: after async sends queue up,
+        // drain mailboxes periodically without explicit schedule() calls
         self.reductions -= 1;
-        // TODO: when reductions <= 0 and scheduler is active, yield
+        if (self.reductions <= 0) {
+            self.reductions = 4000;
+            self.runScheduler(100);
+        }
         switch (node.kind) {
             // Literals
             .integer_lit => |lit| {
@@ -867,7 +871,6 @@ pub const Evaluator = struct {
                 // Async send (<--): enqueue in mailbox, return :queued
                 if (ms.is_async) {
                     const entry = self.registry.getInstance(ref) orelse return error.TypeError;
-                    // Evaluate args
                     const args = self.allocator.alloc(*const Value, ms.args.len) catch return error.OutOfMemory;
                     for (ms.args, 0..) |arg, i| {
                         args[i] = try self.eval(arg);
@@ -878,8 +881,10 @@ pub const Evaluator = struct {
                         .args = args,
                         .reply_slot = null,
                     });
+                    // Auto-drain: process this message immediately
+                    self.runScheduler(1);
                     const queued = self.allocator.create(Value) catch return error.OutOfMemory;
-                    queued.* = Value{ .atom = "queued" };
+                    queued.* = Value{ .atom = "ok" };
                     return queued;
                 }
 
