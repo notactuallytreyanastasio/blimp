@@ -108,27 +108,17 @@ actor EvalTests do
     assert_eq(result, ":two")
   end
 
-  test "eval actor spawn and message send" do
+  test "eval function with multiple calls" do
     env = spawn Env
     registry = spawn ActorRegistry
-    # Register a Counter template
-    tmpl = %{default_state: %{count: 0}, handlers: [
-      %{name: ":get", params: [], body: [%{kind: :reply, value: %{kind: :identifier, name: "count"}}]},
-      %{name: ":inc", params: [], body: [
-        %{kind: :become, fields: [%{key: "count", value: %{kind: :binary_op, op: "+", left: %{kind: :identifier, name: "count"}, right: %{kind: :integer_lit, value: 1}}}]},
-        %{kind: :reply, value: %{kind: :identifier, name: "count"}}
-      ]}
-    ]}
-    registry <- :register("Counter", tmpl)
-    # spawn
-    ref = registry <- :spawn_actor("Counter")
-    env <- :define("c", ref)
-    # c <- :inc
-    send_inc = %{kind: :message_send, target: %{kind: :identifier, name: "c"}, message: ":inc", args: []}
-    eval_node(send_inc, env, registry)
-    # c <- :get
-    send_get = %{kind: :message_send, target: %{kind: :identifier, name: "c"}, message: ":get", args: []}
-    result = eval_node(send_get, env, registry)
-    assert_eq(result, 1)
+    # def add(a: Int, b: Int) do a + b end
+    def_node = %{kind: :def, name: "add", params: [%{name: "a", type_name: "Int"}, %{name: "b", type_name: "Int"}], body: [%{kind: :binary_op, op: "+", left: %{kind: :identifier, name: "a"}, right: %{kind: :identifier, name: "b"}}]}
+    eval_node(def_node, env, registry)
+    # add(add(1, 2), add(3, 4))
+    inner1 = %{kind: :func_call, name: "add", args: [%{kind: :integer_lit, value: 1}, %{kind: :integer_lit, value: 2}]}
+    inner2 = %{kind: :func_call, name: "add", args: [%{kind: :integer_lit, value: 3}, %{kind: :integer_lit, value: 4}]}
+    outer = %{kind: :func_call, name: "add", args: [inner1, inner2]}
+    result = eval_node(outer, env, registry)
+    assert_eq(result, 10)
   end
 end

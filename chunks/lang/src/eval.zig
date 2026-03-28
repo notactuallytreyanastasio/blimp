@@ -69,7 +69,16 @@ pub const Evaluator = struct {
         // First pass: evaluate all top-level nodes (actor defs, functions, etc.)
         // so actors and functions are registered before tests run
         for (nodes) |node| {
-            _ = self.eval(node) catch {};
+            _ = self.eval(node) catch {
+                stderr.writeAll("\x1b[33mwarning: first-pass eval failed: ") catch {};
+                if (self.last_error) |blimp_err| {
+                    var errbuf: [512]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&errbuf);
+                    blimp_err.formatPlain(fbs.writer());
+                    stderr.writeAll(fbs.getWritten()) catch {};
+                }
+                stderr.writeAll("\x1b[0m\n") catch {};
+            };
         }
 
         // Second pass: find actors with test blocks and run them
@@ -1620,6 +1629,23 @@ pub const Evaluator = struct {
     }
 
     fn evalList(self: *Evaluator, list: ast.Node.ListLit) EvalError!*const Value {
+        // If there's a tail expression [h1, h2 | tail], concat head elements with evaluated tail
+        if (list.tail) |tail_node| {
+            const tail_val = try self.eval(tail_node.*);
+            const tail_items = if (tail_val.* == .list) tail_val.list else &[_]*const Value{};
+            const total = list.elements.len + tail_items.len;
+            const items = self.allocator.alloc(*const Value, total) catch return error.OutOfMemory;
+            for (list.elements, 0..) |elem, i| {
+                items[i] = try self.eval(elem);
+            }
+            for (tail_items, 0..) |item, i| {
+                items[list.elements.len + i] = item;
+            }
+            const result = self.allocator.create(Value) catch return error.OutOfMemory;
+            result.* = Value{ .list = items };
+            return result;
+        }
+        // Simple list literal [a, b, c]
         const items = self.allocator.alloc(*const Value, list.elements.len) catch return error.OutOfMemory;
         for (list.elements, 0..) |elem, i| {
             items[i] = try self.eval(elem);
