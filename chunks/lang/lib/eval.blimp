@@ -1,0 +1,477 @@
+# Blimp evaluator written in Blimp
+# Tree-walks the map-based AST from the parser.
+# Closes the self-hosting loop: Blimp can eval Blimp.
+#
+# Uses the Env actor for variable scoping and the
+# ActorRegistry actor for actor template/instance management.
+
+# -- Environment: lexical scope chain --
+
+actor Env do
+  state scopes: List :: [%{}]
+
+  on :push do
+    become scopes: [%{} | scopes]
+    reply :ok
+  end
+
+  on :pop do
+    become scopes: tail(scopes)
+    reply :ok
+  end
+
+  on :define(name: String, val: Any) do
+    current = head(scopes)
+    new_scope = put(current, name, val)
+    become scopes: [new_scope | tail(scopes)]
+    reply :ok
+  end
+
+  on :lookup(name: String) do
+    result = env_lookup(scopes, name)
+    reply result
+  end
+end
+
+def env_lookup(scopes: List, name: String) -> Any do
+  case empty?(scopes) do
+    true -> nil
+    _ ->
+      val = lookup(head(scopes), name)
+      case nil?(val) do
+        true -> env_lookup(tail(scopes), name)
+        _ -> val
+      end
+  end
+end
+
+# -- Actor Registry --
+
+actor ActorRegistry do
+  state templates: Map :: %{}
+  state instances: Map :: %{}
+  state next_id: Int :: 1
+
+  on :register(name: String, template: Map) do
+    become templates: put(templates, name, template)
+    reply :ok
+  end
+
+  on :spawn_actor(name: String) do
+    tmpl = lookup(templates, name)
+    case nil?(tmpl) do
+      true -> reply nil
+      _ ->
+        id = next_id
+        # Deep copy default state
+        default_state = lookup(tmpl, "default_state")
+        tmpl_handlers = lookup(tmpl, "handlers")
+        instance = %{id: id, actor_type: name, fields: default_state, handlers: tmpl_handlers}
+        sid = to_string(id)
+        become instances: put(instances, sid, instance), next_id: next_id + 1
+        reply %{id: id, actor_type: name}
+    end
+  end
+
+  on :get_instance(id: Int) do
+    reply lookup(instances, to_string(id))
+  end
+
+  on :update_state(id: Int, new_state: Map) do
+    inst = lookup(instances, to_string(id))
+    case nil?(inst) do
+      true -> reply :error
+      _ ->
+        updated = put(inst, "fields", new_state)
+        become instances: put(instances, to_string(id), updated)
+        reply :ok
+    end
+  end
+end
+
+# -- Evaluator --
+
+def blimp_self_eval(source: String) -> Any do
+  # Lex
+  l = spawn Lexer
+  l <- :set_source(source)
+  tokens = l <- :tokenize
+  # Parse
+  p = spawn Parser
+  p <- :set_tokens(tokens)
+  parse_result = p <- :parse
+  case lookup(parse_result, "ok") do
+    false -> %{ok: false, error: lookup(parse_result, "error")}
+    _ ->
+      nodes = lookup(parse_result, "nodes")
+      env = spawn Env
+      registry = spawn ActorRegistry
+      eval_nodes(nodes, env, registry)
+  end
+end
+
+def eval_nodes(nodes: List, env: Env, registry: ActorRegistry) -> Any do
+  eval_nodes_loop(nodes, 0, env, registry, nil)
+end
+
+def eval_nodes_loop(nodes: List, idx: Int, env: Env, registry: ActorRegistry, last: Any) -> Any do
+  case idx >= length(nodes) do
+    true -> last
+    _ ->
+      node = elem(nodes, idx)
+      result = eval_node(node, env, registry)
+      eval_nodes_loop(nodes, idx + 1, env, registry, result)
+  end
+end
+
+def eval_node(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  kind = lookup(node, "kind")
+  eval_dispatch(node, kind, env, registry)
+end
+
+def eval_dispatch(node: Map, kind: Atom, env: Env, registry: ActorRegistry) -> Any do
+  case kind do
+    :integer_lit -> lookup(node, "value")
+    :float_lit -> lookup(node, "value")
+    :bool_lit -> lookup(node, "value")
+    :nil_lit -> nil
+    :hole -> nil
+    :atom_lit -> lookup(node, "name")
+    :identifier -> env <- :lookup(lookup(node, "name"))
+    _ -> eval_dispatch2(node, kind, env, registry)
+  end
+end
+
+def eval_dispatch2(node: Map, kind: Atom, env: Env, registry: ActorRegistry) -> Any do
+  case kind do
+    :string_lit -> strip_quotes(lookup(node, "value"))
+    :binary_op -> eval_binary(node, env, registry)
+    :func_call -> eval_func_call(node, env, registry)
+    :list_lit -> eval_list(lookup(node, "elements"), 0, env, registry, [])
+    :case_expr -> eval_case(node, env, registry)
+    :spawn -> registry <- :spawn_actor(lookup(node, "actor_name"))
+    :message_send -> eval_message_send(node, env, registry)
+    :actor_def -> eval_actor_def(node, env, registry)
+    _ -> eval_dispatch3(node, kind, env, registry)
+  end
+end
+
+def eval_dispatch3(node: Map, kind: Atom, env: Env, registry: ActorRegistry) -> Any do
+  case kind do
+    :def -> eval_def(node, env, registry)
+    :assign -> eval_assign(node, env, registry)
+    :unary_op -> eval_unary(node, env, registry)
+    :become -> nil
+    :reply -> eval_node(lookup(node, "value"), env, registry)
+    _ -> nil
+  end
+end
+
+def eval_assign(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  name = lookup(node, "name")
+  val = eval_node(lookup(node, "value"), env, registry)
+  env <- :define(name, val)
+  val
+end
+
+def eval_unary(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  val = eval_node(lookup(node, "operand"), env, registry)
+  case lookup(node, "op") == "-" do
+    true -> 0 - val
+    _ -> val
+  end
+end
+
+def strip_quotes(raw: String) -> String do
+  case length(raw) >= 2 do
+    true ->
+      case char_code(raw, 0) == 34 do
+        true -> slice(raw, 1, length(raw) - 2)
+        _ -> raw
+      end
+    _ -> raw
+  end
+end
+
+def eval_binary(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  op = lookup(node, "op")
+  left = eval_node(lookup(node, "left"), env, registry)
+  right = eval_node(lookup(node, "right"), env, registry)
+  case op do
+    "+"  -> left + right
+    "-"  -> left - right
+    "*"  -> left * right
+    "/"  -> left / right
+    "==" -> left == right
+    "!=" -> left != right
+    "<"  -> left < right
+    ">"  -> left > right
+    "<=" -> left <= right
+    ">=" -> left >= right
+    _    -> nil
+  end
+end
+
+def eval_list(elems: List, idx: Int, env: Env, registry: ActorRegistry, result: List) -> List do
+  case idx >= length(elems) do
+    true -> result
+    _ ->
+      val = eval_node(elem(elems, idx), env, registry)
+      eval_list(elems, idx + 1, env, registry, append(result, val))
+  end
+end
+
+def eval_func_call(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  name = lookup(node, "name")
+  args = lookup(node, "args")
+  # Evaluate arguments
+  arg_vals = eval_list(args, 0, env, registry, [])
+  # Check for user-defined function
+  func = env <- :lookup(name)
+  case nil?(func) do
+    true ->
+      # Try builtins -- delegate to host for now
+      eval_builtin(name, arg_vals)
+    _ ->
+      # Call user-defined function
+      func_params = lookup(func, "params")
+      func_body = lookup(func, "body")
+      env <- :push
+      # Bind params
+      bind_params(func_params, arg_vals, 0, env)
+      # Eval body
+      result = eval_nodes(func_body, env, registry)
+      env <- :pop
+      result
+  end
+end
+
+def eval_become(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  # become is only meaningful inside a handler body -- handled there
+  # but if called standalone, just return nil
+  nil
+end
+
+def bind_params(params: List, args: List, idx: Int, env: Env) -> Any do
+  case idx >= length(params) do
+    true -> :ok
+    _ ->
+      param = elem(params, idx)
+      name = lookup(param, "name")
+      val = elem(args, idx)
+      env <- :define(name, val)
+      bind_params(params, args, idx + 1, env)
+  end
+end
+
+def eval_builtin(name: String, args: List) -> Any do
+  case name do
+    "print" ->
+      print(head(args))
+      head(args)
+    "concat" -> concat(elem(args, 0), elem(args, 1))
+    "to_string" -> to_string(head(args))
+    "to_int" -> to_int(head(args))
+    "length" -> length(head(args))
+    "head" -> head(head(args))
+    "tail" -> tail(head(args))
+    "append" -> append(elem(args, 0), elem(args, 1))
+    "reverse" -> reverse(head(args))
+    "sort" -> sort(head(args))
+    "empty?" -> empty?(head(args))
+    "nil?" -> nil?(head(args))
+    "elem" -> elem(elem(args, 0), elem(args, 1))
+    "lookup" -> lookup(elem(args, 0), elem(args, 1))
+    "put" -> put(elem(args, 0), elem(args, 1), elem(args, 2))
+    "keys" -> keys(head(args))
+    "values" -> values(head(args))
+    "char_at" -> char_at(elem(args, 0), elem(args, 1))
+    "char_code" -> char_code(head(args))
+    "slice" -> slice(elem(args, 0), elem(args, 1), elem(args, 2))
+    "rem" -> rem(elem(args, 0), elem(args, 1))
+    "abs" -> abs(head(args))
+    "max" -> max(elem(args, 0), elem(args, 1))
+    "min" -> min(elem(args, 0), elem(args, 1))
+    "range" -> range(elem(args, 0), elem(args, 1))
+    "not" -> not(head(args))
+    "type_of" -> type_of(head(args))
+    _ -> nil
+  end
+end
+
+def eval_case(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  subject = eval_node(lookup(node, "subject"), env, registry)
+  branches = lookup(node, "branches")
+  match_branch(branches, subject, 0, env, registry)
+end
+
+def match_branch(branches: List, subject: Any, idx: Int, env: Env, registry: ActorRegistry) -> Any do
+  case idx >= length(branches) do
+    true -> nil
+    _ ->
+      branch = elem(branches, idx)
+      pattern = lookup(branch, "pattern")
+      # Wildcard: hole matches anything
+      case lookup(pattern, "kind") == :hole do
+        true -> eval_node(lookup(branch, "body"), env, registry)
+        _ ->
+          pat_val = eval_node(pattern, env, registry)
+          case pat_val == subject do
+            true -> eval_node(lookup(branch, "body"), env, registry)
+            _ -> match_branch(branches, subject, idx + 1, env, registry)
+          end
+      end
+  end
+end
+
+def eval_actor_def(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  name = lookup(node, "name")
+  body = lookup(node, "body")
+  # Collect state defaults and handlers
+  default_state = collect_state(body, 0, %{})
+  handlers = collect_handlers(body, 0, [])
+  template = %{default_state: default_state, handlers: handlers}
+  registry <- :register(name, template)
+  env <- :define(name, :actor_template)
+  name
+end
+
+def collect_state(body: List, idx: Int, st: Map) -> Map do
+  case idx >= length(body) do
+    true -> st
+    _ ->
+      node = elem(body, idx)
+      case lookup(node, "kind") == :state_def do
+        true ->
+          name = lookup(node, "name")
+          default = lookup(node, "default")
+          # For now store the default as-is (could eval it)
+          val = case nil?(default) do
+            true -> nil
+            _ -> lookup(default, "value") orelse nil
+          end
+          collect_state(body, idx + 1, put(st, name, val))
+        _ -> collect_state(body, idx + 1, st)
+      end
+  end
+end
+
+def collect_handlers(body: List, idx: Int, handlers: List) -> List do
+  case idx >= length(body) do
+    true -> handlers
+    _ ->
+      node = elem(body, idx)
+      case lookup(node, "kind") == :handler do
+        true -> collect_handlers(body, idx + 1, append(handlers, node))
+        _ -> collect_handlers(body, idx + 1, handlers)
+      end
+  end
+end
+
+def eval_def(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  name = lookup(node, "name")
+  func = %{params: lookup(node, "params"), body: lookup(node, "body"), return_type: lookup(node, "return_type")}
+  env <- :define(name, func)
+  name
+end
+
+def eval_message_send(node: Map, env: Env, registry: ActorRegistry) -> Any do
+  target = eval_node(lookup(node, "target"), env, registry)
+  msg_name = lookup(node, "message")
+  args = lookup(node, "args")
+  arg_vals = eval_list(args, 0, env, registry, [])
+  # Target should be a ref map: %{id: N, type: "Name"}
+  id = lookup(target, "id")
+  case nil?(id) do
+    true -> nil
+    _ ->
+      instance = registry <- :get_instance(id)
+      case nil?(instance) do
+        true -> nil
+        _ ->
+          handlers = lookup(instance, "handlers")
+          inst_st = lookup(instance, "fields")
+          dispatch_handler(handlers, msg_name, arg_vals, inst_st, id, env, registry)
+      end
+  end
+end
+
+def dispatch_handler(handlers: List, msg_name: String, args: List, st: Map, id: Int, env: Env, registry: ActorRegistry) -> Any do
+  case empty?(handlers) do
+    true -> nil
+    _ ->
+      handler = head(handlers)
+      h_name = lookup(handler, "name")
+      case h_name == msg_name do
+        true ->
+          # Match! Execute handler body
+          params = lookup(handler, "params")
+          body = lookup(handler, "body")
+          env <- :push
+          # Bind state fields
+          st_keys = keys(st)
+          bind_st(st_keys, st, 0, env)
+          # Bind params
+          bind_params(params, args, 0, env)
+          # Eval body, collecting become/reply
+          result = eval_handler_body(body, st, id, env, registry)
+          env <- :pop
+          result
+        _ -> dispatch_handler(tail(handlers), msg_name, args, st, id, env, registry)
+      end
+  end
+end
+
+def bind_st(st_keys: List, st: Map, idx: Int, env: Env) -> Any do
+  case idx >= length(st_keys) do
+    true -> :ok
+    _ ->
+      key = elem(st_keys, idx)
+      val = lookup(st, key)
+      env <- :define(key, val)
+      bind_st(st_keys, st, idx + 1, env)
+  end
+end
+
+def eval_handler_body(body: List, st: Map, id: Int, env: Env, registry: ActorRegistry) -> Any do
+  eval_handler_loop(body, 0, st, id, env, registry, nil)
+end
+
+def eval_handler_loop(body: List, idx: Int, st: Map, id: Int, env: Env, registry: ActorRegistry, last: Any) -> Any do
+  case idx >= length(body) do
+    true -> last
+    _ ->
+      node = elem(body, idx)
+      kind = lookup(node, "kind")
+      case kind do
+        :become ->
+          fields = lookup(node, "fields")
+          new_st = apply_become(fields, st, env, registry)
+          registry <- :update_state(id, new_st)
+          eval_handler_loop(body, idx + 1, new_st, id, env, registry, last)
+        :reply ->
+          eval_node(lookup(node, "value"), env, registry)
+        _ ->
+          result = eval_node(node, env, registry)
+          eval_handler_loop(body, idx + 1, st, id, env, registry, result)
+      end
+  end
+end
+
+def apply_become(fields: List, st: Map, env: Env, registry: ActorRegistry) -> Map do
+  apply_become_loop(fields, 0, st, env, registry)
+end
+
+def apply_become_loop(fields: List, idx: Int, st: Map, env: Env, registry: ActorRegistry) -> Map do
+  case idx >= length(fields) do
+    true -> st
+    _ ->
+      field = elem(fields, idx)
+      key = lookup(field, "key")
+      val = eval_node(lookup(field, "value"), env, registry)
+      new_st = put(st, key, val)
+      # Also update env so subsequent expressions in the same handler see new value
+      env <- :define(key, val)
+      apply_become_loop(fields, idx + 1, new_st, env, registry)
+  end
+end

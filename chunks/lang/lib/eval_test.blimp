@@ -1,0 +1,134 @@
+# Tests for the self-hosted evaluator
+# Uses blimp_eval to load lexer+parser+eval to avoid type checker bug
+
+def self_eval(code: String) -> Any do
+  # Load the self-hosted compiler and eval the code
+  loader = concat(
+    "def is_digit(ch: String) -> Bool do case nil?(ch) do true -> false _ -> c = char_code(ch)\nc >= 48 && c <= 57 end end\n",
+    "def is_upper_char(c: Int) -> Bool do c >= 65 && c <= 90 end\n"
+  )
+  # This approach won't work -- too much code to inline.
+  # Instead: test eval_node directly with pre-built AST maps
+  nil
+end
+
+# Test the evaluator functions directly with hand-crafted AST nodes
+
+actor EvalTests do
+  test "eval integer literal" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    node = %{kind: :integer_lit, value: 42, line: 1}
+    result = eval_node(node, env, registry)
+    assert_eq(result, 42)
+  end
+
+  test "eval string literal" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    node = %{kind: :string_lit, value: "hello", line: 1}
+    result = eval_node(node, env, registry)
+    assert_eq(result, "hello")
+  end
+
+  test "eval binary add" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "+", left: %{kind: :integer_lit, value: 2}, right: %{kind: :integer_lit, value: 3}}
+    result = eval_node(node, env, registry)
+    assert_eq(result, 5)
+  end
+
+  test "eval binary multiply" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    node = %{kind: :binary_op, op: "*", left: %{kind: :integer_lit, value: 6}, right: %{kind: :integer_lit, value: 7}}
+    result = eval_node(node, env, registry)
+    assert_eq(result, 42)
+  end
+
+  test "eval variable assignment and lookup" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    assign = %{kind: :assign, name: "x", value: %{kind: :integer_lit, value: 99}}
+    eval_node(assign, env, registry)
+    lookup_node = %{kind: :identifier, name: "x"}
+    result = eval_node(lookup_node, env, registry)
+    assert_eq(result, 99)
+  end
+
+  test "eval function def and call" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    # def double(n: Int) do n * 2 end
+    def_node = %{kind: :def, name: "double", params: [%{name: "n", type_name: "Int"}], body: [%{kind: :binary_op, op: "*", left: %{kind: :identifier, name: "n"}, right: %{kind: :integer_lit, value: 2}}]}
+    eval_node(def_node, env, registry)
+    # double(21)
+    call_node = %{kind: :func_call, name: "double", args: [%{kind: :integer_lit, value: 21}]}
+    result = eval_node(call_node, env, registry)
+    assert_eq(result, 42)
+  end
+
+  test "eval builtin concat" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    call = %{kind: :func_call, name: "concat", args: [%{kind: :string_lit, value: "hello"}, %{kind: :string_lit, value: " world"}]}
+    result = eval_node(call, env, registry)
+    assert_eq(result, "hello world")
+  end
+
+  test "eval list literal" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    list_node = %{kind: :list_lit, elements: [%{kind: :integer_lit, value: 1}, %{kind: :integer_lit, value: 2}, %{kind: :integer_lit, value: 3}]}
+    result = eval_node(list_node, env, registry)
+    assert_eq(length(result), 3)
+  end
+
+  test "eval comparison" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    node = %{kind: :binary_op, op: ">", left: %{kind: :integer_lit, value: 5}, right: %{kind: :integer_lit, value: 3}}
+    result = eval_node(node, env, registry)
+    assert_eq(result, true)
+  end
+
+  test "eval case expression" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    # case 2 do 1 -> :one 2 -> :two _ -> :other end
+    case_node = %{kind: :case_expr,
+      subject: %{kind: :integer_lit, value: 2},
+      branches: [
+        %{pattern: %{kind: :integer_lit, value: 1}, body: %{kind: :atom_lit, name: ":one"}},
+        %{pattern: %{kind: :integer_lit, value: 2}, body: %{kind: :atom_lit, name: ":two"}},
+        %{pattern: %{kind: :hole}, body: %{kind: :atom_lit, name: ":other"}}
+      ]}
+    result = eval_node(case_node, env, registry)
+    assert_eq(result, ":two")
+  end
+
+  test "eval actor spawn and message send" do
+    env = spawn Env
+    registry = spawn ActorRegistry
+    # Register a Counter template
+    tmpl = %{default_state: %{count: 0}, handlers: [
+      %{name: ":get", params: [], body: [%{kind: :reply, value: %{kind: :identifier, name: "count"}}]},
+      %{name: ":inc", params: [], body: [
+        %{kind: :become, fields: [%{key: "count", value: %{kind: :binary_op, op: "+", left: %{kind: :identifier, name: "count"}, right: %{kind: :integer_lit, value: 1}}}]},
+        %{kind: :reply, value: %{kind: :identifier, name: "count"}}
+      ]}
+    ]}
+    registry <- :register("Counter", tmpl)
+    # spawn
+    ref = registry <- :spawn_actor("Counter")
+    env <- :define("c", ref)
+    # c <- :inc
+    send_inc = %{kind: :message_send, target: %{kind: :identifier, name: "c"}, message: ":inc", args: []}
+    eval_node(send_inc, env, registry)
+    # c <- :get
+    send_get = %{kind: :message_send, target: %{kind: :identifier, name: "c"}, message: ":get", args: []}
+    result = eval_node(send_get, env, registry)
+    assert_eq(result, 1)
+  end
+end

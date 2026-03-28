@@ -799,6 +799,8 @@ pub const Checker = struct {
                 // Check if the identifier has an actor type in the environment
                 if (self.env.lookup(id.name)) |ty| {
                     if (ty == .actor) return ty.actor;
+                    // Any type is compatible -- could be an actor ref at runtime
+                    if (ty == .any or ty == .hole) return id.name;
                 }
                 return null;
             },
