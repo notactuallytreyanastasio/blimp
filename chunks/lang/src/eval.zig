@@ -1025,6 +1025,8 @@ pub const Evaluator = struct {
     /// Check if a value matches an expected type name.
     fn checkType(self: *Evaluator, val: *const Value, expected: []const u8) bool {
         _ = self;
+        // Any accepts everything
+        if (std.mem.eql(u8, expected, "Any")) return true;
         // Built-in types
         if (std.mem.eql(u8, expected, "Int")) return val.* == .integer;
         if (std.mem.eql(u8, expected, "Float")) return val.* == .float;
