@@ -29,6 +29,10 @@ pub const Evaluator = struct {
     msg_log: [64]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
     bubble_reason: ?*const Value = null,
+    /// Reduction counter: decremented on each eval. Yield when 0.
+    reductions: i32 = 4_000_000, // high default for non-scheduled mode
+    /// Scheduler instance (null in non-scheduled mode)
+    scheduler: ?*@import("scheduler.zig").Scheduler = null,
 
     // Message log for canvas rays
     pub const MsgLogEntry = struct {
@@ -50,6 +54,75 @@ pub const Evaluator = struct {
             .builtins = BuiltinRegistry.init(allocator),
             .registry = Registry.init(allocator),
         };
+    }
+
+    /// Process one message from an actor's mailbox. Returns the reply value or null.
+    /// Used by the scheduler to drain mailboxes in round-robin order.
+    pub fn processMailboxMessage(self: *Evaluator, actor_ref: registry_mod.ActorRef) ?*const Value {
+        const entry = self.registry.getInstance(actor_ref) orelse return null;
+        const msg = entry.mailbox.dequeue(self.allocator) orelse return null;
+
+        // Find a matching handler
+        for (entry.handlers) |handler| {
+            if (!std.mem.eql(u8, handler.name, msg.name)) continue;
+            if (handler.params.len != msg.args.len) continue;
+
+            // Execute the handler body
+            self.env.pushScope();
+
+            // Bind params
+            for (handler.params, 0..) |param, i| {
+                self.env.define(param.name, msg.args[i]);
+            }
+
+            // Bind state fields
+            for (entry.state_fields) |field| {
+                self.env.define(field.key, field.val);
+            }
+
+            // Set actor context
+            var ctx = ActorContext{ .entry = entry };
+            const prev_ctx = self.actor_ctx;
+            self.actor_ctx = &ctx;
+
+            // Eval body
+            var reply_val: ?*const Value = null;
+            for (handler.body) |stmt| {
+                if (stmt.kind == .reply_stmt) {
+                    reply_val = self.eval(stmt.kind.reply_stmt.value.*) catch null;
+                    break;
+                }
+                _ = self.eval(stmt) catch {};
+            }
+
+            self.actor_ctx = prev_ctx;
+            self.env.popScope();
+
+            // Deliver reply to sender if they're waiting
+            if (msg.reply_slot) |slot| {
+                slot.* = reply_val;
+            }
+
+            return reply_val;
+        }
+
+        return null;
+    }
+
+    /// Run the scheduler: process messages from all actors in round-robin
+    /// until no messages remain or max_ticks is reached.
+    pub fn runScheduler(self: *Evaluator, max_ticks: u32) void {
+        var ticks: u32 = 0;
+        while (ticks < max_ticks) : (ticks += 1) {
+            var processed_any = false;
+            for (self.registry.instances.items) |*entry| {
+                if (!entry.mailbox.isEmpty()) {
+                    _ = self.processMailboxMessage(entry.ref);
+                    processed_any = true;
+                }
+            }
+            if (!processed_any) break; // all mailboxes empty
+        }
     }
 
     /// Run all test blocks found in parsed AST nodes.
@@ -181,6 +254,9 @@ pub const Evaluator = struct {
 
     /// Evaluate a single AST node to a runtime Value.
     pub fn eval(self: *Evaluator, node: ast.Node) EvalError!*const Value {
+        // Reduction counting: each eval costs 1 reduction
+        self.reductions -= 1;
+        // TODO: when reductions <= 0 and scheduler is active, yield
         switch (node.kind) {
             // Literals
             .integer_lit => |lit| {
@@ -1221,6 +1297,8 @@ pub const Evaluator = struct {
         // Runtime eval/test -- needs evaluator context, can't be a plain builtin
         if (std.mem.eql(u8, call.name, "blimp_eval")) return self.runtimeEval(call.args);
         if (std.mem.eql(u8, call.name, "blimp_test")) return self.runtimeTest(call.args);
+        if (std.mem.eql(u8, call.name, "schedule")) return self.builtinSchedule(call.args);
+        if (std.mem.eql(u8, call.name, "send_async")) return self.builtinSendAsync(call.args);
 
         // Otherwise, look up the builtin
         const func = self.builtins.get(call.name) orelse {
@@ -1356,6 +1434,48 @@ pub const Evaluator = struct {
     /// blimp_eval("code string") -> last expression value
     /// Parses and evaluates a string of Blimp code in a fresh scope.
     /// Actors/functions defined in the code are registered in the current evaluator.
+    /// send_async(actor_ref, :message, args...) -- enqueue a message without blocking
+    fn builtinSendAsync(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        if (arg_nodes.len < 2) return error.TypeError;
+        const target_val = try self.eval(arg_nodes[0]);
+        const msg_val = try self.eval(arg_nodes[1]);
+        if (target_val.* != .actor_ref or msg_val.* != .atom) return error.TypeError;
+        const ref = target_val.actor_ref;
+        const msg_name = msg_val.atom;
+
+        // Evaluate remaining args
+        var args = self.allocator.alloc(*const Value, arg_nodes.len - 2) catch return error.OutOfMemory;
+        for (arg_nodes[2..], 0..) |arg_node, i| {
+            args[i] = try self.eval(arg_node);
+        }
+
+        // Enqueue in target's mailbox
+        const entry = self.registry.getInstance(ref) orelse return error.TypeError;
+        const MailboxMsg = @import("mailbox.zig").Message;
+        entry.mailbox.enqueue(self.allocator, MailboxMsg{
+            .name = msg_name,
+            .args = args,
+            .reply_slot = null,
+        });
+
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .atom = "queued" };
+        return result;
+    }
+
+    /// schedule(ticks) -- run the scheduler for N ticks, processing actor mailboxes
+    fn builtinSchedule(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
+        var ticks: u32 = 100;
+        if (arg_nodes.len >= 1) {
+            const arg = try self.eval(arg_nodes[0]);
+            if (arg.* == .integer) ticks = @intCast(@max(1, arg.integer));
+        }
+        self.runScheduler(ticks);
+        const result = self.allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .atom = "ok" };
+        return result;
+    }
+
     fn runtimeEval(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 1) return error.TypeError;
         const code_val = try self.eval(arg_nodes[0]);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("value.zig").Value;
+const Mailbox = @import("mailbox.zig").Mailbox;
 
 /// An opaque handle to a spawned actor instance.
 pub const ActorRef = struct {
@@ -11,6 +12,7 @@ pub const ActorRef = struct {
 pub const ActorStatus = enum {
     idle,
     running,
+    waiting, // blocked on empty mailbox
     dead,
 };
 
@@ -20,6 +22,8 @@ pub const ActorEntry = struct {
     state_fields: []Value.MapEntry, // current mutable state
     handlers: []const Value.HandlerDef, // from the template
     status: ActorStatus,
+    mailbox: Mailbox, // pending messages
+    reductions: u32 = 4000, // remaining reductions this timeslice
 };
 
 /// A registered actor template (from an actor definition).
@@ -91,6 +95,7 @@ pub const Registry = struct {
             .state_fields = state,
             .handlers = template.handlers,
             .status = .idle,
+            .mailbox = Mailbox.init(),
         }) catch {};
 
         return ref;
