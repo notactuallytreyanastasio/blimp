@@ -131,6 +131,37 @@ body {
   padding: 0;
   margin: 0;
 }
+/* Autocomplete dropdown */
+.ac-menu {
+  position: absolute;
+  background: #1e1e30;
+  border: 1px solid #3a3a5e;
+  border-radius: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  z-index: 100;
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  min-width: 200px;
+}
+.ac-item {
+  padding: 4px 10px;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.ac-item.selected { background: #2a2a4e; }
+.ac-item:hover { background: #2a2a4e; }
+.ac-name { color: #a6e22e; }
+.ac-sig { color: #666; font-size: 11px; }
+/* Inline type hint */
+.type-hint {
+  color: #555;
+  font-size: 11px;
+  margin-left: 0.5rem;
+  font-style: italic;
+}
 
 .right-col {
   width: 280px;
@@ -316,6 +347,9 @@ body {
   var mountedActors = {};
   var currentLesson = 0;
   var blimpCanvas = null;
+  var acMenu = null;     // autocomplete dropdown element
+  var acItems = [];      // current completions
+  var acIdx = -1;        // selected index
 
   // Restore progress
   try { currentLesson = parseInt(localStorage.getItem('blimp_lesson') || '0') || 0; } catch(e) {}
@@ -497,8 +531,24 @@ body {
   }
 
   function handleKey(e) {
+    // Autocomplete navigation
+    if (acMenu) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = Math.min(acIdx + 1, acItems.length - 1); renderAc(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = Math.max(acIdx - 1, 0); renderAc(); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); acceptAc(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); closeAc(); return; }
+    }
+
+    // Tab: trigger autocomplete
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      showAc();
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      closeAc();
       var line = freezeInput();
       buffer += (buffer ? '\n' : '') + line;
       depth += countDepth(line);
@@ -517,6 +567,86 @@ body {
       else { historyIdx = history.length; inputEl.value = ''; }
       autoResize.call(inputEl);
     }
+
+    // Close autocomplete on other keys
+    if (acMenu && e.key !== 'Shift' && e.key !== 'Control' && e.key !== 'Meta' && e.key !== 'Alt') {
+      closeAc();
+    }
+  }
+
+  function getPrefix() {
+    if (!inputEl) return '';
+    var val = inputEl.value;
+    var pos = inputEl.selectionStart;
+    var before = val.substring(0, pos);
+    var match = before.match(/[\w.!?]*$/);
+    return match ? match[0] : '';
+  }
+
+  function showAc() {
+    var prefix = getPrefix();
+    if (!prefix) return;
+    var completions = blimp.complete(prefix);
+    if (!completions || completions.length === 0) return;
+
+    acItems = completions;
+    acIdx = 0;
+
+    if (!acMenu) {
+      acMenu = document.createElement('div');
+      acMenu.className = 'ac-menu';
+      document.body.appendChild(acMenu);
+    }
+
+    renderAc();
+    positionAc();
+  }
+
+  function renderAc() {
+    if (!acMenu) return;
+    acMenu.innerHTML = '';
+    for (var i = 0; i < acItems.length; i++) {
+      var item = acItems[i];
+      var div = document.createElement('div');
+      div.className = 'ac-item' + (i === acIdx ? ' selected' : '');
+      div.innerHTML = '<span class="ac-name">' + esc(item.insert || item.label) + '</span>' +
+        (item.label !== item.insert ? '<span class="ac-sig">' + esc(item.label) + '</span>' : '');
+      (function(idx) { div.addEventListener('click', function() { acIdx = idx; acceptAc(); }); })(i);
+      acMenu.appendChild(div);
+    }
+    // Scroll selected into view
+    var sel = acMenu.querySelector('.selected');
+    if (sel) sel.scrollIntoView({ block: 'nearest' });
+  }
+
+  function positionAc() {
+    if (!acMenu || !inputEl) return;
+    var rect = inputEl.getBoundingClientRect();
+    acMenu.style.left = rect.left + 'px';
+    acMenu.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+    acMenu.style.top = 'auto';
+  }
+
+  function acceptAc() {
+    if (acIdx < 0 || acIdx >= acItems.length) { closeAc(); return; }
+    var item = acItems[acIdx];
+    var insert = item.insert || item.label;
+    var prefix = getPrefix();
+    // Replace prefix with full completion
+    var val = inputEl.value;
+    var pos = inputEl.selectionStart;
+    var before = val.substring(0, pos - prefix.length);
+    var after = val.substring(pos);
+    inputEl.value = before + insert + after;
+    inputEl.selectionStart = inputEl.selectionEnd = before.length + insert.length;
+    closeAc();
+    inputEl.focus();
+  }
+
+  function closeAc() {
+    if (acMenu) { acMenu.remove(); acMenu = null; }
+    acItems = [];
+    acIdx = -1;
   }
 
   function autoResize() { this.style.height = 'auto'; this.style.height = Math.min(this.scrollHeight, 320) + 'px'; }
