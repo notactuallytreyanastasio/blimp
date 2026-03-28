@@ -57,7 +57,18 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 .loading { text-align: center; padding: 48px; color: #a1a1aa; font-size: 16px; }
 .progress-bar { height: 4px; background: #27272a; border-radius: 2px; margin: 16px 0; overflow: hidden; }
 .progress-fill { height: 100%; background: #a855f7; border-radius: 2px; transition: width 0.3s; }
-/* View preview pane */
+/* Canvas: running system output */
+#canvas-container { margin: 12px 0; }
+.canvas-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #52525b; margin-bottom: 6px; }
+.canvas {
+  background: #fafafa; color: #111; border-radius: 8px; padding: 16px; min-height: 48px;
+  font-family: system-ui, sans-serif; border: 1px solid #3f3f46;
+}
+.canvas:empty::after { content: 'Hit Run to see output'; color: #a1a1aa; font-style: italic; font-size: 14px; }
+.canvas .result-value { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #18181b; font-size: 15px; }
+.canvas .result-error { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #dc2626; font-size: 14px; }
+.canvas .result-prints { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #2563eb; font-size: 13px; margin-bottom: 8px; white-space: pre-wrap; }
+/* View rendering inside canvas */
 .view-preview {
   background: #fafafa; color: #111; border-radius: 8px; padding: 16px; margin: 12px 0;
   font-family: system-ui, sans-serif; border: 1px solid #3f3f46;
@@ -428,10 +439,13 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
       html += '<textarea id="code" placeholder="Write your code here..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">' + esc(lesson.starter || '') + '</textarea>';
     }
 
-    html += '<div class="btn-row"><button class="btn" id="check-btn">' +
-      (lesson.type === 'view' ? 'Render' : lesson.type === 'write' ? 'Run Tests' : 'Check') + '</button></div>';
+    html += '<div class="btn-row"><button class="btn" id="check-btn">Run</button></div>';
 
-    html += '<div id="view-container"></div>';
+    // Canvas: always present, shows the running system output
+    html += '<div id="canvas-container">';
+    html += '<div class="canvas-label">Output</div>';
+    html += '<div class="canvas" id="canvas"></div>';
+    html += '</div>';
     html += '<div id="feedback"></div>';
 
     html += '<hr>';
@@ -477,29 +491,36 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
   function handleCheck() {
     var lesson = lessons[currentLesson];
     var feedbackEl = document.getElementById('feedback');
-    var viewContainer = document.getElementById('view-container');
+    var canvas = document.getElementById('canvas');
     var result;
+    var prints = [];
+
+    // Capture prints from the WASM module
+    blimpInstance.onPrint(function(s) { prints.push(s); });
 
     if (lesson.type === 'predict') {
+      // For predict: eval the shown code to populate the canvas, then check the answer
+      blimpInstance.reset();
+      var evalResult = blimpInstance.eval(lesson.showCode);
+      populateCanvas(canvas, evalResult, prints);
       var answer = document.getElementById('answer').value.trim();
       result = (answer === lesson.expected) ? {pass:true} : {pass:false, msg:'Expected: ' + lesson.expected};
     } else {
+      // For write/fill/view: eval the user's code, show output in canvas, then validate
       var code = document.getElementById('code').value;
+      blimpInstance.reset();
+      var evalResult = blimpInstance.eval(code);
+      populateCanvas(canvas, evalResult, prints);
       if (lesson.validate) {
         result = lesson.validate(code, blimpInstance);
+        // If validate returned a view, re-render the canvas with it
+        if (result.view) populateCanvas(canvas, {ok:true, view:result.view, value:''}, []);
       } else {
         result = {pass:false, msg:'No validator'};
       }
     }
 
-    // Render view if present
-    viewContainer.innerHTML = '';
-    if (result.view) {
-      var preview = document.createElement('div');
-      preview.className = 'view-preview';
-      preview.appendChild(renderView(result.view));
-      viewContainer.appendChild(preview);
-    }
+    blimpInstance.onPrint(null);
 
     feedbackEl.className = 'feedback ' + (result.pass ? 'pass' : 'fail');
     feedbackEl.textContent = result.pass ? (result.msg || 'Correct!') : (result.msg || 'Not quite.');
@@ -514,6 +535,52 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
       } else {
         container.innerHTML = '<span style="color:#4ade80;font-weight:600">You completed all lessons!</span>';
       }
+    }
+  }
+
+  function populateCanvas(canvas, evalResult, prints) {
+    canvas.innerHTML = '';
+
+    // Show prints first
+    if (prints.length > 0) {
+      var printEl = document.createElement('div');
+      printEl.className = 'result-prints';
+      printEl.textContent = prints.join('\n');
+      canvas.appendChild(printEl);
+    }
+
+    if (!evalResult.ok) {
+      // Error
+      var errEl = document.createElement('div');
+      errEl.className = 'result-error';
+      errEl.textContent = evalResult.error;
+      canvas.appendChild(errEl);
+      return;
+    }
+
+    // View output
+    if (evalResult.view) {
+      var preview = document.createElement('div');
+      preview.className = 'view-preview';
+      preview.appendChild(renderView(evalResult.view));
+      canvas.appendChild(preview);
+    }
+
+    // Value output (show if not a view, or show alongside)
+    if (evalResult.value && evalResult.value !== 'nil' && !evalResult.view) {
+      var valEl = document.createElement('div');
+      valEl.className = 'result-value';
+      valEl.textContent = evalResult.value;
+      canvas.appendChild(valEl);
+    }
+
+    // If canvas is still empty, show nil
+    if (canvas.children.length === 0) {
+      var nilEl = document.createElement('div');
+      nilEl.className = 'result-value';
+      nilEl.style.color = '#71717a';
+      nilEl.textContent = 'nil';
+      canvas.appendChild(nilEl);
     }
   }
 
