@@ -345,7 +345,7 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
       validate: function(code, b) {
         b.reset(); var r = b.eval(code); if (!r.ok) return {pass:false, msg:r.error};
         var t = b.eval('Greeter <- :greet');
-        return (t.ok && t.value==='Hello, World') ? {pass:true} : {pass:false, msg:'Greeter <- :greet should return "Hello, World", got: '+(t.ok?t.value:t.error)};
+        return (t.ok && unquote(t.value)==='Hello, World') ? {pass:true} : {pass:false, msg:'Greeter <- :greet should return "Hello, World", got: '+(t.ok?t.value:t.error)};
       }
     },
     {
@@ -787,6 +787,13 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 
   function saveProgress() {
     try { localStorage.setItem('blimp_lesson', currentLesson.toString()); } catch(e) {}
+  }
+
+  // Strip surrounding quotes from WASM string results
+  // The evaluator formats strings as "hello" but we want hello
+  function unquote(s) {
+    if (s && s.length >= 2 && s[0] === '"' && s[s.length-1] === '"') return s.slice(1, -1);
+    return s;
   }
 
   function esc(s) {
