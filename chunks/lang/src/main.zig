@@ -27,6 +27,13 @@ pub fn main() !void {
         return;
     }
 
+    // blimp test [dir] -- discover and run *_test.blimp files
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "test")) {
+        const test_dir = if (args.len >= 3) args[2] else "test";
+        runTestDir(allocator, test_dir);
+        return;
+    }
+
     if (args.len < 2) {
         // No arguments -- enter REPL mode
         const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
@@ -84,6 +91,20 @@ pub fn main() !void {
         var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
         printNodes(&stdout_writer.interface, nodes, 0);
         stdout_writer.interface.flush() catch {};
+        return;
+    }
+
+    // Check for --test flag (run test blocks)
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "--test")) {
+        var evaluator = Evaluator.init(arena.allocator());
+        evaluator.setSource(source);
+        const start = std.time.milliTimestamp();
+        const all_passed = evaluator.runTests(nodes);
+        const elapsed = std.time.milliTimestamp() - start;
+        var tbuf: [64]u8 = undefined;
+        const timing = std.fmt.bufPrint(&tbuf, "\nFinished in {d}ms\n", .{elapsed}) catch "\n";
+        std.fs.File.stderr().writeAll(timing) catch {};
+        if (!all_passed) std.process.exit(1);
         return;
     }
 
@@ -542,6 +563,90 @@ const HistoryEntry = struct {
     kind: enum { input, output, err },
     text: []const u8,
 };
+
+/// Discover and run all *_test.blimp files in a directory.
+fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
+    var test_arena = std.heap.ArenaAllocator.init(gpa);
+    defer test_arena.deinit();
+    const allocator = test_arena.allocator();
+    const stderr = std.fs.File.stderr();
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        stderr.writeAll("Could not open test directory: ") catch {};
+        stderr.writeAll(dir_path) catch {};
+        stderr.writeAll("\n") catch {};
+        std.process.exit(1);
+    };
+    defer dir.close();
+
+    var files: std.ArrayList([]const u8) = .empty;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (std.mem.endsWith(u8, entry.name, "_test.blimp")) {
+            const name = allocator.dupe(u8, entry.name) catch continue;
+            files.append(allocator, name) catch continue;
+        }
+    }
+
+    if (files.items.len == 0) {
+        stderr.writeAll("No *_test.blimp files found in ") catch {};
+        stderr.writeAll(dir_path) catch {};
+        stderr.writeAll("/\n") catch {};
+        return;
+    }
+
+    // Sort for deterministic order
+    std.mem.sort([]const u8, files.items, {}, struct {
+        fn cmp(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.cmp);
+
+    stderr.writeAll("\n") catch {};
+    var any_failed = false;
+    const start_time = std.time.milliTimestamp();
+
+    for (files.items) |filename| {
+        // Build full path
+        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, filename }) catch continue;
+
+        stderr.writeAll("\x1b[1m") catch {};
+        stderr.writeAll(filename) catch {};
+        stderr.writeAll("\x1b[0m\n") catch {};
+
+        const source = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch {
+            stderr.writeAll("  \x1b[31mfailed to read file\x1b[0m\n") catch {};
+            any_failed = true;
+            continue;
+        };
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+
+        var parser = Parser.init(arena.allocator(), source);
+        const nodes = parser.parseFile() catch {
+            stderr.writeAll("  \x1b[31mparse error\x1b[0m\n") catch {};
+            any_failed = true;
+            continue;
+        };
+
+        var checker = Checker.init(arena.allocator());
+        _ = checker.checkFile(nodes);
+
+        var evaluator = Evaluator.init(arena.allocator());
+        evaluator.setSource(source);
+        if (!evaluator.runTests(nodes)) {
+            any_failed = true;
+        }
+    }
+
+    const elapsed = std.time.milliTimestamp() - start_time;
+    var buf: [64]u8 = undefined;
+    const timing = std.fmt.bufPrint(&buf, "\nFinished in {d}ms\n", .{elapsed}) catch "\n";
+    stderr.writeAll(timing) catch {};
+
+    if (any_failed) std.process.exit(1);
+}
 
 fn repl(allocator: std.mem.Allocator) void {
     var arena = std.heap.ArenaAllocator.init(allocator);

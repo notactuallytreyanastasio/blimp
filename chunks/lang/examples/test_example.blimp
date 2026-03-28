@@ -1,0 +1,67 @@
+# Blimp test runner example
+# Run: ./blimp examples/test_example.blimp --test
+#
+# The suite actor is the test runtime. Its state fields are
+# the fixture -- each test gets fresh actor instances.
+
+actor Counter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+  end
+
+  on :decrement do
+    become count: count - 1
+  end
+
+  on :get_count do
+    reply count
+  end
+end
+
+actor CounterTests do
+  # Fixture: each test gets its own fresh Counter
+  state counter: Counter :: spawn Counter
+
+  test "starts at zero" do
+    result = counter <- :get_count
+    assert_eq(result, 0)
+  end
+
+  test "increment increases count" do
+    counter <- :increment
+    result = counter <- :get_count
+    assert_eq(result, 1)
+  end
+
+  test "decrement goes negative" do
+    counter <- :decrement
+    result = counter <- :get_count
+    assert_eq(result, -1)
+  end
+
+  test "multiple increments accumulate" do
+    counter <- :increment
+    counter <- :increment
+    counter <- :increment
+    result = counter <- :get_count
+    assert_eq(result, 3)
+  end
+
+  test "assert works on truthy values" do
+    assert(true)
+    assert(42)
+    assert("hello")
+  end
+
+  test "refute works on falsy values" do
+    refute(nil)
+    refute(false)
+  end
+
+  test "assert_ne catches differences" do
+    assert_ne(1, 2)
+    assert_ne("a", "b")
+  end
+end

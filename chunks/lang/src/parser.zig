@@ -100,7 +100,8 @@ pub const Parser = struct {
         return switch (self.current.kind) {
             .kw_state => self.parseStateDef(),
             .kw_on => self.parseMessageHandler(),
-            // Reject anything else - actor definition bodies should only have state and on
+            .kw_test => self.parseTestDef(),
+            // Reject anything else - actor definition bodies should only have state, on, and test
             else => error.UnexpectedToken,
         };
     }
@@ -131,6 +132,33 @@ pub const Parser = struct {
         const fields = try self.parseTypedKeyValueList();
         return Node{
             .kind = .{ .state_def = .{ .fields = fields } },
+            .loc = loc,
+        };
+    }
+
+    /// Parse: test "description" do ... end
+    fn parseTestDef(self: *Parser) ParseError!Node {
+        const loc = self.currentLoc();
+        try self.expect(.kw_test);
+        // Expect a string literal for the test name
+        if (self.current.kind != .string) return error.UnexpectedToken;
+        const name = self.current.lexeme;
+        self.advance();
+        try self.expect(.kw_do);
+        self.skipNewlines();
+        // Parse body statements (same as handler body)
+        var body: std.ArrayList(Node) = .empty;
+        while (self.current.kind != .kw_end and self.current.kind != .eof) {
+            const stmt = try self.parseHandlerBody();
+            body.append(self.allocator, stmt) catch return error.OutOfMemory;
+            self.skipNewlines();
+        }
+        try self.expect(.kw_end);
+        return Node{
+            .kind = .{ .test_def = .{
+                .name = name,
+                .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            } },
             .loc = loc,
         };
     }

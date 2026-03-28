@@ -1,0 +1,27 @@
+actor Counter do
+  state count: Int :: 0
+  on :increment do become count: count + 1 end
+  on :decrement do become count: count - 1 end
+  on :get_count do reply count end
+end
+
+actor CounterTests do
+  state counter: Counter :: spawn Counter
+
+  test "starts at zero" do
+    result = counter <- :get_count
+    assert_eq(result, 0)
+  end
+
+  test "increment increases count" do
+    counter <- :increment
+    result = counter <- :get_count
+    assert_eq(result, 1)
+  end
+
+  test "decrement goes negative" do
+    counter <- :decrement
+    result = counter <- :get_count
+    assert_eq(result, -1)
+  end
+end

@@ -55,6 +55,11 @@ pub const BuiltinRegistry = struct {
         reg.register("values", &builtinValues);
         reg.register("type_of", &builtinTypeOf);
         reg.register("print", &builtinPrint);
+        // Test assertions
+        reg.register("assert", &builtinAssert);
+        reg.register("assert_eq", &builtinAssertEq);
+        reg.register("assert_ne", &builtinAssertNe);
+        reg.register("refute", &builtinRefute);
         reg.register("rem", &builtinRem);
         reg.register("abs", &builtinAbs);
         reg.register("nil?", &builtinIsNil);
@@ -666,6 +671,83 @@ fn builtinPrint(_: std.mem.Allocator, args: []const *const Value) EvalError!*con
         stdout.writeAll("\n") catch {};
     }
     return args[0]; // return the value (identity)
+}
+
+// ── Test assertion builtins ─────────────────────────────
+
+/// assert(expr) -- fails if expr is falsy (nil, false)
+fn builtinAssert(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    if (!args[0].truthy()) {
+        const stderr = std.fs.File.stderr();
+        stderr.writeAll("\x1b[31mAssertion failed: value is falsy\x1b[0m\n") catch {};
+        var buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        args[0].format(fbs.writer());
+        stderr.writeAll("  got: ") catch {};
+        stderr.writeAll(fbs.getWritten()) catch {};
+        stderr.writeAll("\n") catch {};
+        return error.TypeError; // assertion failure
+    }
+    return args[0];
+}
+
+/// assert_eq(a, b) -- fails if a != b
+fn builtinAssertEq(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (!args[0].eql(args[1].*)) {
+        const stderr = std.fs.File.stderr();
+        stderr.writeAll("\x1b[31mAssertion failed: values not equal\x1b[0m\n") catch {};
+        var buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        args[0].format(fbs.writer());
+        stderr.writeAll("  left:  ") catch {};
+        stderr.writeAll(fbs.getWritten()) catch {};
+        stderr.writeAll("\n") catch {};
+        fbs = std.io.fixedBufferStream(&buf);
+        args[1].format(fbs.writer());
+        stderr.writeAll("  right: ") catch {};
+        stderr.writeAll(fbs.getWritten()) catch {};
+        stderr.writeAll("\n") catch {};
+        return error.TypeError; // assertion failure
+    }
+    return args[0];
+}
+
+/// assert_ne(a, b) -- fails if a == b
+fn builtinAssertNe(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].eql(args[1].*)) {
+        const stderr = std.fs.File.stderr();
+        stderr.writeAll("\x1b[31mAssertion failed: values should not be equal\x1b[0m\n") catch {};
+        var buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        args[0].format(fbs.writer());
+        stderr.writeAll("  both: ") catch {};
+        stderr.writeAll(fbs.getWritten()) catch {};
+        stderr.writeAll("\n") catch {};
+        return error.TypeError; // assertion failure
+    }
+    return args[0];
+}
+
+/// refute(expr) -- fails if expr is truthy
+fn builtinRefute(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    if (args[0].truthy()) {
+        const stderr = std.fs.File.stderr();
+        stderr.writeAll("\x1b[31mRefute failed: value is truthy\x1b[0m\n") catch {};
+        var buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        args[0].format(fbs.writer());
+        stderr.writeAll("  got: ") catch {};
+        stderr.writeAll(fbs.getWritten()) catch {};
+        stderr.writeAll("\n") catch {};
+        return error.TypeError; // assertion failure
+    }
+    const result = @constCast(args[0]);
+    _ = result;
+    return args[0];
 }
 
 // ── Math and utility builtins ───────────────────────────

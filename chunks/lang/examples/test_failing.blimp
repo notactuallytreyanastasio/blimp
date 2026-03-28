@@ -1,0 +1,16 @@
+# Test file with intentional failures
+# Run: ./blimp examples/test_failing.blimp --test
+
+actor MathTests do
+  test "this passes" do
+    assert_eq(2 + 2, 4)
+  end
+
+  test "this fails on purpose" do
+    assert_eq(2 + 2, 5)
+  end
+
+  test "refute catches truthy" do
+    refute(true)
+  end
+end

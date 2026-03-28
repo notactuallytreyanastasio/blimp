@@ -55,6 +55,7 @@ pub const Node = struct {
         spread_map: SpreadExpr,   // ...list, fn -> map
         spread_each: SpreadExpr,  // ..list, fn -> each
         self_ref: void,
+        test_def: TestDef,
     };
 
     pub const ActorDef = struct {
@@ -243,6 +244,12 @@ pub const Node = struct {
         name: []const u8,
         params: []const HandlerParam,
         return_type: ?[]const u8 = null, // -> Type
+        body: []const Node,
+    };
+
+    /// Test block: test "name" do ... end
+    pub const TestDef = struct {
+        name: []const u8, // test description string
         body: []const Node,
     };
 

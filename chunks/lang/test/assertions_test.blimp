@@ -1,0 +1,29 @@
+actor AssertionTests do
+  test "assert on truthy" do
+    assert(true)
+    assert(42)
+    assert("hello")
+    assert([1, 2, 3])
+  end
+
+  test "refute on falsy" do
+    refute(nil)
+    refute(false)
+  end
+
+  test "assert_eq with integers" do
+    assert_eq(1 + 1, 2)
+    assert_eq(10 - 3, 7)
+    assert_eq(4 * 5, 20)
+  end
+
+  test "assert_eq with strings" do
+    assert_eq(concat("hello", " world"), "hello world")
+  end
+
+  test "assert_ne with different values" do
+    assert_ne(1, 2)
+    assert_ne("a", "b")
+    assert_ne(true, false)
+  end
+end

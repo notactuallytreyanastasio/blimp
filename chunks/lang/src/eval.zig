@@ -52,6 +52,118 @@ pub const Evaluator = struct {
         };
     }
 
+    /// Run all test blocks found in parsed AST nodes.
+    /// For each actor with test_def children:
+    ///   1. Spawn a fresh actor instance (fresh state)
+    ///   2. Execute each test body in the actor's environment
+    ///   3. Report pass/fail with colored output
+    /// Returns true if all tests passed.
+    pub fn runTests(self: *Evaluator, nodes: []const ast.Node) bool {
+        const stderr = std.fs.File.stderr();
+        var total: u32 = 0;
+        var passed: u32 = 0;
+        var failed: u32 = 0;
+        var failure_details: [256]FailureDetail = undefined;
+        var failure_count: u32 = 0;
+
+        // First pass: evaluate all top-level nodes (actor defs, functions, etc.)
+        // so actors and functions are registered before tests run
+        for (nodes) |node| {
+            _ = self.eval(node) catch {};
+        }
+
+        // Second pass: find actors with test blocks and run them
+        for (nodes) |node| {
+            if (node.kind != .actor_def) continue;
+            const def = node.kind.actor_def;
+
+            // Collect test_def nodes from this actor's body
+            for (def.body) |body_node| {
+                if (body_node.kind != .test_def) continue;
+                const test_def = body_node.kind.test_def;
+                total += 1;
+
+                // Strip quotes from test name
+                const raw_name = test_def.name;
+                const test_name = if (raw_name.len >= 2 and raw_name[0] == '"' and raw_name[raw_name.len - 1] == '"')
+                    raw_name[1 .. raw_name.len - 1]
+                else
+                    raw_name;
+
+                // Fresh scope per test: re-evaluate state defaults from AST
+                // This gives each test fresh actor spawns (not shared singletons)
+                self.env.pushScope();
+                for (def.body) |state_node| {
+                    if (state_node.kind != .state_def) continue;
+                    for (state_node.kind.state_def.fields) |field| {
+                        if (field.default_value) |default_ptr| {
+                            const val = self.eval(default_ptr.*) catch continue;
+                            self.env.define(field.key, val);
+                        }
+                    }
+                }
+
+                // Run test body
+                var test_passed = true;
+                for (test_def.body) |stmt| {
+                    _ = self.eval(stmt) catch {
+                        test_passed = false;
+                        break;
+                    };
+                }
+
+                self.env.popScope();
+                self.actor_ctx = null;
+
+                if (test_passed) {
+                    stderr.writeAll("\x1b[32m.\x1b[0m") catch {};
+                    passed += 1;
+                } else {
+                    stderr.writeAll("\x1b[31mF\x1b[0m") catch {};
+                    failed += 1;
+                    if (failure_count < 256) {
+                        failure_details[failure_count] = .{
+                            .actor_name = def.name,
+                            .test_name = test_name,
+                            .error_msg = "assertion failed",
+                        };
+                        failure_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Summary
+        stderr.writeAll("\n\n") catch {};
+        if (failed == 0) {
+            var buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "\x1b[32m{d} test{s} passed\x1b[0m\n", .{ passed, if (passed != 1) "s" else "" }) catch "tests done\n";
+            stderr.writeAll(msg) catch {};
+        } else {
+            // Print failure details
+            for (failure_details[0..failure_count]) |detail| {
+                stderr.writeAll("\n\x1b[31m  FAIL\x1b[0m ") catch {};
+                stderr.writeAll(detail.actor_name) catch {};
+                stderr.writeAll(" > ") catch {};
+                stderr.writeAll(detail.test_name) catch {};
+                stderr.writeAll("\n    ") catch {};
+                stderr.writeAll(detail.error_msg) catch {};
+                stderr.writeAll("\n") catch {};
+            }
+            var buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "\n\x1b[31m{d} failed\x1b[0m, \x1b[32m{d} passed\x1b[0m, {d} total\n", .{ failed, passed, total }) catch "tests done\n";
+            stderr.writeAll(msg) catch {};
+        }
+
+        return failed == 0;
+    }
+
+    const FailureDetail = struct {
+        actor_name: []const u8,
+        test_name: []const u8,
+        error_msg: []const u8,
+    };
+
     /// Set the source text for error reporting before eval.
     pub fn setSource(self: *Evaluator, src: []const u8) void {
         self.source = src;
@@ -192,6 +304,13 @@ pub const Evaluator = struct {
 
             // Actor definition
             .actor_def => |def| return self.evalActorDef(def),
+
+            // Test def is stored during actor eval; standalone is skipped in normal mode
+            .test_def => {
+                const v = self.allocator.create(Value) catch return error.OutOfMemory;
+                v.* = .nil;
+                return v;
+            },
 
             // State def is handled inside evalActorDef; standalone is an error
             .state_def => {
