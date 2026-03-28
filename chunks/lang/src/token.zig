@@ -43,6 +43,8 @@ pub const Token = struct {
         kw_for,
         kw_in,
         kw_test,
+        kw_and,
+        kw_or,
         plus_plus,  // ++ (list concat)
         dot_dot,    // .. (each)
         dot_dot_dot, // ... (map)
@@ -113,6 +115,8 @@ pub const Token = struct {
             .{ "for", .kw_for },
             .{ "in", .kw_in },
             .{ "test", .kw_test },
+            .{ "and", .kw_and },
+            .{ "or", .kw_or },
             .{ "true", .true_lit },
             .{ "false", .false_lit },
             .{ "nil", .nil_lit },

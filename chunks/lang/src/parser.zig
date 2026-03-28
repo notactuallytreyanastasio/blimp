@@ -646,7 +646,7 @@ pub const Parser = struct {
 
     fn parseBinaryOr(self: *Parser) ParseError!Node {
         var left = try self.parseBinaryAnd();
-        while (self.current.kind == .pipe_pipe) {
+        while (self.current.kind == .pipe_pipe or self.current.kind == .kw_or) {
             self.advance();
             const right = try self.parseBinaryAnd();
             left = try self.makeBinaryOp(.or_op, left, right);
@@ -656,7 +656,7 @@ pub const Parser = struct {
 
     fn parseBinaryAnd(self: *Parser) ParseError!Node {
         var left = try self.parseComparison();
-        while (self.current.kind == .amp_amp) {
+        while (self.current.kind == .amp_amp or self.current.kind == .kw_and) {
             self.advance();
             const right = try self.parseComparison();
             left = try self.makeBinaryOp(.and_op, left, right);

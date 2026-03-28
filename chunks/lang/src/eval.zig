@@ -1655,35 +1655,38 @@ pub const Evaluator = struct {
         // If right side is a func_call, check for hole args and substitute
         switch (pipe.right.kind) {
             .func_call => |call| {
-                const func = self.builtins.get(call.name) orelse return error.UndefinedVariable;
-
-                // Check if any arg is a hole -- if so, substitute left value
+                // Check for hole args -- substitute left value for _
                 var has_hole = false;
                 for (call.args) |arg| {
-                    if (arg.kind == .hole) {
-                        has_hole = true;
-                        break;
-                    }
+                    if (arg.kind == .hole) { has_hole = true; break; }
                 }
 
+                // Build a modified func_call node with the hole replaced by a synthetic node
+                // that evaluates to left_val. We inject left_val via a temporary env binding.
+                const tmp_name = "__pipe_val__";
+                self.env.define(tmp_name, left_val);
+
                 if (has_hole) {
-                    const args = self.allocator.alloc(*const Value, call.args.len) catch return error.OutOfMemory;
+                    // Replace hole args with the pipe value identifier
+                    const new_args = self.allocator.alloc(ast.Node, call.args.len) catch return error.OutOfMemory;
                     for (call.args, 0..) |arg, i| {
                         if (arg.kind == .hole) {
-                            args[i] = left_val;
+                            new_args[i] = ast.Node{ .kind = .{ .identifier = .{ .name = tmp_name } }, .loc = arg.loc };
                         } else {
-                            args[i] = try self.eval(arg);
+                            new_args[i] = arg;
                         }
                     }
-                    return func(self.allocator, args);
+                    const modified_call = ast.Node.FuncCall{ .name = call.name, .args = new_args };
+                    return self.evalFuncCall(modified_call);
                 } else {
-                    // No hole -- pass left as first arg
-                    const args = self.allocator.alloc(*const Value, call.args.len + 1) catch return error.OutOfMemory;
-                    args[0] = left_val;
+                    // No hole -- prepend left as first arg
+                    const new_args = self.allocator.alloc(ast.Node, call.args.len + 1) catch return error.OutOfMemory;
+                    new_args[0] = ast.Node{ .kind = .{ .identifier = .{ .name = tmp_name } }, .loc = .{ .line = 0, .col = 0 } };
                     for (call.args, 0..) |arg, i| {
-                        args[i + 1] = try self.eval(arg);
+                        new_args[i + 1] = arg;
                     }
-                    return func(self.allocator, args);
+                    const modified_call = ast.Node.FuncCall{ .name = call.name, .args = new_args };
+                    return self.evalFuncCall(modified_call);
                 }
             },
             .identifier => |id| {
