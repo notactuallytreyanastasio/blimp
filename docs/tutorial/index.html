@@ -57,14 +57,24 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
 .loading { text-align: center; padding: 48px; color: #a1a1aa; font-size: 16px; }
 .progress-bar { height: 4px; background: #27272a; border-radius: 2px; margin: 16px 0; overflow: hidden; }
 .progress-fill { height: 100%; background: #a855f7; border-radius: 2px; transition: width 0.3s; }
-/* Canvas: running system output */
-#canvas-container { margin: 12px 0; }
-.canvas-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #52525b; margin-bottom: 6px; }
-.canvas {
-  background: #fafafa; color: #111; border-radius: 8px; padding: 16px; min-height: 48px;
-  font-family: system-ui, sans-serif; border: 1px solid #3f3f46;
+/* Tabs */
+.tabs { display: flex; gap: 0; margin: 16px 0 0 0; border-bottom: 2px solid #27272a; }
+.tab {
+  padding: 10px 20px; background: transparent; color: #71717a; border: none;
+  font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -2px; min-height: 44px;
+  touch-action: manipulation;
 }
-.canvas:empty::after { content: 'Hit Run to see output'; color: #a1a1aa; font-style: italic; font-size: 14px; }
+.tab.active { color: #a855f7; border-bottom-color: #a855f7; }
+.tab:hover { color: #e4e4e7; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+/* Canvas: running system output */
+.canvas {
+  background: #fafafa; color: #111; border-radius: 0 0 8px 8px; padding: 16px; min-height: 120px;
+  font-family: system-ui, sans-serif; border: 1px solid #3f3f46; border-top: none;
+}
+.canvas-empty { color: #a1a1aa; font-style: italic; font-size: 14px; text-align: center; padding: 32px 0; }
 .canvas .result-value { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #18181b; font-size: 15px; }
 .canvas .result-error { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #dc2626; font-size: 14px; }
 .canvas .result-prints { font-family: 'Berkeley Mono', 'SF Mono', Menlo, monospace; color: #2563eb; font-size: 13px; margin-bottom: 8px; white-space: pre-wrap; }
@@ -429,23 +439,30 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     html += '<h2>' + lesson.title + '</h2>';
     html += '<p class="description">' + lesson.description + '</p>';
 
+    // Tabs: Code and Output
+    html += '<div class="tabs">';
+    html += '<button class="tab active" id="tab-code">Code</button>';
+    html += '<button class="tab" id="tab-output">Output</button>';
+    html += '</div>';
+
+    // Code tab
+    html += '<div class="tab-panel active" id="panel-code">';
     if (lesson.showCode) {
       html += '<pre>' + esc(lesson.showCode) + '</pre>';
     }
-
     if (lesson.type === 'predict') {
       html += '<input type="text" id="answer" placeholder="Type your answer..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />';
     } else {
       html += '<textarea id="code" placeholder="Write your code here..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">' + esc(lesson.starter || '') + '</textarea>';
     }
-
     html += '<div class="btn-row"><button class="btn" id="check-btn">Run</button></div>';
-
-    // Canvas: always present, shows the running system output
-    html += '<div id="canvas-container">';
-    html += '<div class="canvas-label">Output</div>';
-    html += '<div class="canvas" id="canvas"></div>';
     html += '</div>';
+
+    // Output tab (canvas)
+    html += '<div class="tab-panel" id="panel-output">';
+    html += '<div class="canvas" id="canvas"><div class="canvas-empty">Hit Run to see output</div></div>';
+    html += '</div>';
+
     html += '<div id="feedback"></div>';
 
     html += '<hr>';
@@ -455,6 +472,21 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     html += '</div>';
 
     app.innerHTML = html;
+
+    // Wire tab switching
+    var tabCode = document.getElementById('tab-code');
+    var tabOutput = document.getElementById('tab-output');
+    var panelCode = document.getElementById('panel-code');
+    var panelOutput = document.getElementById('panel-output');
+
+    tabCode.addEventListener('click', function() {
+      tabCode.classList.add('active'); tabOutput.classList.remove('active');
+      panelCode.classList.add('active'); panelOutput.classList.remove('active');
+    });
+    tabOutput.addEventListener('click', function() {
+      tabOutput.classList.add('active'); tabCode.classList.remove('active');
+      panelOutput.classList.add('active'); panelCode.classList.remove('active');
+    });
 
     // Wire events
     document.getElementById('check-btn').addEventListener('click', handleCheck);
@@ -521,6 +553,14 @@ input:focus, textarea:focus { outline: none; border-color: #a855f7; box-shadow: 
     }
 
     blimpInstance.onPrint(null);
+
+    // Switch to Output tab
+    var tabCode = document.getElementById('tab-code');
+    var tabOutput = document.getElementById('tab-output');
+    var panelCode = document.getElementById('panel-code');
+    var panelOutput = document.getElementById('panel-output');
+    tabOutput.classList.add('active'); tabCode.classList.remove('active');
+    panelOutput.classList.add('active'); panelCode.classList.remove('active');
 
     feedbackEl.className = 'feedback ' + (result.pass ? 'pass' : 'fail');
     feedbackEl.textContent = result.pass ? (result.msg || 'Correct!') : (result.msg || 'Not quite.');
