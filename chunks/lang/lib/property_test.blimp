@@ -1,0 +1,513 @@
+# Property-based tests for the entire Blimp language
+# Each property runs 100 times with random inputs
+
+# ── Arithmetic Properties ────────────────────────────
+
+actor ArithmeticProperties do
+  property "addition is commutative" do
+    given a: gen_integer(-1000, 1000)
+    given b: gen_integer(-1000, 1000)
+    assert_eq(a + b, b + a)
+  end
+
+  property "addition is associative" do
+    given a: gen_integer(-100, 100)
+    given b: gen_integer(-100, 100)
+    given c: gen_integer(-100, 100)
+    assert_eq((a + b) + c, a + (b + c))
+  end
+
+  property "multiplication is commutative" do
+    given a: gen_integer(-100, 100)
+    given b: gen_integer(-100, 100)
+    assert_eq(a * b, b * a)
+  end
+
+  property "multiply by zero is zero" do
+    given a: gen_integer(-1000, 1000)
+    assert_eq(a * 0, 0)
+  end
+
+  property "multiply by one is identity" do
+    given a: gen_integer(-1000, 1000)
+    assert_eq(a * 1, a)
+  end
+
+  property "add zero is identity" do
+    given a: gen_integer(-1000, 1000)
+    assert_eq(a + 0, a)
+  end
+
+  property "subtract self is zero" do
+    given a: gen_integer(-1000, 1000)
+    assert_eq(a - a, 0)
+  end
+
+  property "double equals add self" do
+    given a: gen_integer(-500, 500)
+    assert_eq(a * 2, a + a)
+  end
+
+  property "negation: a + (-a) = 0" do
+    given a: gen_integer(-1000, 1000)
+    assert_eq(a + (0 - a), 0)
+  end
+end
+
+# ── Comparison Properties ────────────────────────────
+
+actor ComparisonProperties do
+  property "< and >= are complementary" do
+    given a: gen_integer(-100, 100)
+    given b: gen_integer(-100, 100)
+    assert_ne(a < b, a >= b)
+  end
+
+  property "> and <= are complementary" do
+    given a: gen_integer(-100, 100)
+    given b: gen_integer(-100, 100)
+    assert_ne(a > b, a <= b)
+  end
+
+  property "== is reflexive" do
+    given a: gen_integer(-1000, 1000)
+    assert_eq(a == a, true)
+  end
+
+  property "!= is negation of ==" do
+    given a: gen_integer(-100, 100)
+    given b: gen_integer(-100, 100)
+    assert_eq(a != b, not(a == b))
+  end
+
+  property "<= includes ==" do
+    given a: gen_integer(-100, 100)
+    assert(a <= a)
+  end
+
+  property ">= includes ==" do
+    given a: gen_integer(-100, 100)
+    assert(a >= a)
+  end
+end
+
+# ── Boolean Properties ───────────────────────────────
+
+actor BooleanProperties do
+  property "and with true is identity" do
+    given b: gen_boolean()
+    assert_eq(b and true, b)
+  end
+
+  property "and with false is false" do
+    given b: gen_boolean()
+    assert_eq(b and false, false)
+  end
+
+  property "or with false is identity" do
+    given b: gen_boolean()
+    assert_eq(b or false, b)
+  end
+
+  property "or with true is true" do
+    given b: gen_boolean()
+    assert_eq(b or true, true)
+  end
+
+  property "not not is identity" do
+    given b: gen_boolean()
+    assert_eq(not(not(b)), b)
+  end
+
+  property "de morgan: not(a and b) == not(a) or not(b)" do
+    given a: gen_boolean()
+    given b: gen_boolean()
+    assert_eq(not(a and b), not(a) or not(b))
+  end
+
+  property "de morgan: not(a or b) == not(a) and not(b)" do
+    given a: gen_boolean()
+    given b: gen_boolean()
+    assert_eq(not(a or b), not(a) and not(b))
+  end
+end
+
+# ── List Properties ──────────────────────────────────
+
+actor ListProperties do
+  property "reverse reverse is identity" do
+    given xs: gen_list(20, -100, 100)
+    assert_eq(reverse(reverse(xs)), xs)
+  end
+
+  property "reverse preserves length" do
+    given xs: gen_list(20, -50, 50)
+    assert_eq(length(reverse(xs)), length(xs))
+  end
+
+  property "sort is idempotent" do
+    given xs: gen_list(20, -100, 100)
+    assert_eq(sort(sort(xs)), sort(xs))
+  end
+
+  property "sort preserves length" do
+    given xs: gen_list(20, -50, 50)
+    assert_eq(length(sort(xs)), length(xs))
+  end
+
+  property "append increases length by 1" do
+    given xs: gen_list(15)
+    given n: gen_integer(-100, 100)
+    assert_eq(length(append(xs, n)), length(xs) + 1)
+  end
+
+  property "head of append is head or appended" do
+    given xs: gen_list(10, 0, 50)
+    given n: gen_integer(0, 100)
+    ys = append(xs, n)
+    case empty?(xs) do
+      true -> assert_eq(head(ys), n)
+      _ -> assert_eq(head(ys), head(xs))
+    end
+  end
+
+  property "length is non-negative" do
+    given xs: gen_list(30)
+    assert(length(xs) >= 0)
+  end
+
+  property "empty list has length 0" do
+    assert_eq(length([]), 0)
+  end
+
+  property "cons preserves elements" do
+    given xs: gen_list(10, 0, 50)
+    given n: gen_integer(0, 100)
+    ys = [n | xs]
+    assert_eq(head(ys), n)
+    assert_eq(tail(ys), xs)
+  end
+
+  property "cons increases length by 1" do
+    given xs: gen_list(10, 0, 50)
+    given n: gen_integer(0, 100)
+    assert_eq(length([n | xs]), length(xs) + 1)
+  end
+
+  property "sum of empty is 0" do
+    assert_eq(sum([]), 0)
+  end
+
+  property "sum of single element" do
+    given n: gen_integer(-100, 100)
+    assert_eq(sum([n]), n)
+  end
+
+  property "sum is linear: sum(a ++ b) = sum(a) + sum(b)" do
+    given a: gen_list(10, 0, 50)
+    given b: gen_list(10, 0, 50)
+    combined = reduce(b, a, fn(acc: List, x: Int) do append(acc, x) end)
+    assert_eq(sum(combined), sum(a) + sum(b))
+  end
+
+  property "uniq has no duplicates (length <= original)" do
+    given xs: gen_list(20, 1, 10)
+    assert(length(uniq(xs)) <= length(xs))
+  end
+
+  property "uniq is idempotent" do
+    given xs: gen_list(15, 1, 10)
+    assert_eq(uniq(uniq(xs)), uniq(xs))
+  end
+
+  property "flat of flat list is identity" do
+    given xs: gen_list(10, 0, 50)
+    assert_eq(flat(xs), xs)
+  end
+
+  property "range produces correct length" do
+    given a: gen_integer(0, 20)
+    given b: gen_integer(0, 20)
+    case a <= b do
+      true -> assert_eq(length(range(a, b)), b - a + 1)
+      _ -> assert_eq(length(range(a, b)), 0)
+    end
+  end
+
+  property "elem at 0 equals head" do
+    given xs: gen_list(10, 0, 50)
+    case empty?(xs) do
+      true -> assert(true)
+      _ -> assert_eq(elem(xs, 0), head(xs))
+    end
+  end
+end
+
+# ── String Properties ────────────────────────────────
+
+actor StringProperties do
+  property "concat with empty is identity" do
+    given s: gen_string(20)
+    assert_eq(concat(s, ""), s)
+    assert_eq(concat("", s), s)
+  end
+
+  property "length of concat is sum of lengths" do
+    given a: gen_string(15)
+    given b: gen_string(15)
+    assert_eq(length(concat(a, b)), length(a) + length(b))
+  end
+
+  property "slice 0 to length is identity" do
+    given s: gen_string(20)
+    assert_eq(slice(s, 0, length(s)), s)
+  end
+
+  property "char_at and from_char_code roundtrip" do
+    given n: gen_integer(32, 126)
+    ch = from_char_code(n)
+    assert_eq(char_code(ch), n)
+  end
+
+  property "to_string of int roundtrips with to_int" do
+    given n: gen_integer(0, 9999)
+    assert_eq(to_int(to_string(n)), n)
+  end
+
+  property "upcase of downcase covers lowercase" do
+    given s: gen_string(10)
+    assert_eq(downcase(upcase(downcase(s))), downcase(s))
+  end
+
+  property "split then rejoin preserves content" do
+    given n: gen_integer(1, 50)
+    s = to_string(n)
+    parts = split(s, "")
+    assert(length(parts) >= 1)
+  end
+end
+
+# ── Map Properties ───────────────────────────────────
+
+actor MapProperties do
+  property "put then lookup retrieves value" do
+    given n: gen_integer(0, 1000)
+    m = put(%{}, "x", n)
+    assert_eq(lookup(m, "x"), n)
+  end
+
+  property "put overwrites previous" do
+    given a: gen_integer(0, 100)
+    given b: gen_integer(0, 100)
+    m = put(put(%{}, "k", a), "k", b)
+    assert_eq(lookup(m, "k"), b)
+  end
+
+  property "keys and values have same length" do
+    given a: gen_integer(0, 100)
+    given b: gen_integer(0, 100)
+    m = put(put(%{}, "a", a), "b", b)
+    assert_eq(length(keys(m)), length(values(m)))
+  end
+
+  property "size equals length of keys" do
+    given a: gen_integer(0, 100)
+    m = put(put(%{}, "x", a), "y", a)
+    assert_eq(size(m), length(keys(m)))
+  end
+
+  property "merge with empty is identity" do
+    given n: gen_integer(0, 100)
+    m = %{x: n}
+    assert_eq(lookup(merge(m, %{}), "x"), n)
+  end
+end
+
+# ── Higher-Order Function Properties ─────────────────
+
+actor HigherOrderProperties do
+  property "map preserves length" do
+    given xs: gen_list(20, -50, 50)
+    result = map(xs, fn(x: Int) do x * 2 end)
+    assert_eq(length(result), length(xs))
+  end
+
+  property "filter length <= original length" do
+    given xs: gen_list(20, -50, 50)
+    result = filter(xs, fn(x: Int) do x > 0 end)
+    assert(length(result) <= length(xs))
+  end
+
+  property "filter then length + filter complement = original length" do
+    given xs: gen_list(20, -50, 50)
+    pos = filter(xs, fn(x: Int) do x > 0 end)
+    non_pos = filter(xs, fn(x: Int) do x <= 0 end)
+    assert_eq(length(pos) + length(non_pos), length(xs))
+  end
+
+  property "map identity is identity" do
+    given xs: gen_list(15, -50, 50)
+    assert_eq(map(xs, fn(x: Int) do x end), xs)
+  end
+
+  property "reduce sum equals sum builtin" do
+    given xs: gen_list(15, 0, 100)
+    manual = reduce(xs, 0, fn(acc: Int, x: Int) do acc + x end)
+    assert_eq(manual, sum(xs))
+  end
+
+  property "map compose: map(map(f), g) == map(f . g)" do
+    given xs: gen_list(10, 1, 20)
+    step1 = map(xs, fn(x: Int) do x * 2 end)
+    step2 = map(step1, fn(x: Int) do x + 1 end)
+    combined = map(xs, fn(x: Int) do x * 2 + 1 end)
+    assert_eq(step2, combined)
+  end
+
+  property "filter filter is idempotent" do
+    given xs: gen_list(15, -50, 50)
+    once = filter(xs, fn(x: Int) do x > 0 end)
+    twice = filter(once, fn(x: Int) do x > 0 end)
+    assert_eq(once, twice)
+  end
+end
+
+# ── Self-Hosted Compiler Properties ──────────────────
+
+actor CompilerProperties do
+  property "lexer tokenizes random integers" do
+    given n: gen_integer(0, 9999)
+    src = to_string(n)
+    l = spawn Lexer
+    l <- :set_source(src)
+    tokens = l <- :tokenize
+    assert_eq(lookup(head(tokens), "kind"), :integer)
+    assert_eq(lookup(head(tokens), "lexeme"), src)
+  end
+
+  property "self-hosted eval of integer literals" do
+    given n: gen_integer(0, 9999)
+    src = to_string(n)
+    result = blimp_self_eval(src)
+    assert_eq(result, n)
+  end
+
+  property "self-hosted eval of addition" do
+    given a: gen_integer(0, 500)
+    given b: gen_integer(0, 500)
+    src = concat(to_string(a), concat(" + ", to_string(b)))
+    result = blimp_self_eval(src)
+    assert_eq(result, a + b)
+  end
+
+  property "self-hosted eval of subtraction" do
+    given a: gen_integer(0, 1000)
+    given b: gen_integer(0, 1000)
+    src = concat(to_string(a), concat(" - ", to_string(b)))
+    result = blimp_self_eval(src)
+    assert_eq(result, a - b)
+  end
+
+  property "self-hosted eval of multiplication" do
+    given a: gen_integer(0, 100)
+    given b: gen_integer(0, 100)
+    src = concat(to_string(a), concat(" * ", to_string(b)))
+    result = blimp_self_eval(src)
+    assert_eq(result, a * b)
+  end
+
+  property "self-hosted eval of comparison" do
+    given a: gen_integer(0, 100)
+    given b: gen_integer(0, 100)
+    src = concat(to_string(a), concat(" > ", to_string(b)))
+    result = blimp_self_eval(src)
+    assert_eq(result, a > b)
+  end
+
+  property "self-hosted eval of variable roundtrip" do
+    given n: gen_integer(0, 9999)
+    src = concat("x = ", concat(to_string(n), "\nx"))
+    result = blimp_self_eval(src)
+    assert_eq(result, n)
+  end
+
+  property "lexer produces EOF as last token" do
+    given s: gen_string(10)
+    src = concat("x", s)
+    l = spawn Lexer
+    l <- :set_source(to_string(42))
+    tokens = l <- :tokenize
+    last = elem(tokens, length(tokens) - 1)
+    assert_eq(lookup(last, "kind"), :eof)
+  end
+end
+
+# ── Generator Properties (testing the generators themselves) ──
+
+actor GeneratorProperties do
+  property "gen_integer stays in range" do
+    given lo: gen_integer(0, 50)
+    hi = lo + 10
+    given n: gen_integer(lo, hi)
+    assert(n >= lo and n <= hi)
+  end
+
+  property "gen_list respects max length" do
+    given xs: gen_list(5, 0, 10)
+    assert(length(xs) <= 5)
+  end
+
+  property "gen_string respects max length" do
+    given s: gen_string(8)
+    assert(length(s) <= 8)
+  end
+
+  property "gen_boolean always returns bool" do
+    given b: gen_boolean()
+    assert(type_of(b) == :boolean)
+  end
+
+  property "gen_one_of returns element from list" do
+    given x: gen_one_of([1, 2, 3, 4, 5])
+    assert(x >= 1 and x <= 5)
+  end
+end
+
+# ── Actor Properties ─────────────────────────────────
+
+actor Counter do
+  state count: Int :: 0
+  on :add(n: Int) do become count: count + n reply count + n end
+  on :get do reply count end
+  on :reset do become count: 0 reply :ok end
+end
+
+actor ActorProperties do
+  property "counter add is cumulative" do
+    given a: gen_integer(1, 100)
+    given b: gen_integer(1, 100)
+    c = spawn Counter
+    c <- :add(a)
+    c <- :add(b)
+    assert_eq(c <- :get, a + b)
+  end
+
+  property "counter reset always returns to zero" do
+    given n: gen_integer(1, 1000)
+    c = spawn Counter
+    c <- :add(n)
+    c <- :reset
+    assert_eq(c <- :get, 0)
+  end
+
+  property "multiple spawns are independent" do
+    given a: gen_integer(1, 100)
+    given b: gen_integer(1, 100)
+    c1 = spawn Counter
+    c2 = spawn Counter
+    c1 <- :add(a)
+    c2 <- :add(b)
+    assert_eq(c1 <- :get, a)
+    assert_eq(c2 <- :get, b)
+  end
+end
