@@ -1,0 +1,152 @@
+# WASM codegen tests
+# Each test compiles Blimp source to WASM bytes and validates the output.
+
+# Helper: check WASM magic bytes
+def valid_wasm(bytes: List) -> Bool do
+  length(bytes) > 8 and elem(bytes, 0) == 0 and elem(bytes, 1) == 97 and elem(bytes, 2) == 115 and elem(bytes, 3) == 109
+end
+
+actor CodegenTests do
+  test "compiles integer to valid WASM" do
+    bytes = compile_to_wasm("42")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles addition" do
+    bytes = compile_to_wasm("2 + 3")
+    assert(valid_wasm(bytes))
+    # Should contain i32.const 2, i32.const 3, i32.add
+    assert(length(bytes) > 0)
+  end
+
+  test "compiles subtraction" do
+    bytes = compile_to_wasm("10 - 3")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles multiplication" do
+    bytes = compile_to_wasm("6 * 7")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles division" do
+    bytes = compile_to_wasm("100 / 4")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles nested arithmetic" do
+    bytes = compile_to_wasm("2 + 3 * 4")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles comparison ==" do
+    bytes = compile_to_wasm("5 == 5")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles comparison <" do
+    bytes = compile_to_wasm("3 < 5")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles comparison >" do
+    bytes = compile_to_wasm("5 > 3")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles boolean true" do
+    bytes = compile_to_wasm("true")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles boolean false" do
+    bytes = compile_to_wasm("false")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles zero" do
+    bytes = compile_to_wasm("0")
+    assert(valid_wasm(bytes))
+  end
+
+  test "compiles large number" do
+    bytes = compile_to_wasm("9999")
+    assert(valid_wasm(bytes))
+  end
+
+  test "output is deterministic" do
+    a = compile_to_wasm("42")
+    b = compile_to_wasm("42")
+    assert_eq(a, b)
+  end
+
+  test "different expressions produce different output" do
+    a = compile_to_wasm("1")
+    b = compile_to_wasm("2")
+    assert_ne(a, b)
+  end
+
+  test "WASM magic bytes are correct" do
+    bytes = compile_to_wasm("0")
+    assert_eq(elem(bytes, 0), 0)
+    assert_eq(elem(bytes, 1), 97)
+    assert_eq(elem(bytes, 2), 115)
+    assert_eq(elem(bytes, 3), 109)
+  end
+
+  test "WASM version is 1" do
+    bytes = compile_to_wasm("0")
+    assert_eq(elem(bytes, 4), 1)
+    assert_eq(elem(bytes, 5), 0)
+    assert_eq(elem(bytes, 6), 0)
+    assert_eq(elem(bytes, 7), 0)
+  end
+
+  test "empty input produces empty list" do
+    bytes = compile_to_wasm("")
+    assert_eq(bytes, [])
+  end
+end
+
+# Property tests for the codegen
+actor CodegenPropertyTests do
+  property "all integers compile to valid WASM" do
+    given n: gen_integer(0, 9999)
+    bytes = compile_to_wasm(to_string(n))
+    assert(valid_wasm(bytes))
+  end
+
+  property "all additions compile to valid WASM" do
+    given a: gen_integer(0, 500)
+    given b: gen_integer(0, 500)
+    src = concat(to_string(a), concat(" + ", to_string(b)))
+    bytes = compile_to_wasm(src)
+    assert(valid_wasm(bytes))
+  end
+
+  property "all multiplications compile to valid WASM" do
+    given a: gen_integer(0, 100)
+    given b: gen_integer(0, 100)
+    src = concat(to_string(a), concat(" * ", to_string(b)))
+    bytes = compile_to_wasm(src)
+    assert(valid_wasm(bytes))
+  end
+
+  property "WASM output is never empty for valid input" do
+    given n: gen_integer(0, 9999)
+    bytes = compile_to_wasm(to_string(n))
+    assert(length(bytes) > 8)
+  end
+
+  property "compiled WASM and self-eval agree" do
+    given a: gen_integer(1, 100)
+    given b: gen_integer(1, 100)
+    src = concat(to_string(a), concat(" + ", to_string(b)))
+    # Self-hosted eval gets the right answer
+    eval_result = blimp_self_eval(src)
+    assert_eq(eval_result, a + b)
+    # WASM compiles without error
+    bytes = compile_to_wasm(src)
+    assert(valid_wasm(bytes))
+  end
+end

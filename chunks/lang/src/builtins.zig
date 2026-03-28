@@ -114,6 +114,8 @@ pub const BuiltinRegistry = struct {
         // Actor introspection
         reg.register("actor_name", &builtinActorName);
         reg.register("to_atom", &builtinToAtom);
+        reg.register("write_bytes", &builtinWriteBytes);
+        reg.register("read_file", &builtinReadFile);
         // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
         reg.register("to_html", &builtinToHtml_impl);
         reg.register("tcp_listen", &builtinTcpListen_impl);
@@ -1032,6 +1034,52 @@ fn builtinRandom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
 
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = val };
+    return result;
+}
+
+// ============================================================
+// File I/O builtins
+// ============================================================
+
+/// write_bytes(path: String, bytes: List of Int) -> :ok
+/// Writes a list of byte values (0-255) to a file.
+fn builtinWriteBytes(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .list) return error.TypeError;
+    const path = args[0].string;
+    const byte_list = args[1].list;
+
+    // Convert list of integers to byte array
+    const buf = allocator.alloc(u8, byte_list.len) catch return error.OutOfMemory;
+    for (byte_list, 0..) |val, i| {
+        if (val.* != .integer) return error.TypeError;
+        buf[i] = @intCast(@max(0, @min(255, val.integer)));
+    }
+
+    // Write to file
+    if (is_wasm) {
+        return error.NotSupported;
+    }
+    const file = std.fs.cwd().createFile(path, .{}) catch return error.NotSupported;
+    defer file.close();
+    file.writeAll(buf) catch return error.NotSupported;
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .atom = "ok" };
+    return result;
+}
+
+/// read_file(path: String) -> String
+fn builtinReadFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    const path = args[0].string;
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = .nil;
+        return result;
+    };
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = content };
     return result;
 }
 

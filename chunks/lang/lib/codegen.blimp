@@ -1,0 +1,235 @@
+# WASM codegen for Blimp -- written in Blimp
+# Compiles Blimp AST (from the self-hosted parser) to WASM bytecode.
+#
+# The output is a list of bytes (integers 0-255) that form a valid
+# .wasm module. The host can write this to a file or load it directly.
+#
+# WASM binary format: https://webassembly.github.io/spec/core/binary/
+#
+# Phase 1: compile integer expressions to i32 arithmetic.
+# The generated module exports a single function "main" that
+# returns the result of evaluating the expression.
+
+# ── WASM opcodes ─────────────────────────────────────
+
+def op_i32_const() do 65 end
+def op_i32_add() do 106 end
+def op_i32_sub() do 107 end
+def op_i32_mul() do 108 end
+def op_i32_div_s() do 109 end
+def op_i32_eq() do 70 end
+def op_i32_ne() do 71 end
+def op_i32_lt_s() do 72 end
+def op_i32_gt_s() do 74 end
+def op_i32_le_s() do 76 end
+def op_i32_ge_s() do 78 end
+def op_i32_and() do 113 end
+def op_i32_or() do 114 end
+def op_end() do 11 end
+def op_local_get() do 32 end
+def op_local_set() do 33 end
+
+# ── LEB128 encoding ──────────────────────────────────
+# WASM uses LEB128 for variable-length integers.
+
+def encode_unsigned_leb128(n: Int) -> List do
+  encode_uleb_loop(n, [])
+end
+
+def encode_uleb_loop(n: Int, bytes: List) -> List do
+  byte = rem(n, 128)
+  rest = n / 128
+  case rest == 0 do
+    true -> append(bytes, byte)
+    _ -> encode_uleb_loop(rest, append(bytes, byte + 128))
+  end
+end
+
+def encode_signed_leb128(n: Int) -> List do
+  encode_sleb_loop(n, [])
+end
+
+def encode_sleb_loop(n: Int, bytes: List) -> List do
+  byte = rem(n, 128)
+  rest = n / 128
+  case rest == 0 and byte < 64 do
+    true -> append(bytes, byte)
+    _ ->
+      case rest == -1 and byte >= 64 do
+        true -> append(bytes, rem(byte + 256, 256))
+        _ -> encode_sleb_loop(rest, append(bytes, rem(byte + 256, 256) + 128 - 128 * 0 ))
+      end
+  end
+end
+
+# Simplified: for small non-negative integers, unsigned LEB is just the byte
+def encode_u32(n: Int) -> List do
+  encode_unsigned_leb128(n)
+end
+
+def encode_i32(n: Int) -> List do
+  case n >= 0 and n < 64 do
+    true -> [n]
+    _ ->
+      case n >= 0 and n < 128 do
+        true -> [n, 0]
+        _ ->
+          case n >= 0 do
+            true -> encode_unsigned_leb128(n)
+            _ ->
+              # Negative: use two's complement encoding
+              encode_neg_leb(n + 256, [])
+          end
+      end
+  end
+end
+
+def encode_neg_leb(n: Int, bytes: List) -> List do
+  # Simplified negative encoding for small negatives
+  [rem(n + 256, 256)]
+end
+
+# ── Byte helpers ─────────────────────────────────────
+
+def bytes_concat(a: List, b: List) -> List do
+  reduce(b, a, fn(acc: List, byte: Int) do append(acc, byte) end)
+end
+
+def encode_string(s: String) -> List do
+  len = length(s)
+  header = encode_u32(len)
+  body = string_to_bytes(s, 0, [])
+  bytes_concat(header, body)
+end
+
+def string_to_bytes(s: String, idx: Int, bytes: List) -> List do
+  case idx >= length(s) do
+    true -> bytes
+    _ ->
+      byte = char_code(s, idx)
+      string_to_bytes(s, idx + 1, append(bytes, byte))
+  end
+end
+
+# ── Section builders ─────────────────────────────────
+
+def make_section(id: Int, contents: List) -> List do
+  header = [id]
+  size = encode_u32(length(contents))
+  bytes_concat(bytes_concat(header, size), contents)
+end
+
+# ── WASM module builder ──────────────────────────────
+
+def compile_to_wasm(source: String) -> List do
+  # Lex and parse
+  l = spawn Lexer
+  l <- :set_source(source)
+  tokens = l <- :tokenize
+  p = spawn Parser
+  p <- :set_tokens(tokens)
+  result = p <- :parse
+  case lookup(result, "ok") do
+    false -> []
+    _ ->
+      nodes = lookup(result, "nodes")
+      # Compile the last expression as the return value
+      case empty?(nodes) do
+        true -> []
+        _ ->
+          last_node = elem(nodes, length(nodes) - 1)
+          body_bytes = compile_node(last_node)
+          build_wasm_module(body_bytes)
+      end
+  end
+end
+
+def build_wasm_module(body_bytes: List) -> List do
+  # WASM magic number + version
+  magic = [0, 97, 115, 109]
+  version = [1, 0, 0, 0]
+
+  # Type section: one function type () -> i32
+  # func type = 0x60, 0 params, 1 result (i32 = 0x7f)
+  type_contents = bytes_concat([1, 96, 0, 1], [127])
+  type_section = make_section(1, type_contents)
+
+  # Function section: function 0 uses type 0
+  func_contents = [1, 0]
+  func_section = make_section(3, func_contents)
+
+  # Export section: export "main" as function 0
+  export_name = encode_string("main")
+  export_contents = bytes_concat([1], bytes_concat(export_name, [0, 0]))
+  export_section = make_section(7, export_contents)
+
+  # Code section: one function body
+  func_body = bytes_concat(body_bytes, [op_end()])
+  # Function body: local count (0) + body
+  func_entry = bytes_concat([0], func_body)
+  func_size = encode_u32(length(func_entry))
+  code_contents = bytes_concat([1], bytes_concat(func_size, func_entry))
+  code_section = make_section(10, code_contents)
+
+  # Assemble
+  bytes_concat(
+    bytes_concat(magic, version),
+    bytes_concat(
+      bytes_concat(type_section, func_section),
+      bytes_concat(export_section, code_section)
+    )
+  )
+end
+
+# ── AST -> WASM bytecode ─────────────────────────────
+
+def compile_node(node: Map) -> List do
+  kind = lookup(node, "kind")
+  case kind == :integer_lit do
+    true ->
+      val = lookup(node, "value")
+      bytes_concat([op_i32_const()], encode_i32(val))
+    _ ->
+  case kind == :binary_op do
+    true -> compile_binary(node)
+    _ ->
+  case kind == :unary_op do
+    true ->
+      inner = compile_node(lookup(node, "operand"))
+      # -x = 0 - x
+      bytes_concat(bytes_concat([op_i32_const(), 0], inner), [op_i32_sub()])
+    _ ->
+  case kind == :bool_lit do
+    true ->
+      val = lookup(node, "value")
+      case val do
+        true -> [op_i32_const(), 1]
+        _ -> [op_i32_const(), 0]
+      end
+    _ ->
+  # Unsupported node: return 0
+  [op_i32_const(), 0]
+  end end end end
+end
+
+def compile_binary(node: Map) -> List do
+  left = compile_node(lookup(node, "left"))
+  right = compile_node(lookup(node, "right"))
+  op = lookup(node, "op")
+  opcode = case op do
+    "+"  -> op_i32_add()
+    "-"  -> op_i32_sub()
+    "*"  -> op_i32_mul()
+    "/"  -> op_i32_div_s()
+    "==" -> op_i32_eq()
+    "!=" -> op_i32_ne()
+    "<"  -> op_i32_lt_s()
+    ">"  -> op_i32_gt_s()
+    "<=" -> op_i32_le_s()
+    ">=" -> op_i32_ge_s()
+    "&&" -> op_i32_and()
+    "||" -> op_i32_or()
+    _    -> op_i32_add()
+  end
+  bytes_concat(bytes_concat(left, right), [opcode])
+end
