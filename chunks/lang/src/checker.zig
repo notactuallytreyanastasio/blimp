@@ -259,6 +259,7 @@ pub const Checker = struct {
             .reply_stmt => |r| self.checkReplyStmt(r),
             .assign_stmt => |a| self.checkAssignStmt(a),
             .message_handler => |h| self.checkMessageHandler(h, node.loc),
+            .def_stmt => |d| self.checkDefStmt(d, node.loc),
             // Expression statements: infer type to trigger any errors (e.g., message sends)
             .message_send, .func_call, .pipe_expr, .dot_access => {
                 _ = self.inferExpr(node);
@@ -375,6 +376,27 @@ pub const Checker = struct {
                 },
                 else => self.checkNode(stmt),
             }
+        }
+
+        self.env.popScope();
+    }
+
+    /// Check a def statement: parameters must have type annotations.
+    fn checkDefStmt(self: *Checker, def: Node.DefStmt, loc: Loc) void {
+        self.env.pushScope();
+
+        for (def.params) |param| {
+            if (param.type_name) |tn| {
+                const param_type = types.parseTypeName(self.allocator, tn) catch .hole;
+                self.env.define(param.name, param_type);
+            } else {
+                self.addError(loc, "function parameter '{s}' is missing a type annotation", .{param.name});
+                self.env.define(param.name, .any);
+            }
+        }
+
+        for (def.body) |stmt| {
+            self.checkNode(stmt);
         }
 
         self.env.popScope();
