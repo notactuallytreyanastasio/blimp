@@ -320,43 +320,7 @@ def find_ws_key_line(lines: List) -> String do
   end
 end
 
-def handle_ws(client_fd: Int, raw: String, room: ChatRoom, conns: Connections) -> Atom do
-  key = parse_ws_key(raw)
-  accept = ws_accept_key(key)
-  tcp_write(client_fd, concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", concat(accept, "\r\n\r\n")))
-  # Register this connection
-  conns <- :add(client_fd)
-  # Push initial state
-  json = build_state_json(room)
-  ws_write_frame(client_fd, json)
-  # Enter loop
-  ws_loop(client_fd, room, conns)
-  # Cleanup on disconnect
-  conns <- :remove(client_fd)
-  :disconnected
-end
-
-def ws_loop(ws_fd: Int, room: ChatRoom, conns: Connections) -> Atom do
-  frame = ws_read_frame(ws_fd)
-  case nil?(frame) do
-    true -> :done
-    _ ->
-      case contains(frame, "msg") do
-        true ->
-          from_val = json_field(frame, "from")
-          text_val = json_field(frame, "text")
-          case from_val == "" or text_val == "" do
-            true -> :skip
-            _ ->
-              room <- :send_msg(from_val, text_val)
-              # Broadcast to ALL connected clients
-              broadcast(room, conns)
-          end
-        _ -> :skip
-      end
-      ws_loop(ws_fd, room, conns)
-  end
-end
+# WS handling is now inline in process_ready (poll-based)
 
 # ── HTTP helpers ─────────────────────────────────────
 
@@ -534,7 +498,7 @@ end
 
 # ── Router ───────────────────────────────────────────
 
-def route(method: String, path: String, raw: String, sid: String, sdata: Map, room: ChatRoom, sess: Sessions) -> String do
+def route(method: String, path: String, raw: String, sid: String, sdata: Map, room: ChatRoom, sess: Sessions, conns: Connections) -> String do
   case path do
     "/" ->
       username = lookup(sdata, "username")
@@ -552,6 +516,7 @@ def route(method: String, path: String, raw: String, sid: String, sdata: Map, ro
             _ ->
               room <- :join(username)
               sess <- :put(sid, %{username: username})
+              broadcast(room, conns)
               http_redirect("/")
           end
         _ -> http_redirect("/")
@@ -566,6 +531,7 @@ def route(method: String, path: String, raw: String, sid: String, sdata: Map, ro
             true -> http_redirect("/")
             _ ->
               room <- :send_msg(from_val, text_val)
+              broadcast(room, conns)
               http_redirect("/")
           end
         _ -> http_redirect("/")
@@ -604,14 +570,23 @@ def accept_loop(fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
   raw = tcp_read(client_fd)
 
   case is_ws_upgrade(raw) do
-    true -> handle_ws(client_fd, raw, room, conns)
-    _ -> handle_http(client_fd, raw, room, sess)
+    true ->
+      # WS upgrade: handshake, register, push initial state, keep fd open
+      key = parse_ws_key(raw)
+      accept_key = ws_accept_key(key)
+      tcp_write(client_fd, concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", concat(accept_key, "\r\n\r\n")))
+      conns <- :add(client_fd)
+      json = build_state_json(room)
+      ws_write_frame(client_fd, json)
+      # Don't close the fd -- it stays open for push
+    _ ->
+      handle_http(client_fd, raw, room, sess, conns)
   end
 
   accept_loop(fd, room, sess, conns)
 end
 
-def handle_http(client_fd: Int, raw: String, room: ChatRoom, sess: Sessions) do
+def handle_http(client_fd: Int, raw: String, room: ChatRoom, sess: Sessions, conns: Connections) do
   req = parse_request_line(raw)
   method = lookup(req, "method")
   path = lookup(req, "path")
@@ -631,7 +606,7 @@ def handle_http(client_fd: Int, raw: String, room: ChatRoom, sess: Sessions) do
     _ -> :ok
   end
 
-  response = route(method, path, raw, sid, sdata, room, sess)
+  response = route(method, path, raw, sid, sdata, room, sess, conns)
 
   final = case is_new do
     true ->
