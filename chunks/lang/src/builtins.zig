@@ -859,6 +859,7 @@ fn builtinElem(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
             return items[idx];
         },
         .list => |items| {
+            
             if (idx >= items.len) {
                 const result = allocator.create(Value) catch return error.OutOfMemory;
                 result.* = .nil;
