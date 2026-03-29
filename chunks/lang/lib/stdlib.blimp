@@ -1,0 +1,204 @@
+# Blimp standard library -- builtins implemented in Blimp
+# These replace their Zig counterparts. They're loaded by the
+# bootstrap before user code runs.
+
+# ── Logic ────────────────────────────────────────────
+# empty?, nil?, not stay as Zig builtins (they're primitives)
+
+# ── Math ─────────────────────────────────────────────
+
+def abs(n: Int) -> Int do
+  case n >= 0 do
+    true -> n
+    _ -> 0 - n
+  end
+end
+
+def max(a: Int, b: Int) -> Int do
+  case a >= b do
+    true -> a
+    _ -> b
+  end
+end
+
+def min(a: Int, b: Int) -> Int do
+  case a <= b do
+    true -> a
+    _ -> b
+  end
+end
+
+# ── List operations ──────────────────────────────────
+
+def sum(items: List) -> Int do
+  reduce(items, 0, fn(acc: Int, x: Int) do acc + x end)
+end
+
+def range(start: Int, stop: Int) -> List do
+  case start > stop do
+    true -> []
+    _ -> range_loop(start, stop, [])
+  end
+end
+
+def range_loop(current: Int, stop: Int, acc: List) -> List do
+  acc2 = append(acc, current)
+  case current >= stop do
+    true -> acc2
+    _ -> range_loop(current + 1, stop, acc2)
+  end
+end
+
+def flat(items: List) -> List do
+  reduce(items, [], fn(acc: List, item: Any) do
+    case type_of(item) == :list do
+      true -> reduce(item, acc, fn(a: List, x: Any) do append(a, x) end)
+      _ -> append(acc, item)
+    end
+  end)
+end
+
+def uniq(items: List) -> List do
+  uniq_loop(items, [])
+end
+
+def uniq_loop(remaining: List, seen: List) -> List do
+  case empty?(remaining) do
+    true -> seen
+    _ ->
+      item = head(remaining)
+      rest = tail(remaining)
+      case list_contains(seen, item) do
+        true -> uniq_loop(rest, seen)
+        _ -> uniq_loop(rest, append(seen, item))
+      end
+  end
+end
+
+def list_contains(items: List, target: Any) -> Bool do
+  case empty?(items) do
+    true -> false
+    _ ->
+      case head(items) == target do
+        true -> true
+        _ -> list_contains(tail(items), target)
+      end
+  end
+end
+
+def zip(a: List, b: List) -> List do
+  zip_idx(a, b, 0, [])
+end
+
+def zip_idx(a: List, b: List, idx: Int, acc: List) -> List do
+  case idx >= length(a) or idx >= length(b) do
+    true -> acc
+    _ ->
+      pair = [elem(a, idx), elem(b, idx)]
+      zip_idx(a, b, idx + 1, append(acc, pair))
+  end
+end
+
+def set_at(items: List, idx: Int, val: Any) -> List do
+  set_at_loop(items, idx, val, 0, [])
+end
+
+def set_at_loop(items: List, idx: Int, val: Any, current: Int, acc: List) -> List do
+  case empty?(items) do
+    true -> acc
+    _ ->
+      item = case current == idx do
+        true -> val
+        _ -> head(items)
+      end
+      set_at_loop(tail(items), idx, val, current + 1, append(acc, item))
+  end
+end
+
+# ── String operations ────────────────────────────────
+
+def upcase(s: String) -> String do
+  upcase_loop(s, 0, "")
+end
+
+def upcase_loop(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      code = char_code(s, idx)
+      new_code = case code >= 97 and code <= 122 do
+        true -> code - 32
+        _ -> code
+      end
+      upcase_loop(s, idx + 1, concat(acc, from_char_code(new_code)))
+  end
+end
+
+def downcase(s: String) -> String do
+  downcase_loop(s, 0, "")
+end
+
+def downcase_loop(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      code = char_code(s, idx)
+      new_code = case code >= 65 and code <= 90 do
+        true -> code + 32
+        _ -> code
+      end
+      downcase_loop(s, idx + 1, concat(acc, from_char_code(new_code)))
+  end
+end
+
+# ── View primitives ──────────────────────────────────
+# These build ViewNode maps that to_html renders.
+# Moving them to Blimp means view primitives are just functions.
+
+def text(content: String) -> Map do
+  %{tag: "text", attrs: %{}, children: [content]}
+end
+
+def heading(content: String) -> Map do
+  %{tag: "heading", attrs: %{level: 1}, children: [content]}
+end
+
+def bold(content: String) -> Map do
+  %{tag: "bold", attrs: %{}, children: [content]}
+end
+
+def italic(content: String) -> Map do
+  %{tag: "italic", attrs: %{}, children: [content]}
+end
+
+def code_inline(content: String) -> Map do
+  %{tag: "code", attrs: %{}, children: [content]}
+end
+
+def divider() -> Map do
+  %{tag: "divider", attrs: %{}, children: []}
+end
+
+def stack_view(children: List) -> Map do
+  %{tag: "stack", attrs: %{}, children: children}
+end
+
+def row_view(children: List) -> Map do
+  %{tag: "row", attrs: %{}, children: children}
+end
+
+# ── Assertions (for test runner) ─────────────────────
+
+def assert_true(val: Any) -> Any do
+  case val do
+    true -> val
+    _ -> print(concat("Assertion failed: expected truthy, got ", to_string(val)))
+  end
+end
+
+def assert_false(val: Any) -> Any do
+  case val do
+    false -> val
+    _ -> print(concat("Refute failed: expected falsy, got ", to_string(val)))
+  end
+end

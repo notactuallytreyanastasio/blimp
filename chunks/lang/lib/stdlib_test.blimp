@@ -1,0 +1,100 @@
+# Tests for the Blimp stdlib -- verify Blimp implementations
+# match the Zig builtin behavior
+
+actor StdlibLogicTests do
+  test "empty? on empty list" do assert(empty?([])) end
+  test "empty? on non-empty list" do refute(empty?([1])) end
+  test "empty? on empty string" do assert(empty?("")) end
+  test "nil? on nil" do assert(nil?(nil)) end
+  test "nil? on value" do refute(nil?(42)) end
+  test "not true" do assert_eq(not(true), false) end
+  test "not false" do assert_eq(not(false), true) end
+end
+
+actor StdlibMathTests do
+  test "abs positive" do assert_eq(abs(5), 5) end
+  test "abs negative" do assert_eq(abs(0 - 5), 5) end
+  test "abs zero" do assert_eq(abs(0), 0) end
+  test "max" do assert_eq(max(3, 7), 7) end
+  test "max equal" do assert_eq(max(5, 5), 5) end
+  test "max negative" do assert_eq(max(0 - 3, 0 - 7), 0 - 3) end
+  test "min" do assert_eq(min(3, 7), 3) end
+  test "min equal" do assert_eq(min(5, 5), 5) end
+end
+
+actor StdlibListTests do
+  test "sum empty" do assert_eq(sum([]), 0) end
+  test "sum single" do assert_eq(sum([42]), 42) end
+  test "sum multiple" do assert_eq(sum([1, 2, 3, 4, 5]), 15) end
+  test "range ascending" do assert_eq(range(1, 5), [1, 2, 3, 4, 5]) end
+  test "range single" do assert_eq(range(3, 3), [3]) end
+  test "range empty" do assert_eq(range(5, 3), []) end
+  test "flat simple" do assert_eq(flat([[1, 2], [3, 4]]), [1, 2, 3, 4]) end
+  test "flat mixed" do assert_eq(flat([1, [2, 3], 4]), [1, 2, 3, 4]) end
+  test "flat empty" do assert_eq(flat([]), []) end
+  test "uniq no dups" do assert_eq(uniq([1, 2, 3]), [1, 2, 3]) end
+  test "uniq with dups" do assert_eq(uniq([1, 2, 2, 3, 1]), [1, 2, 3]) end
+  test "uniq empty" do assert_eq(uniq([]), []) end
+  test "list_contains found" do assert(list_contains([1, 2, 3], 2)) end
+  test "list_contains not found" do refute(list_contains([1, 2, 3], 5)) end
+  test "list_contains empty" do refute(list_contains([], 1)) end
+  test "zip equal" do assert_eq(zip([1, 2], [3, 4]), [[1, 3], [2, 4]]) end
+  test "zip unequal" do assert_eq(zip([1], [2, 3]), [[1, 2]]) end
+  test "zip empty" do assert_eq(zip([], [1]), []) end
+  test "set_at" do assert_eq(set_at([1, 2, 3], 1, 99), [1, 99, 3]) end
+  test "set_at first" do assert_eq(set_at([1, 2, 3], 0, 99), [99, 2, 3]) end
+  test "set_at last" do assert_eq(set_at([1, 2, 3], 2, 99), [1, 2, 99]) end
+end
+
+actor StdlibStringTests do
+  test "upcase lowercase" do assert_eq(upcase("hello"), "HELLO") end
+  test "upcase already upper" do assert_eq(upcase("HELLO"), "HELLO") end
+  test "upcase mixed" do assert_eq(upcase("Hello"), "HELLO") end
+  test "upcase empty" do assert_eq(upcase(""), "") end
+  test "downcase uppercase" do assert_eq(downcase("HELLO"), "hello") end
+  test "downcase already lower" do assert_eq(downcase("hello"), "hello") end
+  test "downcase mixed" do assert_eq(downcase("HeLLo"), "hello") end
+  test "downcase empty" do assert_eq(downcase(""), "") end
+end
+
+actor StdlibPropertyTests do
+  property "abs is non-negative" do
+    given n: gen_integer(-1000, 1000)
+    assert(abs(n) >= 0)
+  end
+
+  property "max(a,b) >= a and max(a,b) >= b" do
+    given a: gen_integer(-100, 100)
+    given b: gen_integer(-100, 100)
+    m = max(a, b)
+    assert(m >= a and m >= b)
+  end
+
+  property "min(a,b) <= a and min(a,b) <= b" do
+    given a: gen_integer(-100, 100)
+    given b: gen_integer(-100, 100)
+    m = min(a, b)
+    assert(m <= a and m <= b)
+  end
+
+  property "sum of range(1,n) = n*(n+1)/2" do
+    given n: gen_integer(1, 20)
+    assert_eq(sum(range(1, n)), n * (n + 1) / 2)
+  end
+
+  property "length of range(a,b) = b-a+1 when a<=b" do
+    given a: gen_integer(0, 10)
+    b = a + 5
+    assert_eq(length(range(a, b)), b - a + 1)
+  end
+
+  property "uniq is idempotent" do
+    given xs: gen_list(15, 1, 5)
+    assert_eq(uniq(uniq(xs)), uniq(xs))
+  end
+
+  property "upcase then downcase is downcase" do
+    given s: gen_string(10)
+    assert_eq(downcase(upcase(downcase(s))), downcase(s))
+  end
+end
