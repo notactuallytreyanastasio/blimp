@@ -277,11 +277,54 @@ end
 
 def chat_script() do
   "<script>
-    var m = document.getElementById('messages');
-    if (m) m.scrollTop = m.scrollHeight;
-    var inp = document.querySelector('.chat-input input[type=text]');
-    if (inp) inp.focus();
-    setTimeout(function() { location.reload(); }, 3000);
+    (function() {
+      var ws, rd = 1000;
+      function connect() {
+        ws = new WebSocket('ws://' + location.host + '/ws');
+        ws.onopen = function() { rd = 1000; };
+        ws.onmessage = function(e) {
+          var data = JSON.parse(e.data);
+          if (data.type === 'html') {
+            var chat = document.querySelector('.chat-main');
+            if (chat) {
+              var msgs = chat.querySelector('.messages');
+              var form = chat.querySelector('.chat-input');
+              var div = document.createElement('div');
+              div.innerHTML = data.messages;
+              if (msgs) msgs.innerHTML = div.innerHTML;
+              // Update user list
+              var ul = document.querySelector('.user-list');
+              if (ul && data.users) ul.innerHTML = data.users;
+              // Scroll to bottom
+              if (msgs) msgs.scrollTop = msgs.scrollHeight;
+            }
+          }
+        };
+        ws.onclose = function() { setTimeout(connect, rd); rd = Math.min(rd * 2, 10000); };
+      }
+      connect();
+
+      // Override form submit to send via WS
+      var form = document.querySelector('.chat-input');
+      if (form) {
+        form.addEventListener('submit', function(e) {
+          e.preventDefault();
+          var inp = form.querySelector('input[type=text]');
+          var from = form.querySelector('input[name=from]');
+          if (ws && ws.readyState === 1 && inp.value) {
+            ws.send(JSON.stringify({type:'msg', from: from.value, text: inp.value}));
+            inp.value = '';
+            inp.focus();
+          }
+        });
+      }
+
+      // Scroll to bottom on load
+      var m = document.getElementById('messages');
+      if (m) m.scrollTop = m.scrollHeight;
+      var inp = document.querySelector('.chat-input input[type=text]');
+      if (inp) inp.focus();
+    })();
   </script>"
 end
 
@@ -396,10 +439,163 @@ actor HTTPServer do
   on :unused do reply :ok end
 end
 
+def is_ws_upgrade(raw: String) -> Bool do
+  contains(raw, "Upgrade: websocket") or contains(raw, "Upgrade: WebSocket")
+end
+
+def parse_ws_key(raw: String) -> String do
+  lines = split(raw, "\r\n")
+  find_ws_key(lines)
+end
+
+def find_ws_key(lines: List) -> String do
+  case empty?(lines) do
+    true -> ""
+    _ ->
+      line = head(lines)
+      case contains(line, "Sec-WebSocket-Key") do
+        true ->
+          parts = split(line, ": ")
+          case length(parts) >= 2 do
+            true -> elem(parts, 1)
+            _ -> ""
+          end
+        _ -> find_ws_key(tail(lines))
+      end
+  end
+end
+
+def ws_upgrade_response(accept_key: String) -> String do
+  concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ",
+    concat(accept_key, "\r\n\r\n"))
+end
+
+def ws_push_state(ws_fd: Int, room: Any) -> Any do
+  messages = room <- :recent(50)
+  users = room <- :get_users
+  msg_html = render_messages(messages)
+  user_html = render_users(users)
+  json = concat("{\"type\":\"html\",\"messages\":\"", concat(json_escape(msg_html), concat("\",\"users\":\"", concat(json_escape(user_html), "\"}"))))
+  ws_write_frame(ws_fd, json)
+end
+
+def json_escape(s: String) -> String do
+  json_escape_loop(s, 0, "")
+end
+
+def json_escape_loop(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      ch = char_at(s, idx)
+      code = char_code(ch)
+      escaped = case code == 34 do
+        true -> concat(from_char_code(92), from_char_code(34))
+        _ ->
+          case code == 10 do
+            true -> concat(from_char_code(92), "n")
+            _ ->
+              case code == 13 do
+                true -> concat(from_char_code(92), "r")
+                _ ->
+                  case code == 92 do
+                    true -> concat(from_char_code(92), from_char_code(92))
+                    _ -> ch
+                  end
+              end
+          end
+      end
+      json_escape_loop(s, idx + 1, concat(acc, escaped))
+  end
+end
+
+def handle_ws_connection(client_fd: Int, raw: String, room: Any) do
+  key = parse_ws_key(raw)
+  accept = ws_accept_key(key)
+  response = ws_upgrade_response(accept)
+  tcp_write(client_fd, response)
+  # Push initial state
+  ws_push_state(client_fd, room)
+  # Enter WS loop
+  ws_chat_loop(client_fd, room)
+end
+
+def ws_chat_loop(ws_fd: Int, room: Any) do
+  frame = ws_read_frame(ws_fd)
+  case nil?(frame) do
+    true -> :disconnected
+    _ ->
+      # Parse the message
+      case contains(frame, "\"type\":\"msg\"") do
+        true ->
+          from_val = extract_json_field(frame, "from")
+          text_val = extract_json_field(frame, "text")
+          case nil?(from_val) or nil?(text_val) do
+            true -> :skip
+            _ -> room <- :send_msg(from_val, text_val)
+          end
+        _ -> :skip
+      end
+      # Push updated state to this client
+      ws_push_state(ws_fd, room)
+      # Continue loop
+      ws_chat_loop(ws_fd, room)
+  end
+end
+
+def extract_json_field(json: String, field: String) -> String do
+  # Simple JSON field extraction: find "field":"value"
+  marker = concat(concat(from_char_code(34), field), concat(from_char_code(34), ":"))
+  case contains(json, marker) do
+    true ->
+      parts = split(json, marker)
+      case length(parts) >= 2 do
+        true ->
+          after_key = elem(parts, 1)
+          # Skip the opening quote
+          case char_code(after_key, 0) == 34 do
+            true ->
+              # Find closing quote
+              extract_quoted(after_key, 1, "")
+            _ -> nil
+          end
+        _ -> nil
+      end
+    _ -> nil
+  end
+end
+
+def extract_quoted(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      code = char_code(s, idx)
+      case code == 34 do
+        true -> acc
+        _ ->
+          case code == 92 do
+            true -> extract_quoted(s, idx + 2, concat(acc, char_at(s, idx + 1)))
+            _ -> extract_quoted(s, idx + 1, concat(acc, char_at(s, idx)))
+          end
+      end
+  end
+end
+
 def accept_loop(fd: Int, room: Any, sess: Any) do
     client_fd = tcp_accept(fd)
     raw = tcp_read(client_fd)
 
+    case is_ws_upgrade(raw) do
+      true ->
+        handle_ws_connection(client_fd, raw, room)
+      _ ->
+        handle_http(client_fd, raw, room, sess)
+    end
+
+    accept_loop(fd, room, sess)
+end
+
+def handle_http(client_fd: Int, raw: String, room: Any, sess: Any) do
     req = parse_request_line(raw)
     method = lookup(req, "method")
     path = lookup(req, "path")
@@ -434,8 +630,6 @@ def accept_loop(fd: Int, room: Any, sess: Any) do
 
     tcp_write(client_fd, final_response)
     tcp_close(client_fd)
-
-    accept_loop(fd, room, sess)
 end
 
 # Boot
