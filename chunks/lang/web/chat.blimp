@@ -34,9 +34,7 @@ actor ChatRoom do
   end
 
   on :recent(count: Int) do
-    total = length(messages)
-    start = max_int(0, total - count)
-    reply slice_list(messages, start, total)
+    reply messages
   end
 
   on :get_users do
@@ -114,7 +112,10 @@ end
 def slice_idx(items: List, start: Int, stop: Int, idx: Int, acc: List) -> List do
   case idx >= stop or idx >= length(items) do
     true -> acc
-    _ -> slice_idx(items, start, stop, idx + 1, append(acc, elem(items, idx)))
+    _ ->
+      item = elem(items, idx)
+      next_idx = idx + 1
+      slice_idx(items, start, stop, next_idx, append(acc, item))
   end
 end
 
@@ -210,14 +211,15 @@ end
 # ── Rendering ────────────────────────────────────────
 
 def render_messages(messages: List) -> String do
-  render_messages_idx(messages, 0, "")
+  render_msg_loop(messages, "")
 end
 
-def render_messages_idx(messages: List, idx: Int, acc: String) -> String do
-  case idx >= length(messages) do
+def render_msg_loop(remaining: List, acc: String) -> String do
+  case empty?(remaining) do
     true -> acc
     _ ->
-      msg = elem(messages, idx)
+      msg = head(remaining)
+      rest = tail(remaining)
       from_name = lookup(msg, "from")
       msg_text = lookup(msg, "text")
       cls = case from_name == "system" do
@@ -225,21 +227,22 @@ def render_messages_idx(messages: List, idx: Int, acc: String) -> String do
         _ -> "msg"
       end
       line = concat("<div class='", concat(cls, concat("'><span class='from'>", concat(from_name, concat("</span> ", concat(msg_text, "</div>"))))))
-      render_messages_idx(messages, idx + 1, concat(acc, line))
+      render_msg_loop(rest, concat(acc, line))
   end
 end
 
 def render_users(users: List) -> String do
-  render_users_idx(users, 0, "")
+  render_user_loop(users, "")
 end
 
-def render_users_idx(users: List, idx: Int, acc: String) -> String do
-  case idx >= length(users) do
+def render_user_loop(remaining: List, acc: String) -> String do
+  case empty?(remaining) do
     true -> acc
     _ ->
-      user = elem(users, idx)
+      user = head(remaining)
+      rest = tail(remaining)
       line = concat("<div class='user'>", concat(to_string(user), "</div>"))
-      render_users_idx(users, idx + 1, concat(acc, line))
+      render_user_loop(rest, concat(acc, line))
   end
 end
 
