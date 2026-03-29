@@ -1,9 +1,16 @@
-# Blimp Chat -- first real web app
+# Blimp Chat -- WebSocket real-time chat
 # Run: ./blimp web/chat.blimp
 # Open: http://localhost:8080
+#
+# Zero Any types. Every parameter is properly typed.
+
+# ── Message type ─────────────────────────────────────
+
+def make_msg(id: Int, from: String, text: String) -> Map do
+  %{id: id, from: from, text: text, ts: now()}
+end
 
 # ── Chat Room actor ──────────────────────────────────
-# Holds messages and connected users. Single source of truth.
 
 actor ChatRoom do
   state messages: List :: []
@@ -14,21 +21,21 @@ actor ChatRoom do
     case list_has(users, username) do
       true -> reply :already_joined
       _ ->
-        msg = %{id: next_id, from: "system", text: concat(username, " joined the chat"), ts: now()}
+        msg = make_msg(next_id, "system", concat(username, " joined the chat"))
         become users: append(users, username), messages: append(messages, msg), next_id: next_id + 1
         reply :ok
     end
   end
 
   on :send_msg(from: String, text: String) do
-    msg = %{id: next_id, from: from, text: text, ts: now()}
+    msg = make_msg(next_id, from, text)
     become messages: append(messages, msg), next_id: next_id + 1
     reply msg
   end
 
   on :recent(count: Int) do
     total = length(messages)
-    start = max(0, total - count)
+    start = max_int(0, total - count)
     reply slice_list(messages, start, total)
   end
 
@@ -37,9 +44,42 @@ actor ChatRoom do
   end
 
   on :leave(username: String) do
-    msg = %{id: next_id, from: "system", text: concat(username, " left the chat"), ts: now()}
-    become users: remove_from(users, username), messages: append(messages, msg), next_id: next_id + 1
+    msg = make_msg(next_id, "system", concat(username, " left the chat"))
+    become users: remove_str(users, username), messages: append(messages, msg), next_id: next_id + 1
     reply :ok
+  end
+end
+
+# ── Connections actor (tracks open WS fds) ───────────
+
+actor Connections do
+  state fds: List :: []
+
+  on :add(fd: Int) do
+    become fds: append(fds, fd)
+    reply :ok
+  end
+
+  on :remove(fd: Int) do
+    become fds: filter(fds, fn(x: Int) do x != fd end)
+    reply :ok
+  end
+
+  on :get_all do
+    reply fds
+  end
+end
+
+# ── Sessions ─────────────────────────────────────────
+
+actor Sessions do
+  state store: Map :: %{}
+
+  on :get(id: String) do reply lookup(store, id) end
+  on :put(id: String, data: Map) do become store: put(store, id, data) reply :ok end
+  on :new_session do
+    token = concat(to_string(random(100000, 999999)), concat("-", to_string(now())))
+    reply token
   end
 end
 
@@ -56,8 +96,15 @@ def list_has(items: List, target: String) -> Bool do
   end
 end
 
-def remove_from(items: List, target: String) -> List do
+def remove_str(items: List, target: String) -> List do
   filter(items, fn(x: String) do x != target end)
+end
+
+def max_int(a: Int, b: Int) -> Int do
+  case a >= b do
+    true -> a
+    _ -> b
+  end
 end
 
 def slice_list(items: List, start: Int, stop: Int) -> List do
@@ -67,145 +114,142 @@ end
 def slice_idx(items: List, start: Int, stop: Int, idx: Int, acc: List) -> List do
   case idx >= stop or idx >= length(items) do
     true -> acc
-    _ ->
-      item = elem(items, idx)
-      slice_idx(items, start, stop, idx + 1, append(acc, item))
+    _ -> slice_idx(items, start, stop, idx + 1, append(acc, elem(items, idx)))
   end
 end
 
-def max(a: Int, b: Int) -> Int do
-  case a >= b do true -> a _ -> b end
+# ── JSON builder ─────────────────────────────────────
+# Proper JSON construction, not string concat.
+
+def json_obj(pairs: List) -> String do
+  inner = json_pairs(pairs, 0)
+  concat("{", concat(inner, "}"))
 end
 
-# ── Sessions ─────────────────────────────────────────
-
-actor Sessions do
-  state store: Map :: %{}
-
-  on :get(id: String) do
-    reply lookup(store, id)
-  end
-
-  on :put(id: String, data: Map) do
-    become store: put(store, id, data)
-    reply :ok
-  end
-
-  on :new_session do
-    token = concat(to_string(random(100000, 999999)), concat("-", to_string(now())))
-    reply token
-  end
-end
-
-# ── Cookie parsing ───────────────────────────────────
-
-def find_header(raw: String, header_name: String) -> String do
-  lines = split(raw, "\r\n")
-  find_header_line(lines, header_name)
-end
-
-def find_header_line(lines: List, header_name: String) -> String do
-  case empty?(lines) do
+def json_pairs(pairs: List, idx: Int) -> String do
+  case idx >= length(pairs) do
     true -> ""
     _ ->
-      line = head(lines)
-      case contains(line, header_name) do
-        true ->
-          parts = split(line, ": ")
-          case length(parts) >= 2 do
-            true -> elem(parts, 1)
-            _ -> ""
-          end
-        _ -> find_header_line(tail(lines), header_name)
+      pair = elem(pairs, idx)
+      key = elem(pair, 0)
+      val = elem(pair, 1)
+      entry = concat(json_string(key), concat(":", val))
+      case idx + 1 < length(pairs) do
+        true -> concat(entry, concat(",", json_pairs(pairs, idx + 1)))
+        _ -> entry
       end
   end
 end
 
-def parse_cookie(raw: String) -> String do
-  cookie_header = find_header(raw, "Cookie")
-  case cookie_header == "" do
-    true -> ""
-    _ -> find_cookie_value(cookie_header, "blimp_session=")
-  end
+def json_string(s: String) -> String do
+  concat(from_char_code(34), concat(json_escape(s), from_char_code(34)))
 end
 
-def find_cookie_value(cookie_str: String, prefix: String) -> String do
-  pairs = split(cookie_str, "; ")
-  find_in_pairs(pairs, prefix)
+def json_escape(s: String) -> String do
+  json_escape_loop(s, 0, "")
 end
 
-def find_in_pairs(pairs: List, prefix: String) -> String do
-  case empty?(pairs) do
-    true -> ""
-    _ ->
-      pair = head(pairs)
-      case contains(pair, prefix) do
-        true ->
-          parts = split(pair, "=")
-          case length(parts) >= 2 do
-            true -> elem(parts, 1)
-            _ -> ""
-          end
-        _ -> find_in_pairs(tail(pairs), prefix)
-      end
-  end
-end
-
-# ── URL decode ───────────────────────────────────────
-
-def url_decode(s: String) -> String do
-  parts = split(s, "+")
-  join_parts(parts, " ")
-end
-
-def join_parts(parts: List, sep: String) -> String do
-  case empty?(parts) do
-    true -> ""
-    _ ->
-      case empty?(tail(parts)) do
-        true -> head(parts)
-        _ -> concat(head(parts), concat(sep, join_parts(tail(parts), sep)))
-      end
-  end
-end
-
-# ── Form parsing ─────────────────────────────────────
-
-def parse_form(body: String) -> Map do
-  pairs = split(body, "&")
-  parse_pairs(pairs, %{})
-end
-
-def parse_pairs(pairs: List, acc: Map) -> Map do
-  case empty?(pairs) do
+def json_escape_loop(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
     true -> acc
     _ ->
-      pair = head(pairs)
-      kv = split(pair, "=")
-      case length(kv) >= 2 do
-        true ->
-          key = head(kv)
-          val = url_decode(elem(kv, 1))
-          parse_pairs(tail(pairs), put(acc, key, val))
-        _ -> parse_pairs(tail(pairs), acc)
+      code = char_code(s, idx)
+      escaped = case code == 34 do
+        true -> concat(from_char_code(92), from_char_code(34))
+        _ -> case code == 92 do
+          true -> concat(from_char_code(92), from_char_code(92))
+          _ -> case code == 10 do
+            true -> concat(from_char_code(92), "n")
+            _ -> case code == 13 do
+              true -> concat(from_char_code(92), "r")
+              _ -> char_at(s, idx)
+            end end end
+      end
+      json_escape_loop(s, idx + 1, concat(acc, escaped))
+  end
+end
+
+# ── JSON parser (for WS messages) ────────────────────
+
+def json_field(json: String, field: String) -> String do
+  marker = concat(json_string(field), ":")
+  case contains(json, marker) do
+    true ->
+      parts = split(json, marker)
+      case length(parts) >= 2 do
+        true -> extract_json_value(elem(parts, 1))
+        _ -> ""
+      end
+    _ -> ""
+  end
+end
+
+def extract_json_value(s: String) -> String do
+  case char_code(s, 0) == 34 do
+    true -> extract_quoted(s, 1, "")
+    _ -> ""
+  end
+end
+
+def extract_quoted(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      code = char_code(s, idx)
+      case code == 34 do
+        true -> acc
+        _ ->
+          case code == 92 do
+            true -> extract_quoted(s, idx + 2, concat(acc, char_at(s, idx + 1)))
+            _ -> extract_quoted(s, idx + 1, concat(acc, char_at(s, idx)))
+          end
       end
   end
 end
 
 # ── Rendering ────────────────────────────────────────
 
-def render_login() -> String do
-  concat(html_page("Blimp Chat - Login", concat(
-    "<div class='login-box'>",
-    concat("<h1>blimp chat</h1>",
-    concat("<form method='POST' action='/login'>",
-    concat("<input type='text' name='username' placeholder='Pick a username' autofocus>",
-    concat("<button type='submit'>Join</button>",
-    "</form></div>"))))
-  )), "")
+def render_messages(messages: List) -> String do
+  render_messages_idx(messages, 0, "")
 end
 
-def render_chat(username: String, room: Any) do
+def render_messages_idx(messages: List, idx: Int, acc: String) -> String do
+  case idx >= length(messages) do
+    true -> acc
+    _ ->
+      msg = elem(messages, idx)
+      from_name = lookup(msg, "from")
+      msg_text = lookup(msg, "text")
+      cls = case from_name == "system" do
+        true -> "msg system"
+        _ -> "msg"
+      end
+      line = concat("<div class='", concat(cls, concat("'><span class='from'>", concat(from_name, concat("</span> ", concat(msg_text, "</div>"))))))
+      render_messages_idx(messages, idx + 1, concat(acc, line))
+  end
+end
+
+def render_users(users: List) -> String do
+  render_users_idx(users, 0, "")
+end
+
+def render_users_idx(users: List, idx: Int, acc: String) -> String do
+  case idx >= length(users) do
+    true -> acc
+    _ ->
+      user = elem(users, idx)
+      line = concat("<div class='user'>", concat(to_string(user), "</div>"))
+      render_users_idx(users, idx + 1, concat(acc, line))
+  end
+end
+
+def render_login() -> String do
+  html_page("Blimp Chat - Login", concat(
+    "<div class='login-box'><h1>blimp chat</h1><form method='POST' action='/login'>",
+    "<input type='text' name='username' placeholder='Pick a username' autofocus><button type='submit'>Join</button></form></div>"))
+end
+
+def render_chat(username: String, room: ChatRoom) -> String do
   messages = room <- :recent(50)
   users = room <- :get_users
   msg_html = render_messages(messages)
@@ -217,28 +261,201 @@ def render_chat(username: String, room: Any) do
   html_page("Blimp Chat", body)
 end
 
-def render_messages(messages: List) -> String do
-  case empty?(messages) do
-    true -> ""
+# ── Broadcast ────────────────────────────────────────
+
+def build_state_json(room: ChatRoom) -> String do
+  messages = room <- :recent(50)
+  users = room <- :get_users
+  msg_html = render_messages(messages)
+  user_html = render_users(users)
+  json_obj([
+    ["type", json_string("html")],
+    ["messages", json_string(msg_html)],
+    ["users", json_string(user_html)]
+  ])
+end
+
+def broadcast(room: ChatRoom, conns: Connections) -> Atom do
+  all_fds = conns <- :get_all
+  json = build_state_json(room)
+  broadcast_fds(all_fds, json)
+end
+
+def broadcast_fds(fds: List, json: String) -> Atom do
+  case empty?(fds) do
+    true -> :ok
     _ ->
-      msg = head(messages)
-      rest = render_messages(tail(messages))
-      from_name = lookup(msg, "from") orelse "unknown"
-      msg_text = lookup(msg, "text") orelse ""
-      cls = case from_name == "system" do
-        true -> "msg system"
-        _ -> "msg"
-      end
-      line = concat("<div class='", concat(cls, concat("'><span class='from'>", concat(to_string(from_name), concat("</span> ", concat(to_string(msg_text), "</div>"))))))
-      concat(line, rest)
+      ws_write_frame(head(fds), json)
+      broadcast_fds(tail(fds), json)
   end
 end
 
-def render_users(users: List) -> String do
-  case empty?(users) do
+# ── WebSocket handling ───────────────────────────────
+
+def is_ws_upgrade(raw: String) -> Bool do
+  contains(raw, "Upgrade: websocket") or contains(raw, "Upgrade: WebSocket")
+end
+
+def parse_ws_key(raw: String) -> String do
+  lines = split(raw, "\r\n")
+  find_ws_key_line(lines)
+end
+
+def find_ws_key_line(lines: List) -> String do
+  case empty?(lines) do
     true -> ""
     _ ->
-      concat("<div class='user'>", concat(head(users), concat("</div>", render_users(tail(users)))))
+      case contains(head(lines), "Sec-WebSocket-Key") do
+        true ->
+          parts = split(head(lines), ": ")
+          case length(parts) >= 2 do
+            true -> elem(parts, 1)
+            _ -> ""
+          end
+        _ -> find_ws_key_line(tail(lines))
+      end
+  end
+end
+
+def handle_ws(client_fd: Int, raw: String, room: ChatRoom, conns: Connections) -> Atom do
+  key = parse_ws_key(raw)
+  accept = ws_accept_key(key)
+  tcp_write(client_fd, concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", concat(accept, "\r\n\r\n")))
+  # Register this connection
+  conns <- :add(client_fd)
+  # Push initial state
+  json = build_state_json(room)
+  ws_write_frame(client_fd, json)
+  # Enter loop
+  ws_loop(client_fd, room, conns)
+  # Cleanup on disconnect
+  conns <- :remove(client_fd)
+  :disconnected
+end
+
+def ws_loop(ws_fd: Int, room: ChatRoom, conns: Connections) -> Atom do
+  frame = ws_read_frame(ws_fd)
+  case nil?(frame) do
+    true -> :done
+    _ ->
+      case contains(frame, "msg") do
+        true ->
+          from_val = json_field(frame, "from")
+          text_val = json_field(frame, "text")
+          case from_val == "" or text_val == "" do
+            true -> :skip
+            _ ->
+              room <- :send_msg(from_val, text_val)
+              # Broadcast to ALL connected clients
+              broadcast(room, conns)
+          end
+        _ -> :skip
+      end
+      ws_loop(ws_fd, room, conns)
+  end
+end
+
+# ── HTTP helpers ─────────────────────────────────────
+
+def parse_request_line(raw: String) -> Map do
+  first_line = head(split(raw, "\r\n"))
+  parts = split(first_line, " ")
+  %{method: head(parts), path: elem(parts, 1)}
+end
+
+def http_ok(body: String) -> String do
+  len = to_string(length(body))
+  concat("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ", concat(len, concat("\r\nConnection: close\r\n\r\n", body)))
+end
+
+def http_redirect(location: String) -> String do
+  concat("HTTP/1.1 302 Found\r\nLocation: ", concat(location, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+end
+
+def http_redirect_cookie(location: String, session_id: String) -> String do
+  concat("HTTP/1.1 302 Found\r\nLocation: ", concat(location, concat("\r\nSet-Cookie: blimp_session=", concat(session_id, "; Path=/; HttpOnly; SameSite=Lax\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))))
+end
+
+def get_body(raw: String) -> String do
+  parts = split(raw, "\r\n\r\n")
+  case length(parts) >= 2 do
+            true -> elem(parts, 1)
+            _ -> ""
+          end
+end
+
+def parse_form(body: String) -> Map do
+  pairs = split(body, "&")
+  parse_form_pairs(pairs, %{})
+end
+
+def parse_form_pairs(pairs: List, acc: Map) -> Map do
+  case empty?(pairs) do
+    true -> acc
+    _ ->
+      kv = split(head(pairs), "=")
+      case length(kv) >= 2 do
+        true -> parse_form_pairs(tail(pairs), put(acc, head(kv), url_decode(elem(kv, 1))))
+        _ -> parse_form_pairs(tail(pairs), acc)
+      end
+  end
+end
+
+def url_decode(s: String) -> String do
+  join_strs(split(s, "+"), " ")
+end
+
+def join_strs(parts: List, sep: String) -> String do
+  case empty?(parts) do
+    true -> ""
+    _ ->
+      case empty?(tail(parts)) do
+        true -> head(parts)
+        _ -> concat(head(parts), concat(sep, join_strs(tail(parts), sep)))
+      end
+  end
+end
+
+def parse_cookie(raw: String) -> String do
+  lines = split(raw, "\r\n")
+  cookie_line = find_header_val(lines, "Cookie")
+  case cookie_line == "" do
+    true -> ""
+    _ ->
+      pairs = split(cookie_line, "; ")
+      find_cookie_val(pairs, "blimp_session=")
+  end
+end
+
+def find_header_val(lines: List, name: String) -> String do
+  case empty?(lines) do
+    true -> ""
+    _ ->
+      case contains(head(lines), name) do
+        true ->
+          parts = split(head(lines), ": ")
+          case length(parts) >= 2 do
+            true -> elem(parts, 1)
+            _ -> ""
+          end
+        _ -> find_header_val(tail(lines), name)
+      end
+  end
+end
+
+def find_cookie_val(pairs: List, prefix: String) -> String do
+  case empty?(pairs) do
+    true -> ""
+    _ ->
+      case contains(head(pairs), prefix) do
+        true ->
+          parts = split(head(pairs), "=")
+          case length(parts) >= 2 do
+            true -> elem(parts, 1)
+            _ -> ""
+          end
+        _ -> find_cookie_val(tail(pairs), prefix)
+      end
   end
 end
 
@@ -283,43 +500,27 @@ def chat_script() do
         ws = new WebSocket('ws://' + location.host + '/ws');
         ws.onopen = function() { rd = 1000; };
         ws.onmessage = function(e) {
-          var data = JSON.parse(e.data);
-          if (data.type === 'html') {
-            var chat = document.querySelector('.chat-main');
-            if (chat) {
-              var msgs = chat.querySelector('.messages');
-              var form = chat.querySelector('.chat-input');
-              var div = document.createElement('div');
-              div.innerHTML = data.messages;
-              if (msgs) msgs.innerHTML = div.innerHTML;
-              // Update user list
-              var ul = document.querySelector('.user-list');
-              if (ul && data.users) ul.innerHTML = data.users;
-              // Scroll to bottom
-              if (msgs) msgs.scrollTop = msgs.scrollHeight;
-            }
+          var d = JSON.parse(e.data);
+          if (d.type === 'html') {
+            var msgs = document.querySelector('.messages');
+            var ul = document.querySelector('.user-list');
+            if (msgs) { msgs.innerHTML = d.messages; msgs.scrollTop = msgs.scrollHeight; }
+            if (ul) ul.innerHTML = d.users;
           }
         };
         ws.onclose = function() { setTimeout(connect, rd); rd = Math.min(rd * 2, 10000); };
       }
       connect();
-
-      // Override form submit to send via WS
       var form = document.querySelector('.chat-input');
-      if (form) {
-        form.addEventListener('submit', function(e) {
-          e.preventDefault();
-          var inp = form.querySelector('input[type=text]');
-          var from = form.querySelector('input[name=from]');
-          if (ws && ws.readyState === 1 && inp.value) {
-            ws.send(JSON.stringify({type:'msg', from: from.value, text: inp.value}));
-            inp.value = '';
-            inp.focus();
-          }
-        });
-      }
-
-      // Scroll to bottom on load
+      if (form) form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var inp = form.querySelector('input[type=text]');
+        var from = form.querySelector('input[name=from]');
+        if (ws && ws.readyState === 1 && inp.value) {
+          ws.send(JSON.stringify({type:'msg', from: from.value, text: inp.value}));
+          inp.value = ''; inp.focus();
+        }
+      });
       var m = document.getElementById('messages');
       if (m) m.scrollTop = m.scrollHeight;
       var inp = document.querySelector('.chat-input input[type=text]');
@@ -328,46 +529,12 @@ def chat_script() do
   </script>"
 end
 
-# ── HTTP ─────────────────────────────────────────────
-
-def parse_request_line(raw: String) -> Map do
-  first_line = head(split(raw, "\r\n"))
-  parts = split(first_line, " ")
-  %{method: head(parts), path: elem(parts, 1)}
-end
-
-def http_ok(body: String) -> String do
-  len = to_string(length(body))
-  concat("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ", concat(len, concat("\r\nConnection: close\r\n\r\n", body)))
-end
-
-def http_redirect(location: String) -> String do
-  concat("HTTP/1.1 302 Found\r\nLocation: ", concat(location, "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-end
-
-def http_ok_with_cookie(body: String, session_id: String) -> String do
-  len = to_string(length(body))
-  concat("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ", concat(len, concat("\r\nSet-Cookie: blimp_session=", concat(session_id, concat("; Path=/; HttpOnly; SameSite=Lax\r\nConnection: close\r\n\r\n", body)))))
-end
-
-def http_redirect_with_cookie(location: String, session_id: String) -> String do
-  concat("HTTP/1.1 302 Found\r\nLocation: ", concat(location, concat("\r\nSet-Cookie: blimp_session=", concat(session_id, concat("; Path=/; HttpOnly; SameSite=Lax\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", "")))))
-end
-
-def get_body(raw: String) -> String do
-  parts = split(raw, "\r\n\r\n")
-  case length(parts) >= 2 do
-    true -> elem(parts, 1)
-    _ -> ""
-  end
-end
-
 # ── Router ───────────────────────────────────────────
 
-def route(method: String, path: String, raw: String, session_id: String, session_data: Map, room: Any, sessions: Any) -> String do
+def route(method: String, path: String, raw: String, sid: String, sdata: Map, room: ChatRoom, sess: Sessions) -> String do
   case path do
     "/" ->
-      username = lookup(session_data, "username")
+      username = lookup(sdata, "username")
       case nil?(username) do
         true -> http_ok(render_login())
         _ -> http_ok(render_chat(username, room))
@@ -375,16 +542,13 @@ def route(method: String, path: String, raw: String, session_id: String, session
     "/login" ->
       case method == "POST" do
         true ->
-          body = get_body(raw)
-          form = parse_form(body)
+          form = parse_form(get_body(raw))
           username = lookup(form, "username")
           case nil?(username) or username == "" do
             true -> http_redirect("/")
             _ ->
-              
               room <- :join(username)
-              
-              sess <- :put(session_id, %{username: username})
+              sess <- :put(sid, %{username: username})
               http_redirect("/")
           end
         _ -> http_redirect("/")
@@ -392,31 +556,26 @@ def route(method: String, path: String, raw: String, session_id: String, session
     "/send" ->
       case method == "POST" do
         true ->
-          body = get_body(raw)
-          form = parse_form(body)
-          from = lookup(form, "from")
-          text = lookup(form, "text")
-          case nil?(from) or nil?(text) or text == "" do
+          form = parse_form(get_body(raw))
+          from_val = lookup(form, "from")
+          text_val = lookup(form, "text")
+          case nil?(from_val) or nil?(text_val) or text_val == "" do
             true -> http_redirect("/")
             _ ->
-              
-              room <- :send_msg(from, text)
+              room <- :send_msg(from_val, text_val)
               http_redirect("/")
           end
         _ -> http_redirect("/")
       end
     "/logout" ->
-      username = lookup(session_data, "username")
+      username = lookup(sdata, "username")
       case nil?(username) do
         true -> :ok
-        _ ->
-          
-          room <- :leave(username)
+        _ -> room <- :leave(username)
       end
-      
-      sess <- :put(session_id, %{})
+      sess <- :put(sid, %{})
       http_redirect("/")
-    _ -> http_ok("404 Not Found")
+    _ -> http_ok("404")
   end
 end
 
@@ -425,215 +584,69 @@ end
 actor HTTPServer do
   state port: Int :: 8080
   state fd: Int :: -1
-  state room: Any :: nil
-  state sess: Any :: nil
-  state me: Any :: nil
+  state room: ChatRoom :: nil
+  state sess: Sessions :: nil
+  state conns: Connections :: nil
 
-  on :start(r: Any, s: Any, self_ref: Any) do
+  on :start(r: ChatRoom, s: Sessions, c: Connections) do
     server_fd = tcp_listen(port)
-    become fd: server_fd, room: r, sess: s, me: self_ref
+    become fd: server_fd, room: r, sess: s, conns: c
     print(concat("Blimp Chat running at http://localhost:", to_string(port)))
-    accept_loop(server_fd, r, s)
-  end
-
-  on :unused do reply :ok end
-end
-
-def is_ws_upgrade(raw: String) -> Bool do
-  contains(raw, "Upgrade: websocket") or contains(raw, "Upgrade: WebSocket")
-end
-
-def parse_ws_key(raw: String) -> String do
-  lines = split(raw, "\r\n")
-  find_ws_key(lines)
-end
-
-def find_ws_key(lines: List) -> String do
-  case empty?(lines) do
-    true -> ""
-    _ ->
-      line = head(lines)
-      case contains(line, "Sec-WebSocket-Key") do
-        true ->
-          parts = split(line, ": ")
-          case length(parts) >= 2 do
-            true -> elem(parts, 1)
-            _ -> ""
-          end
-        _ -> find_ws_key(tail(lines))
-      end
+    accept_loop(server_fd, r, s, c)
   end
 end
 
-def ws_upgrade_response(accept_key: String) -> String do
-  concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ",
-    concat(accept_key, "\r\n\r\n"))
-end
+def accept_loop(fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
+  client_fd = tcp_accept(fd)
+  raw = tcp_read(client_fd)
 
-def ws_push_state(ws_fd: Int, room: Any) -> Any do
-  messages = room <- :recent(50)
-  users = room <- :get_users
-  msg_html = render_messages(messages)
-  user_html = render_users(users)
-  json = concat("{\"type\":\"html\",\"messages\":\"", concat(json_escape(msg_html), concat("\",\"users\":\"", concat(json_escape(user_html), "\"}"))))
-  ws_write_frame(ws_fd, json)
-end
-
-def json_escape(s: String) -> String do
-  json_escape_loop(s, 0, "")
-end
-
-def json_escape_loop(s: String, idx: Int, acc: String) -> String do
-  case idx >= length(s) do
-    true -> acc
-    _ ->
-      ch = char_at(s, idx)
-      code = char_code(ch)
-      escaped = case code == 34 do
-        true -> concat(from_char_code(92), from_char_code(34))
-        _ ->
-          case code == 10 do
-            true -> concat(from_char_code(92), "n")
-            _ ->
-              case code == 13 do
-                true -> concat(from_char_code(92), "r")
-                _ ->
-                  case code == 92 do
-                    true -> concat(from_char_code(92), from_char_code(92))
-                    _ -> ch
-                  end
-              end
-          end
-      end
-      json_escape_loop(s, idx + 1, concat(acc, escaped))
+  case is_ws_upgrade(raw) do
+    true -> handle_ws(client_fd, raw, room, conns)
+    _ -> handle_http(client_fd, raw, room, sess)
   end
+
+  accept_loop(fd, room, sess, conns)
 end
 
-def handle_ws_connection(client_fd: Int, raw: String, room: Any) do
-  key = parse_ws_key(raw)
-  accept = ws_accept_key(key)
-  response = ws_upgrade_response(accept)
-  tcp_write(client_fd, response)
-  # Push initial state
-  ws_push_state(client_fd, room)
-  # Enter WS loop
-  ws_chat_loop(client_fd, room)
-end
+def handle_http(client_fd: Int, raw: String, room: ChatRoom, sess: Sessions) do
+  req = parse_request_line(raw)
+  method = lookup(req, "method")
+  path = lookup(req, "path")
 
-def ws_chat_loop(ws_fd: Int, room: Any) do
-  frame = ws_read_frame(ws_fd)
-  case nil?(frame) do
-    true -> :disconnected
-    _ ->
-      # Parse the message
-      case contains(frame, "\"type\":\"msg\"") do
-        true ->
-          from_val = extract_json_field(frame, "from")
-          text_val = extract_json_field(frame, "text")
-          case nil?(from_val) or nil?(text_val) do
-            true -> :skip
-            _ -> room <- :send_msg(from_val, text_val)
-          end
-        _ -> :skip
-      end
-      # Push updated state to this client
-      ws_push_state(ws_fd, room)
-      # Continue loop
-      ws_chat_loop(ws_fd, room)
+  cookie_session = parse_cookie(raw)
+  sid = case cookie_session == "" do
+    true -> sess <- :new_session
+    _ -> cookie_session
   end
-end
+  is_new = cookie_session == ""
 
-def extract_json_field(json: String, field: String) -> String do
-  # Simple JSON field extraction: find "field":"value"
-  marker = concat(concat(from_char_code(34), field), concat(from_char_code(34), ":"))
-  case contains(json, marker) do
+  sdata = sess <- :get(sid)
+  sdata = sdata orelse %{}
+
+  case is_new do
+    true -> sess <- :put(sid, sdata)
+    _ -> :ok
+  end
+
+  response = route(method, path, raw, sid, sdata, room, sess)
+
+  final = case is_new do
     true ->
-      parts = split(json, marker)
-      case length(parts) >= 2 do
-        true ->
-          after_key = elem(parts, 1)
-          # Skip the opening quote
-          case char_code(after_key, 0) == 34 do
-            true ->
-              # Find closing quote
-              extract_quoted(after_key, 1, "")
-            _ -> nil
-          end
-        _ -> nil
+      case contains(response, "302 Found") do
+        true -> http_redirect_cookie("/", sid)
+        _ -> response
       end
-    _ -> nil
+    _ -> response
   end
+
+  tcp_write(client_fd, final)
+  tcp_close(client_fd)
 end
 
-def extract_quoted(s: String, idx: Int, acc: String) -> String do
-  case idx >= length(s) do
-    true -> acc
-    _ ->
-      code = char_code(s, idx)
-      case code == 34 do
-        true -> acc
-        _ ->
-          case code == 92 do
-            true -> extract_quoted(s, idx + 2, concat(acc, char_at(s, idx + 1)))
-            _ -> extract_quoted(s, idx + 1, concat(acc, char_at(s, idx)))
-          end
-      end
-  end
-end
+# ── Boot ─────────────────────────────────────────────
 
-def accept_loop(fd: Int, room: Any, sess: Any) do
-    client_fd = tcp_accept(fd)
-    raw = tcp_read(client_fd)
-
-    case is_ws_upgrade(raw) do
-      true ->
-        handle_ws_connection(client_fd, raw, room)
-      _ ->
-        handle_http(client_fd, raw, room, sess)
-    end
-
-    accept_loop(fd, room, sess)
-end
-
-def handle_http(client_fd: Int, raw: String, room: Any, sess: Any) do
-    req = parse_request_line(raw)
-    method = lookup(req, "method")
-    path = lookup(req, "path")
-
-    # Session handling
-    cookie_session = parse_cookie(raw)
-    session_id = case cookie_session == "" do
-      true -> sess <- :new_session
-      _ -> cookie_session
-    end
-    is_new = cookie_session == ""
-
-    session_data = sess <- :get(session_id)
-    session_data = session_data orelse %{}
-
-    case is_new do
-      true -> sess <- :put(session_id, session_data)
-      _ -> :ok
-    end
-
-    response = route(method, path, raw, session_id, session_data, room, sess)
-
-    # Add cookie on new sessions
-    final_response = case is_new do
-      true ->
-        case contains(response, "302 Found") do
-          true -> http_redirect_with_cookie("/", session_id)
-          _ -> http_ok_with_cookie(response, session_id)
-        end
-      _ -> response
-    end
-
-    tcp_write(client_fd, final_response)
-    tcp_close(client_fd)
-end
-
-# Boot
 chat_room = spawn ChatRoom
 chat_sessions = spawn Sessions
+chat_conns = spawn Connections
 http = spawn HTTPServer
-http <- :start(chat_room, chat_sessions, http)
+http <- :start(chat_room, chat_sessions, chat_conns)
