@@ -1,0 +1,426 @@
+# Secure string composition for Blimp
+# Implements the accumulator pattern from "Compile-time Security
+# Analysis and Optimization of Sensitive String Producers"
+#
+# The key types:
+#   SafeHtml  -- a string proven safe for HTML embedding
+#   SafeSql   -- a parameterized query proven safe for SQL
+#   SafeUrl   -- a string proven safe as a URL
+#
+# These types are OPAQUE. You cannot create a SafeHtml from a raw
+# string. You must compose it through the accumulator, which tracks
+# parse context and applies the correct escaper at each interpolation.
+#
+# The accumulator has two inputs:
+#   appendFixed(chunk)   -- literal text from source code (trusted)
+#   appendUnsafe(value)  -- runtime expression result (untrusted)
+
+# ── Character helpers ────────────────────────────────
+
+def is_alpha_char(ch: String) -> Bool do
+  case nil?(ch) do
+    true -> false
+    _ ->
+      code = char_code(ch)
+      case code >= 65 and code <= 90 do
+        true -> true
+        _ -> code >= 97 and code <= 122
+      end
+  end
+end
+
+# ── HTML Escaping ────────────────────────────────────
+
+def html_escape(s: String) -> String do
+  html_escape_loop(s, 0, "")
+end
+
+def html_escape_loop(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      ch = char_at(s, idx)
+      escaped = case ch do
+        "<" -> "&lt;"
+        ">" -> "&gt;"
+        "&" -> "&amp;"
+        _ ->
+          code = char_code(ch)
+          case code == 34 do
+            true -> "&quot;"
+            _ ->
+              case code == 39 do
+                true -> "&#x27;"
+                _ -> ch
+              end
+          end
+      end
+      html_escape_loop(s, idx + 1, concat(acc, escaped))
+  end
+end
+
+# ── HTML Attribute Escaping ──────────────────────────
+
+def html_attr_escape(s: String) -> String do
+  # Attribute values: escape quotes and HTML entities
+  html_attr_escape_loop(s, 0, "")
+end
+
+def html_attr_escape_loop(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      ch = char_at(s, idx)
+      code = char_code(ch)
+      escaped = case ch do
+        "<" -> "&lt;"
+        ">" -> "&gt;"
+        "&" -> "&amp;"
+        _ ->
+          case code == 34 do
+            true -> "&quot;"
+            _ ->
+              case code == 39 do
+                true -> "&#x27;"
+                _ -> ch
+              end
+          end
+      end
+      html_attr_escape_loop(s, idx + 1, concat(acc, escaped))
+  end
+end
+
+# ── URL Escaping ─────────────────────────────────────
+
+def url_escape(s: String) -> String do
+  url_escape_loop(s, 0, "")
+end
+
+def url_escape_loop(s: String, idx: Int, acc: String) -> String do
+  case idx >= length(s) do
+    true -> acc
+    _ ->
+      code = char_code(s, idx)
+      # Allow unreserved chars: A-Z a-z 0-9 - _ . ~
+      safe = is_url_safe(code)
+      escaped = case safe do
+        true -> char_at(s, idx)
+        _ -> percent_encode(code)
+      end
+      url_escape_loop(s, idx + 1, concat(acc, escaped))
+  end
+end
+
+def is_url_safe(code: Int) -> Bool do
+  is_url_alpha(code) or is_url_digit(code) or is_url_special(code)
+end
+
+def is_url_alpha(code: Int) -> Bool do
+  case code >= 65 and code <= 90 do
+    true -> true
+    _ -> code >= 97 and code <= 122
+  end
+end
+
+def is_url_digit(code: Int) -> Bool do
+  code >= 48 and code <= 57
+end
+
+def is_url_special(code: Int) -> Bool do
+  code == 45 or code == 95 or code == 46 or code == 126
+end
+
+def percent_encode(code: Int) -> String do
+  hi = code / 16
+  lo = rem(code, 16)
+  concat("%", concat(hex_digit(hi), hex_digit(lo)))
+end
+
+def hex_digit(n: Int) -> String do
+  case n < 10 do
+    true -> to_string(n)
+    _ -> from_char_code(55 + n)
+  end
+end
+
+# ── SQL Parameterization ─────────────────────────────
+# SQL safety: never interpolate values into SQL strings.
+# Instead, collect parameters and use $1, $2, etc.
+
+def sql_param_escape(s: String) -> String do
+  # For SQL, untrusted values become parameter placeholders.
+  # The actual value is stored separately in the params list.
+  # This function just marks it -- the real parameterization
+  # happens at the query level.
+  s
+end
+
+# ── HTML Context Automaton ───────────────────────────
+# Tracks parse state through HTML fixed parts.
+# Context = %{st: :pcdata | :tag | :attr_name | :attr_value | :url_attr, ...}
+
+def html_initial_context() -> Map do
+  %{st: :pcdata, tg: nil, at: nil, qt: nil}
+end
+
+def html_transition(ctx: Map, chunk: String) -> Map do
+  html_transition_loop(ctx, chunk, 0)
+end
+
+def html_transition_loop(ctx: Map, chunk: String, idx: Int) -> Map do
+  case idx >= length(chunk) do
+    true -> ctx
+    _ ->
+      ch = char_at(chunk, idx)
+      new_ctx = html_step(ctx, ch)
+      html_transition_loop(new_ctx, chunk, idx + 1)
+  end
+end
+
+def html_step(ctx: Map, ch: String) -> Map do
+  st = lookup(ctx, "st")
+  case st do
+    :pcdata ->
+      case ch do
+        "<" -> put(ctx, "st", :tag_open)
+        _ -> ctx
+      end
+    :tag_open ->
+      case ch == "/" do
+        true -> put(ctx, "st", :close_tag)
+        _ ->
+          case is_alpha_char(ch) do
+            true -> put(put(ctx, "st", :tag_name), "tg", ch)
+            _ -> put(ctx, "st", :pcdata)
+          end
+      end
+    :tag_name ->
+      case ch == " " or ch == ">" do
+        true ->
+          case ch == ">" do
+            true -> put(ctx, "st", :pcdata)
+            _ -> put(ctx, "st", :before_attr)
+          end
+        _ -> put(ctx, "tg", concat(lookup(ctx, "tg"), ch))
+      end
+    :before_attr ->
+      case ch == ">" do
+        true -> put(ctx, "st", :pcdata)
+        _ ->
+          case is_alpha_char(ch) do
+            true -> put(put(ctx, "st", :attr_name), "at", ch)
+            _ -> ctx
+          end
+      end
+    :attr_name ->
+      case ch == "=" do
+        true -> put(ctx, "st", :before_attr_value)
+        _ ->
+          case ch == " " or ch == ">" do
+            true ->
+              case ch == ">" do
+                true -> put(ctx, "st", :pcdata)
+                _ -> put(ctx, "st", :before_attr)
+              end
+            _ -> put(ctx, "at", concat(lookup(ctx, "at"), ch))
+          end
+      end
+    :before_attr_value ->
+      code = char_code(ch)
+      case code == 34 or code == 39 do
+        true -> put(put(ctx, "st", :attr_value), "qt", ch)
+        _ -> put(ctx, "st", :attr_value_unquoted)
+      end
+    :attr_value ->
+      q = lookup(ctx, "qt")
+      case ch == q do
+        true -> put(ctx, "st", :before_attr)
+        _ -> ctx
+      end
+    :attr_value_unquoted ->
+      case ch == " " or ch == ">" do
+        true ->
+          case ch == ">" do
+            true -> put(ctx, "st", :pcdata)
+            _ -> put(ctx, "st", :before_attr)
+          end
+        _ -> ctx
+      end
+    :close_tag ->
+      case ch == ">" do
+        true -> put(ctx, "st", :pcdata)
+        _ -> ctx
+      end
+    _ -> ctx
+  end
+end
+
+# ── Context-Sensitive Escaper Selection ──────────────
+
+def select_escaper(ctx: Map) -> Atom do
+  st = lookup(ctx, "st")
+  attr = lookup(ctx, "at")
+  case st do
+    :pcdata -> :html_escape
+    :attr_value ->
+      case attr == "href" or attr == "src" or attr == "action" do
+        true -> :url_escape
+        _ -> :html_attr_escape
+      end
+    :attr_value_unquoted -> :html_attr_escape
+    _ -> :html_escape
+  end
+end
+
+def apply_escaper(escaper: Atom, value: String) -> String do
+  case escaper do
+    :html_escape -> html_escape(value)
+    :html_attr_escape -> html_attr_escape(value)
+    :url_escape -> url_escape(value)
+    :sql_param_escape -> sql_param_escape(value)
+    _ -> html_escape(value)
+  end
+end
+
+# ── The SafeHtml Accumulator ─────────────────────────
+# This is the runtime implementation. The compile-time optimization
+# (accumulator erasure) will inline the escapers and eliminate this actor.
+
+actor SafeHtmlAccumulator do
+  state collector: String :: ""
+  state context: Map :: %{st: :pcdata, tg: nil, at: nil, qt: nil}
+
+  on :append_fixed(chunk: String) do
+    # Fixed chunks are trusted -- append directly
+    become collector: concat(collector, chunk),
+           context: html_transition(context, chunk)
+    reply :ok
+  end
+
+  on :append_unsafe(value: String) do
+    # Untrusted value -- escape based on current context
+    escaper = select_escaper(context)
+    escaped = apply_escaper(escaper, value)
+    become collector: concat(collector, escaped)
+    reply :ok
+  end
+
+  on :to_safe_html do
+    # Return the accumulated string as a SafeHtml value
+    reply %{__safe_html__: true, content: collector}
+  end
+end
+
+# ── SafeHtml constructor (the only way to create one) ──
+
+def safe_html(parts: List) -> Map do
+  # parts is a list of %{type: :fixed, value: "..."} or %{type: :unsafe, value: "..."}
+  acc = spawn SafeHtmlAccumulator
+  build_safe_html(acc, parts, 0)
+  result = acc <- :to_safe_html
+  result
+end
+
+def build_safe_html(acc: SafeHtmlAccumulator, parts: List, idx: Int) -> Any do
+  case idx >= length(parts) do
+    true -> :ok
+    _ ->
+      part = elem(parts, idx)
+      part_type = lookup(part, "type")
+      value = lookup(part, "value")
+      case part_type do
+        :fixed -> acc <- :append_fixed(value)
+        :unsafe -> acc <- :append_unsafe(to_string(value))
+        _ -> :ok
+      end
+      build_safe_html(acc, parts, idx + 1)
+  end
+end
+
+# ── SafeSql (parameterized queries) ──────────────────
+
+actor SafeSqlBuilder do
+  state query: String :: ""
+  state params: List :: []
+  state param_count: Int :: 0
+
+  on :append_fixed(chunk: String) do
+    become query: concat(query, chunk)
+    reply :ok
+  end
+
+  on :append_unsafe(value: Any) do
+    # Never interpolate -- add a parameter placeholder
+    n = param_count + 1
+    become query: concat(query, concat("$", to_string(n))),
+           params: append(params, value),
+           param_count: n
+    reply :ok
+  end
+
+  on :to_safe_sql do
+    reply %{__safe_sql__: true, query: query, params: params}
+  end
+end
+
+def safe_sql(parts: List) -> Map do
+  builder = spawn SafeSqlBuilder
+  build_safe_html(builder, parts, 0)
+  builder <- :to_safe_sql
+end
+
+# ── Convenience: compose safe HTML from a template ───
+
+def html_safe(template: String, values: Map) -> Map do
+  # Split template on #{key} markers and compose safely
+  parts = parse_template(template, values, 0, [])
+  safe_html(parts)
+end
+
+def parse_template(template: String, values: Map, idx: Int, parts: List) -> List do
+  case idx >= length(template) do
+    true -> parts
+    _ ->
+      # Look for #{ marker
+      case char_at(template, idx) == "#" and char_at(template, idx + 1) == "{" do
+        true ->
+          # Find closing }
+          end_idx = find_close_brace(template, idx + 2)
+          key = slice(template, idx + 2, end_idx - idx - 2)
+          val = lookup(values, key)
+          new_parts = append(parts, %{type: :unsafe, value: val})
+          parse_template(template, values, end_idx + 1, new_parts)
+        _ ->
+          # Fixed character
+          ch = char_at(template, idx)
+          # Merge with last fixed part if possible
+          new_parts = append_fixed_char(parts, ch)
+          parse_template(template, values, idx + 1, new_parts)
+      end
+  end
+end
+
+def find_close_brace(s: String, idx: Int) -> Int do
+  case idx >= length(s) do
+    true -> idx
+    _ ->
+      case char_at(s, idx) == "}" do
+        true -> idx
+        _ -> find_close_brace(s, idx + 1)
+      end
+  end
+end
+
+def append_fixed_char(parts: List, ch: String) -> List do
+  case empty?(parts) do
+    true -> [%{type: :fixed, value: ch}]
+    _ ->
+      last = elem(parts, length(parts) - 1)
+      case lookup(last, "type") == :fixed do
+        true ->
+          updated = %{type: :fixed, value: concat(lookup(last, "value"), ch)}
+          set_at(parts, length(parts) - 1, updated)
+        _ -> append(parts, %{type: :fixed, value: ch})
+      end
+  end
+end

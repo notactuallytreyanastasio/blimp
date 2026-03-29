@@ -1,0 +1,261 @@
+# Tests for secure string composition
+
+# ── HTML Escaping Tests ──────────────────────────────
+
+actor HtmlEscapeTests do
+  test "escapes angle brackets" do
+    assert_eq(html_escape("<script>"), "&lt;script&gt;")
+  end
+
+  test "escapes ampersand" do
+    assert_eq(html_escape("a & b"), "a &amp; b")
+  end
+
+  test "passes safe text through" do
+    assert_eq(html_escape("hello world"), "hello world")
+  end
+
+  test "escapes mixed dangerous chars" do
+    assert_eq(html_escape("<b>a&b</b>"), "&lt;b&gt;a&amp;b&lt;/b&gt;")
+  end
+
+  test "escapes empty string" do
+    assert_eq(html_escape(""), "")
+  end
+end
+
+# ── URL Escaping Tests ───────────────────────────────
+
+actor UrlEscapeTests do
+  test "passes safe chars through" do
+    assert_eq(url_escape("hello"), "hello")
+  end
+
+  test "escapes spaces" do
+    assert_eq(url_escape("hello world"), "hello%20world")
+  end
+
+  test "escapes special chars" do
+    result = url_escape("<script>")
+    assert(contains(result, "%3C"))
+  end
+
+  test "preserves digits" do
+    assert_eq(url_escape("abc123"), "abc123")
+  end
+end
+
+# ── HTML Context Automaton Tests ─────────────────────
+
+actor HtmlContextTests do
+  test "initial context is pcdata" do
+    ctx = html_initial_context()
+    assert_eq(lookup(ctx, "state"), :pcdata)
+  end
+
+  test "transitions to tag on <" do
+    ctx = html_transition(html_initial_context(), "<")
+    assert_eq(lookup(ctx, "state"), :tag_open)
+  end
+
+  test "transitions through tag name" do
+    ctx = html_transition(html_initial_context(), "<div")
+    assert_eq(lookup(ctx, "state"), :tag_name)
+  end
+
+  test "transitions to before_attr after space" do
+    ctx = html_transition(html_initial_context(), "<div ")
+    assert_eq(lookup(ctx, "state"), :before_attr)
+  end
+
+  test "transitions through attribute" do
+    ctx = html_transition(html_initial_context(), "<a href=")
+    assert_eq(lookup(ctx, "state"), :before_attr_value)
+  end
+
+  test "enters quoted attr value" do
+    ctx = html_transition(html_initial_context(), "<a href=\"")
+    assert_eq(lookup(ctx, "state"), :attr_value)
+  end
+
+  test "returns to pcdata after closing tag" do
+    ctx = html_transition(html_initial_context(), "<div>")
+    assert_eq(lookup(ctx, "state"), :pcdata)
+  end
+
+  test "full round trip" do
+    ctx = html_transition(html_initial_context(), "<p>hello</p>")
+    assert_eq(lookup(ctx, "state"), :pcdata)
+  end
+end
+
+# ── Escaper Selection Tests ──────────────────────────
+
+actor EscaperSelectionTests do
+  test "pcdata context uses html_escape" do
+    ctx = html_initial_context()
+    assert_eq(select_escaper(ctx), :html_escape)
+  end
+
+  test "href attr uses url_escape" do
+    ctx = html_transition(html_initial_context(), "<a href=\"")
+    assert_eq(select_escaper(ctx), :url_escape)
+  end
+
+  test "src attr uses url_escape" do
+    ctx = %{st: :attr_value, at: "src", qt: "\""}
+    assert_eq(select_escaper(ctx), :url_escape)
+  end
+
+  test "regular attr uses html_attr_escape" do
+    ctx = %{st: :attr_value, at: "class", qt: "\""}
+    assert_eq(select_escaper(ctx), :html_attr_escape)
+  end
+
+  test "id attr uses html_attr_escape" do
+    ctx = %{st: :attr_value, at: "id", qt: "\""}
+    assert_eq(select_escaper(ctx), :html_attr_escape)
+  end
+end
+
+# ── SafeHtml Accumulator Tests ───────────────────────
+
+actor SafeHtmlTests do
+  test "fixed-only produces safe html" do
+    parts = [%{type: :fixed, value: "<h1>Hello</h1>"}]
+    result = safe_html(parts)
+    assert_eq(lookup(result, "__safe_html__"), true)
+    assert_eq(lookup(result, "content"), "<h1>Hello</h1>")
+  end
+
+  test "escapes unsafe interpolation in pcdata" do
+    parts = [
+      %{type: :fixed, value: "<p>"},
+      %{type: :unsafe, value: "<script>alert(1)</script>"},
+      %{type: :fixed, value: "</p>"}
+    ]
+    result = safe_html(parts)
+    content = lookup(result, "content")
+    # The script tags should be escaped
+    assert(contains(content, "&lt;script&gt;"))
+    refute(contains(content, "<script>"))
+  end
+
+  test "escapes unsafe in href attribute" do
+    parts = [
+      %{type: :fixed, value: "<a href=\""},
+      %{type: :unsafe, value: "javascript:alert(1)"},
+      %{type: :fixed, value: "\">click</a>"}
+    ]
+    result = safe_html(parts)
+    content = lookup(result, "content")
+    # javascript: should be URL-escaped
+    assert(contains(content, "javascript%3A"))
+    refute(contains(content, "javascript:alert"))
+  end
+
+  test "safe text passes through in pcdata" do
+    parts = [
+      %{type: :fixed, value: "<p>"},
+      %{type: :unsafe, value: "Hello World"},
+      %{type: :fixed, value: "</p>"}
+    ]
+    result = safe_html(parts)
+    assert_eq(lookup(result, "content"), "<p>Hello World</p>")
+  end
+
+  test "multiple interpolations get correct escapers" do
+    parts = [
+      %{type: :fixed, value: "<a href=\""},
+      %{type: :unsafe, value: "https://example.com"},
+      %{type: :fixed, value: "\">"},
+      %{type: :unsafe, value: "Click <here>"},
+      %{type: :fixed, value: "</a>"}
+    ]
+    result = safe_html(parts)
+    content = lookup(result, "content")
+    # URL in href should be safe (no escaping needed for https://example.com)
+    assert(contains(content, "https"))
+    # Text in pcdata should have angle brackets escaped
+    assert(contains(content, "&lt;here&gt;"))
+  end
+end
+
+# ── SafeSql Tests ────────────────────────────────────
+
+actor SafeSqlTests do
+  test "parameterizes user input" do
+    parts = [
+      %{type: :fixed, value: "SELECT * FROM users WHERE name = "},
+      %{type: :unsafe, value: "'; DROP TABLE users; --"},
+      %{type: :fixed, value: " AND active = true"}
+    ]
+    result = safe_sql(parts)
+    query = lookup(result, "query")
+    params = lookup(result, "params")
+    # The user input should be a parameter, not interpolated
+    assert_eq(query, "SELECT * FROM users WHERE name = $1 AND active = true")
+    assert_eq(length(params), 1)
+    assert_eq(head(params), "'; DROP TABLE users; --")
+  end
+
+  test "multiple params get numbered" do
+    parts = [
+      %{type: :fixed, value: "INSERT INTO users (name, email) VALUES ("},
+      %{type: :unsafe, value: "Alice"},
+      %{type: :fixed, value: ", "},
+      %{type: :unsafe, value: "alice@example.com"},
+      %{type: :fixed, value: ")"}
+    ]
+    result = safe_sql(parts)
+    assert_eq(lookup(result, "query"), "INSERT INTO users (name, email) VALUES ($1, $2)")
+    assert_eq(length(lookup(result, "params")), 2)
+  end
+
+  test "fixed-only query has no params" do
+    parts = [%{type: :fixed, value: "SELECT 1"}]
+    result = safe_sql(parts)
+    assert_eq(lookup(result, "query"), "SELECT 1")
+    assert_eq(length(lookup(result, "params")), 0)
+  end
+end
+
+# ── Property Tests ───────────────────────────────────
+
+actor SecureCompositionProperties do
+  property "html_escape never produces raw angle brackets" do
+    given s: gen_string(20)
+    escaped = html_escape(s)
+    refute(contains(escaped, "<") and contains(s, "<"))
+  end
+
+  property "html_escape is idempotent on safe strings" do
+    given s: gen_string(10)
+    # Filter to safe chars only
+    safe = filter(range(0, length(s) - 1), fn(i: Int) do
+      code = char_code(s, i)
+      code >= 97 and code <= 122
+    end)
+    safe_str = reduce(safe, "", fn(acc: String, i: Int) do concat(acc, char_at(s, i)) end)
+    assert_eq(html_escape(safe_str), safe_str)
+  end
+
+  property "url_escape preserves alphanumeric" do
+    given n: gen_integer(0, 25)
+    ch = from_char_code(97 + n)
+    assert_eq(url_escape(ch), ch)
+  end
+
+  property "safe_sql always parameterizes unsafe input" do
+    given s: gen_string(15)
+    parts = [
+      %{type: :fixed, value: "SELECT * FROM t WHERE x = "},
+      %{type: :unsafe, value: s}
+    ]
+    result = safe_sql(parts)
+    query = lookup(result, "query")
+    # The query should contain $1, not the raw string
+    assert(contains(query, "$1"))
+    refute(contains(query, s) and length(s) > 0)
+  end
+end
