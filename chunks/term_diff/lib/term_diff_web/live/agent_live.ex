@@ -192,6 +192,7 @@ defmodule TermDiffWeb.AgentLive do
               <textarea
                 name="prompt"
                 placeholder="Start a new agent..."
+                aria-label="Agent prompt"
                 class={"flex-1 px-3 py-2 border rounded text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-400/60 #{if @dark_mode, do: "bg-neutral-900 border-neutral-600 text-neutral-100 placeholder-neutral-500", else: "border-neutral-300 text-neutral-900 placeholder-neutral-400"}"}
                 rows="3"
                 phx-hook="PromptSubmit"
@@ -199,6 +200,7 @@ defmodule TermDiffWeb.AgentLive do
               ></textarea>
               <button
                 type="submit"
+                aria-label="Start new agent"
                 class="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700 self-end"
               >
                 New Agent
@@ -515,9 +517,13 @@ defmodule TermDiffWeb.AgentLive do
   end
 
   def handle_info({:agent_event, run_id, event_data}, socket) do
-    pane_events = socket.assigns.pane_events
-    events = Map.get(pane_events, run_id, []) ++ [event_data]
-    {:noreply, assign(socket, :pane_events, Map.put(pane_events, run_id, events))}
+    if run_id in socket.assigns.pane_order do
+      pane_events = socket.assigns.pane_events
+      events = Map.get(pane_events, run_id, []) ++ [event_data]
+      {:noreply, assign(socket, :pane_events, Map.put(pane_events, run_id, events))}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:run_created, run}, socket) do

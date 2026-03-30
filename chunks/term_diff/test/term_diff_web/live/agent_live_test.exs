@@ -184,5 +184,25 @@ defmodule TermDiffWeb.AgentLiveTest do
 
       assert html =~ "detail test prompt"
     end
+
+    test "redirects to /agents for nonexistent run", %{conn: conn} do
+      assert {:error, {:live_redirect, %{to: "/agents"}}} = live(conn, "/agents/999999")
+    end
+  end
+
+  # ── Accessibility ──
+
+  describe "accessibility" do
+    test "new agent button has aria-label", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/agents")
+
+      assert html =~ ~s(aria-label="Start new agent")
+    end
+
+    test "prompt textarea has aria-label", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/agents")
+
+      assert html =~ ~s(aria-label="Agent prompt")
+    end
   end
 end

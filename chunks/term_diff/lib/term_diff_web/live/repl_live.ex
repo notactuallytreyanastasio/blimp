@@ -56,6 +56,7 @@ defmodule TermDiffWeb.ReplLive do
                 type="text"
                 name="input"
                 placeholder="type an expression..."
+                aria-label="REPL input"
                 class="flex-1 px-3 py-2 bg-neutral-900 border border-neutral-600 rounded text-sm font-mono text-neutral-100 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-blue-500/60"
                 autocomplete="off"
                 autofocus
@@ -63,6 +64,7 @@ defmodule TermDiffWeb.ReplLive do
               />
               <button
                 type="submit"
+                aria-label="Evaluate expression"
                 class="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700"
               >
                 Eval
@@ -88,6 +90,15 @@ defmodule TermDiffWeb.ReplLive do
       </div>
     </div>
     """
+  end
+
+  @impl true
+  def terminate(_reason, socket) do
+    if socket.assigns[:port] do
+      Port.close(socket.assigns.port)
+    end
+
+    :ok
   end
 
   # ── handle_event ─────────────────────────────────────────
