@@ -15,8 +15,16 @@ defmodule TermDiffWeb.AgentRunLive do
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    run = Runs.get_run!(id)
+    run = Runs.get_run(id)
 
+    if run do
+      mount_with_run(run, socket)
+    else
+      {:ok, push_navigate(socket, to: "/agents")}
+    end
+  end
+
+  defp mount_with_run(run, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(TermDiff.PubSub, "run:#{run.id}")
       Phoenix.PubSub.subscribe(TermDiff.PubSub, "events")
@@ -48,7 +56,11 @@ defmodule TermDiffWeb.AgentRunLive do
       <div class="flex flex-1 overflow-hidden">
         <%!-- Left: metadata --%>
         <div class="w-80 border-r border-neutral-200 overflow-y-auto p-4 bg-neutral-50 shrink-0">
-          <a href="/agents" class="text-blue-600 text-xs hover:underline mb-4 block">
+          <a
+            href="/agents"
+            class="text-blue-600 text-xs hover:underline mb-4 block"
+            aria-label="Back to agent list"
+          >
             Back to Agents
           </a>
 
@@ -101,7 +113,13 @@ defmodule TermDiffWeb.AgentRunLive do
         </div>
 
         <%!-- Right: output blocks --%>
-        <div class="flex-1 overflow-y-auto p-4" id="run-output" phx-hook="AgentAutoScroll">
+        <div
+          class="flex-1 overflow-y-auto p-4"
+          id="run-output"
+          phx-hook="AgentAutoScroll"
+          aria-live="polite"
+          role="log"
+        >
           <div :if={@blocks == []} class="text-neutral-400 text-sm italic">
             No output yet.
           </div>

@@ -840,7 +840,12 @@ defmodule TermDiffWeb.DiffLive do
       phx-hook="AutoScroll"
       data-following="false"
     >
-      <.diff_pane diff={@commit_diff} nav={@nav} line_selection={%LineSelection{}} />
+      <.diff_pane
+        diff={@commit_diff}
+        nav={@nav}
+        line_selection={%LineSelection{}}
+        expanded_comments={MapSet.new()}
+      />
     </div>
     """
   end
