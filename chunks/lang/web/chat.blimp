@@ -489,13 +489,14 @@ def chat_script() do
       if (document.querySelector('.chat-main')) connect();
       var form = document.querySelector('.chat-input');
       if (form) form.addEventListener('submit', function(e) {
-        e.preventDefault();
         var inp = form.querySelector('input[type=text]');
         var from = form.querySelector('input[name=from]');
         if (ws && ws.readyState === 1 && inp.value) {
+          e.preventDefault();
           ws.send(JSON.stringify({type:'msg', from: from.value, text: inp.value}));
           inp.value = ''; inp.focus();
         }
+        // If WS not connected, let the form POST normally
       });
       var m = document.getElementById('messages');
       if (m) m.scrollTop = m.scrollHeight;
