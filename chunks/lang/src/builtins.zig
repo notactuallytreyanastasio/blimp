@@ -2040,13 +2040,17 @@ fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value
     return result;
 }
 
-/// tcp_write(fd: Int, data: String) -> nil
+/// tcp_write(fd: Int, data: String) -> :ok or :error
 fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
-    _ = std.posix.write(fd, args[1].string) catch return error.NotSupported;
+    _ = std.posix.write(fd, args[1].string) catch {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .atom = "error" };
+        return result;
+    };
     const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = .nil;
+    result.* = Value{ .atom = "ok" };
     return result;
 }
 
@@ -2239,9 +2243,14 @@ fn builtinWsWriteFrameNative(allocator: std.mem.Allocator, args: []const *const 
     if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     const data = args[1].string;
-    wsWriteFrame(fd, 0x1, data) catch return error.NotSupported;
+    // Don't crash on dead fds -- return :error instead
+    wsWriteFrame(fd, 0x1, data) catch {
+        const result = allocator.create(Value) catch return error.OutOfMemory;
+        result.* = Value{ .atom = "error" };
+        return result;
+    };
     const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = .nil;
+    result.* = Value{ .atom = "ok" };
     return result;
 }
 

@@ -281,15 +281,23 @@ end
 def broadcast(room: ChatRoom, conns: Connections) -> Atom do
   all_fds = conns <- :get_all
   json = build_state_json(room)
-  broadcast_fds(all_fds, json)
+  broadcast_fds(all_fds, json, conns)
 end
 
-def broadcast_fds(fds: List, json: String) -> Atom do
+def broadcast_fds(fds: List, json: String, conns: Connections) -> Atom do
   case empty?(fds) do
     true -> :ok
     _ ->
-      ws_write_frame(head(fds), json)
-      broadcast_fds(tail(fds), json)
+      fd = head(fds)
+      result = ws_write_frame(fd, json)
+      case result == :error do
+        true ->
+          # Dead connection -- remove it
+          conns <- :remove(fd)
+          tcp_close(fd)
+        _ -> :ok
+      end
+      broadcast_fds(tail(fds), json, conns)
   end
 end
 
@@ -478,13 +486,7 @@ def chat_script() do
         ws.onclose = function() { setTimeout(connect, rd); rd = Math.min(rd * 2, 10000); };
       }
       // Only connect WS on the chat page, not the login page
-      if (document.querySelector('.chat-main')) {
-        connect();
-        // Fallback: auto-refresh every 2s if WS fails
-        setInterval(function() {
-          if (!ws || ws.readyState !== 1) location.reload();
-        }, 2000);
-      }
+      if (document.querySelector('.chat-main')) connect();
       var form = document.querySelector('.chat-input');
       if (form) form.addEventListener('submit', function(e) {
         e.preventDefault();
@@ -578,9 +580,12 @@ def accept_loop(fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
 
   case is_ws_upgrade(raw) do
     true ->
-      # WS upgrade -- close for now, HTTP fallback with auto-refresh
-      tcp_write(client_fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-      tcp_close(client_fd)
+      key = parse_ws_key(raw)
+      accept_key = ws_accept_key(key)
+      tcp_write(client_fd, concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", concat(accept_key, "\r\n\r\n")))
+      conns <- :add(client_fd)
+      json = build_state_json(room)
+      ws_write_frame(client_fd, json)
     _ ->
       handle_http(client_fd, raw, room, sess, conns)
   end
