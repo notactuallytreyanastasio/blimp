@@ -12,6 +12,27 @@ use crate::app::{App, InputMode};
 use crate::state::navigation::Focus;
 
 pub fn render(frame: &mut Frame, app: &App) {
+    // When an overlay is active, skip the expensive background rendering.
+    // The overlay covers most of the screen anyway.
+    match app.input_mode {
+        InputMode::CommitMessage => {
+            // Just fill bg and render the overlay -- no diff/file list
+            let bg = ratatui::widgets::Block::default()
+                .style(ratatui::prelude::Style::default().bg(app.theme.bg));
+            frame.render_widget(bg, frame.area());
+            overlays::render_commit(frame, app, frame.area());
+            return;
+        }
+        InputMode::AgentPrompt => {
+            let bg = ratatui::widgets::Block::default()
+                .style(ratatui::prelude::Style::default().bg(app.theme.bg));
+            frame.render_widget(bg, frame.area());
+            overlays::render_agent_prompt(frame, app, frame.area());
+            return;
+        }
+        InputMode::Normal => {}
+    }
+
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
@@ -29,13 +50,6 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Status bar always visible
     status_bar::render(frame, app, bar_area);
-
-    // Overlays on top
-    match app.input_mode {
-        InputMode::CommitMessage => overlays::render_commit(frame, app, frame.area()),
-        InputMode::AgentPrompt => overlays::render_agent_prompt(frame, app, frame.area()),
-        InputMode::Normal => {}
-    }
 }
 
 fn render_diff_layout(frame: &mut Frame, app: &App, area: Rect) {

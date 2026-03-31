@@ -130,7 +130,7 @@ impl App {
 
         // Follow mode
         if self.nav.following {
-            if let Some(latest) = find_latest_modified(&files, &diff_map) {
+            if let Some(latest) = find_latest_modified(&files, &diff_map, &self.repo_path) {
                 let hunk_count = diff_map
                     .get(&latest)
                     .map(|d| d.hunks.len())
@@ -378,13 +378,18 @@ fn should_ignore(path: &str) -> bool {
 fn find_latest_modified(
     files: &[crate::types::FileEntry],
     diffs: &HashMap<String, FileDiff>,
+    repo_path: &std::path::Path,
 ) -> Option<String> {
-    // Heuristic: file with the most recent hunk highlighted_at, or first file with diffs
     files
         .iter()
         .filter(|f| diffs.contains_key(&f.path))
-        .map(|f| f.path.clone())
-        .next()
+        .filter_map(|f| {
+            let full = repo_path.join(&f.path);
+            let mtime = std::fs::metadata(&full).ok()?.modified().ok()?;
+            Some((f.path.clone(), mtime))
+        })
+        .max_by_key(|(_, mtime)| *mtime)
+        .map(|(path, _)| path)
 }
 
 #[cfg(test)]

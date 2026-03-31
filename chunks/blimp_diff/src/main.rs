@@ -260,6 +260,7 @@ fn handle_input_key(app: &mut App, code: KeyCode) {
         KeyCode::Esc => app.cancel_input(),
         KeyCode::Backspace => app.delete_char(),
         KeyCode::Char(c) => app.insert_char(c),
-        _ => {}
+        _ => return, // don't mark dirty for unhandled keys
     }
+    app.needs_redraw = true;
 }
