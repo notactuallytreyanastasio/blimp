@@ -276,25 +276,39 @@ std::vector<Span> highlight_line(std::string_view line, Lang lang,
             continue;
         }
 
-        // Preprocessor directives (C/C++)
-        if (line[i] == '#' && (lang == Lang::Cpp || lang == Lang::CSharp)) {
-            spans.push_back({std::string(line.substr(i)), colors.keyword});
-            break;
+        // Preprocessor / attributes: # starts a directive (C/C++/C#) or attribute (Rust)
+        if (line[i] == '#') {
+            if (lang == Lang::Cpp || lang == Lang::CSharp) {
+                spans.push_back({std::string(line.substr(i)), colors.keyword});
+                break; // rest of line is preprocessor
+            }
+            // Rust attributes (#[...], #![...]), Python/etc comments handled above
+            size_t start = i;
+            i++;
+            // Consume #[...] or #![...]
+            if (i < line.size() && (line[i] == '[' || line[i] == '!')) {
+                while (i < line.size() && line[i] != ']') i++;
+                if (i < line.size()) i++; // closing ]
+            }
+            spans.push_back({std::string(line.substr(start, i - start)), colors.keyword});
+            continue;
         }
 
         // Everything else (punctuation, whitespace)
-        size_t start = i;
-        while (i < line.size() && !is_ident_char(line[i]) &&
-               line[i] != '"' && line[i] != '\'' && line[i] != '`' &&
-               line[i] != '/' && line[i] != '#' && line[i] != '-' &&
-               line[i] != '=' && line[i] != '+' && line[i] != '*' &&
-               line[i] != '<' && line[i] != '>' && line[i] != '!' &&
-               line[i] != '&' && line[i] != '|' && line[i] != '^' &&
-               line[i] != '~' && line[i] != '%' &&
-               !std::isdigit(static_cast<unsigned char>(line[i]))) {
-            i++;
-        }
-        if (i > start) {
+        // SAFETY: this MUST advance i by at least 1 to prevent infinite loops.
+        {
+            size_t start = i;
+            i++; // always advance at least one character
+            while (i < line.size() && !is_ident_char(line[i]) &&
+                   line[i] != '"' && line[i] != '\'' && line[i] != '`' &&
+                   line[i] != '/' && line[i] != '#' && line[i] != '-' &&
+                   line[i] != '=' && line[i] != '+' && line[i] != '*' &&
+                   line[i] != '<' && line[i] != '>' && line[i] != '!' &&
+                   line[i] != '&' && line[i] != '|' && line[i] != '^' &&
+                   line[i] != '~' && line[i] != '%' &&
+                   !std::isdigit(static_cast<unsigned char>(line[i]))) {
+                i++;
+            }
             spans.push_back({std::string(line.substr(start, i - start)), colors.plain});
         }
     }
