@@ -234,7 +234,7 @@ void App::switch_mode(state::Mode m) {
     if (interaction_.mode() != m) {
         needs_full_redraw_ = true;
     }
-    switch_mode(m);
+    interaction_.set_mode(m);
 }
 
 // ── Overlay plane management ────────────────────────────────────────────────

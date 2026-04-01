@@ -17,19 +17,14 @@ CmdResult Runner::run(const std::vector<std::string>& args,
     cmd << "cd " << root_.string() << " && git";
     for (const auto& arg : args) {
         cmd << " ";
-        // Simple shell quoting
-        if (arg.find(' ') != std::string::npos ||
-            arg.find('\'') != std::string::npos ||
-            arg.find('"') != std::string::npos) {
-            cmd << "'";
-            for (char c : arg) {
-                if (c == '\'') cmd << "'\\''";
-                else cmd << c;
-            }
-            cmd << "'";
-        } else {
-            cmd << arg;
+        // Always single-quote args to handle spaces, newlines, special chars.
+        // Single quotes protect everything except single quotes themselves.
+        cmd << "'";
+        for (char c : arg) {
+            if (c == '\'') cmd << "'\\''";
+            else cmd << c;
         }
+        cmd << "'";
     }
     cmd << " 2>&1";
 
