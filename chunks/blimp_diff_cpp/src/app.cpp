@@ -607,7 +607,8 @@ int App::run() {
     struct ncplane* std_plane = notcurses_stdplane(nc);
     std_plane_ = std_plane; // cache for overlay creation
 
-    refresh_sync();
+    // Async initial load -- UI appears immediately with "Loading..."
+    refresh_async();
 
     struct timespec timeout;
     timeout.tv_sec = 0;

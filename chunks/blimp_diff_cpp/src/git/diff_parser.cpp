@@ -1,19 +1,74 @@
 #include "git/diff_parser.h"
-#include <regex>
+#include <cstdlib>
 #include <sstream>
 
 namespace blimp::git {
 
 namespace {
 
-// Extract path from "diff --git a/foo b/foo" or "+++ b/foo"
 std::string extract_path(const std::string& line) {
-    // Try "diff --git a/... b/..."
     auto pos = line.find(" b/");
     if (pos != std::string::npos) {
         return line.substr(pos + 3);
     }
     return {};
+}
+
+// Parse "@@ -old_start,old_count +new_start,new_count @@"
+// Returns true if this is a valid hunk header.
+bool parse_hunk_header(const std::string& line, Hunk& hunk) {
+    // Must start with "@@ -"
+    if (line.size() < 4 || line[0] != '@' || line[1] != '@' ||
+        line[2] != ' ' || line[3] != '-') {
+        return false;
+    }
+
+    const char* p = line.c_str() + 4; // skip "@@ -"
+    char* end = nullptr;
+
+    // old_start
+    long val = strtol(p, &end, 10);
+    if (end == p) return false;
+    hunk.old_start = static_cast<int>(val);
+    p = end;
+
+    // optional ,old_count
+    if (*p == ',') {
+        p++;
+        val = strtol(p, &end, 10);
+        if (end == p) return false;
+        hunk.old_count = static_cast<int>(val);
+        p = end;
+    } else {
+        hunk.old_count = 1;
+    }
+
+    // " +"
+    if (*p != ' ' || *(p + 1) != '+') return false;
+    p += 2;
+
+    // new_start
+    val = strtol(p, &end, 10);
+    if (end == p) return false;
+    hunk.new_start = static_cast<int>(val);
+    p = end;
+
+    // optional ,new_count
+    if (*p == ',') {
+        p++;
+        val = strtol(p, &end, 10);
+        if (end == p) return false;
+        hunk.new_count = static_cast<int>(val);
+        p = end;
+    } else {
+        hunk.new_count = 1;
+    }
+
+    // " @@"
+    if (*p != ' ' || *(p + 1) != '@' || *(p + 2) != '@') return false;
+
+    hunk.header = line;
+    return true;
 }
 
 } // namespace
@@ -27,10 +82,6 @@ std::vector<FileDiff> parse_diff(const std::string& output) {
     Hunk* current_hunk = nullptr;
     int old_line = 0;
     int new_line = 0;
-
-    // Regex for hunk headers: @@ -old_start,old_count +new_start,new_count @@
-    static const std::regex hunk_re(
-        R"(^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@)");
 
     while (std::getline(stream, line)) {
         // New file diff
@@ -56,7 +107,7 @@ std::vector<FileDiff> parse_diff(const std::string& output) {
             continue;
         }
 
-        // Skip --- and other header lines
+        // Skip header lines
         if (line.starts_with("---") || line.starts_with("index ") ||
             line.starts_with("old mode") || line.starts_with("new mode") ||
             line.starts_with("new file") || line.starts_with("deleted file") ||
@@ -65,19 +116,16 @@ std::vector<FileDiff> parse_diff(const std::string& output) {
             continue;
         }
 
-        // Hunk header
-        std::smatch match;
-        if (std::regex_search(line, match, hunk_re)) {
-            current->hunks.emplace_back();
-            current_hunk = &current->hunks.back();
-            current_hunk->header = line;
-            current_hunk->old_start = std::stoi(match[1].str());
-            current_hunk->old_count = match[2].matched ? std::stoi(match[2].str()) : 1;
-            current_hunk->new_start = std::stoi(match[3].str());
-            current_hunk->new_count = match[4].matched ? std::stoi(match[4].str()) : 1;
-            old_line = current_hunk->old_start;
-            new_line = current_hunk->new_start;
-            continue;
+        // Hunk header -- fast check: starts with "@@"
+        if (line.size() >= 4 && line[0] == '@' && line[1] == '@') {
+            Hunk hunk;
+            if (parse_hunk_header(line, hunk)) {
+                current->hunks.push_back(std::move(hunk));
+                current_hunk = &current->hunks.back();
+                old_line = current_hunk->old_start;
+                new_line = current_hunk->new_start;
+                continue;
+            }
         }
 
         if (!current_hunk) continue;
@@ -87,7 +135,6 @@ std::vector<FileDiff> parse_diff(const std::string& output) {
 
         // Diff lines
         if (line.empty()) {
-            // Empty context line
             DiffLine dl;
             dl.kind = LineKind::Context;
             dl.old_line = old_line++;
