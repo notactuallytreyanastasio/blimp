@@ -2,6 +2,7 @@
 #include "ui/renderer.h"
 #include "ui/theme.h"
 #include "ui/diff_cache.h"
+#include "ui/highlight.h"
 #include "state/navigation.h"
 #include "state/selection.h"
 
@@ -26,8 +27,9 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
 
     const auto& lines = cache.lines();
     int total_lines = cache.line_count();
+    Lang lang = cache.lang();
+    auto colors = colors_for_theme(theme);
 
-    // Gutter width: 5(old) + 5(new) + 2(prefix+space) = 12
     const int gutter_w = 12;
     int content_w = w - gutter_w;
     if (content_w < 1) content_w = 1;
@@ -52,12 +54,12 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
             put_str(plane, draw_y, x, "@@",
                     theme.diff_hunk_header.to_channel(), theme.gutter_bg.to_channel());
             hline(plane, draw_y, x + gutter_w, content_w, 0, bg);
-            put_str_trunc(plane, draw_y, x + gutter_w, cl.header_text.c_str(),
+            put_str_trunc(plane, draw_y, x + gutter_w, cl.text.c_str(),
                           content_w, theme.diff_hunk_header.to_channel(), bg);
             continue;
         }
 
-        // Determine line background
+        // Line background
         uint32_t line_bg = bg;
         char prefix = ' ';
 
@@ -74,7 +76,6 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
                 break;
         }
 
-        // Selection override
         if (selection.contains(static_cast<size_t>(line_idx))) {
             line_bg = theme.selection_bg.to_channel();
         }
@@ -83,44 +84,39 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
         char gutter_buf[14];
         char old_str[6] = "     ";
         char new_str[6] = "     ";
-
         if (cl.old_line >= 0) snprintf(old_str, sizeof(old_str), "%4d ", cl.old_line);
         if (cl.new_line >= 0) snprintf(new_str, sizeof(new_str), "%4d ", cl.new_line);
-
         snprintf(gutter_buf, sizeof(gutter_buf), "%s%s%c", old_str, new_str, prefix);
-
         put_str(plane, draw_y, x, gutter_buf,
                 theme.gutter_fg.to_channel(), theme.gutter_bg.to_channel());
 
-        // Clear content area with line_bg
+        // Clear content area
         hline(plane, draw_y, x + gutter_w, content_w, 0, line_bg);
 
-        // Render highlighted spans with horizontal scroll.
-        // Batch each span into a single putstr call (much faster than per-char).
+        // Highlight this single line on the fly (only visible lines get tokenized)
+        auto spans = highlight_line(cl.text, lang, colors);
+
+        // Render spans with horizontal scroll
         int col = x + gutter_w;
         int chars_skipped = 0;
         int chars_drawn = 0;
 
-        for (const auto& span : cl.content) {
+        for (const auto& span : spans) {
             if (chars_drawn >= content_w) break;
 
             size_t start = 0;
-            // Skip chars for horizontal scroll
             if (chars_skipped < h_scroll) {
                 size_t to_skip = std::min(span.text.size(),
                     static_cast<size_t>(h_scroll - chars_skipped));
                 chars_skipped += static_cast<int>(to_skip);
                 start = to_skip;
             }
-
             if (start >= span.text.size()) continue;
 
-            // Truncate to remaining content width
             int remaining = content_w - chars_drawn;
             size_t len = std::min(span.text.size() - start,
                                    static_cast<size_t>(remaining));
 
-            // Set colors once, write the whole visible substring
             ncplane_set_fg_rgb(plane, span.fg);
             ncplane_set_bg_rgb(plane, line_bg);
             ncplane_putstr_yx(plane, draw_y, col + chars_drawn,

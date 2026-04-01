@@ -165,7 +165,7 @@ void App::rebuild_diff_cache() {
 
     auto it = repo_.diffs.find(path);
     if (it != repo_.diffs.end()) {
-        diff_cache_.rebuild(it->second, path, themes_.current());
+        diff_cache_.rebuild(it->second, path);
     } else {
         diff_cache_.clear();
     }
@@ -220,8 +220,7 @@ void App::dispatch(state::Action action, uint32_t codepoint) {
     }
     if (action == state::Action::CycleTheme) {
         themes_.next();
-        diff_cache_.clear(); // force re-highlight with new theme colors
-        update_selected_diff();
+        // No cache clear needed -- highlighting is per-frame from theme
         return;
     }
 
@@ -518,9 +517,7 @@ std::vector<std::string> App::extract_selected_lines() {
 
         std::string text;
         text += prefix;
-        for (const auto& span : cl.content) {
-            text += span.text;
-        }
+        text += cl.text;
         result.push_back(std::move(text));
     }
     return result;
