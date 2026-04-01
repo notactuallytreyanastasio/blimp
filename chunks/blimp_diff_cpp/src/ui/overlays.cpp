@@ -28,8 +28,14 @@ struct ncplane* create_overlay_plane(struct ncplane* std_plane,
     struct ncplane* overlay = ncplane_create(std_plane, &nopts);
     if (!overlay) return nullptr;
 
-    // The overlay is opaque -- we WANT it to cover the background.
-    // No transparency needed here since it's a modal dialog.
+    // Set base cell to opaque background so the overlay fully covers
+    // whatever is underneath on the standard plane.
+    uint64_t channels = 0;
+    ncchannels_set_bg_rgb(&channels, 0); // will be set properly on each render
+    ncchannels_set_bg_alpha(&channels, NCALPHA_OPAQUE);
+    ncchannels_set_fg_alpha(&channels, NCALPHA_OPAQUE);
+    ncplane_set_base(overlay, " ", 0, channels);
+
     return overlay;
 }
 
@@ -46,8 +52,11 @@ void render_commit_overlay(struct ncplane* overlay, const Theme& theme,
     uint32_t fg = theme.fg.to_channel();
     uint32_t border = theme.border_active.to_channel();
 
-    // Clear overlay plane
-    ncplane_set_bg_rgb(overlay, bg);
+    // Set base cell to theme bg so erase fills with the right color
+    uint64_t base_ch = 0;
+    ncchannels_set_bg_rgb(&base_ch, bg);
+    ncchannels_set_fg_rgb(&base_ch, fg);
+    ncplane_set_base(overlay, " ", 0, base_ch);
     ncplane_erase(overlay);
 
     // Top border (coordinates relative to overlay plane, not terminal)

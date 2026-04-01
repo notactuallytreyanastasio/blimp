@@ -8,10 +8,24 @@
 
 #include <notcurses/notcurses.h>
 #include <algorithm>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <termios.h>
 #include <unistd.h>
+
+// Debug timing log -- writes to /tmp/blimp_debug.log
+static FILE* g_debug_log = nullptr;
+void dlog(const char* msg) {
+    if (!g_debug_log) g_debug_log = fopen("/tmp/blimp_debug.log", "w");
+    if (g_debug_log) {
+        auto now = std::chrono::steady_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+        fprintf(g_debug_log, "[%lld] %s\n", ms, msg);
+        fflush(g_debug_log);
+    }
+}
 
 // Global notcurses pointer for emergency cleanup in signal handler
 static struct notcurses* g_nc = nullptr;
@@ -159,6 +173,7 @@ void App::update_selected_diff() {
 }
 
 void App::rebuild_diff_cache() {
+    dlog("rebuild_diff_cache start");
     if (repo_.files.empty()) {
         diff_cache_.clear();
         return;
@@ -175,8 +190,9 @@ void App::rebuild_diff_cache() {
     // Lazy-load untracked file diff on demand (just for selected file)
     if (file.unstaged == Status::Untracked &&
         repo_.diffs.find(path) == repo_.diffs.end()) {
-        // TODO: make this async. For now it blocks briefly for small files.
+        dlog("lazy-diff-untracked START");
         auto result = runner_.diff_untracked(path);
+        dlog("lazy-diff-untracked END");
         auto parsed = git::parse_diff(result.stdout_str);
         for (auto& d : parsed) {
             d.path = path;
@@ -646,25 +662,32 @@ int App::run() {
 
     struct ncinput ni;
     while (!should_quit_ && !g_sigint_received.load(std::memory_order_relaxed)) {
+        dlog("loop-top");
         poll_async_refresh();
         agent_state_.poll();
 
+        dlog("pre-render");
         ui::render(std_plane, overlay_plane_, needs_full_redraw_,
                    themes_.current(), repo_, nav_, interaction_,
                    commit_state_, selection_, diff_cache_,
                    log_entries_, agent_state_, status_message_);
         needs_full_redraw_ = false;
+        dlog("pre-nc-render");
         notcurses_render(nc);
+        dlog("post-nc-render");
 
         uint32_t key = notcurses_get(nc, &timeout, &ni);
+        dlog("post-get");
 
         // Check signal between get and processing
         if (g_sigint_received.load(std::memory_order_relaxed)) break;
 
         if (key != 0 && key != static_cast<uint32_t>(-1)) {
+            dlog("pre-process-key");
             if (ni.evtype != NCTYPE_RELEASE) {
                 process_key(nc, key, ni);
             }
+            dlog("post-process-key");
 
             struct timespec zero = {0, 0};
             while (!should_quit_ && !g_sigint_received.load(std::memory_order_relaxed)) {

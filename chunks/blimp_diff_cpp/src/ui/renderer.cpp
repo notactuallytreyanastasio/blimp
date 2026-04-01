@@ -18,6 +18,9 @@
 #include <cstring>
 #include <algorithm>
 
+// temp debug
+extern void dlog(const char* msg);
+
 namespace blimp::ui {
 
 void cell_set(struct ncplane* plane, int y, int x, const char* gcluster,
@@ -129,14 +132,17 @@ void render(struct ncplane* std_plane,
     int file_list_w = divider_x;
     int diff_w = total_w - divider_x - 1;
 
+    dlog("render: mode dispatch");
     if (mode == state::Mode::AgentView) {
         render_agent_view(std_plane, theme, agent_state, 0, 0, main_h, total_w);
     } else if (mode == state::Mode::LogList || mode == state::Mode::LogDetail) {
         render_log_view(std_plane, theme, log_entries, nav, 0, 0, main_h, total_w);
     } else {
         bool file_focused = (nav.active_pane() == state::Pane::FileList);
+        dlog("render: file_list start");
         render_file_list(std_plane, theme, repo, nav,
                          0, 0, main_h, file_list_w, file_focused);
+        dlog("render: file_list done");
 
         uint32_t div_fg = file_focused
             ? theme.border_active.to_channel()
@@ -144,10 +150,13 @@ void render(struct ncplane* std_plane,
         vline(std_plane, divider_x, 0, main_h - 1, div_fg, theme.bg.to_channel());
 
         bool diff_focused = (nav.active_pane() == state::Pane::Diff);
+        dlog("render: diff_pane start");
         render_diff_pane(std_plane, theme, diff_cache, nav, selection,
                          0, divider_x + 1, main_h, diff_w, diff_focused);
+        dlog("render: diff_pane done");
     }
 
+    dlog("render: status_bar");
     render_status_bar(std_plane, theme, repo, nav, interaction,
                       main_h, 0, status_h, total_w, status_message);
 
