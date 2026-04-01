@@ -13,11 +13,27 @@
 #include <termios.h>
 #include <unistd.h>
 
-// Global signal flag -- set by SIGINT handler, checked by event loop
+// Global notcurses pointer for emergency cleanup in signal handler
+static struct notcurses* g_nc = nullptr;
+static struct termios g_saved_termios;
 static std::atomic<bool> g_sigint_received{false};
 
-static void sigint_handler(int) {
+static void sigint_handler(int sig) {
     g_sigint_received.store(true, std::memory_order_relaxed);
+
+    // If we're stuck in notcurses_render() or a blocking popen(),
+    // the event loop will never check the flag. Do emergency cleanup
+    // and exit directly on SECOND signal.
+    static std::atomic<int> signal_count{0};
+    if (signal_count.fetch_add(1) >= 1) {
+        // Second Ctrl+C -- force exit
+        if (g_nc) {
+            notcurses_stop(g_nc);
+            g_nc = nullptr;
+        }
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_termios);
+        _exit(128 + sig);
+    }
 }
 
 namespace blimp {
@@ -50,18 +66,9 @@ RefreshResult App::build_refresh() {
 
     merge_diffs(unstaged_diffs, staged_diffs, r.diffs);
 
-    // Pre-diff all untracked files so navigation never blocks
-    for (const auto& file : r.files) {
-        if (file.unstaged == Status::Untracked &&
-            r.diffs.find(file.path) == r.diffs.end()) {
-            auto untracked = runner_.diff_untracked(file.path);
-            auto parsed = git::parse_diff(untracked.stdout_str);
-            for (auto& d : parsed) {
-                d.path = file.path;
-                r.diffs[d.path] = std::move(d);
-            }
-        }
-    }
+    // Don't pre-diff untracked files here -- it's too slow for large files
+    // (e.g. not_curses.txt at 5837 lines spawns a subprocess and blocks).
+    // Untracked diffs are fetched lazily when the user selects the file.
 
     return r;
 }
@@ -158,10 +165,23 @@ void App::rebuild_diff_cache() {
     size_t idx = nav_.file_index();
     if (idx >= repo_.files.size()) return;
 
-    const auto& path = repo_.files[idx].path;
+    const auto& file = repo_.files[idx];
+    const auto& path = file.path;
 
     // Only rebuild if the file changed
     if (diff_cache_.cached_path() == path) return;
+
+    // Lazy-load untracked file diff on demand (just for selected file)
+    if (file.unstaged == Status::Untracked &&
+        repo_.diffs.find(path) == repo_.diffs.end()) {
+        // TODO: make this async. For now it blocks briefly for small files.
+        auto result = runner_.diff_untracked(path);
+        auto parsed = git::parse_diff(result.stdout_str);
+        for (auto& d : parsed) {
+            d.path = path;
+            repo_.diffs[path] = std::move(d);
+        }
+    }
 
     auto it = repo_.diffs.find(path);
     if (it != repo_.diffs.end()) {
@@ -578,9 +598,9 @@ void App::do_commit() {
 
 int App::run() {
     // Save terminal state BEFORE notcurses touches it.
-    // This is our ground truth for restoration.
     struct termios saved_termios;
     tcgetattr(STDIN_FILENO, &saved_termios);
+    g_saved_termios = saved_termios; // global copy for signal handler
 
     // Install our own SIGINT handler that just sets a flag.
     // We tell notcurses NOT to install its own quit handlers --
@@ -602,6 +622,8 @@ int App::run() {
         fprintf(stderr, "Failed to initialize notcurses\n");
         return 1;
     }
+
+    g_nc = nc; // global for emergency signal cleanup
 
     notcurses_mice_enable(nc, NCMICE_ALL_EVENTS);
     struct ncplane* std_plane = notcurses_stdplane(nc);
@@ -664,6 +686,7 @@ int App::run() {
     // Let notcurses tear down (alternate screen, cursor, etc.)
     notcurses_mice_disable(nc);
     notcurses_stop(nc);
+    g_nc = nullptr;
 
     // Force-restore saved terminal state. This is the nuclear option:
     // no matter what notcurses or signal handlers did, the terminal
