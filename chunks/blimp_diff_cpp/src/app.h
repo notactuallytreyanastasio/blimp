@@ -70,6 +70,9 @@ private:
     // Event processing (extracted from run loop)
     void process_key(struct notcurses* nc, uint32_t key, const struct ncinput& ni);
 
+    // Mode transition (marks full redraw needed)
+    void switch_mode(state::Mode m);
+
     // Overlay plane management
     void show_overlay();
     void hide_overlay();
@@ -96,6 +99,7 @@ private:
     ui::DiffCache diff_cache_;
     std::string status_message_;
     bool should_quit_ = false;
+    bool needs_full_redraw_ = true; // set on mode change or resize
 
     // Overlay plane for commit dialog (created on enter, destroyed on exit)
     struct ncplane* overlay_plane_ = nullptr;

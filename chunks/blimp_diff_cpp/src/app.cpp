@@ -100,6 +100,7 @@ void App::apply_refresh(RefreshResult&& result) {
 
     // Force cache rebuild since diffs may have changed
     diff_cache_.clear();
+    needs_full_redraw_ = true;
     update_selected_diff();
 }
 
@@ -213,6 +214,13 @@ void App::merge_diffs(std::vector<FileDiff>& unstaged, std::vector<FileDiff>& st
     }
 }
 
+void App::switch_mode(state::Mode m) {
+    if (interaction_.mode() != m) {
+        needs_full_redraw_ = true;
+    }
+    switch_mode(m);
+}
+
 // ── Overlay plane management ────────────────────────────────────────────────
 
 void App::show_overlay() {
@@ -240,7 +248,7 @@ void App::dispatch(state::Action action, uint32_t codepoint) {
     }
     if (action == state::Action::CycleTheme) {
         themes_.next();
-        // No cache clear needed -- highlighting is per-frame from theme
+        needs_full_redraw_ = true;
         return;
     }
 
@@ -283,7 +291,7 @@ void App::dispatch_file_list(state::Action action) {
             update_selected_diff();
             break;
         case state::Action::Select:
-            interaction_.set_mode(state::Mode::DiffView);
+            switch_mode(state::Mode::DiffView);
             break;
         case state::Action::Back:
             should_quit_ = true;
@@ -291,7 +299,7 @@ void App::dispatch_file_list(state::Action action) {
         case state::Action::TogglePane:
             nav_.toggle_pane();
             if (nav_.active_pane() == state::Pane::Diff)
-                interaction_.set_mode(state::Mode::DiffView);
+                switch_mode(state::Mode::DiffView);
             break;
         case state::Action::PageDown:
             nav_.page_down(20);
@@ -305,7 +313,7 @@ void App::dispatch_file_list(state::Action action) {
             nav_.toggle_follow();
             break;
         case state::Action::OpenLog:
-            interaction_.set_mode(state::Mode::LogList);
+            switch_mode(state::Mode::LogList);
             {
                 auto log_result = runner_.log_oneline();
                 log_entries_ = git::parse_log(log_result.stdout_str);
@@ -324,14 +332,14 @@ void App::dispatch_file_list(state::Action action) {
             do_unstage();
             break;
         case state::Action::EnterAmend:
-            interaction_.set_mode(state::Mode::Committing);
+            switch_mode(state::Mode::Committing);
             commit_state_.begin_editing();
             show_overlay();
             break;
         case state::Action::OpenAgent:
             // Switch to agent tab if agent is active
             if (agent_state_.phase() != state::AgentPhase::Idle) {
-                interaction_.set_mode(state::Mode::AgentView);
+                switch_mode(state::Mode::AgentView);
             }
             break;
         default:
@@ -348,13 +356,13 @@ void App::dispatch_diff_view(state::Action action) {
             nav_.scroll_diff_up();
             break;
         case state::Action::Back:
-            interaction_.set_mode(state::Mode::FileList);
+            switch_mode(state::Mode::FileList);
             nav_.set_active_pane(state::Pane::FileList);
             break;
         case state::Action::TogglePane:
             nav_.toggle_pane();
             if (nav_.active_pane() == state::Pane::FileList)
-                interaction_.set_mode(state::Mode::FileList);
+                switch_mode(state::Mode::FileList);
             break;
         case state::Action::PageDown:
             nav_.scroll_diff_down(20);
@@ -369,7 +377,7 @@ void App::dispatch_diff_view(state::Action action) {
             nav_.scroll_diff_right();
             break;
         case state::Action::EnterVisual:
-            interaction_.set_mode(state::Mode::Selecting);
+            switch_mode(state::Mode::Selecting);
             selection_.start(static_cast<size_t>(nav_.diff_scroll()));
             break;
         case state::Action::StageFile:
@@ -392,7 +400,7 @@ void App::dispatch_log(state::Action action) {
             nav_.log_up();
             break;
         case state::Action::Back:
-            interaction_.set_mode(state::Mode::FileList);
+            switch_mode(state::Mode::FileList);
             break;
         default:
             break;
@@ -403,7 +411,7 @@ void App::dispatch_committing(state::Action action, uint32_t codepoint) {
     switch (action) {
         case state::Action::Cancel:
             commit_state_.cancel();
-            interaction_.set_mode(state::Mode::FileList);
+            switch_mode(state::Mode::FileList);
             hide_overlay();
             break;
         case state::Action::Submit:
@@ -440,14 +448,14 @@ void App::dispatch_selecting(state::Action action) {
             auto lines = extract_selected_lines();
             if (!lines.empty()) {
                 agent_state_.begin_prompting(std::move(lines));
-                interaction_.set_mode(state::Mode::AgentPrompt);
+                switch_mode(state::Mode::AgentPrompt);
                 show_overlay(); // reuse overlay for prompt input
             }
             break;
         }
         case state::Action::Back:
             selection_.clear();
-            interaction_.set_mode(state::Mode::DiffView);
+            switch_mode(state::Mode::DiffView);
             break;
         default:
             break;
@@ -460,7 +468,7 @@ void App::dispatch_agent_prompt(state::Action action, uint32_t codepoint) {
             agent_state_.cancel();
             selection_.clear();
             hide_overlay();
-            interaction_.set_mode(state::Mode::DiffView);
+            switch_mode(state::Mode::DiffView);
             break;
         case state::Action::Submit: {
             // Ctrl+Enter: spawn claude and switch to agent view
@@ -471,7 +479,7 @@ void App::dispatch_agent_prompt(state::Action action, uint32_t codepoint) {
             agent_state_.submit(path);
             selection_.clear();
             hide_overlay();
-            interaction_.set_mode(state::Mode::AgentView);
+            switch_mode(state::Mode::AgentView);
             break;
         }
         case state::Action::Backspace:
@@ -507,11 +515,11 @@ void App::dispatch_agent_view(state::Action action) {
         case state::Action::Back:
             // Esc: dismiss agent, go back to diff
             agent_state_.dismiss();
-            interaction_.set_mode(state::Mode::DiffView);
+            switch_mode(state::Mode::DiffView);
             break;
         case state::Action::TogglePane:
             // Tab: flip back to diff view (agent keeps running)
-            interaction_.set_mode(state::Mode::DiffView);
+            switch_mode(state::Mode::DiffView);
             nav_.set_active_pane(state::Pane::FileList);
             break;
         default:
@@ -587,7 +595,7 @@ void App::do_commit() {
         commit_state_.set_error(result.stderr_str);
     } else {
         commit_state_.succeed();
-        interaction_.set_mode(state::Mode::FileList);
+        switch_mode(state::Mode::FileList);
         hide_overlay();
         status_message_ = "Commit successful";
         refresh_sync();
@@ -641,9 +649,11 @@ int App::run() {
         poll_async_refresh();
         agent_state_.poll();
 
-        ui::render(std_plane, overlay_plane_, themes_.current(), repo_, nav_,
-                   interaction_, commit_state_, selection_, diff_cache_,
+        ui::render(std_plane, overlay_plane_, needs_full_redraw_,
+                   themes_.current(), repo_, nav_, interaction_,
+                   commit_state_, selection_, diff_cache_,
                    log_entries_, agent_state_, status_message_);
+        needs_full_redraw_ = false;
         notcurses_render(nc);
 
         uint32_t key = notcurses_get(nc, &timeout, &ni);
@@ -757,6 +767,7 @@ void App::process_key(struct notcurses* nc, uint32_t key, const struct ncinput& 
             show_overlay();
         }
         diff_cache_.clear();
+        needs_full_redraw_ = true;
         update_selected_diff();
         return;
     }

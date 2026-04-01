@@ -92,6 +92,7 @@ void put_str_trunc(struct ncplane* plane, int y, int x, const char* str,
 
 void render(struct ncplane* std_plane,
             struct ncplane* overlay_plane,
+            bool full_redraw,
             const Theme& theme,
             const RepoState& repo,
             const state::Navigation& nav,
@@ -112,9 +113,13 @@ void render(struct ncplane* std_plane,
     int status_h = 1;
     int main_h = total_h - status_h;
 
-    // Clear entire plane in one call (much faster than cell-by-cell)
-    ncplane_set_bg_rgb(std_plane, theme.bg.to_channel());
-    ncplane_erase(std_plane);
+    // Only erase on mode transitions or resize -- not every frame.
+    // Each pane overwrites its own rows, so normal frames need no erase.
+    // This lets notcurses damage tracking skip unchanged cells.
+    if (full_redraw) {
+        ncplane_set_bg_rgb(std_plane, theme.bg.to_channel());
+        ncplane_erase(std_plane);
+    }
 
     auto mode = interaction.mode();
 

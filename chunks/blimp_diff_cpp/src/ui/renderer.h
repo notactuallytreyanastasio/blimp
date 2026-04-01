@@ -50,6 +50,7 @@ void put_str_trunc(struct ncplane* plane, int y, int x, const char* str,
 // overlay_plane is created/destroyed by the caller when commit mode is entered/exited.
 void render(struct ncplane* std_plane,
             struct ncplane* overlay_plane,
+            bool full_redraw,
             const Theme& theme,
             const RepoState& repo,
             const state::Navigation& nav,
