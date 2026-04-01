@@ -1,5 +1,6 @@
 #include "ui/renderer.h"
 #include "ui/theme.h"
+#include "ui/diff_cache.h"
 #include "ui/file_list.h"
 #include "ui/diff_pane.h"
 #include "ui/log_view.h"
@@ -29,25 +30,43 @@ void cell_set(struct ncplane* plane, int y, int x, const char* gcluster,
 
 void hline(struct ncplane* plane, int y, int x, int len,
            uint32_t fg_ch, uint32_t bg_ch) {
-    for (int i = 0; i < len; i++) {
-        cell_set(plane, y, x + i, " ", fg_ch, bg_ch);
-    }
+    if (len <= 0) return;
+    // Use notcurses hline: one cell init + single call vs per-cell loop
+    nccell c = NCCELL_TRIVIAL_INITIALIZER;
+    nccell_set_fg_rgb(&c, fg_ch);
+    nccell_set_bg_rgb(&c, bg_ch);
+    nccell_load(plane, &c, " ");
+    ncplane_cursor_move_yx(plane, y, x);
+    ncplane_hline(plane, &c, static_cast<unsigned>(len));
+    nccell_release(plane, &c);
 }
 
 void vline(struct ncplane* plane, int x, int y_start, int y_end,
            uint32_t fg_ch, uint32_t bg_ch) {
-    for (int y = y_start; y <= y_end; y++) {
-        cell_set(plane, y, x, "│", fg_ch, bg_ch);
-    }
+    int len = y_end - y_start + 1;
+    if (len <= 0) return;
+    nccell c = NCCELL_TRIVIAL_INITIALIZER;
+    nccell_set_fg_rgb(&c, fg_ch);
+    nccell_set_bg_rgb(&c, bg_ch);
+    nccell_load(plane, &c, "│");
+    ncplane_cursor_move_yx(plane, y_start, x);
+    ncplane_vline(plane, &c, static_cast<unsigned>(len));
+    nccell_release(plane, &c);
 }
 
 void fill_rect(struct ncplane* plane, int y, int x, int h, int w,
                uint32_t bg_ch) {
+    if (h <= 0 || w <= 0) return;
+    // Use hline per row -- still O(rows) calls but each row is a single
+    // notcurses hline instead of O(cols) cell_set calls
+    nccell c = NCCELL_TRIVIAL_INITIALIZER;
+    nccell_set_bg_rgb(&c, bg_ch);
+    nccell_load(plane, &c, " ");
     for (int row = y; row < y + h; row++) {
-        for (int col = x; col < x + w; col++) {
-            cell_set(plane, row, col, " ", 0, bg_ch);
-        }
+        ncplane_cursor_move_yx(plane, row, x);
+        ncplane_hline(plane, &c, static_cast<unsigned>(w));
     }
+    nccell_release(plane, &c);
 }
 
 void put_str(struct ncplane* plane, int y, int x, const char* str,
@@ -76,6 +95,8 @@ void render(struct ncplane* std_plane,
             const state::Interaction& interaction,
             const state::CommitState& commit_state,
             const state::LineSelection& selection,
+            const DiffCache& diff_cache,
+            const std::vector<LogEntry>& log_entries,
             const std::string& status_message) {
     unsigned rows = 0, cols = 0;
     ncplane_dim_yx(std_plane, &rows, &cols);
@@ -87,43 +108,38 @@ void render(struct ncplane* std_plane,
     int status_h = 1;
     int main_h = total_h - status_h;
 
-    // Clear background
-    fill_rect(std_plane, 0, 0, total_h, total_w, theme.bg.to_channel());
+    // Clear entire plane in one call (much faster than cell-by-cell)
+    ncplane_set_bg_rgb(std_plane, theme.bg.to_channel());
+    ncplane_erase(std_plane);
 
     auto mode = interaction.mode();
 
-    // Layout: file list on left, diff on right, status bar at bottom
     int divider_x = static_cast<int>(static_cast<float>(total_w) * nav.divider_pos());
     divider_x = std::clamp(divider_x, 10, total_w - 10);
 
     int file_list_w = divider_x;
-    int diff_w = total_w - divider_x - 1; // -1 for divider
+    int diff_w = total_w - divider_x - 1;
 
     if (mode == state::Mode::LogList || mode == state::Mode::LogDetail) {
-        render_log_view(std_plane, theme, repo, nav, 0, 0, main_h, total_w);
+        render_log_view(std_plane, theme, log_entries, nav, 0, 0, main_h, total_w);
     } else {
-        // File list pane
         bool file_focused = (nav.active_pane() == state::Pane::FileList);
         render_file_list(std_plane, theme, repo, nav,
                          0, 0, main_h, file_list_w, file_focused);
 
-        // Divider
         uint32_t div_fg = file_focused
             ? theme.border_active.to_channel()
             : theme.border_inactive.to_channel();
         vline(std_plane, divider_x, 0, main_h - 1, div_fg, theme.bg.to_channel());
 
-        // Diff pane
         bool diff_focused = (nav.active_pane() == state::Pane::Diff);
-        render_diff_pane(std_plane, theme, repo, nav, selection,
+        render_diff_pane(std_plane, theme, diff_cache, nav, selection,
                          0, divider_x + 1, main_h, diff_w, diff_focused);
     }
 
-    // Status bar
     render_status_bar(std_plane, theme, repo, nav, interaction,
                       main_h, 0, status_h, total_w, status_message);
 
-    // Overlays
     if (mode == state::Mode::Committing) {
         render_commit_overlay(std_plane, theme, commit_state,
                               interaction.commit_mode(),

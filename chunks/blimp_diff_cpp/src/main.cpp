@@ -1,8 +1,12 @@
 #include "app.h"
+#include <clocale>
 #include <filesystem>
 #include <iostream>
 
 int main(int argc, char* argv[]) {
+    // MANDATORY: notcurses requires locale to be set before init.
+    // Only US-ASCII and UTF-8 are supported.
+    setlocale(LC_ALL, "");
     std::filesystem::path repo_root;
 
     if (argc > 1) {

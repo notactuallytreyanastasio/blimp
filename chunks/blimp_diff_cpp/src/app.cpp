@@ -12,6 +12,13 @@
 #include <termios.h>
 #include <unistd.h>
 
+// Global signal flag -- set by SIGINT handler, checked by event loop
+static std::atomic<bool> g_sigint_received{false};
+
+static void sigint_handler(int) {
+    g_sigint_received.store(true, std::memory_order_relaxed);
+}
+
 namespace blimp {
 
 App::App(std::filesystem::path repo_root)
@@ -60,10 +67,31 @@ RefreshResult App::build_refresh() {
 
 // Apply a refresh result to the app state. Main thread only.
 void App::apply_refresh(RefreshResult&& result) {
+    // Detect which file changed for follow mode
+    std::string prev_selected;
+    if (!repo_.files.empty() && nav_.file_index() < repo_.files.size()) {
+        prev_selected = repo_.files[nav_.file_index()].path;
+    }
+
     repo_.files = std::move(result.files);
     repo_.diffs = std::move(result.diffs);
     repo_.branch = std::move(result.branch);
     nav_.set_file_count(repo_.files.size());
+
+    // Follow mode: jump to the first file whose diff changed
+    if (nav_.follow_mode() && !repo_.files.empty()) {
+        // Find a file that has a diff and wasn't previously selected
+        for (size_t i = 0; i < repo_.files.size(); i++) {
+            const auto& path = repo_.files[i].path;
+            if (path != prev_selected && repo_.diffs.count(path)) {
+                nav_.follow_jump(i);
+                break;
+            }
+        }
+    }
+
+    // Force cache rebuild since diffs may have changed
+    diff_cache_.clear();
     update_selected_diff();
 }
 
@@ -117,6 +145,29 @@ void App::update_selected_diff() {
         nav_.set_diff_line_count(0);
         nav_.set_hunk_count(0);
     }
+
+    rebuild_diff_cache();
+}
+
+void App::rebuild_diff_cache() {
+    if (repo_.files.empty()) {
+        diff_cache_.clear();
+        return;
+    }
+    size_t idx = nav_.file_index();
+    if (idx >= repo_.files.size()) return;
+
+    const auto& path = repo_.files[idx].path;
+
+    // Only rebuild if the file changed
+    if (diff_cache_.cached_path() == path) return;
+
+    auto it = repo_.diffs.find(path);
+    if (it != repo_.diffs.end()) {
+        diff_cache_.rebuild(it->second, path, themes_.current());
+    } else {
+        diff_cache_.clear();
+    }
 }
 
 void App::merge_diffs(std::vector<FileDiff>& unstaged, std::vector<FileDiff>& staged,
@@ -150,6 +201,8 @@ void App::dispatch(state::Action action, uint32_t codepoint) {
     }
     if (action == state::Action::CycleTheme) {
         themes_.next();
+        diff_cache_.clear(); // force re-highlight with new theme colors
+        update_selected_diff();
         return;
     }
 
@@ -392,11 +445,28 @@ void App::do_commit() {
 // ── Main event loop ─────────────────────────────────────────────────────────
 
 int App::run() {
+    // Save terminal state BEFORE notcurses touches it.
+    // This is our ground truth for restoration.
+    struct termios saved_termios;
+    tcgetattr(STDIN_FILENO, &saved_termios);
+
+    // Install our own SIGINT handler that just sets a flag.
+    // We tell notcurses NOT to install its own quit handlers --
+    // its handler calls notcurses_stop() which races with our cleanup.
+    struct sigaction sa{};
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+
     struct notcurses_options opts{};
-    opts.flags = NCOPTION_SUPPRESS_BANNERS;
+    opts.flags = NCOPTION_SUPPRESS_BANNERS | NCOPTION_NO_QUIT_SIGHANDLERS;
 
     struct notcurses* nc = notcurses_init(&opts, nullptr);
     if (!nc) {
+        // Restore terminal in case init partially ran
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios);
         fprintf(stderr, "Failed to initialize notcurses\n");
         return 1;
     }
@@ -404,36 +474,33 @@ int App::run() {
     notcurses_mice_enable(nc, NCMICE_ALL_EVENTS);
     struct ncplane* std_plane = notcurses_stdplane(nc);
 
-    // Initial data load (sync -- nothing to show yet)
     refresh_sync();
 
-    // 16ms timeout for ~60fps
     struct timespec timeout;
     timeout.tv_sec = 0;
-    timeout.tv_nsec = 16'000'000;
+    timeout.tv_nsec = 16'000'000; // 16ms
 
     struct ncinput ni;
-    while (!should_quit_) {
-        // Check if async refresh completed
+    while (!should_quit_ && !g_sigint_received.load(std::memory_order_relaxed)) {
         poll_async_refresh();
 
-        // Render
         ui::render(std_plane, themes_.current(), repo_, nav_, interaction_,
-                   commit_state_, selection_, status_message_);
+                   commit_state_, selection_, diff_cache_, log_entries_,
+                   status_message_);
         notcurses_render(nc);
 
-        // Block up to 16ms for first event
         uint32_t key = notcurses_get(nc, &timeout, &ni);
 
+        // Check signal between get and processing
+        if (g_sigint_received.load(std::memory_order_relaxed)) break;
+
         if (key != 0 && key != static_cast<uint32_t>(-1)) {
-            // Process this event
             if (ni.evtype != NCTYPE_RELEASE) {
                 process_key(nc, key, ni);
             }
 
-            // Drain all remaining pending events (non-blocking)
             struct timespec zero = {0, 0};
-            while (!should_quit_) {
+            while (!should_quit_ && !g_sigint_received.load(std::memory_order_relaxed)) {
                 struct ncinput ni2;
                 uint32_t k2 = notcurses_get(nc, &zero, &ni2);
                 if (k2 == 0 || k2 == static_cast<uint32_t>(-1)) break;
@@ -442,7 +509,6 @@ int App::run() {
             }
         }
 
-        // Watcher: kick off async refresh (never blocks the event loop)
         if (interaction_.mode() != state::Mode::Committing &&
             interaction_.mode() != state::Mode::AgentPrompt) {
             if (watcher_.poll_changed()) {
@@ -451,60 +517,39 @@ int App::run() {
         }
     }
 
-    // ── Clean shutdown ────────────────────────────────────────────────────
+    // ── Clean shutdown (always runs, even on SIGINT) ─────────────────────
 
-    // 1. Stop watcher thread before touching the terminal
+    // Stop background work first
     watcher_.stop();
-
-    // 2. Wait for any in-flight async refresh
     if (refresh_in_flight_ && pending_refresh_.valid()) {
         pending_refresh_.wait();
     }
 
-    // 3. Disable mouse tracking before stopping notcurses
+    // Let notcurses tear down (alternate screen, cursor, etc.)
     notcurses_mice_disable(nc);
-
-    // 4. Drain any buffered notcurses input
-    {
-        struct timespec zero = {0, 0};
-        struct ncinput drain;
-        while (notcurses_get(nc, &zero, &drain) > 0) {}
-    }
-
-    // 5. Let notcurses restore the terminal (alternate screen, cursor, etc.)
     notcurses_stop(nc);
 
-    // 6. Flush any escape sequence responses still in-flight from the terminal.
-    //    The terminal emulator may still be sending responses to our mouse/keyboard
-    //    protocol queries. We need to eat those before the shell gets them.
-    //    Brief raw-mode drain on stdin.
-    {
-        struct termios oldt, newt;
-        tcgetattr(STDIN_FILENO, &oldt);
-        newt = oldt;
-        newt.c_lflag &= ~(ICANON | ECHO);
-        newt.c_cc[VMIN] = 0;
-        newt.c_cc[VTIME] = 1; // 100ms timeout
-        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    // Force-restore saved terminal state. This is the nuclear option:
+    // no matter what notcurses or signal handlers did, the terminal
+    // goes back to exactly how it was before we started.
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_termios);
 
-        char junk[256];
+    // Drain any in-flight escape sequence responses from the terminal
+    // emulator (mouse tracking acks, kitty keyboard responses, etc.)
+    {
+        struct termios drain_t;
+        tcgetattr(STDIN_FILENO, &drain_t);
+        drain_t.c_lflag &= ~(ICANON | ECHO);
+        drain_t.c_cc[VMIN] = 0;
+        drain_t.c_cc[VTIME] = 1; // 100ms
+        tcsetattr(STDIN_FILENO, TCSANOW, &drain_t);
+
+        char junk[512];
         while (read(STDIN_FILENO, junk, sizeof(junk)) > 0) {}
 
-        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        // Restore again after drain
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios);
     }
-
-    // 7. Belt-and-suspenders: write explicit terminal reset sequences
-    //    in case notcurses missed any.
-    fprintf(stdout,
-        "\033[?1000l"  // disable mouse click tracking
-        "\033[?1002l"  // disable mouse drag tracking
-        "\033[?1003l"  // disable mouse all-movement tracking
-        "\033[?1006l"  // disable SGR mouse mode
-        "\033[?2004l"  // disable bracketed paste
-        "\033[>4;0m"   // reset kitty keyboard flags
-        "\033[?25h"    // show cursor
-    );
-    fflush(stdout);
 
     return 0;
 }
@@ -542,9 +587,25 @@ static uint32_t apply_shift(uint32_t key) {
     }
 }
 
-void App::process_key(struct notcurses* /*nc*/, uint32_t key, const struct ncinput& ni) {
+void App::process_key(struct notcurses* nc, uint32_t key, const struct ncinput& ni) {
+    // Handle terminal resize -- SIGWINCH generates this synthetic event
+    if (key == NCKEY_RESIZE) {
+        unsigned rows, cols;
+        notcurses_stddim_yx(nc, &rows, &cols);
+        // Standard plane auto-resizes. Force full redraw.
+        diff_cache_.clear();
+        update_selected_diff();
+        return;
+    }
+
     bool ctrl = (ni.modifiers & NCKEY_MOD_CTRL) != 0;
     bool shift = (ni.modifiers & NCKEY_MOD_SHIFT) != 0;
+
+    // Ctrl+L: full screen refresh (tradition per notcurses guide)
+    if (ctrl && key == 'l') {
+        notcurses_refresh(nc, nullptr, nullptr);
+        return;
+    }
 
     // Apply shift map for printable characters when modifier is reported separately
     uint32_t codepoint = key;

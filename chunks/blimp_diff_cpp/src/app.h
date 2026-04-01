@@ -7,6 +7,7 @@
 #include "state/commit.h"
 #include "state/selection.h"
 #include "ui/theme.h"
+#include "ui/diff_cache.h"
 
 #include <notcurses/notcurses.h>
 #include <atomic>
@@ -46,6 +47,8 @@ private:
 
     // Lightweight: just update nav counts for currently selected file (no git calls)
     void update_selected_diff();
+    // Rebuild the diff cache when the selected file changes
+    void rebuild_diff_cache();
 
     void merge_diffs(std::vector<FileDiff>& unstaged, std::vector<FileDiff>& staged,
                      std::unordered_map<std::string, FileDiff>& out);
@@ -79,6 +82,7 @@ private:
     state::LineSelection selection_;
     ui::ThemeCycler themes_;
 
+    ui::DiffCache diff_cache_;
     std::string status_message_;
     bool should_quit_ = false;
 
