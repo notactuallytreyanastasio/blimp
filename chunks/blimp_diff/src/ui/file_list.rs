@@ -2,13 +2,13 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::app::App;
-use crate::state::navigation::Focus;
+use crate::state::interaction::Pane;
 use crate::types::Status;
 use crate::ui::theme::Theme;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let focused = app.nav.focus == Focus::FileList;
+    let focused = app.ix.active_pane() == Pane::FileList;
     let border_color = if focused { t.border_focused } else { t.border };
 
     let files = match &app.repo_state {
@@ -32,19 +32,32 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let items: Vec<ListItem> = files
+    // Virtual scroll: only build visible items
+    let viewport = area.height.saturating_sub(2) as usize; // borders
+    let total = files.len();
+
+    // Keep selected item visible
+    let scroll_start = if app.nav.file_index >= viewport {
+        app.nav.file_index - viewport + 1
+    } else {
+        0
+    };
+    let scroll_end = (scroll_start + viewport).min(total);
+
+    let items: Vec<ListItem> = files[scroll_start..scroll_end]
         .iter()
         .enumerate()
-        .map(|(i, entry)| {
+        .map(|(vi, entry)| {
+            let abs_i = scroll_start + vi;
             let icon = status_icon(entry.staged, entry.unstaged);
             let staged_badge = if entry.staged != Status::None { "S " } else { "  " };
 
-            let counts = app
+            let (adds, dels) = app
                 .repo_state
                 .as_ref()
                 .and_then(|r| r.diffs.get(&entry.path))
-                .map(|d| format!("+{} -{}", d.additions, d.deletions))
-                .unwrap_or_default();
+                .map(|d| (d.additions, d.deletions))
+                .unwrap_or((0, 0));
 
             let line = Line::from(vec![
                 Span::styled(
@@ -53,10 +66,13 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::styled(staged_badge, Style::default().fg(t.status_staged)),
                 Span::styled(entry.path.as_str(), Style::default().fg(t.fg)),
-                Span::styled(format!(" {}", counts), Style::default().fg(t.fg_dim)),
+                Span::styled(
+                    format!(" +{} -{}", adds, dels),
+                    Style::default().fg(t.fg_dim),
+                ),
             ]);
 
-            let style = if i == app.nav.file_index {
+            let style = if abs_i == app.nav.file_index {
                 Style::default().bg(t.bg_selected).fg(t.fg_bright)
             } else {
                 Style::default().bg(t.bg)
@@ -68,7 +84,9 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 
     let list = List::new(items).block(themed_block(" files ", border_color, t));
 
-    let mut list_state = ListState::default().with_selected(Some(app.nav.file_index));
+    // ListState selected is relative to the visible slice
+    let relative_selected = app.nav.file_index.saturating_sub(scroll_start);
+    let mut list_state = ListState::default().with_selected(Some(relative_selected));
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 

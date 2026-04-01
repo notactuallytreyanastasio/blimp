@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
-use crate::state::navigation::Focus;
+use crate::state::interaction::Mode;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
@@ -16,11 +16,15 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let file_count = app.nav.file_count;
     let follow = if app.nav.following { "ON" } else { "off" };
 
-    let focus_hint = match app.nav.focus {
-        Focus::FileList => "j/k:move Enter:view s:stage u:unstage cc:commit t:theme",
-        Focus::DiffView => "j/k:hunk q:back v:select Tab:files t:theme",
-        Focus::LogView => "j/k:move Enter:detail q:back",
-        Focus::LogDetail => "q:back",
+    let focus_hint = match app.ix.mode {
+        Mode::FileList => "j/k:move Enter:view s:stage u:unstage cc:commit t:theme",
+        Mode::DiffView => "j/k:scroll Enter:next-hunk q:back v:select h/l:pan Tab:files",
+        Mode::LogList => "j/k:move Enter:detail q:back",
+        Mode::LogDetail => "q:back",
+        Mode::Selecting => "j/k:extend Enter:confirm Esc:cancel",
+        Mode::Committing { .. } => "Ctrl+Enter:submit Esc:cancel",
+        Mode::AgentPrompt => "Ctrl+Enter:send Esc:cancel",
+        Mode::Dragging => "release to stop",
     };
 
     let status = if let Some(ref msg) = app.status_message {

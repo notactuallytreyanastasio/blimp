@@ -220,7 +220,7 @@ fn monokai_dark() -> Theme {
     let bg_lighter = Color::Rgb(53, 54, 48);
     let fg = Color::Rgb(248, 248, 242);
     let fg_dim = Color::Rgb(117, 113, 94);
-    let yellow = Color::Rgb(230, 219, 116);
+    let _yellow = Color::Rgb(230, 219, 116);
     let red = Color::Rgb(249, 38, 114);
     let green = Color::Rgb(166, 226, 46);
     let blue = Color::Rgb(102, 217, 239);

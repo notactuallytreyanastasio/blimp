@@ -8,31 +8,31 @@ pub mod highlight;
 
 use ratatui::prelude::*;
 
-use crate::app::{App, InputMode};
-use crate::state::navigation::Focus;
+use crate::app::App;
+use crate::state::interaction::Mode;
 
 pub fn render(frame: &mut Frame, app: &App) {
     // When an overlay is active, skip the expensive background rendering.
-    // The overlay covers most of the screen anyway.
-    match app.input_mode {
-        InputMode::CommitMessage => {
-            // Just fill bg and render the overlay -- no diff/file list
-            let bg = ratatui::widgets::Block::default()
-                .style(ratatui::prelude::Style::default().bg(app.theme.bg));
-            frame.render_widget(bg, frame.area());
-            overlays::render_commit(frame, app, frame.area());
-            return;
+    if app.ix.is_overlay() {
+        let bg = ratatui::widgets::Block::default()
+            .style(ratatui::prelude::Style::default().bg(app.theme.bg));
+        frame.render_widget(bg, frame.area());
+        match app.ix.mode {
+            Mode::Committing { .. } => overlays::render_commit(frame, app, frame.area()),
+            Mode::AgentPrompt => overlays::render_agent_prompt(frame, app, frame.area()),
+            Mode::Selecting => {
+                // Selection shows the diff view underneath with selection highlight
+                render_main(frame, app);
+            }
+            _ => {}
         }
-        InputMode::AgentPrompt => {
-            let bg = ratatui::widgets::Block::default()
-                .style(ratatui::prelude::Style::default().bg(app.theme.bg));
-            frame.render_widget(bg, frame.area());
-            overlays::render_agent_prompt(frame, app, frame.area());
-            return;
-        }
-        InputMode::Normal => {}
+        return;
     }
 
+    render_main(frame, app);
+}
+
+fn render_main(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
@@ -42,13 +42,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     let main_area = chunks[0];
     let bar_area = chunks[1];
 
-    // Main content depends on focus
-    match app.nav.focus {
-        Focus::LogView | Focus::LogDetail => render_log_layout(frame, app, main_area),
+    match app.ix.mode {
+        Mode::LogList | Mode::LogDetail => render_log_layout(frame, app, main_area),
         _ => render_diff_layout(frame, app, main_area),
     }
 
-    // Status bar always visible
     status_bar::render(frame, app, bar_area);
 }
 
@@ -147,8 +145,8 @@ mod tests {
         app.refresh();
 
         // Navigate into diff view
-        app.handle_nav_key(crate::state::navigation::NavKey::Enter);
-        assert_eq!(app.nav.focus, Focus::DiffView);
+        app.dispatch(crate::state::interaction::Action::Select);
+        assert_eq!(app.ix.mode, Mode::DiffView);
 
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();

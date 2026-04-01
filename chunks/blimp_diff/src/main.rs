@@ -11,8 +11,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -20,9 +20,9 @@ use crossterm::terminal::{
 };
 use ratatui::prelude::*;
 
-use app::{App, InputMode};
+use app::App;
 use git::watcher::{RepoWatcher, WatchEvent};
-use state::navigation::NavKey;
+use state::interaction::{Interaction, Action};
 
 fn main() -> io::Result<()> {
     let repo_path = std::env::args()
@@ -45,12 +45,13 @@ fn main() -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableFocusChange)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     // Setup app
     let mut app = App::new(repo_path.clone());
+    app.terminal_height = terminal.size()?.height;
     if start_following {
         app.nav.following = true;
     }
@@ -65,7 +66,7 @@ fn main() -> io::Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableFocusChange)?;
     terminal.show_cursor()?;
 
     result
@@ -81,17 +82,24 @@ fn run_loop(
         while event::poll(Duration::ZERO)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    match app.input_mode {
-                        InputMode::Normal => handle_normal_key(app, key.code, key.modifiers),
-                        InputMode::CommitMessage => handle_input_key(app, key.code),
-                        InputMode::AgentPrompt => handle_input_key(app, key.code),
-                    }
+                    let action = key_to_action(key.code, key.modifiers, &app.ix);
+                    app.dispatch(action);
                 }
                 Event::Mouse(mouse) => {
-                    handle_mouse(app, mouse);
+                    let action = mouse_to_action(mouse, app.pane_width, app.file_list_scroll);
+                    app.dispatch(action);
                 }
-                Event::Resize(_, _) => {
+                Event::Resize(_, h) => {
+                    app.terminal_height = h;
                     app.needs_redraw = true;
+                }
+                Event::FocusGained => {
+                    // Re-sync state after returning to the window
+                    app.refresh();
+                }
+                Event::FocusLost => {
+                    // Nothing to do, but consuming the event prevents
+                    // crossterm from getting confused
                 }
                 _ => {}
             }
@@ -101,11 +109,12 @@ fn run_loop(
         }
 
         // 2. Check for file system changes (drain all pending, refresh once)
+        // Skip refresh while overlay is active -- typing must stay fast
         let mut needs_refresh = false;
         while watch_rx.try_recv().is_ok() {
             needs_refresh = true;
         }
-        if needs_refresh {
+        if needs_refresh && !app.ix.is_text_input() {
             app.refresh();
         }
 
@@ -115,8 +124,8 @@ fn run_loop(
             app.needs_redraw = false;
         }
 
-        // 4. Block until next event (key, resize, etc) -- no busy spin
-        if !event::poll(Duration::from_millis(100))? {
+        // 4. Block until next event -- 16ms = 60fps responsiveness
+        if !event::poll(Duration::from_millis(16))? {
             // Timeout -- check watcher and loop
             continue;
         }
@@ -125,142 +134,97 @@ fn run_loop(
     Ok(())
 }
 
-fn handle_normal_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+/// Map a physical key event to a semantic Action based on current mode.
+fn key_to_action(code: KeyCode, modifiers: KeyModifiers, ix: &Interaction) -> Action {
     // Ctrl+C always quits
     if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-        app.should_quit = true;
-        return;
+        return Action::Quit;
     }
 
-    let nav_key = match code {
-        KeyCode::Char('j') | KeyCode::Down => NavKey::J,
-        KeyCode::Char('k') | KeyCode::Up => NavKey::K,
-        KeyCode::Enter => NavKey::Enter,
-        KeyCode::Char('q') => NavKey::Q,
-        KeyCode::Tab => NavKey::Tab,
-        KeyCode::Char('f') | KeyCode::Char('F') => NavKey::F,
-        KeyCode::Char('l') => NavKey::L,
-        KeyCode::Char('o') => NavKey::O,
-        KeyCode::Char('s') => NavKey::S,
-        KeyCode::Char('u') => NavKey::U,
-        KeyCode::Char('c') => NavKey::C,
-        KeyCode::Char('a') => NavKey::A,
-        KeyCode::Char('v') => NavKey::V,
-        KeyCode::Esc => NavKey::Escape,
-        KeyCode::Char('t') => {
-            app.cycle_theme();
-            return;
-        }
-        KeyCode::Char('Q') => {
-            app.should_quit = true;
-            return;
-        }
-        _ => return,
-    };
-
-    // Q at file list top level quits
-    if nav_key == NavKey::Q && app.nav.focus == state::navigation::Focus::FileList {
-        app.should_quit = true;
-        return;
+    // Text input modes have their own mapping
+    if ix.is_text_input() {
+        return match code {
+            KeyCode::Enter
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    || modifiers.contains(KeyModifiers::META) =>
+            {
+                Action::Submit
+            }
+            KeyCode::Enter => Action::InsertNewline,
+            KeyCode::Esc => Action::Cancel,
+            KeyCode::Backspace => Action::DeleteChar,
+            KeyCode::Char(c) => Action::InsertChar(c),
+            _ => Action::Noop,
+        };
     }
 
-    app.handle_nav_key(nav_key);
+    // Normal/browse modes
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => Action::Down,
+        KeyCode::Char('k') | KeyCode::Up => Action::Up,
+        KeyCode::Enter => Action::Select,
+        KeyCode::Char('q') | KeyCode::Esc => Action::Back,
+        KeyCode::Tab => Action::TogglePane,
+        KeyCode::Char('f') | KeyCode::Char('F') => Action::ToggleFollow,
+        KeyCode::Char('l') => Action::ToggleLog,
+        KeyCode::Char('o') => Action::OpenEditor,
+        KeyCode::Char('s') => Action::StageFile,
+        KeyCode::Char('u') => Action::UnstageFile,
+        KeyCode::Char('c') => Action::CommitChord,
+        KeyCode::Char('a') => Action::StartAmend,
+        KeyCode::Char('v') => Action::StartVisual,
+        KeyCode::Char(' ') => Action::PageDown,
+        KeyCode::Char('b') => Action::PageUp,
+        KeyCode::Char('h') | KeyCode::Left => Action::ScrollLeft,
+        KeyCode::Char('H') => Action::ScrollHome,
+        KeyCode::Right => Action::ScrollRight,
+        KeyCode::Char('t') => Action::CycleTheme,
+        KeyCode::Char('Q') => Action::Quit,
+        _ => Action::Noop,
+    }
 }
 
-fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+/// Map a mouse event to a semantic Action.
+fn mouse_to_action(mouse: MouseEvent, pane_width: u16, file_scroll: usize) -> Action {
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             let x = mouse.column;
             let y = mouse.row;
-
-            // Click in file list pane (left of divider)
-            if x < app.pane_width {
-                // Subtract 1 for border, y=0 is border too
+            if x < pane_width {
                 if y > 0 {
-                    let file_idx = (y - 1) as usize + app.file_list_scroll;
-                    if file_idx < app.nav.file_count {
-                        app.nav.file_index = file_idx;
-                        app.nav.selected_file = app.nav.file_paths.get(file_idx).cloned();
-                        app.nav.focus = state::navigation::Focus::FileList;
-                        app.update_selected_diff();
-                        app.needs_redraw = true;
-                    }
+                    let idx = (y - 1) as usize + file_scroll;
+                    Action::ClickFileList(idx)
+                } else {
+                    Action::Noop
                 }
-            }
-            // Click on divider (for drag start)
-            else if x == app.pane_width {
-                // Handled by Drag below
-            }
-            // Click in diff pane
-            else {
-                app.nav.focus = state::navigation::Focus::DiffView;
-                app.needs_redraw = true;
+            } else {
+                Action::ClickDiffPane
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            let x = mouse.column;
-            // Dragging the pane divider
-            if x >= 15 && x <= 80 {
-                app.pane_width = x;
-                app.needs_redraw = true;
-            }
+            Action::DragDivider(mouse.column)
         }
         MouseEventKind::Down(MouseButton::Right) => {
-            // Double-click or right-click on file list -> enter diff view
-            if mouse.column < app.pane_width {
-                app.handle_nav_key(NavKey::Enter);
+            if mouse.column < pane_width {
+                Action::Select
+            } else {
+                Action::Noop
             }
         }
         MouseEventKind::ScrollUp => {
-            match app.nav.focus {
-                state::navigation::Focus::FileList => {
-                    app.handle_nav_key(NavKey::K);
-                }
-                state::navigation::Focus::DiffView => {
-                    app.diff_scroll = app.diff_scroll.saturating_sub(3);
-                    app.needs_redraw = true;
-                }
-                state::navigation::Focus::LogView => {
-                    app.handle_nav_key(NavKey::K);
-                }
-                _ => {}
+            if mouse.column < pane_width {
+                Action::ScrollUp
+            } else {
+                Action::ScrollDiffUp
             }
         }
         MouseEventKind::ScrollDown => {
-            match app.nav.focus {
-                state::navigation::Focus::FileList => {
-                    app.handle_nav_key(NavKey::J);
-                }
-                state::navigation::Focus::DiffView => {
-                    app.diff_scroll += 3;
-                    app.needs_redraw = true;
-                }
-                state::navigation::Focus::LogView => {
-                    app.handle_nav_key(NavKey::J);
-                }
-                _ => {}
+            if mouse.column < pane_width {
+                Action::ScrollDown
+            } else {
+                Action::ScrollDiffDown
             }
         }
-        _ => {}
+        _ => Action::Noop,
     }
-}
-
-fn handle_input_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Enter => {
-            match app.input_mode {
-                InputMode::CommitMessage => app.submit_commit(),
-                InputMode::AgentPrompt => {
-                    // TODO: dispatch to agent (Spec 13)
-                    app.cancel_input();
-                }
-                _ => {}
-            }
-        }
-        KeyCode::Esc => app.cancel_input(),
-        KeyCode::Backspace => app.delete_char(),
-        KeyCode::Char(c) => app.insert_char(c),
-        _ => return, // don't mark dirty for unhandled keys
-    }
-    app.needs_redraw = true;
 }

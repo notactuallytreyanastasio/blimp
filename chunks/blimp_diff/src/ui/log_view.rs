@@ -2,11 +2,11 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 use crate::app::App;
-use crate::state::navigation::Focus;
+use crate::state::interaction::Pane;
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let focused = app.nav.focus == Focus::LogView;
+    let focused = app.ix.active_pane() == Pane::Log;
     let border_color = if focused { t.border_focused } else { t.border };
 
     let items: Vec<ListItem> = app

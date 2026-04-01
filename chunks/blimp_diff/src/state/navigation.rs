@@ -139,7 +139,7 @@ impl Navigation {
         self.enter_visual = false;
     }
 
-    fn update_selected_file(&mut self) {
+    pub fn update_selected_file(&mut self) {
         self.selected_file = self.file_paths.get(self.file_index).cloned();
     }
 

@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::app::{App, InputMode};
+use crate::app::App;
 
 pub fn render_commit(frame: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
@@ -20,7 +20,7 @@ pub fn render_commit(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let text = format!(
-        "{}{}\n\n~ Enter to submit, Esc to cancel ~",
+        "{}{}\n\n~ Ctrl+Enter to submit, Esc to cancel ~",
         app.input_buffer, error_line,
     );
 
