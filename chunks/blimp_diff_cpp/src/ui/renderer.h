@@ -2,6 +2,8 @@
 
 #include <notcurses/notcurses.h>
 #include <string>
+#include <vector>
+#include "types.h"
 
 namespace blimp {
 struct RepoState;
@@ -17,6 +19,7 @@ class LineSelection;
 namespace blimp::ui {
 
 struct Theme;
+class DiffCache;
 
 // Fills a cell with fg/bg channels
 void cell_set(struct ncplane* plane, int y, int x, const char* gcluster,
@@ -50,6 +53,8 @@ void render(struct ncplane* std_plane,
             const state::Interaction& interaction,
             const state::CommitState& commit_state,
             const state::LineSelection& selection,
+            const DiffCache& diff_cache,
+            const std::vector<LogEntry>& log_entries,
             const std::string& status_message);
 
 } // namespace blimp::ui

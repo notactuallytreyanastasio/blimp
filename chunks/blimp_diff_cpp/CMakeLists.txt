@@ -32,6 +32,8 @@ add_executable(blimp_diff
     src/ui/status_bar.cpp
     src/ui/overlays.cpp
     src/ui/theme.cpp
+    src/ui/highlight.cpp
+    src/ui/diff_cache.cpp
 )
 
 target_include_directories(blimp_diff PRIVATE src)
@@ -61,6 +63,9 @@ add_executable(blimp_diff_test
     tests/test_commit.cpp
     tests/test_selection.cpp
     tests/test_file_state.cpp
+    tests/test_highlight.cpp
+    src/ui/highlight.cpp
+    src/ui/theme.cpp
 )
 
 target_include_directories(blimp_diff_test PRIVATE src)
