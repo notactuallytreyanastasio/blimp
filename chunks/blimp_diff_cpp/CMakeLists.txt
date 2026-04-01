@@ -66,8 +66,11 @@ add_executable(blimp_diff_test
     tests/test_selection.cpp
     tests/test_file_state.cpp
     tests/test_highlight.cpp
+    tests/test_git_integration.cpp
+    src/git/runner.cpp
     src/ui/highlight.cpp
     src/ui/theme.cpp
+    src/ui/diff_cache.cpp
 )
 
 target_include_directories(blimp_diff_test PRIVATE src)
