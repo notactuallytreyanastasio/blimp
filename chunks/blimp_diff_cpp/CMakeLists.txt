@@ -25,6 +25,7 @@ add_executable(blimp_diff
     src/state/commit.cpp
     src/state/selection.cpp
     src/state/file_state.cpp
+    src/state/agent.cpp
     src/ui/renderer.cpp
     src/ui/file_list.cpp
     src/ui/diff_pane.cpp
@@ -34,6 +35,7 @@ add_executable(blimp_diff
     src/ui/theme.cpp
     src/ui/highlight.cpp
     src/ui/diff_cache.cpp
+    src/ui/agent_view.cpp
 )
 
 target_include_directories(blimp_diff PRIVATE src)

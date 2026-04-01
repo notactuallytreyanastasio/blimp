@@ -49,13 +49,19 @@ void render_status_bar(struct ncplane* plane, const Theme& theme,
     const char* hints = nullptr;
     switch (interaction.mode()) {
         case state::Mode::FileList:
-            hints = "j/k:nav s:stage u:unstage cc:commit Tab:pane q:quit";
+            hints = "j/k:nav s:stage u:unstage cc:commit g:agent Tab:pane q:quit";
             break;
         case state::Mode::DiffView:
-            hints = "j/k:hunk h/l:scroll v:select Tab:pane q:back";
+            hints = "j/k:hunk h/l:scroll v:select g:agent Tab:pane q:back";
+            break;
+        case state::Mode::Selecting:
+            hints = "j/k:extend Enter:ask Claude Esc:cancel";
             break;
         case state::Mode::LogList:
             hints = "j/k:nav Enter:detail q:back";
+            break;
+        case state::Mode::AgentView:
+            hints = "j/k:scroll Tab:back to diff Esc:dismiss";
             break;
         default:
             hints = "Esc:cancel";

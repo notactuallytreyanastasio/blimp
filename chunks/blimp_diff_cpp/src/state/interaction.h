@@ -16,7 +16,8 @@ enum class Mode : uint8_t {
     LogDetail,
     Selecting,
     Committing,
-    AgentPrompt,
+    AgentPrompt,  // overlay: typing initial question
+    AgentView,    // full-screen tab: streaming/reading response
     Dragging,
 };
 
@@ -41,6 +42,7 @@ enum class Action : uint8_t {
     EnterAmend,
     EnterVisual,
     CycleTheme,
+    OpenAgent,    // switch to agent view tab
     Quit,
     // Text input
     InsertChar,

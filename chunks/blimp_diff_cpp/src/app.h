@@ -6,6 +6,7 @@
 #include "state/interaction.h"
 #include "state/commit.h"
 #include "state/selection.h"
+#include "state/agent.h"
 #include "ui/theme.h"
 #include "ui/diff_cache.h"
 
@@ -60,6 +61,11 @@ private:
     void dispatch_log(state::Action action);
     void dispatch_committing(state::Action action, uint32_t codepoint);
     void dispatch_selecting(state::Action action);
+    void dispatch_agent_prompt(state::Action action, uint32_t codepoint);
+    void dispatch_agent_view(state::Action action);
+
+    // Extract selected lines from diff cache as text
+    std::vector<std::string> extract_selected_lines();
 
     // Event processing (extracted from run loop)
     void process_key(struct notcurses* nc, uint32_t key, const struct ncinput& ni);
@@ -84,6 +90,7 @@ private:
     state::Interaction interaction_;
     state::CommitState commit_state_;
     state::LineSelection selection_;
+    state::AgentState agent_state_;
     ui::ThemeCycler themes_;
 
     ui::DiffCache diff_cache_;

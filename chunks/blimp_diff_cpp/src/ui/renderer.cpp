@@ -4,6 +4,8 @@
 #include "ui/file_list.h"
 #include "ui/diff_pane.h"
 #include "ui/log_view.h"
+#include "ui/agent_view.h"
+#include "state/agent.h"
 #include "ui/status_bar.h"
 #include "ui/overlays.h"
 #include "types.h"
@@ -98,6 +100,7 @@ void render(struct ncplane* std_plane,
             const state::LineSelection& selection,
             const DiffCache& diff_cache,
             const std::vector<LogEntry>& log_entries,
+            const state::AgentState& agent_state,
             const std::string& status_message) {
     unsigned rows = 0, cols = 0;
     ncplane_dim_yx(std_plane, &rows, &cols);
@@ -121,7 +124,9 @@ void render(struct ncplane* std_plane,
     int file_list_w = divider_x;
     int diff_w = total_w - divider_x - 1;
 
-    if (mode == state::Mode::LogList || mode == state::Mode::LogDetail) {
+    if (mode == state::Mode::AgentView) {
+        render_agent_view(std_plane, theme, agent_state, 0, 0, main_h, total_w);
+    } else if (mode == state::Mode::LogList || mode == state::Mode::LogDetail) {
         render_log_view(std_plane, theme, log_entries, nav, 0, 0, main_h, total_w);
     } else {
         bool file_focused = (nav.active_pane() == state::Pane::FileList);
@@ -144,6 +149,9 @@ void render(struct ncplane* std_plane,
     if (mode == state::Mode::Committing && overlay_plane) {
         render_commit_overlay(overlay_plane, theme, commit_state,
                               interaction.commit_mode());
+    }
+    if (mode == state::Mode::AgentPrompt && overlay_plane) {
+        render_agent_overlay(overlay_plane, theme, agent_state);
     }
 }
 

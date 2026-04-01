@@ -242,6 +242,12 @@ void App::dispatch(state::Action action, uint32_t codepoint) {
         case state::Mode::Selecting:
             dispatch_selecting(action);
             break;
+        case state::Mode::AgentPrompt:
+            dispatch_agent_prompt(action, codepoint);
+            break;
+        case state::Mode::AgentView:
+            dispatch_agent_view(action);
+            break;
         default:
             break;
     }
@@ -302,6 +308,12 @@ void App::dispatch_file_list(state::Action action) {
             interaction_.set_mode(state::Mode::Committing);
             commit_state_.begin_editing();
             show_overlay();
+            break;
+        case state::Action::OpenAgent:
+            // Switch to agent tab if agent is active
+            if (agent_state_.phase() != state::AgentPhase::Idle) {
+                interaction_.set_mode(state::Mode::AgentView);
+            }
             break;
         default:
             break;
@@ -404,6 +416,16 @@ void App::dispatch_selecting(state::Action action) {
             nav_.scroll_diff_up();
             selection_.extend(static_cast<size_t>(nav_.diff_scroll()));
             break;
+        case state::Action::Select: {
+            // Enter: capture selected lines and enter agent prompt
+            auto lines = extract_selected_lines();
+            if (!lines.empty()) {
+                agent_state_.begin_prompting(std::move(lines));
+                interaction_.set_mode(state::Mode::AgentPrompt);
+                show_overlay(); // reuse overlay for prompt input
+            }
+            break;
+        }
         case state::Action::Back:
             selection_.clear();
             interaction_.set_mode(state::Mode::DiffView);
@@ -411,6 +433,97 @@ void App::dispatch_selecting(state::Action action) {
         default:
             break;
     }
+}
+
+void App::dispatch_agent_prompt(state::Action action, uint32_t codepoint) {
+    switch (action) {
+        case state::Action::Cancel:
+            agent_state_.cancel();
+            selection_.clear();
+            hide_overlay();
+            interaction_.set_mode(state::Mode::DiffView);
+            break;
+        case state::Action::Submit: {
+            // Ctrl+Enter: spawn claude and switch to agent view
+            std::string path;
+            if (!repo_.files.empty() && nav_.file_index() < repo_.files.size()) {
+                path = repo_.files[nav_.file_index()].path;
+            }
+            agent_state_.submit(path);
+            selection_.clear();
+            hide_overlay();
+            interaction_.set_mode(state::Mode::AgentView);
+            break;
+        }
+        case state::Action::Backspace:
+            agent_state_.backspace();
+            break;
+        case state::Action::NewLine:
+            agent_state_.newline();
+            break;
+        case state::Action::InsertChar:
+            if (codepoint >= 32 && codepoint < 127) {
+                agent_state_.insert_char(static_cast<char>(codepoint));
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void App::dispatch_agent_view(state::Action action) {
+    switch (action) {
+        case state::Action::Down:
+            agent_state_.scroll_response_down();
+            break;
+        case state::Action::Up:
+            agent_state_.scroll_response_up();
+            break;
+        case state::Action::PageDown:
+            agent_state_.scroll_response_down(20);
+            break;
+        case state::Action::PageUp:
+            agent_state_.scroll_response_up(20);
+            break;
+        case state::Action::Back:
+            // Esc: dismiss agent, go back to diff
+            agent_state_.dismiss();
+            interaction_.set_mode(state::Mode::DiffView);
+            break;
+        case state::Action::TogglePane:
+            // Tab: flip back to diff view (agent keeps running)
+            interaction_.set_mode(state::Mode::DiffView);
+            nav_.set_active_pane(state::Pane::FileList);
+            break;
+        default:
+            break;
+    }
+}
+
+std::vector<std::string> App::extract_selected_lines() {
+    std::vector<std::string> result;
+    if (!selection_.active()) return result;
+
+    auto [lo, hi] = selection_.range();
+    const auto& lines = diff_cache_.lines();
+
+    for (size_t i = lo; i <= hi && i < lines.size(); i++) {
+        const auto& cl = lines[i];
+        if (cl.type == ui::CachedLine::HunkHeader) continue;
+
+        // Reconstruct the line text with +/- prefix
+        char prefix = ' ';
+        if (cl.kind == LineKind::Addition) prefix = '+';
+        else if (cl.kind == LineKind::Deletion) prefix = '-';
+
+        std::string text;
+        text += prefix;
+        for (const auto& span : cl.content) {
+            text += span.text;
+        }
+        result.push_back(std::move(text));
+    }
+    return result;
 }
 
 // ── Git mutations ───────────────────────────────────────────────────────────
@@ -506,10 +619,11 @@ int App::run() {
     struct ncinput ni;
     while (!should_quit_ && !g_sigint_received.load(std::memory_order_relaxed)) {
         poll_async_refresh();
+        agent_state_.poll();
 
         ui::render(std_plane, overlay_plane_, themes_.current(), repo_, nav_,
                    interaction_, commit_state_, selection_, diff_cache_,
-                   log_entries_, status_message_);
+                   log_entries_, agent_state_, status_message_);
         notcurses_render(nc);
 
         uint32_t key = notcurses_get(nc, &timeout, &ni);

@@ -14,6 +14,7 @@ class Navigation;
 class Interaction;
 class CommitState;
 class LineSelection;
+class AgentState;
 }
 
 namespace blimp::ui {
@@ -57,6 +58,7 @@ void render(struct ncplane* std_plane,
             const state::LineSelection& selection,
             const DiffCache& diff_cache,
             const std::vector<LogEntry>& log_entries,
+            const state::AgentState& agent_state,
             const std::string& status_message);
 
 } // namespace blimp::ui

@@ -4,6 +4,7 @@
 
 namespace blimp::state {
 class CommitState;
+class AgentState;
 }
 
 namespace blimp::ui {
@@ -20,5 +21,13 @@ struct ncplane* create_overlay_plane(struct ncplane* std_plane,
 void render_commit_overlay(struct ncplane* overlay, const Theme& theme,
                            const state::CommitState& commit_state,
                            state::CommitMode mode);
+
+// Create the agent overlay plane (wider than commit -- 80% x 70%)
+struct ncplane* create_agent_plane(struct ncplane* std_plane,
+                                    int total_h, int total_w);
+
+// Render the agent prompt/response into its overlay plane
+void render_agent_overlay(struct ncplane* overlay, const Theme& theme,
+                          const state::AgentState& agent_state);
 
 } // namespace blimp::ui
