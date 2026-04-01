@@ -89,6 +89,7 @@ void put_str_trunc(struct ncplane* plane, int y, int x, const char* str,
 }
 
 void render(struct ncplane* std_plane,
+            struct ncplane* overlay_plane,
             const Theme& theme,
             const RepoState& repo,
             const state::Navigation& nav,
@@ -140,10 +141,9 @@ void render(struct ncplane* std_plane,
     render_status_bar(std_plane, theme, repo, nav, interaction,
                       main_h, 0, status_h, total_w, status_message);
 
-    if (mode == state::Mode::Committing) {
-        render_commit_overlay(std_plane, theme, commit_state,
-                              interaction.commit_mode(),
-                              total_h, total_w);
+    if (mode == state::Mode::Committing && overlay_plane) {
+        render_commit_overlay(overlay_plane, theme, commit_state,
+                              interaction.commit_mode());
     }
 }
 

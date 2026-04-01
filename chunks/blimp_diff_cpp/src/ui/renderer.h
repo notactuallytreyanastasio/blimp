@@ -45,8 +45,10 @@ void put_str(struct ncplane* plane, int y, int x, const char* str,
 void put_str_trunc(struct ncplane* plane, int y, int x, const char* str,
                    int max_width, uint32_t fg_channel, uint32_t bg_channel);
 
-// Render the full application frame
+// Render the full application frame.
+// overlay_plane is created/destroyed by the caller when commit mode is entered/exited.
 void render(struct ncplane* std_plane,
+            struct ncplane* overlay_plane,
             const Theme& theme,
             const RepoState& repo,
             const state::Navigation& nav,

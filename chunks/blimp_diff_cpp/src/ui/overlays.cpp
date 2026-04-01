@@ -10,35 +10,58 @@
 
 namespace blimp::ui {
 
-void render_commit_overlay(struct ncplane* plane, const Theme& theme,
-                           const state::CommitState& commit_state,
-                           state::CommitMode mode,
-                           int total_h, int total_w) {
+struct ncplane* create_overlay_plane(struct ncplane* std_plane,
+                                     int total_h, int total_w) {
     int box_w = std::max(40, total_w * 60 / 100);
     int box_h = std::max(10, total_h * 40 / 100);
-    int box_x = (total_w - box_w) / 2;
     int box_y = (total_h - box_h) / 2;
+    int box_x = (total_w - box_w) / 2;
+
+    struct ncplane_options nopts{};
+    nopts.y = box_y;
+    nopts.x = box_x;
+    nopts.rows = static_cast<unsigned>(box_h);
+    nopts.cols = static_cast<unsigned>(box_w);
+    nopts.name = "commit-overlay";
+
+    struct ncplane* overlay = ncplane_create(std_plane, &nopts);
+    if (!overlay) return nullptr;
+
+    // The overlay is opaque -- we WANT it to cover the background.
+    // No transparency needed here since it's a modal dialog.
+    return overlay;
+}
+
+void render_commit_overlay(struct ncplane* overlay, const Theme& theme,
+                           const state::CommitState& commit_state,
+                           state::CommitMode mode) {
+    unsigned rows = 0, cols = 0;
+    ncplane_dim_yx(overlay, &rows, &cols);
+
+    int box_h = static_cast<int>(rows);
+    int box_w = static_cast<int>(cols);
 
     uint32_t bg = theme.bg_selected.to_channel();
     uint32_t fg = theme.fg.to_channel();
     uint32_t border = theme.border_active.to_channel();
 
-    // Fill background
-    fill_rect(plane, box_y, box_x, box_h, box_w, bg);
+    // Clear overlay plane
+    ncplane_set_bg_rgb(overlay, bg);
+    ncplane_erase(overlay);
 
-    // Top border
-    hline(plane, box_y, box_x, box_w, border, bg);
+    // Top border (coordinates relative to overlay plane, not terminal)
+    hline(overlay, 0, 0, box_w, border, bg);
 
     // Title
     const char* title = (mode == state::CommitMode::Amend)
         ? " Amend Commit " : " Commit ";
-    put_str(plane, box_y, box_x + 2, title, border, bg);
+    put_str(overlay, 0, 2, title, border, bg);
 
     // Message area
-    int msg_y = box_y + 2;
-    int msg_x = box_x + 2;
+    int msg_y = 2;
+    int msg_x = 2;
     int msg_w = box_w - 4;
-    int msg_max_lines = box_h - 5; // room for title, error, hint
+    int msg_max_lines = box_h - 5;
 
     const auto& msg = commit_state.message();
 
@@ -49,14 +72,11 @@ void render_commit_overlay(struct ncplane* plane, const Theme& theme,
     while (std::getline(stream, line)) {
         lines.push_back(line);
     }
-    // If message ends with newline or is empty, add empty line for cursor
     if (msg.empty() || (!msg.empty() && msg.back() == '\n')) {
         lines.emplace_back();
     }
 
-    // Render each line
     int visible_lines = std::min(static_cast<int>(lines.size()), msg_max_lines);
-    // Scroll to keep cursor visible
     int scroll = 0;
     if (static_cast<int>(lines.size()) > msg_max_lines) {
         scroll = static_cast<int>(lines.size()) - msg_max_lines;
@@ -65,30 +85,30 @@ void render_commit_overlay(struct ncplane* plane, const Theme& theme,
     for (int i = 0; i < visible_lines; i++) {
         int line_idx = scroll + i;
         if (line_idx < static_cast<int>(lines.size())) {
-            put_str_trunc(plane, msg_y + i, msg_x,
+            put_str_trunc(overlay, msg_y + i, msg_x,
                           lines[static_cast<size_t>(line_idx)].c_str(),
                           msg_w, fg, bg);
         }
     }
 
-    // Cursor: at end of last visible line
+    // Cursor
     int cursor_line = static_cast<int>(lines.size()) - 1 - scroll;
     cursor_line = std::clamp(cursor_line, 0, visible_lines - 1);
     int cursor_col = static_cast<int>(lines[static_cast<size_t>(cursor_line + scroll)].size());
     cursor_col = std::min(cursor_col, msg_w - 1);
 
-    put_str(plane, msg_y + cursor_line, msg_x + cursor_col,
+    put_str(overlay, msg_y + cursor_line, msg_x + cursor_col,
             "▋", theme.accent.to_channel(), bg);
 
-    // Error message
+    // Error
     if (!commit_state.error().empty()) {
-        put_str_trunc(plane, box_y + box_h - 2, msg_x,
+        put_str_trunc(overlay, box_h - 2, msg_x,
                       commit_state.error().c_str(), msg_w,
                       theme.error.to_channel(), bg);
     }
 
-    // Bottom hint
-    put_str(plane, box_y + box_h - 1, msg_x,
+    // Hint
+    put_str(overlay, box_h - 1, msg_x,
             "Ctrl+Enter: submit  Esc: cancel  Enter: newline",
             theme.fg_dim.to_channel(), bg);
 }

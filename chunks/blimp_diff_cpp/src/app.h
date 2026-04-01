@@ -64,6 +64,10 @@ private:
     // Event processing (extracted from run loop)
     void process_key(struct notcurses* nc, uint32_t key, const struct ncinput& ni);
 
+    // Overlay plane management
+    void show_overlay();
+    void hide_overlay();
+
     // Git operations
     void do_stage();
     void do_unstage();
@@ -85,6 +89,10 @@ private:
     ui::DiffCache diff_cache_;
     std::string status_message_;
     bool should_quit_ = false;
+
+    // Overlay plane for commit dialog (created on enter, destroyed on exit)
+    struct ncplane* overlay_plane_ = nullptr;
+    struct ncplane* std_plane_ = nullptr; // cached for overlay creation
 
     // Async refresh
     std::future<RefreshResult> pending_refresh_;

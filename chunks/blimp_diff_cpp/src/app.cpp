@@ -4,6 +4,7 @@
 #include "git/log_parser.h"
 #include "state/file_state.h"
 #include "ui/renderer.h"
+#include "ui/overlays.h"
 
 #include <notcurses/notcurses.h>
 #include <algorithm>
@@ -192,6 +193,24 @@ void App::merge_diffs(std::vector<FileDiff>& unstaged, std::vector<FileDiff>& st
     }
 }
 
+// ── Overlay plane management ────────────────────────────────────────────────
+
+void App::show_overlay() {
+    if (overlay_plane_) return; // already showing
+    if (!std_plane_) return;
+    unsigned rows, cols;
+    ncplane_dim_yx(std_plane_, &rows, &cols);
+    overlay_plane_ = ui::create_overlay_plane(
+        std_plane_, static_cast<int>(rows), static_cast<int>(cols));
+}
+
+void App::hide_overlay() {
+    if (overlay_plane_) {
+        ncplane_destroy(overlay_plane_);
+        overlay_plane_ = nullptr;
+    }
+}
+
 // ── Input dispatch ──────────────────────────────────────────────────────────
 
 void App::dispatch(state::Action action, uint32_t codepoint) {
@@ -282,6 +301,7 @@ void App::dispatch_file_list(state::Action action) {
         case state::Action::EnterAmend:
             interaction_.set_mode(state::Mode::Committing);
             commit_state_.begin_editing();
+            show_overlay();
             break;
         default:
             break;
@@ -353,6 +373,7 @@ void App::dispatch_committing(state::Action action, uint32_t codepoint) {
         case state::Action::Cancel:
             commit_state_.cancel();
             interaction_.set_mode(state::Mode::FileList);
+            hide_overlay();
             break;
         case state::Action::Submit:
             do_commit();
@@ -437,6 +458,7 @@ void App::do_commit() {
     } else {
         commit_state_.succeed();
         interaction_.set_mode(state::Mode::FileList);
+        hide_overlay();
         status_message_ = "Commit successful";
         refresh_sync();
     }
@@ -473,6 +495,7 @@ int App::run() {
 
     notcurses_mice_enable(nc, NCMICE_ALL_EVENTS);
     struct ncplane* std_plane = notcurses_stdplane(nc);
+    std_plane_ = std_plane; // cache for overlay creation
 
     refresh_sync();
 
@@ -484,9 +507,9 @@ int App::run() {
     while (!should_quit_ && !g_sigint_received.load(std::memory_order_relaxed)) {
         poll_async_refresh();
 
-        ui::render(std_plane, themes_.current(), repo_, nav_, interaction_,
-                   commit_state_, selection_, diff_cache_, log_entries_,
-                   status_message_);
+        ui::render(std_plane, overlay_plane_, themes_.current(), repo_, nav_,
+                   interaction_, commit_state_, selection_, diff_cache_,
+                   log_entries_, status_message_);
         notcurses_render(nc);
 
         uint32_t key = notcurses_get(nc, &timeout, &ni);
@@ -521,6 +544,7 @@ int App::run() {
 
     // Stop background work first
     watcher_.stop();
+    hide_overlay();
     if (refresh_in_flight_ && pending_refresh_.valid()) {
         pending_refresh_.wait();
     }
@@ -592,7 +616,11 @@ void App::process_key(struct notcurses* nc, uint32_t key, const struct ncinput& 
     if (key == NCKEY_RESIZE) {
         unsigned rows, cols;
         notcurses_stddim_yx(nc, &rows, &cols);
-        // Standard plane auto-resizes. Force full redraw.
+        // Standard plane auto-resizes. Recreate overlay if active.
+        if (overlay_plane_) {
+            hide_overlay();
+            show_overlay();
+        }
         diff_cache_.clear();
         update_selected_diff();
         return;
@@ -618,6 +646,7 @@ void App::process_key(struct notcurses* nc, uint32_t key, const struct ncinput& 
         interaction_.mode() == state::Mode::FileList) {
         if (interaction_.press_c()) {
             commit_state_.begin_editing();
+            show_overlay();
             return;
         }
         return;
