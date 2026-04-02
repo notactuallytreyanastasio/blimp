@@ -2,14 +2,14 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
-#include <functional>
-#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace blimp::git {
 
-// File watcher using kqueue/stat polling.
-// Checks .git/index mtime and working tree for changes.
+// File watcher using kqueue (macOS) to watch for filesystem changes.
+// Watches the working tree and .git directory for any modifications.
 class Watcher {
 public:
     explicit Watcher(std::filesystem::path repo_root,
@@ -23,14 +23,13 @@ public:
 
 private:
     void watch_loop();
-    [[nodiscard]] std::filesystem::file_time_type get_index_mtime() const;
 
     std::filesystem::path root_;
     std::chrono::milliseconds debounce_;
     std::atomic<bool> changed_{false};
     std::atomic<bool> running_{true};
-    std::filesystem::file_time_type last_index_mtime_;
-    std::filesystem::file_time_type last_head_mtime_;
+    int kq_ = -1;  // kqueue fd
+    std::vector<int> watch_fds_; // open fds being watched
     std::thread thread_;
 };
 
