@@ -312,7 +312,10 @@ TEST(e2e_diff_cache_from_parsed) {
     ASSERT_EQ(diffs.size(), 1u);
 
     blimp::ui::DiffCache cache;
-    cache.rebuild(diffs[0], "data.txt");
+    blimp::CombinedDiff cd;
+    cd.unstaged = diffs[0];
+    cd.has_unstaged = true;
+    cache.rebuild(cd, "data.txt");
 
     ASSERT_TRUE(cache.line_count() > 0);
     ASSERT_EQ(cache.cached_path(), "data.txt");

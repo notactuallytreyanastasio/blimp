@@ -158,12 +158,23 @@ void App::update_selected_diff() {
 
     auto it = repo_.diffs.find(repo_.files[idx].path);
     if (it != repo_.diffs.end()) {
+        const auto& cd = it->second;
         int total = 0;
-        for (const auto& hunk : it->second.hunks) {
-            total += 1 + static_cast<int>(hunk.lines.size());
+        size_t hunks = 0;
+        if (cd.has_staged) {
+            for (const auto& h : cd.staged.hunks)
+                total += 1 + static_cast<int>(h.lines.size());
+            hunks += cd.staged.hunks.size();
+            if (cd.has_unstaged) total++; // section header
+        }
+        if (cd.has_unstaged) {
+            for (const auto& h : cd.unstaged.hunks)
+                total += 1 + static_cast<int>(h.lines.size());
+            hunks += cd.unstaged.hunks.size();
+            if (cd.has_staged) total++; // section header
         }
         nav_.set_diff_line_count(total);
-        nav_.set_hunk_count(it->second.hunks.size());
+        nav_.set_hunk_count(hunks);
     } else {
         nav_.set_diff_line_count(0);
         nav_.set_hunk_count(0);
@@ -190,13 +201,14 @@ void App::rebuild_diff_cache() {
     // Lazy-load untracked file diff on demand (just for selected file)
     if (file.unstaged == Status::Untracked &&
         repo_.diffs.find(path) == repo_.diffs.end()) {
-        dlog("lazy-diff-untracked START");
         auto result = runner_.diff_untracked(path);
-        dlog("lazy-diff-untracked END");
         auto parsed = git::parse_diff(result.stdout_str);
         for (auto& d : parsed) {
             d.path = path;
-            repo_.diffs[path] = std::move(d);
+            CombinedDiff cd;
+            cd.unstaged = std::move(d);
+            cd.has_unstaged = true;
+            repo_.diffs[path] = std::move(cd);
         }
     }
 
@@ -209,24 +221,19 @@ void App::rebuild_diff_cache() {
 }
 
 void App::merge_diffs(std::vector<FileDiff>& unstaged, std::vector<FileDiff>& staged,
-                      std::unordered_map<std::string, FileDiff>& out) {
+                      std::unordered_map<std::string, CombinedDiff>& out) {
     out.clear();
 
     for (auto& d : unstaged) {
-        out[d.path] = std::move(d);
+        auto& cd = out[d.path];
+        cd.unstaged = std::move(d);
+        cd.has_unstaged = true;
     }
 
     for (auto& d : staged) {
-        auto it = out.find(d.path);
-        if (it == out.end()) {
-            out[d.path] = std::move(d);
-        } else {
-            for (auto& hunk : d.hunks) {
-                it->second.hunks.push_back(std::move(hunk));
-            }
-            it->second.additions += d.additions;
-            it->second.deletions += d.deletions;
-        }
+        auto& cd = out[d.path];
+        cd.staged = std::move(d);
+        cd.has_staged = true;
     }
 }
 
@@ -558,7 +565,7 @@ std::vector<std::string> App::extract_selected_lines() {
 
     for (size_t i = lo; i <= hi && i < lines.size(); i++) {
         const auto& cl = lines[i];
-        if (cl.type == ui::CachedLine::HunkHeader) continue;
+        if (cl.type != ui::CachedLine::DiffContent) continue;
 
         // Reconstruct the line text with +/- prefix
         char prefix = ' ';

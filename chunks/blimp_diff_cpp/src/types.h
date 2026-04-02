@@ -67,9 +67,27 @@ struct LogEntry {
 
 // ── Repo state ──────────────────────────────────────────────────────────────
 
+// Combined diff for a file -- keeps staged and unstaged separate
+struct CombinedDiff {
+    FileDiff unstaged;
+    FileDiff staged;
+    bool has_unstaged = false;
+    bool has_staged = false;
+
+    // Total counts across both
+    [[nodiscard]] int total_additions() const {
+        return (has_unstaged ? unstaged.additions : 0) +
+               (has_staged ? staged.additions : 0);
+    }
+    [[nodiscard]] int total_deletions() const {
+        return (has_unstaged ? unstaged.deletions : 0) +
+               (has_staged ? staged.deletions : 0);
+    }
+};
+
 struct RepoState {
     std::vector<FileEntry> files;
-    std::unordered_map<std::string, FileDiff> diffs;
+    std::unordered_map<std::string, CombinedDiff> diffs;
     std::string branch;
 };
 

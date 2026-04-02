@@ -23,7 +23,7 @@ namespace blimp {
 // Result of a background git refresh -- built off-thread, swapped in on main thread
 struct RefreshResult {
     std::vector<FileEntry> files;
-    std::unordered_map<std::string, FileDiff> diffs;
+    std::unordered_map<std::string, CombinedDiff> diffs;
     std::string branch;
 };
 
@@ -52,7 +52,7 @@ private:
     void rebuild_diff_cache();
 
     void merge_diffs(std::vector<FileDiff>& unstaged, std::vector<FileDiff>& staged,
-                     std::unordered_map<std::string, FileDiff>& out);
+                     std::unordered_map<std::string, CombinedDiff>& out);
 
     // Input dispatch
     void dispatch(state::Action action, uint32_t codepoint = 0);

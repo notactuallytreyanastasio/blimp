@@ -48,6 +48,14 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
 
         const auto& cl = lines[static_cast<size_t>(line_idx)];
 
+        // Section header (Staged / Unstaged separator)
+        if (cl.type == CachedLine::SectionHeader) {
+            hline(plane, draw_y, x, w, 0, theme.status_bg.to_channel());
+            put_str(plane, draw_y, x + 1, cl.text.c_str(),
+                    theme.accent.to_channel(), theme.status_bg.to_channel());
+            continue;
+        }
+
         // Hunk header
         if (cl.type == CachedLine::HunkHeader) {
             hline(plane, draw_y, x, gutter_w, 0, theme.gutter_bg.to_channel());

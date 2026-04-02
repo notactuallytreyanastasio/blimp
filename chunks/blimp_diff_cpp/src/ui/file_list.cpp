@@ -93,7 +93,8 @@ void render_file_list(struct ncplane* plane, const Theme& theme,
         std::string suffix;
         if (it != repo.diffs.end()) {
             char buf[32];
-            snprintf(buf, sizeof(buf), " +%d -%d", it->second.additions, it->second.deletions);
+            snprintf(buf, sizeof(buf), " +%d -%d",
+                     it->second.total_additions(), it->second.total_deletions());
             suffix = buf;
             name_w -= static_cast<int>(suffix.size());
         }

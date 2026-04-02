@@ -12,19 +12,19 @@ struct Theme;
 // A lightweight diff line -- stores raw text, NOT pre-highlighted.
 // Highlighting happens lazily in the renderer for visible lines only.
 struct CachedLine {
-    enum Type { HunkHeader, DiffContent };
+    enum Type { SectionHeader, HunkHeader, DiffContent };
     Type type = DiffContent;
     LineKind kind = LineKind::Context;
-    std::string text;       // raw content (or hunk header)
+    std::string text;       // raw content (or hunk/section header)
     int old_line = -1;
     int new_line = -1;
 };
 
-// Flattens a FileDiff into a linear array of CachedLines.
-// No highlighting -- just metadata + raw text. O(n) with no tokenization.
+// Flattens a CombinedDiff into a linear array of CachedLines.
+// If both staged and unstaged exist, inserts section headers.
 class DiffCache {
 public:
-    void rebuild(const FileDiff& diff, std::string_view path);
+    void rebuild(const CombinedDiff& diff, std::string_view path);
     void clear();
 
     [[nodiscard]] const std::vector<CachedLine>& lines() const { return lines_; }
@@ -33,6 +33,7 @@ public:
     [[nodiscard]] Lang lang() const { return lang_; }
 
 private:
+    void append_diff(const FileDiff& diff);
     std::vector<CachedLine> lines_;
     std::string path_;
     Lang lang_ = Lang::Unknown;
