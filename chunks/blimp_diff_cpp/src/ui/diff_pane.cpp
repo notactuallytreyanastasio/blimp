@@ -88,6 +88,9 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
             line_bg = theme.selection_bg.to_channel();
         }
 
+        // Fill entire row first (prevents black gaps from stale cells)
+        hline(plane, draw_y, x, w, 0, line_bg);
+
         // Gutter
         char gutter_buf[14];
         char old_str[6] = "     ";
@@ -97,9 +100,6 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
         snprintf(gutter_buf, sizeof(gutter_buf), "%s%s%c", old_str, new_str, prefix);
         put_str(plane, draw_y, x, gutter_buf,
                 theme.gutter_fg.to_channel(), theme.gutter_bg.to_channel());
-
-        // Clear content area
-        hline(plane, draw_y, x + gutter_w, content_w, 0, line_bg);
 
         // Highlight this single line on the fly (only visible lines get tokenized)
         auto spans = highlight_line(cl.text, lang, colors);
