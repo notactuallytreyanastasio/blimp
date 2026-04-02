@@ -762,30 +762,50 @@ int App::run() {
         pending_refresh_.wait();
     }
 
-    // Let notcurses tear down (alternate screen, cursor, etc.)
+    // Explicitly disable kitty keyboard protocol and mouse BEFORE notcurses
+    // tears down. This gives the terminal time to process the disable
+    // sequences while we're still in raw mode and can drain responses.
+    fprintf(stdout,
+        "\033[>4;0m"   // pop kitty keyboard mode
+        "\033[?1000l"  // disable mouse click tracking
+        "\033[?1002l"  // disable mouse drag tracking
+        "\033[?1003l"  // disable mouse all-movement tracking
+        "\033[?1006l"  // disable SGR mouse mode
+        "\033[?2004l"  // disable bracketed paste
+    );
+    fflush(stdout);
+
+    // Give the terminal a moment to process the disable sequences
+    // and stop sending responses
+    usleep(50000); // 50ms
+
+    // Drain any responses that arrived
+    {
+        struct timespec zero = {0, 0};
+        struct ncinput drain;
+        while (notcurses_get(nc, &zero, &drain) > 0) {}
+    }
+
+    // Now tear down notcurses
     notcurses_mice_disable(nc);
     notcurses_stop(nc);
     g_nc = nullptr;
 
-    // Force-restore saved terminal state. This is the nuclear option:
-    // no matter what notcurses or signal handlers did, the terminal
-    // goes back to exactly how it was before we started.
+    // Force-restore saved terminal state
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_termios);
 
-    // Drain any in-flight escape sequence responses from the terminal
-    // emulator (mouse tracking acks, kitty keyboard responses, etc.)
+    // Final drain: catch any late-arriving escape sequences
     {
         struct termios drain_t;
         tcgetattr(STDIN_FILENO, &drain_t);
         drain_t.c_lflag &= ~(ICANON | ECHO);
         drain_t.c_cc[VMIN] = 0;
-        drain_t.c_cc[VTIME] = 1; // 100ms
+        drain_t.c_cc[VTIME] = 2; // 200ms -- longer wait for slow terminals
         tcsetattr(STDIN_FILENO, TCSANOW, &drain_t);
 
         char junk[512];
         while (read(STDIN_FILENO, junk, sizeof(junk)) > 0) {}
 
-        // Restore again after drain
         tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios);
     }
 
