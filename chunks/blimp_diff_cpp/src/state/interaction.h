@@ -43,6 +43,8 @@ enum class Action : uint8_t {
     EnterVisual,
     CycleTheme,
     OpenAgent,    // switch to agent view tab
+    DiscardFile,  // x: git checkout -- file (discard unstaged changes)
+    Stash,        // S: git stash
     Quit,
     // Text input
     InsertChar,

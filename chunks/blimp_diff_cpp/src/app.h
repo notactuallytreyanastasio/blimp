@@ -80,6 +80,8 @@ private:
     // Git operations
     void do_stage();
     void do_unstage();
+    void do_discard();
+    void do_stash();
     void do_commit();
 
     std::filesystem::path root_;

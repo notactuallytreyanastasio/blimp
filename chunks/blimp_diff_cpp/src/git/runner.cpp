@@ -100,6 +100,18 @@ CmdResult Runner::commit_amend(const std::string& message) const {
     return run({"commit", "--amend", "-m", message});
 }
 
+CmdResult Runner::discard(const std::string& path) const {
+    return run({"checkout", "--", path});
+}
+
+CmdResult Runner::stash() const {
+    return run({"stash"});
+}
+
+CmdResult Runner::stash_pop() const {
+    return run({"stash", "pop"}, /*allow_nonzero=*/true);
+}
+
 void Runner::open_editor(const std::string& path) const {
     const char* editor = std::getenv("EDITOR");
     if (!editor) editor = "vim";

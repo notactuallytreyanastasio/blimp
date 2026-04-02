@@ -55,6 +55,8 @@ Action Interaction::action_for_key(Mode mode, int key, bool ctrl, bool shift) {
         case 'v':                    return Action::EnterVisual;
         case 't':                    return Action::CycleTheme;
         case 'g':                    return Action::OpenAgent;
+        case 'x':                    return Action::DiscardFile;
+        case 'S':                    return Action::Stash;
         default:                     return Action::None;
     }
 }

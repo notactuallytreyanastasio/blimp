@@ -358,6 +358,12 @@ void App::dispatch_file_list(state::Action action) {
                 switch_mode(state::Mode::AgentView);
             }
             break;
+        case state::Action::DiscardFile:
+            do_discard();
+            break;
+        case state::Action::Stash:
+            do_stash();
+            break;
         default:
             break;
     }
@@ -598,6 +604,43 @@ void App::do_unstage() {
         refresh_sync();
         status_message_ = "Unstaged: " + repo_.files[idx].path;
     }
+}
+
+void App::do_discard() {
+    if (repo_.files.empty()) return;
+    size_t idx = nav_.file_index();
+    if (idx >= repo_.files.size()) return;
+
+    const auto& file = repo_.files[idx];
+
+    // Only discard unstaged changes on tracked files
+    if (file.unstaged == Status::None && file.staged == Status::None) return;
+
+    if (file.unstaged == Status::Untracked) {
+        // For untracked files, just delete
+        std::error_code ec;
+        std::filesystem::remove(root_ / file.path, ec);
+        if (ec) {
+            status_message_ = "Error deleting: " + file.path;
+            return;
+        }
+    } else if (file.unstaged != Status::None) {
+        // For tracked files with unstaged changes, git checkout
+        (void)runner_.discard(file.path);
+    }
+
+    refresh_sync();
+    status_message_ = "Discarded: " + file.path;
+}
+
+void App::do_stash() {
+    auto result = runner_.stash();
+    if (result.exit_code != 0) {
+        status_message_ = "Stash failed";
+    } else {
+        status_message_ = "Stashed";
+    }
+    refresh_sync();
 }
 
 void App::do_commit() {

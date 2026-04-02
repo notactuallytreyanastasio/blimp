@@ -49,7 +49,7 @@ void render_status_bar(struct ncplane* plane, const Theme& theme,
     const char* hints = nullptr;
     switch (interaction.mode()) {
         case state::Mode::FileList:
-            hints = "j/k:nav s:stage u:unstage cc:commit g:agent Tab:pane q:quit";
+            hints = "j/k:nav s:stage u:unstage x:discard S:stash cc:commit g:agent q:quit";
             break;
         case state::Mode::DiffView:
             hints = "j/k:hunk h/l:scroll v:select g:agent Tab:pane q:back";

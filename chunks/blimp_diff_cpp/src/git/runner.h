@@ -32,6 +32,9 @@ public:
     [[nodiscard]] CmdResult unstage_rm_cached(const std::string& path) const;
     [[nodiscard]] CmdResult commit(const std::string& message) const;
     [[nodiscard]] CmdResult commit_amend(const std::string& message) const;
+    [[nodiscard]] CmdResult discard(const std::string& path) const;
+    [[nodiscard]] CmdResult stash() const;
+    [[nodiscard]] CmdResult stash_pop() const;
 
     void open_editor(const std::string& path) const;
 
