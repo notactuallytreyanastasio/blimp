@@ -257,6 +257,13 @@ void App::switch_mode(state::Mode m) {
         needs_full_redraw_ = true;
     }
     interaction_.set_mode(m);
+
+    // Keep active pane in sync with mode
+    if (m == state::Mode::DiffView || m == state::Mode::Selecting) {
+        nav_.set_active_pane(state::Pane::Diff);
+    } else if (m == state::Mode::FileList) {
+        nav_.set_active_pane(state::Pane::FileList);
+    }
 }
 
 // ── Overlay plane management ────────────────────────────────────────────────
@@ -335,6 +342,7 @@ void App::dispatch_file_list(state::Action action) {
             break;
         case state::Action::Select:
             switch_mode(state::Mode::DiffView);
+            nav_.set_active_pane(state::Pane::Diff);
             break;
         case state::Action::Back:
             should_quit_ = true;
