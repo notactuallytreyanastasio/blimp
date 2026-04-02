@@ -593,17 +593,12 @@ void App::do_unstage() {
     size_t idx = nav_.file_index();
     if (idx >= repo_.files.size()) return;
 
-    auto cmd = state::unstage_command(repo_.files[idx]);
-    if (cmd) {
-        auto fstate = state::classify(repo_.files[idx]);
-        if (fstate == state::FileState::StagedNew) {
-            (void)runner_.unstage_rm_cached(repo_.files[idx].path);
-        } else {
-            (void)runner_.unstage_restore(repo_.files[idx].path);
-        }
-        refresh_sync();
-        status_message_ = "Unstaged: " + repo_.files[idx].path;
-    }
+    const auto& file = repo_.files[idx];
+    if (file.staged == Status::None) return;
+
+    (void)runner_.unstage_restore(file.path);
+    refresh_sync();
+    status_message_ = "Unstaged: " + file.path;
 }
 
 void App::do_discard() {
