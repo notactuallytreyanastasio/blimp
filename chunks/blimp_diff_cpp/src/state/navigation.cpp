@@ -30,6 +30,12 @@ void Navigation::set_file_index(size_t i) {
         file_index_ = std::min(i, file_count_ - 1);
 }
 
+void Navigation::reset_diff_scroll() {
+    diff_scroll_ = 0;
+    diff_cursor_ = 0;
+    diff_h_scroll_ = 0;
+}
+
 void Navigation::scroll_diff_down(int amount) {
     diff_cursor_ = std::min(diff_cursor_ + amount,
                             std::max(0, diff_line_count_ - 1));
@@ -70,6 +76,7 @@ void Navigation::follow_jump(size_t file_idx) {
     if (follow_mode_ && file_count_ > 0) {
         file_index_ = std::min(file_idx, file_count_ - 1);
         diff_scroll_ = 0;
+        diff_cursor_ = 0;
     }
 }
 

@@ -199,6 +199,9 @@ void App::rebuild_diff_cache() {
     // Only rebuild if the file changed
     if (diff_cache_.cached_path() == path) return;
 
+    // New file selected -- reset diff view to top
+    nav_.reset_diff_scroll();
+
     // Lazy-load untracked file diff on demand (just for selected file)
     if (file.unstaged == Status::Untracked &&
         repo_.diffs.find(path) == repo_.diffs.end()) {

@@ -24,6 +24,7 @@ public:
     [[nodiscard]] int diff_h_scroll() const { return diff_h_scroll_; }
     void set_diff_line_count(int n) { diff_line_count_ = n; }
     void set_diff_visible_height(int h) { diff_visible_h_ = h; }
+    void reset_diff_scroll();
     void scroll_diff_down(int amount = 1);
     void scroll_diff_up(int amount = 1);
     void scroll_diff_left(int amount = 4);
