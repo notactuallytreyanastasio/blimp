@@ -74,7 +74,7 @@ inline constexpr Theme solarized_dark{
     .border_inactive = {88, 110, 117},
     .hot_highlight_bg = {42, 161, 152},
     .error         = {220, 50, 47},
-    .selection_bg  = {7, 54, 66},
+    .selection_bg  = {20, 70, 110},
     .staged_badge  = {133, 153, 0},
 };
 
@@ -101,7 +101,7 @@ inline constexpr Theme solarized_light{
     .border_inactive = {147, 161, 161},
     .hot_highlight_bg = {42, 161, 152},
     .error         = {220, 50, 47},
-    .selection_bg  = {238, 232, 213},
+    .selection_bg  = {180, 210, 240},
     .staged_badge  = {133, 153, 0},
 };
 
@@ -128,7 +128,7 @@ inline constexpr Theme monokai_dark{
     .border_inactive = {117, 113, 94},
     .hot_highlight_bg = {253, 151, 31},
     .error         = {249, 38, 114},
-    .selection_bg  = {73, 72, 62},
+    .selection_bg  = {50, 70, 110},
     .staged_badge  = {166, 226, 46},
 };
 
@@ -155,7 +155,7 @@ inline constexpr Theme monokai_light{
     .border_inactive = {180, 180, 170},
     .hot_highlight_bg = {255, 180, 50},
     .error         = {200, 0, 50},
-    .selection_bg  = {210, 230, 255},
+    .selection_bg  = {170, 200, 240},
     .staged_badge  = {0, 120, 0},
 };
 
