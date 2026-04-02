@@ -12,6 +12,7 @@
 
 #include <notcurses/notcurses.h>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <future>
 #include <mutex>
@@ -70,6 +71,10 @@ private:
     // Event processing (extracted from run loop)
     void process_key(struct notcurses* nc, uint32_t key, const struct ncinput& ni);
 
+    // Flash message (auto-clears after ~2s)
+    void set_flash(const std::string& msg);
+    [[nodiscard]] std::string active_flash() const;
+
     // Mode transition (marks full redraw needed)
     void switch_mode(state::Mode m);
 
@@ -99,7 +104,8 @@ private:
     ui::ThemeCycler themes_;
 
     ui::DiffCache diff_cache_;
-    std::string status_message_;
+    std::string flash_message_;
+    std::chrono::steady_clock::time_point flash_expires_;
     bool should_quit_ = false;
     bool needs_full_redraw_ = true; // set on mode change or resize
 

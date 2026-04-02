@@ -105,7 +105,7 @@ void render(struct ncplane* std_plane,
             const DiffCache& diff_cache,
             const std::vector<LogEntry>& log_entries,
             const state::AgentState& agent_state,
-            const std::string& status_message) {
+            const std::string& flash_message) {
     unsigned rows = 0, cols = 0;
     ncplane_dim_yx(std_plane, &rows, &cols);
 
@@ -158,7 +158,19 @@ void render(struct ncplane* std_plane,
 
     dlog("render: status_bar");
     render_status_bar(std_plane, theme, repo, nav, interaction,
-                      main_h, 0, status_h, total_w, status_message);
+                      main_h, 0, status_h, total_w, "");
+
+    // Flash message at top of diff pane
+    if (!flash_message.empty() && mode != state::Mode::AgentView &&
+        mode != state::Mode::LogList && mode != state::Mode::LogDetail) {
+        int flash_x = divider_x + 2;
+        int flash_w = diff_w - 2;
+        if (flash_w > 0) {
+            hline(std_plane, 0, divider_x + 1, diff_w, 0, theme.accent.to_channel());
+            put_str_trunc(std_plane, 0, flash_x, flash_message.c_str(),
+                          flash_w, theme.bg.to_channel(), theme.accent.to_channel());
+        }
+    }
 
     if (mode == state::Mode::Committing && overlay_plane) {
         render_commit_overlay(overlay_plane, theme, commit_state,

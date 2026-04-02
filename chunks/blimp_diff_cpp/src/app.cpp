@@ -237,6 +237,17 @@ void App::merge_diffs(std::vector<FileDiff>& unstaged, std::vector<FileDiff>& st
     }
 }
 
+void App::set_flash(const std::string& msg) {
+    flash_message_ = msg;
+    flash_expires_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+}
+
+std::string App::active_flash() const {
+    if (flash_message_.empty()) return {};
+    if (std::chrono::steady_clock::now() > flash_expires_) return {};
+    return flash_message_;
+}
+
 void App::switch_mode(state::Mode m) {
     if (interaction_.mode() != m) {
         needs_full_redraw_ = true;
@@ -592,7 +603,7 @@ void App::do_stage() {
         std::string path = repo_.files[idx].path; // copy before refresh
         (void)runner_.stage(path);
         refresh_sync();
-        status_message_ = "Staged: " + path;
+        set_flash("Staged: " + path);
     }
 }
 
@@ -606,7 +617,7 @@ void App::do_unstage() {
     std::string path = repo_.files[idx].path; // copy before refresh
     (void)runner_.unstage_restore(path);
     refresh_sync();
-    status_message_ = "Unstaged: " + path;
+    set_flash("Unstaged: " + path);
 }
 
 void App::do_discard() {
@@ -624,7 +635,7 @@ void App::do_discard() {
         std::error_code ec;
         std::filesystem::remove(root_ / path, ec);
         if (ec) {
-            status_message_ = "Error deleting: " + path;
+            set_flash("Error deleting: " + path);
             return;
         }
     } else if (unstaged != Status::None) {
@@ -632,15 +643,15 @@ void App::do_discard() {
     }
 
     refresh_sync();
-    status_message_ = "Discarded: " + path;
+    set_flash("Discarded: " + path);
 }
 
 void App::do_stash() {
     auto result = runner_.stash();
     if (result.exit_code != 0) {
-        status_message_ = "Stash failed";
+        set_flash("Stash failed");
     } else {
-        status_message_ = "Stashed";
+        set_flash("Stashed");
     }
     refresh_sync();
 }
@@ -658,7 +669,7 @@ void App::do_commit() {
         commit_state_.succeed();
         switch_mode(state::Mode::FileList);
         hide_overlay();
-        status_message_ = "Commit successful";
+        set_flash("Commit successful");
         refresh_sync();
     }
 }
@@ -716,7 +727,7 @@ int App::run() {
         ui::render(std_plane, overlay_plane_, needs_full_redraw_,
                    themes_.current(), repo_, nav_, interaction_,
                    commit_state_, selection_, diff_cache_,
-                   log_entries_, agent_state_, status_message_);
+                   log_entries_, agent_state_, active_flash());
         needs_full_redraw_ = false;
         dlog("pre-nc-render");
         notcurses_render(nc);

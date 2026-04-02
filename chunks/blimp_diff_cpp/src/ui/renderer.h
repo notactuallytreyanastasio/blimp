@@ -60,6 +60,6 @@ void render(struct ncplane* std_plane,
             const DiffCache& diff_cache,
             const std::vector<LogEntry>& log_entries,
             const state::AgentState& agent_state,
-            const std::string& status_message);
+            const std::string& flash_message);
 
 } // namespace blimp::ui
