@@ -36,6 +36,7 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
     if (content_w < 1) content_w = 1;
 
     int scroll = nav.diff_scroll();
+    int cursor = nav.diff_cursor();
     int h_scroll = nav.diff_h_scroll();
 
     for (int row = 0; row < h; row++) {
@@ -89,6 +90,12 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
             line_bg = theme.selection_bg.to_channel();
         }
 
+        // Cursor line indicator (subtle brighten when focused)
+        bool is_cursor_line = focused && (line_idx == cursor);
+        if (is_cursor_line && !selection.active()) {
+            line_bg = theme.bg_selected.to_channel();
+        }
+
         // Fill entire row first (prevents black gaps from stale cells)
         hline(plane, draw_y, x, w, 0, line_bg);
 
@@ -99,8 +106,11 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
         if (cl.old_line >= 0) snprintf(old_str, sizeof(old_str), "%4d ", cl.old_line);
         if (cl.new_line >= 0) snprintf(new_str, sizeof(new_str), "%4d ", cl.new_line);
         snprintf(gutter_buf, sizeof(gutter_buf), "%s%s%c", old_str, new_str, prefix);
+        uint32_t gutter_bg = is_cursor_line
+            ? theme.bg_selected.to_channel()
+            : theme.gutter_bg.to_channel();
         put_str(plane, draw_y, x, gutter_buf,
-                theme.gutter_fg.to_channel(), theme.gutter_bg.to_channel());
+                theme.gutter_fg.to_channel(), gutter_bg);
 
         // Highlight this single line on the fly (only visible lines get tokenized)
         auto spans = highlight_line(cl.text, lang, colors);
