@@ -50,12 +50,19 @@ TEST(nav_toggle_pane) {
 TEST(nav_diff_scroll) {
     blimp::state::Navigation nav;
     nav.set_diff_line_count(100);
+    nav.set_diff_visible_height(10); // small viewport for predictable centering
     nav.scroll_diff_down(5);
-    ASSERT_EQ(nav.diff_scroll(), 5);
-    nav.scroll_diff_up(3);
-    ASSERT_EQ(nav.diff_scroll(), 2);
-    nav.scroll_diff_up(10);
-    ASSERT_EQ(nav.diff_scroll(), 0); // Clamped to 0
+    ASSERT_EQ(nav.diff_cursor(), 5);
+    ASSERT_EQ(nav.diff_scroll(), 0); // cursor 5, half=5, scroll=max(0,5-5)=0
+    nav.scroll_diff_down(10); // cursor now 15
+    ASSERT_EQ(nav.diff_cursor(), 15);
+    ASSERT_EQ(nav.diff_scroll(), 10); // max(0, 15-5) = 10
+    nav.scroll_diff_up(3); // cursor 12
+    ASSERT_EQ(nav.diff_cursor(), 12);
+    ASSERT_EQ(nav.diff_scroll(), 7); // max(0, 12-5) = 7
+    nav.scroll_diff_up(20); // cursor clamped to 0
+    ASSERT_EQ(nav.diff_cursor(), 0);
+    ASSERT_EQ(nav.diff_scroll(), 0);
 }
 
 TEST(nav_divider_pos_clamped) {
@@ -136,10 +143,12 @@ TEST(nav_set_file_index_zero_count_noop) {
 TEST(nav_diff_scroll_at_maximum) {
     blimp::state::Navigation nav;
     nav.set_diff_line_count(10);
+    nav.set_diff_visible_height(6);
     nav.scroll_diff_down(100); // Try to scroll way past end
-    ASSERT_EQ(nav.diff_scroll(), 9); // Clamped to diff_line_count_ - 1
+    ASSERT_EQ(nav.diff_cursor(), 9); // Clamped to diff_line_count_ - 1
+    ASSERT_EQ(nav.diff_scroll(), 6); // max(0, 9 - 3) = 6
     nav.scroll_diff_down(5); // Already at max
-    ASSERT_EQ(nav.diff_scroll(), 9);
+    ASSERT_EQ(nav.diff_cursor(), 9); // Still clamped
 }
 
 TEST(nav_diff_scroll_zero_lines) {
@@ -257,8 +266,9 @@ TEST(nav_follow_jump_resets_diff_scroll) {
     blimp::state::Navigation nav;
     nav.set_file_count(10);
     nav.set_diff_line_count(100);
-    nav.scroll_diff_down(50);
-    ASSERT_EQ(nav.diff_scroll(), 50);
+    nav.set_diff_visible_height(10);
+    nav.scroll_diff_down(50); // cursor=50, scroll=45
+    ASSERT_TRUE(nav.diff_scroll() > 0);
     nav.toggle_follow();
     nav.follow_jump(3);
     ASSERT_EQ(nav.diff_scroll(), 0); // Reset on jump

@@ -13,10 +13,11 @@
 namespace blimp::ui {
 
 void render_diff_pane(struct ncplane* plane, const Theme& theme,
-                      const DiffCache& cache, const state::Navigation& nav,
+                      const DiffCache& cache, state::Navigation& nav,
                       const state::LineSelection& selection,
                       int y, int x, int h, int w, bool focused) {
     if (w < 10 || h < 1) return;
+    nav.set_diff_visible_height(h);
 
     uint32_t bg = theme.bg.to_channel();
 
@@ -135,3 +136,4 @@ void render_diff_pane(struct ncplane* plane, const Theme& theme,
 }
 
 } // namespace blimp::ui
+// TODO: add horizontal scroll indicator

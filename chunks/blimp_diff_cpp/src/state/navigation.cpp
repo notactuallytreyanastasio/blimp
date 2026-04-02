@@ -31,12 +31,17 @@ void Navigation::set_file_index(size_t i) {
 }
 
 void Navigation::scroll_diff_down(int amount) {
-    diff_scroll_ = std::min(diff_scroll_ + amount,
+    diff_cursor_ = std::min(diff_cursor_ + amount,
                             std::max(0, diff_line_count_ - 1));
+    // Keep cursor centered in viewport
+    int half = diff_visible_h_ / 2;
+    diff_scroll_ = std::max(0, diff_cursor_ - half);
 }
 
 void Navigation::scroll_diff_up(int amount) {
-    diff_scroll_ = std::max(0, diff_scroll_ - amount);
+    diff_cursor_ = std::max(0, diff_cursor_ - amount);
+    int half = diff_visible_h_ / 2;
+    diff_scroll_ = std::max(0, diff_cursor_ - half);
 }
 
 void Navigation::scroll_diff_left(int amount) {

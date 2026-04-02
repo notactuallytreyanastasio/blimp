@@ -79,7 +79,7 @@ private:
     void switch_mode(state::Mode m);
 
     // Overlay plane management
-    void show_overlay();
+    void show_overlay(bool large = false);
     void hide_overlay();
 
     // Git operations

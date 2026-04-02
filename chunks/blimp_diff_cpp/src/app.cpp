@@ -9,6 +9,7 @@
 #include <notcurses/notcurses.h>
 #include <algorithm>
 #include <chrono>
+#include <unordered_set>
 #include <csignal>
 #include <cstdio>
 #include <termios.h>
@@ -89,10 +90,10 @@ RefreshResult App::build_refresh() {
 
 // Apply a refresh result to the app state. Main thread only.
 void App::apply_refresh(RefreshResult&& result) {
-    // Detect which file changed for follow mode
-    std::string prev_selected;
-    if (!repo_.files.empty() && nav_.file_index() < repo_.files.size()) {
-        prev_selected = repo_.files[nav_.file_index()].path;
+    // Snapshot old file paths for follow mode comparison
+    std::unordered_set<std::string> old_paths;
+    for (const auto& f : repo_.files) {
+        old_paths.insert(f.path);
     }
 
     repo_.files = std::move(result.files);
@@ -100,12 +101,12 @@ void App::apply_refresh(RefreshResult&& result) {
     repo_.branch = std::move(result.branch);
     nav_.set_file_count(repo_.files.size());
 
-    // Follow mode: jump to the first file whose diff changed
+    // Follow mode: jump only when a NEW file appears in the list
+    // (i.e., a file that wasn't in the previous snapshot at all).
+    // This prevents bouncing between existing files on every refresh.
     if (nav_.follow_mode() && !repo_.files.empty()) {
-        // Find a file that has a diff and wasn't previously selected
         for (size_t i = 0; i < repo_.files.size(); i++) {
-            const auto& path = repo_.files[i].path;
-            if (path != prev_selected && repo_.diffs.count(path)) {
+            if (old_paths.find(repo_.files[i].path) == old_paths.end()) {
                 nav_.follow_jump(i);
                 break;
             }
@@ -257,13 +258,18 @@ void App::switch_mode(state::Mode m) {
 
 // ── Overlay plane management ────────────────────────────────────────────────
 
-void App::show_overlay() {
+void App::show_overlay(bool large) {
     if (overlay_plane_) return; // already showing
     if (!std_plane_) return;
     unsigned rows, cols;
     ncplane_dim_yx(std_plane_, &rows, &cols);
-    overlay_plane_ = ui::create_overlay_plane(
-        std_plane_, static_cast<int>(rows), static_cast<int>(cols));
+    if (large) {
+        overlay_plane_ = ui::create_agent_plane(
+            std_plane_, static_cast<int>(rows), static_cast<int>(cols));
+    } else {
+        overlay_plane_ = ui::create_overlay_plane(
+            std_plane_, static_cast<int>(rows), static_cast<int>(cols));
+    }
 }
 
 void App::hide_overlay() {
@@ -418,7 +424,7 @@ void App::dispatch_diff_view(state::Action action) {
             break;
         case state::Action::EnterVisual:
             switch_mode(state::Mode::Selecting);
-            selection_.start(static_cast<size_t>(nav_.diff_scroll()));
+            selection_.start(static_cast<size_t>(nav_.diff_cursor()));
             break;
         case state::Action::StageFile:
             do_stage();
@@ -477,11 +483,11 @@ void App::dispatch_selecting(state::Action action) {
     switch (action) {
         case state::Action::Down:
             nav_.scroll_diff_down();
-            selection_.extend(static_cast<size_t>(nav_.diff_scroll()));
+            selection_.extend(static_cast<size_t>(nav_.diff_cursor()));
             break;
         case state::Action::Up:
             nav_.scroll_diff_up();
-            selection_.extend(static_cast<size_t>(nav_.diff_scroll()));
+            selection_.extend(static_cast<size_t>(nav_.diff_cursor()));
             break;
         case state::Action::Select: {
             // Enter: capture selected lines and enter agent prompt
@@ -489,7 +495,7 @@ void App::dispatch_selecting(state::Action action) {
             if (!lines.empty()) {
                 agent_state_.begin_prompting(std::move(lines));
                 switch_mode(state::Mode::AgentPrompt);
-                show_overlay(); // reuse overlay for prompt input
+                show_overlay(true); // large overlay for agent prompt
             }
             break;
         }

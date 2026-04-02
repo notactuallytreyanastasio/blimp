@@ -137,7 +137,15 @@ struct ncplane* create_agent_plane(struct ncplane* std_plane,
     nopts.cols = static_cast<unsigned>(box_w);
     nopts.name = "agent-overlay";
 
-    return ncplane_create(std_plane, &nopts);
+    struct ncplane* overlay = ncplane_create(std_plane, &nopts);
+    if (!overlay) return nullptr;
+
+    uint64_t channels = 0;
+    ncchannels_set_bg_alpha(&channels, NCALPHA_OPAQUE);
+    ncchannels_set_fg_alpha(&channels, NCALPHA_OPAQUE);
+    ncplane_set_base(overlay, " ", 0, channels);
+
+    return overlay;
 }
 
 void render_agent_overlay(struct ncplane* overlay, const Theme& theme,
@@ -154,7 +162,11 @@ void render_agent_overlay(struct ncplane* overlay, const Theme& theme,
     uint32_t dim = theme.fg_dim.to_channel();
     uint32_t accent = theme.accent.to_channel();
 
-    ncplane_set_bg_rgb(overlay, bg);
+    // Set base cell so erase fills with correct bg
+    uint64_t base_ch = 0;
+    ncchannels_set_bg_rgb(&base_ch, bg);
+    ncchannels_set_fg_rgb(&base_ch, fg);
+    ncplane_set_base(overlay, " ", 0, base_ch);
     ncplane_erase(overlay);
 
     // Top border + title

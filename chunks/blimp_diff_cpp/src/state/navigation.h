@@ -18,10 +18,12 @@ public:
     void page_up(size_t page_size);
     void set_file_index(size_t i);
 
-    // Diff scroll
+    // Diff scroll/cursor
     [[nodiscard]] int diff_scroll() const { return diff_scroll_; }
+    [[nodiscard]] int diff_cursor() const { return diff_cursor_; }
     [[nodiscard]] int diff_h_scroll() const { return diff_h_scroll_; }
     void set_diff_line_count(int n) { diff_line_count_ = n; }
+    void set_diff_visible_height(int h) { diff_visible_h_ = h; }
     void scroll_diff_down(int amount = 1);
     void scroll_diff_up(int amount = 1);
     void scroll_diff_left(int amount = 4);
@@ -58,8 +60,10 @@ private:
     size_t file_count_ = 0;
 
     int diff_scroll_ = 0;
+    int diff_cursor_ = 0;
     int diff_h_scroll_ = 0;
     int diff_line_count_ = 0;
+    int diff_visible_h_ = 40;
 
     size_t hunk_index_ = 0;
     size_t hunk_count_ = 0;
