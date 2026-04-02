@@ -582,9 +582,10 @@ void App::do_stage() {
 
     auto cmd = state::stage_command(repo_.files[idx]);
     if (cmd) {
-        (void)runner_.stage(repo_.files[idx].path);
-        refresh_sync(); // must be sync -- UI needs to reflect the change now
-        status_message_ = "Staged: " + repo_.files[idx].path;
+        std::string path = repo_.files[idx].path; // copy before refresh
+        (void)runner_.stage(path);
+        refresh_sync();
+        status_message_ = "Staged: " + path;
     }
 }
 
@@ -593,12 +594,12 @@ void App::do_unstage() {
     size_t idx = nav_.file_index();
     if (idx >= repo_.files.size()) return;
 
-    const auto& file = repo_.files[idx];
-    if (file.staged == Status::None) return;
+    if (repo_.files[idx].staged == Status::None) return;
 
-    (void)runner_.unstage_restore(file.path);
+    std::string path = repo_.files[idx].path; // copy before refresh
+    (void)runner_.unstage_restore(path);
     refresh_sync();
-    status_message_ = "Unstaged: " + file.path;
+    status_message_ = "Unstaged: " + path;
 }
 
 void App::do_discard() {
@@ -606,26 +607,25 @@ void App::do_discard() {
     size_t idx = nav_.file_index();
     if (idx >= repo_.files.size()) return;
 
-    const auto& file = repo_.files[idx];
+    auto unstaged = repo_.files[idx].unstaged;
+    auto staged = repo_.files[idx].staged;
+    std::string path = repo_.files[idx].path; // copy before refresh
 
-    // Only discard unstaged changes on tracked files
-    if (file.unstaged == Status::None && file.staged == Status::None) return;
+    if (unstaged == Status::None && staged == Status::None) return;
 
-    if (file.unstaged == Status::Untracked) {
-        // For untracked files, just delete
+    if (unstaged == Status::Untracked) {
         std::error_code ec;
-        std::filesystem::remove(root_ / file.path, ec);
+        std::filesystem::remove(root_ / path, ec);
         if (ec) {
-            status_message_ = "Error deleting: " + file.path;
+            status_message_ = "Error deleting: " + path;
             return;
         }
-    } else if (file.unstaged != Status::None) {
-        // For tracked files with unstaged changes, git checkout
-        (void)runner_.discard(file.path);
+    } else if (unstaged != Status::None) {
+        (void)runner_.discard(path);
     }
 
     refresh_sync();
-    status_message_ = "Discarded: " + file.path;
+    status_message_ = "Discarded: " + path;
 }
 
 void App::do_stash() {
