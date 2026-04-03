@@ -113,8 +113,11 @@ void App::apply_refresh(RefreshResult&& result) {
         }
     }
 
-    // Force cache rebuild since diffs may have changed
-    diff_cache_.clear();
+    // Force cache rebuild since diffs may have changed.
+    // Don't clear() the cache here -- that wipes cached_path, which makes
+    // rebuild_diff_cache think we switched files and reset scroll to 0.
+    // Instead, invalidate so rebuild_diff_cache rebuilds with fresh diff data.
+    diff_cache_.invalidate();
     needs_full_redraw_ = true;
     update_selected_diff();
 }
@@ -196,11 +199,14 @@ void App::rebuild_diff_cache() {
     const auto& file = repo_.files[idx];
     const auto& path = file.path;
 
-    // Only rebuild if the file changed
-    if (diff_cache_.cached_path() == path) return;
+    // Skip rebuild if cache is still valid (same file, has lines)
+    if (diff_cache_.cached_path() == path && diff_cache_.line_count() > 0) return;
 
-    // New file selected -- reset diff view to top
-    nav_.reset_diff_scroll();
+    // Reset scroll only when actually switching to a different file.
+    // invalidate() keeps cached_path so same-file refreshes preserve scroll.
+    if (diff_cache_.cached_path() != path) {
+        nav_.reset_diff_scroll();
+    }
 
     // Lazy-load untracked file diff on demand (just for selected file)
     if (file.unstaged == Status::Untracked &&
@@ -253,6 +259,10 @@ std::string App::active_flash() const {
 }
 
 void App::switch_mode(state::Mode m) {
+    char dbuf[64];
+    snprintf(dbuf, sizeof(dbuf), "switch_mode %d -> %d",
+             static_cast<int>(interaction_.mode()), static_cast<int>(m));
+    dlog(dbuf);
     if (interaction_.mode() != m) {
         needs_full_redraw_ = true;
     }
@@ -405,9 +415,17 @@ void App::dispatch_file_list(state::Action action) {
 }
 
 void App::dispatch_diff_view(state::Action action) {
+    char dbuf[128];
+    snprintf(dbuf, sizeof(dbuf), "dispatch_diff_view action=%d cursor=%d scroll=%d lines=%d",
+             static_cast<int>(action), nav_.diff_cursor(), nav_.diff_scroll(),
+             nav_.diff_line_count_debug());
+    dlog(dbuf);
     switch (action) {
         case state::Action::Down:
             nav_.scroll_diff_down();
+            snprintf(dbuf, sizeof(dbuf), "  after down: cursor=%d scroll=%d",
+                     nav_.diff_cursor(), nav_.diff_scroll());
+            dlog(dbuf);
             break;
         case state::Action::Up:
             nav_.scroll_diff_up();

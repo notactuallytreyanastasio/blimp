@@ -110,3 +110,4 @@ void render_file_list(struct ncplane* plane, const Theme& theme,
 }
 
 } // namespace blimp::ui
+// TODO: add mouse click support

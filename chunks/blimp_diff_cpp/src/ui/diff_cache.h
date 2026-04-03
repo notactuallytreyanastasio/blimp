@@ -26,6 +26,7 @@ class DiffCache {
 public:
     void rebuild(const CombinedDiff& diff, std::string_view path);
     void clear();
+    void invalidate() { lines_.clear(); }  // force rebuild, keep path for scroll preservation
 
     [[nodiscard]] const std::vector<CachedLine>& lines() const { return lines_; }
     [[nodiscard]] int line_count() const { return static_cast<int>(lines_.size()); }

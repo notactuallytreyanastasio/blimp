@@ -182,3 +182,4 @@ void render(struct ncplane* std_plane,
 }
 
 } // namespace blimp::ui
+// TODO: mouse drag for divider

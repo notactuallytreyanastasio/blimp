@@ -317,3 +317,4 @@ std::vector<Span> highlight_line(std::string_view line, Lang lang,
 }
 
 } // namespace blimp::ui
+// perf: consider caching highlight spans for static lines
