@@ -309,18 +309,6 @@ Compiling with `--canvas` produces an animated HTML visualization showing all 12
 
 ## Tooling
 
-### Diff Follower
-
-A keyboard-driven git diff viewer built with Phoenix LiveView. Watches `.git/index` in real time. Two-pane split: file list on the left, syntax-highlighted diffs on the right. Stage, unstage, commit, amend, browse log, all from the keyboard. Follow mode (F) auto-scrolls to the latest changes with hot green/red highlights. Select lines and send them to an agent with a prompt. We use it to build itself.
-
-![Diff follower showing bank.blimp](docs/blog/img/diff-viewer-bank-blimp.png)
-
-### Agent Multiplexer
-
-A multi-pane dashboard for running up to 4 Claude agent sessions in parallel. Each pane streams live output with per-pane chat for follow-up prompts. Run history sidebar tracks all sessions. YOLO mode auto-approves tool calls. State is fully URL-encoded so you can bookmark a layout and come back to it.
-
-![Agent multiplexer running 3 concurrent sessions](docs/blog/img/multiplexer-agents.png)
-
 ### REPL
 
 A split-pane terminal REPL. Left pane: input history with multi-line support and bracket-depth tracking. Right pane: live state showing all variable bindings and actor instances with their current state. Tab completion with type-aware signatures.
@@ -371,7 +359,6 @@ chunks/lang/src/         20 source files (15,000+ lines)
 chunks/lang/examples/    24 example programs
 chunks/lang/bench/       Benchmark suite (C, Zig, Rust, Python, Ruby)
 chunks/lang/web/         Browser REPL (HTML, JS, WASM)
-chunks/term_diff/        Diff follower + agent multiplexer (Phoenix LiveView)
 docs/lang_design/        Design documents
 docs/blog/               Design journal
 ```

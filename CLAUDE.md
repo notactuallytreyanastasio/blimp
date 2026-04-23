@@ -21,7 +21,6 @@ Rules:
 - If you are about to refactor: make sure tests pass before AND after
 - Test the pure functional core thoroughly (parsers, state machines, transformations)
 - LiveView tests are integration tests, write them after the unit tests pass
-- This is a diff viewer, DO NOT COMMIT OR STAGE, suggest commit messages at most, and allow us to USE THE TOOL (term_diff) to do git operations and dogfood
 
 ### Compilation: Zero Tolerance for Warnings
 
@@ -90,8 +89,6 @@ mix format --check-formatted      # properly formatted
 
 Examples:
 
-- `term-diff/stage-unstage-tdd` - staging feature in the diff follower
-- `term-diff/follow-mode-highlights` - follow mode hot highlights
 - `blimp-core/parser-basics` - first parser for the language
 - `blimp-core/actor-runtime` - actor runtime implementation
 - `blog/second-post` - second blog entry
@@ -109,7 +106,6 @@ Examples:
 
 - NEVER commit directly to main during active development
 - Each branch should represent ONE coherent feature or fix
-- If work spans multiple chunks (e.g. blog post about a term_diff feature), pick the primary chunk for the branch name
 - Deciduous nodes are auto-tagged with the current branch
 
 ### FAILURE MODE: Batch Backfilling

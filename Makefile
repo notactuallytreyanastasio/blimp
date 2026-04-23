@@ -2,10 +2,9 @@
 # Top-level Makefile for common tasks
 
 LANG_DIR = chunks/lang
-TERM_DIFF_DIR = chunks/term_diff
 BLOG_DIR = docs/blog
 
-.PHONY: help build repl compile wasm web term-diff deploy test bench errors clean
+.PHONY: help build repl compile wasm web deploy test bench errors clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -47,14 +46,6 @@ bench: build ## Run benchmarks (fib, actors)
 
 errors: build ## Showcase all error messages
 	cd $(LANG_DIR) && bash examples/errors/run_all.sh
-
-# ── term_diff (Phoenix app) ──────────────────────
-
-term-diff: ## Launch the diff viewer / multiplexer on a given directory
-	cd $(TERM_DIFF_DIR) && mix phx.server
-
-term-diff-setup: ## Install term_diff dependencies
-	cd $(TERM_DIFF_DIR) && mix deps.get && mix compile --warnings-as-errors
 
 # ── Deployment ───────────────────────────────────
 
