@@ -3,6 +3,7 @@ const Lexer = @import("lexer.zig").Lexer;
 const Parser = @import("parser.zig").Parser;
 const Evaluator = @import("eval.zig").Evaluator;
 const Value = @import("value.zig").Value;
+const builtins = @import("builtins.zig");
 
 // ── JS imports ──────────────────────────────────────────
 
@@ -425,4 +426,143 @@ export fn blimp_alloc(len: u32) ?[*]u8 {
 /// Free memory previously allocated with blimp_alloc.
 export fn blimp_free(ptr: [*]u8, len: u32) void {
     allocator.free(ptr[0..len]);
+}
+
+// ── Test runner (for in-browser tutorials) ──────────────
+
+var test_report_buf: [65536]u8 = undefined;
+var test_report_len: u32 = 0;
+
+fn writeJsonStr(w: anytype, s: []const u8) void {
+    for (s) |c| {
+        switch (c) {
+            '"' => w.writeAll("\\\"") catch {},
+            '\\' => w.writeAll("\\\\") catch {},
+            '\n' => w.writeAll("\\n") catch {},
+            '\r' => w.writeAll("\\r") catch {},
+            '\t' => w.writeAll("\\t") catch {},
+            0...8, 11, 12, 14...31 => w.print("\\u{x:0>4}", .{c}) catch {},
+            else => w.writeByte(c) catch {},
+        }
+    }
+}
+
+/// Parse a source string, register actors/functions, then run every `test` block
+/// found inside any actor. Produces a JSON report in test_report_buf.
+/// Returns: 0 = all passed, 1 = at least one failure, 2 = parse error, 3 = not initialized.
+export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
+    // Start fresh each call so the tutorial's red/green cycle is clean.
+    evaluator = Evaluator.init(allocator);
+    var eval = &(evaluator orelse return 3);
+
+    const source_slice = source_ptr[0..source_len];
+    const source = allocator.dupe(u8, source_slice) catch return 3;
+    eval.setSource(source);
+
+    var parser = Parser.init(allocator, source);
+    const nodes = parser.parseFile() catch {
+        var fbs = std.io.fixedBufferStream(&test_report_buf);
+        const w = fbs.writer();
+        w.writeAll("{\"error\":\"parse error at line ") catch {};
+        w.print("{d}", .{parser.current.line}) catch {};
+        w.writeAll(", col ") catch {};
+        w.print("{d}", .{parser.current.col}) catch {};
+        w.writeAll("\",\"total\":0,\"passed\":0,\"failed\":0,\"tests\":[]}") catch {};
+        test_report_len = @intCast(fbs.pos);
+        return 2;
+    };
+
+    // First pass: evaluate top-level nodes so actors are registered.
+    for (nodes) |node| {
+        _ = eval.eval(node) catch {};
+    }
+
+    var fbs = std.io.fixedBufferStream(&test_report_buf);
+    const w = fbs.writer();
+    var total: u32 = 0;
+    var passed: u32 = 0;
+    var first_test = true;
+
+    w.writeAll("{\"tests\":[") catch {};
+
+    for (nodes) |node| {
+        if (node.kind != .actor_def) continue;
+        const def = node.kind.actor_def;
+
+        for (def.body) |body_node| {
+            if (body_node.kind != .test_def) continue;
+            const test_def = body_node.kind.test_def;
+            total += 1;
+
+            // Fresh scope with re-evaluated state defaults.
+            eval.env.pushScope();
+            for (def.body) |state_node| {
+                if (state_node.kind != .state_def) continue;
+                for (state_node.kind.state_def.fields) |field| {
+                    if (field.default_value) |default_ptr| {
+                        const val = eval.eval(default_ptr.*) catch continue;
+                        eval.env.define(field.key, val);
+                    }
+                }
+            }
+
+            // Reset the assertion detail buffer so stale detail doesn't leak between tests.
+            builtins.last_assertion_detail_len = 0;
+
+            var test_passed = true;
+            for (test_def.body) |stmt| {
+                _ = eval.eval(stmt) catch {
+                    test_passed = false;
+                    break;
+                };
+            }
+            eval.env.popScope();
+            eval.actor_ctx = null;
+
+            const raw_name = test_def.name;
+            const test_name = if (raw_name.len >= 2 and raw_name[0] == '"' and raw_name[raw_name.len - 1] == '"')
+                raw_name[1 .. raw_name.len - 1]
+            else
+                raw_name;
+
+            if (!first_test) w.writeAll(",") catch {};
+            first_test = false;
+            w.writeAll("{\"actor\":\"") catch {};
+            writeJsonStr(w, def.name);
+            w.writeAll("\",\"name\":\"") catch {};
+            writeJsonStr(w, test_name);
+            w.writeAll("\",\"ok\":") catch {};
+            if (test_passed) {
+                w.writeAll("true}") catch {};
+                passed += 1;
+            } else {
+                w.writeAll("false,\"detail\":\"") catch {};
+                if (builtins.last_assertion_detail_len > 0) {
+                    writeJsonStr(w, builtins.last_assertion_detail[0..builtins.last_assertion_detail_len]);
+                } else {
+                    w.writeAll("assertion failed") catch {};
+                }
+                w.writeAll("\"}") catch {};
+            }
+        }
+    }
+
+    w.writeAll("],\"total\":") catch {};
+    w.print("{d}", .{total}) catch {};
+    w.writeAll(",\"passed\":") catch {};
+    w.print("{d}", .{passed}) catch {};
+    w.writeAll(",\"failed\":") catch {};
+    w.print("{d}", .{total - passed}) catch {};
+    w.writeAll("}") catch {};
+
+    test_report_len = @intCast(fbs.pos);
+    return if (passed == total) 0 else 1;
+}
+
+export fn blimp_get_test_report_ptr() [*]const u8 {
+    return &test_report_buf;
+}
+
+export fn blimp_get_test_report_len() u32 {
+    return test_report_len;
 }
