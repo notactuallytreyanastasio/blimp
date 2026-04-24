@@ -201,8 +201,12 @@ def extract_quoted(s: String, idx: Int, acc: String) -> String do
         true -> acc
         _ ->
           case code == 92 do
-            true -> extract_quoted(s, idx + 2, concat(acc, char_at(s, idx + 1)))
-            _ -> extract_quoted(s, idx + 1, concat(acc, char_at(s, idx)))
+            true ->
+              escaped = char_at(s, idx + 1)
+              extract_quoted(s, idx + 2, concat(acc, escaped))
+            _ ->
+              ch = char_at(s, idx)
+              extract_quoted(s, idx + 1, concat(acc, ch))
           end
       end
   end
@@ -559,6 +563,16 @@ def route(method: String, path: String, raw: String, sid: String, sdata: Map, ro
 end
 
 # ── Server ───────────────────────────────────────────
+#
+# Poll-based event loop. Every tick we poll the server fd plus all
+# open WS fds. When the server fd is ready, a new connection is
+# accepted. When a WS fd is ready, we read one frame and dispatch it.
+#
+# The server fd is non-blocking so that tcp_accept returns nil if
+# the poll-ready signal was stale. WS fds are left in blocking mode;
+# poll guarantees there's at least one byte to read before we call
+# ws_read_frame, and for small chat messages the whole frame arrives
+# in a single TCP segment.
 
 actor HTTPServer do
   state port: Int :: 8080
@@ -569,29 +583,83 @@ actor HTTPServer do
 
   on :start(r: ChatRoom, s: Sessions, c: Connections) do
     server_fd = tcp_listen(port)
+    tcp_set_nonblocking(server_fd)
     become fd: server_fd, room: r, sess: s, conns: c
     print(concat("Blimp Chat running at http://localhost:", to_string(port)))
-    accept_loop(server_fd, r, s, c)
+    poll_loop(server_fd, r, s, c)
   end
 end
 
-def accept_loop(fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
-  client_fd = tcp_accept(fd)
-  raw = tcp_read(client_fd)
+def poll_loop(server_fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
+  ws_fds = conns <- :get_all
+  watch = append(ws_fds, server_fd)
+  ready = tcp_poll(watch, 100)
+  process_ready(ready, server_fd, room, sess, conns)
+  poll_loop(server_fd, room, sess, conns)
+end
 
-  case is_ws_upgrade(raw) do
-    true ->
-      key = parse_ws_key(raw)
-      accept_key = ws_accept_key(key)
-      tcp_write(client_fd, concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", concat(accept_key, "\r\n\r\n")))
-      conns <- :add(client_fd)
-      json = build_state_json(room)
-      ws_write_frame(client_fd, json)
+def process_ready(ready: List, server_fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
+  case empty?(ready) do
+    true -> :ok
     _ ->
-      handle_http(client_fd, raw, room, sess, conns)
+      ready_fd = head(ready)
+      case ready_fd == server_fd do
+        true -> handle_new_connection(server_fd, room, sess, conns)
+        _ -> handle_ws_message(ready_fd, room, sess, conns)
+      end
+      process_ready(tail(ready), server_fd, room, sess, conns)
   end
+end
 
-  accept_loop(fd, room, sess, conns)
+def handle_new_connection(server_fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
+  client_fd = tcp_accept(server_fd)
+  case nil?(client_fd) do
+    true -> :ok
+    _ ->
+      raw = tcp_read(client_fd)
+      case is_ws_upgrade(raw) do
+        true ->
+          key = parse_ws_key(raw)
+          accept_key = ws_accept_key(key)
+          tcp_write(client_fd, concat("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", concat(accept_key, "\r\n\r\n")))
+          conns <- :add(client_fd)
+          json = build_state_json(room)
+          ws_write_frame(client_fd, json)
+        _ ->
+          handle_http(client_fd, raw, room, sess, conns)
+      end
+  end
+end
+
+def handle_ws_message(fd: Int, room: ChatRoom, sess: Sessions, conns: Connections) do
+  frame = ws_read_frame(fd)
+  case nil?(frame) do
+    true ->
+      conns <- :remove(fd)
+      tcp_close(fd)
+    _ ->
+      dispatch_ws_frame(fd, frame, room, sess, conns)
+  end
+end
+
+# Routes a parsed WS frame. Current message types:
+#   {"type":"msg","from":"<username>","text":"<body>"}
+# TODO: `from` is currently trusted from the client. Step 3 of the
+# bidirectional-WS plan replaces this with a per-fd session lookup.
+def dispatch_ws_frame(fd: Int, frame: String, room: ChatRoom, sess: Sessions, conns: Connections) do
+  msg_type = json_field(frame, "type")
+  case msg_type == "msg" do
+    true ->
+      from_val = json_field(frame, "from")
+      text_val = json_field(frame, "text")
+      case from_val == "" or text_val == "" do
+        true -> :ok
+        _ ->
+          room <- :send_msg(from_val, text_val)
+          broadcast(room, conns)
+      end
+    _ -> :ok
+  end
 end
 
 def handle_http(client_fd: Int, raw: String, room: ChatRoom, sess: Sessions, conns: Connections) do

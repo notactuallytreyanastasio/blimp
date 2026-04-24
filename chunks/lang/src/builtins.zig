@@ -15,6 +15,18 @@ pub const EvalError = error{
 
 pub const BuiltinFn = *const fn (allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value;
 
+// Assertion failure detail (for structured test reports, e.g. in-browser tutorial).
+// Each assertion writes its expected/actual into this buffer on failure.
+// The test runner reads it after a failing test and resets it between tests.
+pub var last_assertion_detail: [512]u8 = undefined;
+pub var last_assertion_detail_len: u32 = 0;
+
+fn recordAssertionDetail(comptime fmt: []const u8, args: anytype) void {
+    var fbs = std.io.fixedBufferStream(&last_assertion_detail);
+    fbs.writer().print(fmt, args) catch {};
+    last_assertion_detail_len = @intCast(fbs.pos);
+}
+
 /// Registry entry for a built-in function.
 const BuiltinEntry = struct {
     name: []const u8,
@@ -749,6 +761,7 @@ fn builtinAssert(_: std.mem.Allocator, args: []const *const Value) EvalError!*co
         stderr.writeAll("  got: ") catch {};
         stderr.writeAll(fbs.getWritten()) catch {};
         stderr.writeAll("\n") catch {};
+        recordAssertionDetail("expected truthy, got {s}", .{fbs.getWritten()});
         return error.TypeError; // assertion failure
     }
     return args[0];
@@ -760,17 +773,19 @@ fn builtinAssertEq(_: std.mem.Allocator, args: []const *const Value) EvalError!*
     if (!args[0].eql(args[1].*)) {
         const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
         stderr.writeAll("\x1b[31mAssertion failed: values not equal\x1b[0m\n") catch {};
-        var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        args[0].format(fbs.writer());
+        var left_buf: [256]u8 = undefined;
+        var left_fbs = std.io.fixedBufferStream(&left_buf);
+        args[0].format(left_fbs.writer());
         stderr.writeAll("  left:  ") catch {};
-        stderr.writeAll(fbs.getWritten()) catch {};
+        stderr.writeAll(left_fbs.getWritten()) catch {};
         stderr.writeAll("\n") catch {};
-        fbs = std.io.fixedBufferStream(&buf);
-        args[1].format(fbs.writer());
+        var right_buf: [256]u8 = undefined;
+        var right_fbs = std.io.fixedBufferStream(&right_buf);
+        args[1].format(right_fbs.writer());
         stderr.writeAll("  right: ") catch {};
-        stderr.writeAll(fbs.getWritten()) catch {};
+        stderr.writeAll(right_fbs.getWritten()) catch {};
         stderr.writeAll("\n") catch {};
+        recordAssertionDetail("expected {s}, got {s}", .{ right_fbs.getWritten(), left_fbs.getWritten() });
         return error.TypeError; // assertion failure
     }
     return args[0];
@@ -788,6 +803,7 @@ fn builtinAssertNe(_: std.mem.Allocator, args: []const *const Value) EvalError!*
         stderr.writeAll("  both: ") catch {};
         stderr.writeAll(fbs.getWritten()) catch {};
         stderr.writeAll("\n") catch {};
+        recordAssertionDetail("both sides equal to {s}", .{fbs.getWritten()});
         return error.TypeError; // assertion failure
     }
     return args[0];
@@ -805,10 +821,9 @@ fn builtinRefute(_: std.mem.Allocator, args: []const *const Value) EvalError!*co
         stderr.writeAll("  got: ") catch {};
         stderr.writeAll(fbs.getWritten()) catch {};
         stderr.writeAll("\n") catch {};
+        recordAssertionDetail("expected falsy, got {s}", .{fbs.getWritten()});
         return error.TypeError; // assertion failure
     }
-    const result = @constCast(args[0]);
-    _ = result;
     return args[0];
 }
 
@@ -1111,7 +1126,7 @@ fn builtinGenInteger(allocator: std.mem.Allocator, args: []const *const Value) E
 fn builtinGenString(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const max_len: usize = @intCast(@max(0, args[0].integer));
-    const len = nextRandom() % (max_len + 1);
+    const len: usize = @intCast(nextRandom() % (max_len + 1));
     const buf = allocator.alloc(u8, len) catch return error.OutOfMemory;
     for (buf) |*c| {
         c.* = @intCast(32 + nextRandom() % 95); // printable ASCII 32-126
@@ -1137,7 +1152,7 @@ fn builtinGenList(allocator: std.mem.Allocator, args: []const *const Value) Eval
     const max_len: usize = @intCast(@max(0, args[0].integer));
     const min_val: i64 = if (args.len >= 2 and args[1].* == .integer) args[1].integer else -100;
     const max_val: i64 = if (args.len >= 3 and args[2].* == .integer) args[2].integer else 100;
-    const len = nextRandom() % (max_len + 1);
+    const len: usize = @intCast(nextRandom() % (max_len + 1));
     const items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
     const range: u64 = @intCast(@max(max_val - min_val + 1, 1));
     for (items) |*item| {
@@ -1159,7 +1174,7 @@ fn builtinGenOneOf(allocator: std.mem.Allocator, args: []const *const Value) Eva
         result.* = .nil;
         return result;
     }
-    const idx = nextRandom() % items.len;
+    const idx: usize = @intCast(nextRandom() % items.len);
     return items[idx];
 }
 

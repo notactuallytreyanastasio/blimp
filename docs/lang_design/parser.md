@@ -231,7 +231,7 @@ Atoms are `:name`. But message patterns are `:name(args)`. Is `:name(args)` an a
 
 Do we require newlines between statements (like Ruby/Python), or use explicit semicolons (like C/Zig), or make them optional?
 
-**Current thinking:** Newlines are statement separators, like Ruby. Semicolons are optional alternatives. Inside `do...end` blocks, each line is a statement. This feels natural for the "Ruby's skin" principle.
+**Current thinking:** Newlines are statement separators, like Ruby. Semicolons are optional alternatives. Inside `do...end` blocks, each line is a statement. This feels natural given the Ruby-flavored surface syntax.
 
 ### Q3: How does `become` parse?
 

@@ -2,773 +2,487 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Learn Blimp</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blimp Tutorial</title>
 <style>
+:root {
+  --bg: #fafafa;
+  --fg: #222;
+  --muted: #666;
+  --subtle: #999;
+  --border: #e0e0e0;
+  --code-bg: #1a1a2e;
+  --code-fg: #d4d4d4;
+  --green: #2ea043;
+  --green-dim: #d6f0db;
+  --red: #cf222e;
+  --red-dim: #ffebe9;
+  --blue: #0066cc;
+  --accent: #a6e22e;
+  --font-mono: 'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; background: var(--bg); color: var(--fg); }
 
-body {
-  background: #1a1a2e;
-  color: #d4d4d4;
-  font-family: 'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
-  font-size: 14px;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  -webkit-text-size-adjust: 100%;
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.5rem 1rem; border-bottom: 1px solid var(--border);
+  height: 42px; flex-shrink: 0;
 }
+.topbar .brand { font-weight: 600; }
+.topbar .brand a { color: var(--fg); text-decoration: none; }
+.topbar .status { font-size: 11px; color: var(--subtle); }
+.topbar .status.ready { color: var(--green); }
+.topbar .status.error { color: var(--red); }
 
-.header {
-  padding: 0.75rem 1.5rem;
-  border-bottom: 1px solid #2a2a3e;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-shrink: 0;
-}
-
-.header h1 { font-size: 1rem; font-weight: 500; color: #a855f7; }
-.header .status { font-size: 0.8rem; color: #666; }
-.header .lesson-info { font-size: 0.75rem; color: #666; margin-left: auto; }
-
-.main {
-  display: flex;
-  flex: 1;
+.app {
+  display: grid;
+  grid-template-columns: 180px 1fr 1fr;
+  height: calc(100vh - 42px);
   overflow: hidden;
 }
 
-.left-col {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+/* -- left rail: chapter list -- */
+.chapters {
+  border-right: 1px solid var(--border);
+  overflow-y: auto; padding: 0.5rem 0;
+  background: #f3f3f3;
 }
-
-.repl-pane {
-  flex: 1;
-  overflow-y: auto;
-  padding: 1rem 1.5rem;
-  font-size: 13px;
-  line-height: 1.6;
-  min-height: 0;
+.chapters a {
+  display: block; padding: 0.35rem 1rem;
+  font-size: 12px; color: var(--muted);
+  text-decoration: none; border-left: 2px solid transparent;
 }
+.chapters a .id { color: var(--subtle); margin-right: 0.5rem; }
+.chapters a.active { background: #fff; color: var(--fg); border-left-color: var(--blue); }
+.chapters a:hover:not(.active) { background: #eaeaea; color: var(--fg); }
+.chapters a.unavailable { opacity: 0.45; cursor: not-allowed; }
 
-.canvas-pane {
-  height: 35%;
-  border-top: 1px solid #2a2a3e;
-  flex-shrink: 0;
-  position: relative;
-  background: #0e0e1a;
+/* -- center: rendered markdown -- */
+.content-wrap {
+  overflow-y: auto; padding: 2rem 2.5rem 4rem; border-right: 1px solid var(--border);
 }
-.canvas-pane canvas { width: 100%; height: 100%; display: block; }
-.view-pane {
-  max-height: 30%;
-  border-top: 1px solid #2a2a3e;
-  flex-shrink: 0;
-  overflow-y: auto;
-  padding: 1rem 1.5rem;
+.content h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 0.4rem; letter-spacing: -0.02em; }
+.content h2 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.75rem; letter-spacing: -0.01em; }
+.content h3 { font-size: 0.95rem; font-weight: 600; margin: 1.5rem 0 0.5rem; color: var(--muted); }
+.content p { margin-bottom: 1.1rem; }
+.content ul, .content ol { margin: 0 0 1.1rem 1.25rem; }
+.content li { margin-bottom: 0.35rem; }
+.content strong { font-weight: 600; color: #000; }
+.content em { font-style: italic; color: #555; }
+.content a { color: var(--blue); text-decoration: none; border-bottom: 1px dotted var(--blue); }
+.content code { background: #eaeaea; padding: 0.08em 0.32em; border-radius: 3px; font-size: 0.95em; color: #6a3fb0; }
+.content pre {
+  background: var(--code-bg); color: var(--code-fg);
+  padding: 0.85rem 1rem; border-radius: 6px; overflow-x: auto;
+  margin-bottom: 1.1rem; font-size: 12px; line-height: 1.55;
 }
+.content pre code { background: transparent; padding: 0; color: var(--code-fg); font-size: 12px; }
 
-.view-pane:empty { display: none; }
+/* Syntax highlighting tokens (Blimp) */
+.tok-c  { color: #6a9955; font-style: italic; }            /* comments */
+.tok-s  { color: #ce9178; }                                /* strings */
+.tok-si { color: #ffb86c; }                                /* string interpolation delimiters */
+.tok-a  { color: #d7ba7d; }                                /* atoms */
+.tok-n  { color: #b5cea8; }                                /* numbers */
+.tok-o  { color: #d4d4d4; }                                /* operators */
+.tok-k  { color: #c586c0; font-weight: 600; }              /* keywords */
+.tok-cn { color: #569cd6; }                                /* true / false / nil */
+.tok-bi { color: #4ec9b0; }                                /* builtins */
+.tok-t  { color: #4ec9b0; }                                /* types / PascalCase */
+.tok-p  { color: #9cdcfe; }                                /* property / map key */
+.content table { border-collapse: collapse; margin-bottom: 1.25rem; font-size: 12px; }
+.content th, .content td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; }
+.content th { background: #f0f0f0; font-weight: 600; }
+.content blockquote { border-left: 3px solid var(--border); padding: 0.25rem 0 0.25rem 0.85rem; color: var(--muted); margin-bottom: 1.1rem; }
+.content hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
 
-/* View DSL rendering */
-.blimp-stack { display: flex; flex-direction: column; gap: 0.5rem; }
-.blimp-row { display: flex; flex-direction: row; gap: 0.5rem; align-items: center; }
-.blimp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem; }
-.blimp-text { color: #d4d4d4; }
-.blimp-bold { font-weight: bold; }
-.blimp-italic { font-style: italic; }
-.blimp-code { font-family: inherit; background: #2a2a3e; padding: 0.1em 0.4em; border-radius: 3px; color: #a6e22e; }
-.blimp-code-block { background: #2a2a3e; padding: 0.75rem 1rem; border-radius: 4px; color: #a6e22e; white-space: pre-wrap; font-family: inherit; overflow-x: auto; }
-.blimp-blockquote { border-left: 3px solid #a6e22e; padding-left: 1rem; color: #999; font-style: italic; }
-.blimp-divider { border: none; border-top: 1px solid #2a2a3e; margin: 0.5rem 0; }
-.blimp-list { list-style: disc; padding-left: 1.5rem; color: #d4d4d4; }
-.blimp-list li { margin-bottom: 0.25rem; }
-.blimp-link { color: #6cb6ff; text-decoration: underline; cursor: pointer; }
-.blimp-button { background: #2a2a3e; color: #a6e22e; border: 1px solid #3a3a5e; padding: 0.4rem 1rem; border-radius: 4px; cursor: pointer; font: inherit; font-size: 13px; }
-.blimp-button:hover { background: #3a3a5e; }
-
-.repl-pane .line { white-space: pre-wrap; word-break: break-all; }
-.prompt-line { color: #a6e22e; }
-.result-line { color: #d4d4d4; }
-.error-line { color: #f92672; }
-.print-line { color: #6cb6ff; }
-.spacer-line { height: 0.4em; }
-
-/* Tutorial-specific lines */
-.lesson-line { color: #a855f7; font-weight: 600; margin-top: 0.5rem; }
-.lesson-desc { color: #999; }
-.lesson-code { color: #a6e22e; background: #2a2a3e; padding: 0.4rem 0.8rem; border-radius: 4px; display: inline-block; margin: 0.3rem 0; }
-.lesson-pass { color: #4ade80; font-weight: 600; }
-.lesson-fail { color: #f87171; }
-.lesson-hint { color: #facc15; font-size: 12px; }
-
-.input-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0;
-  margin-top: 0.15rem;
-}
-
-.input-row .prompt-char {
-  color: #a6e22e;
-  user-select: none;
-  white-space: pre;
-}
-
-.input-row textarea {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: #d4d4d4;
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.6;
-  resize: none;
-  outline: none;
-  min-height: 1.6em;
-  max-height: 20em;
-  padding: 0;
-  margin: 0;
-}
-/* Autocomplete dropdown */
-.ac-menu {
-  position: absolute;
-  background: #1e1e30;
-  border: 1px solid #3a3a5e;
-  border-radius: 6px;
-  max-height: 180px;
-  overflow-y: auto;
-  z-index: 100;
+.prevnext {
+  display: flex; justify-content: space-between;
+  margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border);
   font-size: 12px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-  min-width: 200px;
 }
-.ac-item {
-  padding: 4px 10px;
-  cursor: pointer;
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-}
-.ac-item.selected { background: #2a2a4e; }
-.ac-item:hover { background: #2a2a4e; }
-.ac-name { color: #a6e22e; }
-.ac-sig { color: #666; font-size: 11px; }
-/* Inline type hint */
-.type-hint {
-  color: #555;
-  font-size: 11px;
-  margin-left: 0.5rem;
-  font-style: italic;
-}
+.prevnext a { color: var(--blue); text-decoration: none; }
+.prevnext a.disabled { color: var(--subtle); pointer-events: none; }
 
-.right-col {
-  width: 280px;
-  border-left: 1px solid #2a2a3e;
+/* -- right: repl pane -- */
+.repl {
+  display: grid; grid-template-rows: 36px 1fr;
+  background: #fff; overflow: hidden;
+}
+.repl-tabs {
+  display: flex; border-bottom: 1px solid var(--border); background: #f3f3f3;
+}
+.repl-tabs button {
+  flex: 1; padding: 0.5rem; border: 0; background: transparent;
+  font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+  cursor: pointer; border-bottom: 2px solid transparent;
+}
+.repl-tabs button.active { background: #fff; color: var(--fg); border-bottom-color: var(--blue); }
+
+.tab-pane { display: none; flex-direction: column; overflow: hidden; height: 100%; }
+.tab-pane.active { display: flex; }
+
+/* Layered editor: <pre> behind, <textarea> in front with transparent text */
+.editor-stack { position: relative; flex: 1; overflow: hidden; background: var(--code-bg); }
+.editor-highlight, #editor {
+  position: absolute; inset: 0;
+  margin: 0; padding: 0.85rem 1rem;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+  white-space: pre; overflow: auto; tab-size: 2;
+  border: 0; outline: 0;
+}
+.editor-highlight { color: var(--code-fg); background: transparent; pointer-events: none; z-index: 0; }
+.editor-highlight code { color: inherit; background: transparent; padding: 0; font: inherit; }
+#editor {
+  background: transparent; color: transparent; caret-color: #fff;
+  z-index: 1; resize: none;
+}
+#editor:disabled { caret-color: transparent; }
+
+.solution-view {
+  flex: 1; margin: 0; padding: 0.85rem 1rem;
+  background: var(--code-bg); color: var(--code-fg);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+  white-space: pre; overflow: auto; tab-size: 2; user-select: text;
+}
+.solution-view code { color: inherit; background: transparent; padding: 0; font: inherit; }
+
+.repl-controls {
+  display: flex; gap: 0.5rem; padding: 0.5rem;
+  border-top: 1px solid var(--border); background: #f8f8f8;
   flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
-.right-tabs {
-  display: flex;
-  border-bottom: 1px solid #2a2a3e;
-  flex-shrink: 0;
+.repl-controls button {
+  font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+  padding: 0.45rem 0.85rem; border: 1px solid var(--border);
+  background: #fff; color: var(--fg); border-radius: 4px; cursor: pointer;
 }
-.rt {
-  flex: 1; padding: 0.5rem; background: transparent; border: none;
-  color: #666; font: inherit; font-size: 0.7rem; cursor: pointer;
-  text-transform: uppercase; letter-spacing: 0.08em;
-  border-bottom: 2px solid transparent;
+.repl-controls button:hover { background: #f0f0f0; }
+.repl-controls button.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.repl-controls button.primary:hover { background: #0052a3; }
+.repl-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+#results {
+  max-height: 40%; overflow-y: auto;
+  padding: 0.5rem 0.85rem 1rem;
+  border-top: 1px solid var(--border); background: #fcfcfc;
+  font-size: 12px; flex-shrink: 0;
 }
-.rt.active { color: #a855f7; border-bottom-color: #a855f7; }
-.rt:hover { color: #d4d4d4; }
-.right-panel { display: none; overflow-y: auto; padding: 0.75rem 1rem; flex: 1; }
-.right-panel.active { display: block; }
+#results:empty { display: none; }
+.badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px; font-weight: 600; font-size: 11px; margin-bottom: 0.5rem; }
+.badge.pass { background: var(--green-dim); color: var(--green); }
+.badge.fail { background: var(--red-dim); color: var(--red); }
+.test { padding: 0.25rem 0; border-bottom: 1px solid #f0f0f0; }
+.test:last-child { border-bottom: 0; }
+.test .sym { font-weight: 700; margin-right: 0.4rem; }
+.test.pass .sym { color: var(--green); }
+.test.fail .sym { color: var(--red); }
+.test code { color: var(--muted); font-size: 11px; background: transparent; padding: 0; }
+.test .detail { margin-left: 1.3rem; color: var(--red); font-size: 11px; margin-top: 0.15rem; font-style: italic; }
+.parse-error { color: var(--red); padding: 0.5rem; background: var(--red-dim); border-radius: 4px; white-space: pre-wrap; }
 
-.state-pane .var { margin-bottom: 0.3rem; font-size: 12px; }
-.state-pane .var-name { color: #a6e22e; }
-.state-pane .var-eq { color: #666; }
-.state-pane .var-val { color: #d4d4d4; }
-
-.ref-pane { font-size: 11px; line-height: 1.5; }
-.ref-section { margin-bottom: 1rem; }
-.ref-section h3 { color: #a855f7; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem; }
-.ref-item { color: #999; margin-bottom: 0.15rem; }
-.ref-item b { color: #a6e22e; font-weight: 500; }
-
-@media (max-width: 700px) {
-  .right-col { display: none; }
-  .repl-pane { padding: 0.75rem 1rem; }
-  .input-row textarea { font-size: 16px; }
+/* Tiny-screen fallback */
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
+  .chapters { border-right: 0; border-bottom: 1px solid var(--border); max-height: 160px; }
+  .content-wrap { border-right: 0; border-bottom: 1px solid var(--border); max-height: 50vh; }
+  .repl { min-height: 40vh; }
 }
 </style>
 </head>
 <body>
-
-<div class="header">
-  <h1>learn blimp</h1>
-  <span class="status" id="status">loading...</span>
-  <span class="lesson-info" id="lesson-info"></span>
+<div class="topbar">
+  <div class="brand"><a href="/">blimp</a> / tutorial</div>
+  <div class="status" id="status">loading wasm…</div>
 </div>
 
-<div class="main">
-  <div class="left-col">
-    <div class="repl-pane" id="repl"></div>
-    <div class="canvas-pane" id="canvas-pane"><canvas id="blimp-canvas"></canvas></div>
-    <div class="view-pane" id="view-pane"></div>
-  </div>
-  <div class="right-col">
-    <div class="right-tabs">
-      <button class="rt active" id="rt-state">State</button>
-      <button class="rt" id="rt-ref">Reference</button>
+<div class="app">
+  <aside class="chapters" id="chapter-list"></aside>
+
+  <section class="content-wrap">
+    <article class="content" id="content"><p>Loading…</p></article>
+    <nav class="prevnext">
+      <a id="prev-link" class="disabled">← Previous</a>
+      <a id="next-link" class="disabled">Next →</a>
+    </nav>
+  </section>
+
+  <aside class="repl">
+    <div class="repl-tabs">
+      <button data-tab="editor" class="active">Editor</button>
+      <button data-tab="cheat">Cheat</button>
     </div>
-    <div class="state-pane right-panel active" id="panel-state">
-      <div id="state-content"></div>
+
+    <div class="tab-pane active" id="pane-editor">
+      <div class="editor-stack">
+        <pre class="editor-highlight" aria-hidden="true"><code id="editor-highlight"></code></pre>
+        <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"># This chapter has no exercise yet.</textarea>
+      </div>
+      <div class="repl-controls">
+        <button id="run-tests" class="primary" disabled>Run Tests (⌘⏎)</button>
+        <button id="reset-stub" disabled>Reset to stub</button>
+      </div>
+      <div id="results"></div>
     </div>
-    <div class="ref-pane right-panel" id="panel-ref">
-      <div class="ref-section">
-        <h3>Math</h3>
-        <div class="ref-item"><b>+ - * /</b> arithmetic</div>
-        <div class="ref-item"><b>rem(a, b)</b> remainder</div>
-        <div class="ref-item"><b>abs(n)</b> absolute value</div>
-        <div class="ref-item"><b>max(a, b)</b> <b>min(a, b)</b></div>
-        <div class="ref-item"><b>floor(n)</b> <b>ceil(n)</b> <b>round(n)</b></div>
-        <div class="ref-item"><b>random(lo, hi)</b> random int</div>
-      </div>
-      <div class="ref-section">
-        <h3>Strings</h3>
-        <div class="ref-item"><b>concat(a, b)</b> join strings</div>
-        <div class="ref-item"><b>split(s, delim)</b> &rarr; list</div>
-        <div class="ref-item"><b>contains(s, sub)</b> &rarr; bool</div>
-        <div class="ref-item"><b>length(s)</b> string length</div>
-        <div class="ref-item"><b>upcase(s)</b> <b>downcase(s)</b></div>
-        <div class="ref-item"><b>slice(s, start, len)</b></div>
-        <div class="ref-item"><b>to_string(v)</b> any &rarr; string</div>
-        <div class="ref-item"><b>to_int(s)</b> string &rarr; int</div>
-      </div>
-      <div class="ref-section">
-        <h3>Lists</h3>
-        <div class="ref-item"><b>length(list)</b> count</div>
-        <div class="ref-item"><b>head(list)</b> first element</div>
-        <div class="ref-item"><b>tail(list)</b> rest</div>
-        <div class="ref-item"><b>append(list, val)</b></div>
-        <div class="ref-item"><b>reverse(list)</b></div>
-        <div class="ref-item"><b>sort(list)</b></div>
-        <div class="ref-item"><b>flat(list)</b> flatten nested</div>
-        <div class="ref-item"><b>zip(a, b)</b> pair up</div>
-        <div class="ref-item"><b>uniq(list)</b> deduplicate</div>
-        <div class="ref-item"><b>sum(list)</b> add all ints</div>
-        <div class="ref-item"><b>elem(list, idx)</b> get by index</div>
-        <div class="ref-item"><b>range(a, b)</b> a..b list</div>
-        <div class="ref-item"><b>empty?(list)</b> &rarr; bool</div>
-      </div>
-      <div class="ref-section">
-        <h3>Higher-Order</h3>
-        <div class="ref-item"><b>map(list, fn)</b> transform each</div>
-        <div class="ref-item"><b>filter(list, fn)</b> keep matches</div>
-        <div class="ref-item"><b>reduce(list, acc, fn)</b> fold</div>
-        <div class="ref-item"><b>each(list, fn)</b> side effects</div>
-      </div>
-      <div class="ref-section">
-        <h3>Maps</h3>
-        <div class="ref-item"><b>%{key: val}</b> literal</div>
-        <div class="ref-item"><b>lookup(map, key)</b></div>
-        <div class="ref-item"><b>put(map, key, val)</b></div>
-        <div class="ref-item"><b>keys(map)</b> <b>values(map)</b></div>
-        <div class="ref-item"><b>merge(a, b)</b></div>
-        <div class="ref-item"><b>size(map)</b> count entries</div>
-      </div>
-      <div class="ref-section">
-        <h3>Views</h3>
-        <div class="ref-item"><b>text(s)</b> span</div>
-        <div class="ref-item"><b>heading(s)</b> <b>heading(s, n)</b></div>
-        <div class="ref-item"><b>stack(...)</b> vertical layout</div>
-        <div class="ref-item"><b>row(...)</b> horizontal layout</div>
-        <div class="ref-item"><b>button(label)</b></div>
-        <div class="ref-item"><b>button(label, :msg)</b></div>
-        <div class="ref-item"><b>bold(s)</b> <b>italic(s)</b></div>
-        <div class="ref-item"><b>code(s)</b> <b>code_block(s)</b></div>
-        <div class="ref-item"><b>divider()</b> horizontal rule</div>
-        <div class="ref-item"><b>list(...)</b> bullet list</div>
-        <div class="ref-item"><b>link(label, url)</b></div>
-        <div class="ref-item"><b>image(src)</b></div>
-        <div class="ref-item"><b>input(name, placeholder)</b></div>
-        <div class="ref-item"><b>textarea(name, placeholder)</b></div>
-      </div>
-      <div class="ref-section">
-        <h3>Actors</h3>
-        <div class="ref-item"><b>actor Name do ... end</b></div>
-        <div class="ref-item"><b>state field: Type :: default</b></div>
-        <div class="ref-item"><b>on :msg do ... end</b></div>
-        <div class="ref-item"><b>become field: val</b></div>
-        <div class="ref-item"><b>reply expr</b></div>
-        <div class="ref-item"><b>Actor <- :msg</b> send</div>
-        <div class="ref-item"><b>spawn Actor</b> new instance</div>
-        <div class="ref-item"><b>actor_name(ref)</b> &rarr; string</div>
-      </div>
-      <div class="ref-section">
-        <h3>Control Flow</h3>
-        <div class="ref-item"><b>case expr do ... end</b></div>
-        <div class="ref-item"><b>for x in list do ... end</b></div>
-        <div class="ref-item"><b>fn(x: T) do ... end</b> lambda</div>
-        <div class="ref-item"><b>|></b> pipe operator</div>
-        <div class="ref-item"><b>and</b> / <b>&&</b> logical and</div>
-        <div class="ref-item"><b>or</b> / <b>||</b> logical or</div>
-        <div class="ref-item"><b>orelse</b> nil fallback</div>
-        <div class="ref-item"><b>&lt;-</b> sync message send</div>
-        <div class="ref-item"><b>&lt;--</b> async message send</div>
-      </div>
-      <div class="ref-section">
-        <h3>Utility</h3>
-        <div class="ref-item"><b>print(v)</b> stdout</div>
-        <div class="ref-item"><b>type_of(v)</b> &rarr; atom</div>
-        <div class="ref-item"><b>nil?(v)</b> <b>not(v)</b></div>
-        <div class="ref-item"><b>now()</b> unix timestamp</div>
+
+    <div class="tab-pane" id="pane-cheat">
+      <pre class="solution-view"><code id="solution-view"># Select a chapter with an exercise to see its solution.</code></pre>
+      <div class="repl-controls">
+        <button id="copy-solution" disabled>Copy to editor</button>
       </div>
     </div>
-  </div>
+  </aside>
 </div>
 
 <script src="blimp.js"></script>
-<script src="canvas.js"></script>
+<script src="blimp-highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script>
+const CHAPTERS = [
+  { id: '00', title: 'Why actors?',                        md: '00-why-actors.md' },
+  { id: '01', title: 'Your first actor',                   md: '01-first-actor.md',
+    stub: './exercises/ch01_first_actor/01_bike.blimp',
+    solution: './exercises/ch01_first_actor/solutions/01_bike.blimp' },
+  { id: '02', title: 'State, become, and the free lock',   md: '02-state-and-locks.md',
+    stub: './exercises/ch02_state/01_rental.blimp',
+    solution: './exercises/ch02_state/solutions/01_rental.blimp' },
+  { id: '03', title: 'Actors talking to actors',           md: null },
+  { id: '04', title: 'Supervision tree',                   md: null },
+  { id: '05', title: 'Bulkheads',                          md: null },
+  { id: '06', title: 'Riders',                             md: null },
+  { id: '07', title: 'The clock',                          md: null },
+  { id: '08', title: 'Stale rentals',                      md: null },
+  { id: '09', title: 'GPS phone-home',                     md: null },
+  { id: '10', title: 'The dashboard',                      md: null },
+  { id: '11', title: 'Where to go next',                   md: null },
+];
+
+const statusEl = document.getElementById('status');
+const contentEl = document.getElementById('content');
+const editorEl = document.getElementById('editor');
+const editorHighlightEl = document.getElementById('editor-highlight');
+const solutionEl = document.getElementById('solution-view');
+const runBtn = document.getElementById('run-tests');
+const resetBtn = document.getElementById('reset-stub');
+const copyBtn = document.getElementById('copy-solution');
+const resultsEl = document.getElementById('results');
+const chapterListEl = document.getElementById('chapter-list');
+const prevLink = document.getElementById('prev-link');
+const nextLink = document.getElementById('next-link');
+
+const blimp = new Blimp();
+let currentChapter = null;
+let currentStubSource = null;
+let currentSolutionSource = null;
+
+function paintEditor() {
+  // Trailing newline keeps the last line visible when the buffer ends without \n
+  const src = editorEl.value;
+  editorHighlightEl.innerHTML = blimpHighlight(src.endsWith('\n') ? src : src + '\n');
+}
+
+function highlightCodeBlocks(root) {
+  // Only language-blimp blocks; leave bash/python/etc alone.
+  const blocks = root.querySelectorAll('pre code.language-blimp');
+  for (const el of blocks) {
+    el.innerHTML = blimpHighlight(el.textContent);
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s ?? '';
+  return d.innerHTML;
+}
+
+function renderChapterList(activeId) {
+  chapterListEl.innerHTML = '';
+  for (const ch of CHAPTERS) {
+    const a = document.createElement('a');
+    a.href = '#ch' + ch.id;
+    a.dataset.ch = ch.id;
+    a.innerHTML = `<span class="id">Ch ${ch.id}</span>${escapeHtml(ch.title)}`;
+    if (ch.id === activeId) a.classList.add('active');
+    if (!ch.md) a.classList.add('unavailable');
+    chapterListEl.appendChild(a);
+  }
+}
+
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return await r.text();
+}
+
+function findChapter(id) {
+  return CHAPTERS.find(c => c.id === id) || CHAPTERS[0];
+}
+
+async function loadChapter(id) {
+  const ch = findChapter(id);
+  currentChapter = ch;
+  renderChapterList(ch.id);
+
+  const idx = CHAPTERS.indexOf(ch);
+  if (idx > 0) {
+    prevLink.href = '#ch' + CHAPTERS[idx - 1].id;
+    prevLink.classList.remove('disabled');
+    prevLink.textContent = `← Ch ${CHAPTERS[idx - 1].id}: ${CHAPTERS[idx - 1].title}`;
+  } else {
+    prevLink.classList.add('disabled');
+    prevLink.textContent = '← Previous';
+  }
+  if (idx < CHAPTERS.length - 1) {
+    nextLink.href = '#ch' + CHAPTERS[idx + 1].id;
+    nextLink.classList.remove('disabled');
+    nextLink.textContent = `Ch ${CHAPTERS[idx + 1].id}: ${CHAPTERS[idx + 1].title} →`;
+  } else {
+    nextLink.classList.add('disabled');
+    nextLink.textContent = 'Next →';
+  }
+
+  if (ch.md) {
+    try {
+      const md = await fetchText(ch.md);
+      contentEl.innerHTML = marked.parse(md);
+      highlightCodeBlocks(contentEl);
+    } catch (e) {
+      contentEl.innerHTML = `<p class="parse-error">Failed to load ${escapeHtml(ch.md)}: ${escapeHtml(e.message)}</p>`;
+    }
+  } else {
+    contentEl.innerHTML = `<h1>Chapter ${escapeHtml(ch.id)}: ${escapeHtml(ch.title)}</h1><p>This chapter is planned but not written yet. Come back later, or pick another chapter from the left rail.</p>`;
+  }
+
+  resultsEl.innerHTML = '';
+  if (ch.stub) {
+    try {
+      currentStubSource = await fetchText(ch.stub);
+      editorEl.value = currentStubSource;
+      editorEl.readOnly = false;
+      runBtn.disabled = false;
+      resetBtn.disabled = false;
+    } catch (e) {
+      currentStubSource = null;
+      editorEl.value = `# Failed to load stub: ${e.message}`;
+      editorEl.readOnly = true;
+      runBtn.disabled = true;
+      resetBtn.disabled = true;
+    }
+  } else {
+    currentStubSource = null;
+    editorEl.value = '# This chapter has no exercise yet.';
+    editorEl.readOnly = true;
+    runBtn.disabled = true;
+    resetBtn.disabled = true;
+  }
+  paintEditor();
+
+  if (ch.solution) {
+    try {
+      currentSolutionSource = await fetchText(ch.solution);
+      solutionEl.innerHTML = blimpHighlight(currentSolutionSource);
+      copyBtn.disabled = false;
+    } catch (e) {
+      currentSolutionSource = null;
+      solutionEl.textContent = `# Failed to load solution: ${e.message}`;
+      copyBtn.disabled = true;
+    }
+  } else {
+    currentSolutionSource = null;
+    solutionEl.textContent = '# No solution available (this chapter has no exercise).';
+    copyBtn.disabled = true;
+  }
+}
+
+function renderResults(report) {
+  if (report.error && report.total === 0) {
+    resultsEl.innerHTML = `<div class="parse-error">${escapeHtml(report.error)}</div>`;
+    return;
+  }
+  const badgeClass = report.failed === 0 ? 'pass' : 'fail';
+  const badgeText = report.failed === 0
+    ? `✓ ${report.passed}/${report.total} passed`
+    : `${report.passed}/${report.total} passed · ${report.failed} failed`;
+  let html = `<span class="badge ${badgeClass}">${badgeText}</span>`;
+  for (const t of report.tests) {
+    if (t.ok) {
+      html += `<div class="test pass"><span class="sym">✓</span><code>${escapeHtml(t.actor)}</code> › ${escapeHtml(t.name)}</div>`;
+    } else {
+      html += `<div class="test fail"><span class="sym">✗</span><code>${escapeHtml(t.actor)}</code> › ${escapeHtml(t.name)}`;
+      if (t.detail) html += `<div class="detail">${escapeHtml(t.detail)}</div>`;
+      html += `</div>`;
+    }
+  }
+  resultsEl.innerHTML = html;
+  resultsEl.scrollTop = 0;
+}
+
+runBtn.addEventListener('click', () => {
+  const src = editorEl.value;
+  try {
+    const report = blimp.runTests(src);
+    renderResults(report);
+  } catch (e) {
+    resultsEl.innerHTML = `<div class="parse-error">${escapeHtml(e.message)}</div>`;
+  }
+});
+
+resetBtn.addEventListener('click', () => {
+  if (currentStubSource != null) {
+    editorEl.value = currentStubSource;
+    paintEditor();
+    resultsEl.innerHTML = '';
+  }
+});
+
+copyBtn.addEventListener('click', () => {
+  if (currentSolutionSource == null) return;
+  editorEl.value = currentSolutionSource;
+  paintEditor();
+  for (const b of document.querySelectorAll('[data-tab]')) b.classList.toggle('active', b.dataset.tab === 'editor');
+  for (const p of document.querySelectorAll('.tab-pane')) p.classList.toggle('active', p.id === 'pane-editor');
+});
+
+// Live syntax highlighting + scroll sync for the editor
+editorEl.addEventListener('input', paintEditor);
+editorEl.addEventListener('scroll', () => {
+  const pre = editorHighlightEl.parentElement;
+  pre.scrollTop = editorEl.scrollTop;
+  pre.scrollLeft = editorEl.scrollLeft;
+});
+
+for (const btn of document.querySelectorAll('[data-tab]')) {
+  btn.addEventListener('click', () => {
+    for (const b of document.querySelectorAll('[data-tab]')) b.classList.toggle('active', b === btn);
+    for (const p of document.querySelectorAll('.tab-pane')) p.classList.toggle('active', p.id === 'pane-' + btn.dataset.tab);
+  });
+}
+
+editorEl.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    if (!runBtn.disabled) runBtn.click();
+  }
+});
+
+function idFromHash() {
+  const h = window.location.hash.match(/^#ch(\d{2})/);
+  return h ? h[1] : '00';
+}
+window.addEventListener('hashchange', () => loadChapter(idFromHash()));
+
 (async function() {
-  var repl = document.getElementById('repl');
-  var statusEl = document.getElementById('status');
-  var lessonInfoEl = document.getElementById('lesson-info');
-  var stateContent = document.getElementById('state-content');
-  var viewPane = document.getElementById('view-pane');
-
-  var blimp = new Blimp();
-  var history = [];
-  var historyIdx = -1;
-  var buffer = '';
-  var depth = 0;
-  var inputRow = null;
-  var inputEl = null;
-  var mountedActors = {};
-  var currentLesson = 0;
-  var blimpCanvas = null;
-  var acMenu = null;     // autocomplete dropdown element
-  var acItems = [];      // current completions
-  var acIdx = -1;        // selected index
-
-  // Restore progress
-  try { currentLesson = parseInt(localStorage.getItem('blimp_lesson') || '0') || 0; } catch(e) {}
-
-  // ── Lessons ────────────────────────────────────────────
-
-  var lessons = [
-    { title: "Values", desc: "Blimp has integers and arithmetic. Try it:", prompt: "Type: 2 + 3", check: function(v) { return v === '5' ? true : 'Try typing: 2 + 3'; } },
-    { title: "Strings", desc: "Strings use double quotes. concat joins them.", prompt: 'Type: concat("hello", " world")', check: function(v) { return unquote(v) === 'hello world' ? true : 'Try: concat("hello", " world")'; } },
-    { title: "Atoms", desc: "Atoms start with : and represent themselves.", prompt: "Type: :ok", check: function(v) { return v === ':ok' ? true : 'Try typing: :ok'; } },
-    { title: "Booleans", desc: "Comparisons return true or false.", prompt: "What is 10 > 3?", check: function(v) { return v === 'true' ? true : 'Try: 10 > 3'; } },
-    { title: "Variables", desc: "Assign with =. The REPL shows the value.", prompt: "Set x to 42:", check: function(v, s) { return hasVar(s, 'x', '42') ? true : 'Type: x = 42'; } },
-    { title: "Lists", desc: "Lists hold ordered values in square brackets.", prompt: "Type: length([10, 20, 30])", check: function(v) { return v === '3' ? true : 'Try: length([10, 20, 30])'; } },
-    { title: "Functions", desc: "def defines a function. Parameters need types.", prompt: "Define: def double(n: Int) do n * 2 end, then call double(21)", check: function(v) { return v === '42' ? true : 'Define double first, then call double(21)'; } },
-    { title: "Your first view", desc: "Blimp has built-in view primitives that render as UI.", prompt: 'Type: text("Hello, Blimp!")', check: function(v, s, r) { return r && r.view ? true : 'Try: text("Hello, Blimp!")'; } },
-    { title: "Stacking views", desc: "stack() arranges views vertically. Try building a layout.", prompt: 'Try: stack(heading("Hi"), text("Welcome to Blimp"))', check: function(v, s, r) { return r && r.view ? true : 'Use stack(heading(...), text(...))'; } },
-    { title: "Buttons", desc: "button() creates a clickable button. row() lays them out horizontally.", prompt: 'Try: row(button("Yes"), button("No"))', check: function(v, s, r) { return r && r.view ? true : 'Try: row(button("Yes"), button("No"))'; } },
-    { title: "Actors", desc: "Actors hold state and respond to messages. Define one:", prompt: "Paste or type a Counter actor with state count: Int :: 0", multiline: true, check: function(v, s) { return hasActor(s, 'Counter') ? true : 'Define: actor Counter do\\n  state count: Int :: 0\\nend'; } },
-    { title: "Send a message", desc: "Send messages with <-. The actor replies.", prompt: "Try: Counter <- :get_count", check: function(v, s) { return v === '0' || hasActor(s, 'Counter') ? true : 'Make sure Counter has an on :get_count handler'; }, setup: "If you haven't defined Counter, paste:\\nactor Counter do\\n  state count: Int :: 0\\n  on :increment do become count: count + 1 end\\n  on :get_count do reply count end\\nend" },
-    { title: "Mutate state", desc: "become updates an actor's state. Try incrementing.", prompt: "Type: Counter <- :increment then Counter <- :get_count", check: function(v) { return v !== '0' && v !== undefined ? true : 'Send :increment first, then :get_count'; } },
-    { title: "map", desc: "map transforms every element in a list.", prompt: "Type: map([1,2,3], fn(x: Int) do x * 10 end)", check: function(v) { return v === '[10, 20, 30]' ? true : 'Try: map([1,2,3], fn(x: Int) do x * 10 end)'; } },
-    { title: "filter", desc: "filter keeps elements that pass a test.", prompt: "Type: filter([1,2,3,4,5], fn(x: Int) do x > 3 end)", check: function(v) { return v === '[4, 5]' ? true : 'Try: filter([1,2,3,4,5], fn(x: Int) do x > 3 end)'; } },
-    { title: "Actor views", desc: "Actors can render views. Try making a card.", prompt: 'Type: stack(heading("Card"), text("Built in Blimp"), divider(), row(button("OK"), button("Cancel")))', check: function(v, s, r) { return r && r.view ? true : 'Build a view with stack, heading, text, buttons'; } },
-    { title: "Free play", desc: "You've learned the basics. The REPL is yours -- experiment!", prompt: "Try anything. Type /lessons to restart.", freeplay: true }
-  ];
-
-  // ── Helpers ────────────────────────────────────────────
-
-  function hasVar(state, name, val) {
-    if (!state || !state.vars) return false;
-    for (var v of state.vars) { if (v.name === name && (!val || v.value === val)) return true; }
-    return false;
-  }
-  function hasActor(state, type) {
-    if (!state || !state.actors) return false;
-    for (var a of state.actors) { if (a.type === type) return true; }
-    return false;
-  }
-  function unquote(s) {
-    if (s && s.length >= 2 && s[0] === '"' && s[s.length-1] === '"') return s.slice(1,-1);
-    return s;
-  }
-
-  // ── WASM init ──────────────────────────────────────────
-
-  blimp.onPrint(function(str) { addLine('print-line', str); });
-
   try {
     await blimp.init('blimp.wasm');
     statusEl.textContent = 'ready';
-    statusEl.style.color = '#a6e22e';
-    blimpCanvas = new BlimpCanvas(document.getElementById('blimp-canvas'));
+    statusEl.classList.add('ready');
   } catch (e) {
-    statusEl.textContent = 'failed';
-    statusEl.style.color = '#f92672';
-    addLine('error-line', 'Failed to load: ' + e.message);
-    return;
+    statusEl.textContent = 'wasm error: ' + e.message;
+    statusEl.classList.add('error');
   }
-
-  showLesson();
-  createPrompt();
-
-  repl.addEventListener('click', function() { if (inputEl) inputEl.focus(); });
-
-  // Right panel tabs
-  var rtState = document.getElementById('rt-state');
-  var rtRef = document.getElementById('rt-ref');
-  var panelState = document.getElementById('panel-state');
-  var panelRef = document.getElementById('panel-ref');
-  rtState.addEventListener('click', function() {
-    rtState.classList.add('active'); rtRef.classList.remove('active');
-    panelState.classList.add('active'); panelRef.classList.remove('active');
-  });
-  rtRef.addEventListener('click', function() {
-    rtRef.classList.add('active'); rtState.classList.remove('active');
-    panelRef.classList.add('active'); panelState.classList.remove('active');
-  });
-
-  // ── Show current lesson ────────────────────────────────
-
-  function showLesson() {
-    var lesson = lessons[currentLesson];
-    if (!lesson) return;
-    lessonInfoEl.textContent = (currentLesson + 1) + ' / ' + lessons.length;
-    addLine('spacer-line', '');
-    addLine('lesson-line', '── ' + lesson.title + ' ──');
-    addLine('lesson-desc', lesson.desc);
-    if (lesson.setup) addLine('lesson-hint', lesson.setup);
-    addLine('lesson-desc', lesson.prompt);
-    addLine('spacer-line', '');
-  }
-
-  // ── View renderer (same as REPL) ───────────────────────
-
-  function renderView(node) {
-    if (!node) return document.createTextNode('');
-    if (node.text !== undefined) return document.createTextNode(node.text);
-    var tag = node.tag, attrs = node.attrs || {}, children = node.children || [], el;
-    switch (tag) {
-      case 'stack': el = document.createElement('div'); el.className = 'blimp-stack'; break;
-      case 'row': el = document.createElement('div'); el.className = 'blimp-row'; break;
-      case 'grid': el = document.createElement('div'); el.className = 'blimp-grid'; break;
-      case 'text': el = document.createElement('span'); el.className = 'blimp-text'; break;
-      case 'heading':
-        var lvl = Math.max(1, Math.min(6, attrs.level || 1));
-        el = document.createElement('h' + lvl); break;
-      case 'bold': el = document.createElement('strong'); el.className = 'blimp-bold'; break;
-      case 'italic': el = document.createElement('em'); el.className = 'blimp-italic'; break;
-      case 'code': el = document.createElement('code'); el.className = 'blimp-code'; break;
-      case 'code_block': el = document.createElement('pre'); el.className = 'blimp-code-block'; break;
-      case 'blockquote': el = document.createElement('blockquote'); el.className = 'blimp-blockquote'; break;
-      case 'divider': el = document.createElement('hr'); el.className = 'blimp-divider'; return el;
-      case 'list':
-        el = document.createElement('ul'); el.className = 'blimp-list';
-        for (var i = 0; i < children.length; i++) { var li = document.createElement('li'); li.appendChild(renderView(children[i])); el.appendChild(li); }
-        return el;
-      case 'link': el = document.createElement('a'); el.className = 'blimp-link'; if (attrs.href) el.href = attrs.href; break;
-      case 'image': el = document.createElement('img'); el.className = 'blimp-image'; if (attrs.src) el.src = attrs.src; return el;
-      case 'button':
-        el = document.createElement('button'); el.className = 'blimp-button';
-        if (attrs.sends) { (function(msg) { el.addEventListener('click', function() { sendToActor(msg); }); })(attrs.sends); }
-        break;
-      default: el = document.createElement('div'); break;
-    }
-    for (var i = 0; i < children.length; i++) el.appendChild(renderView(children[i]));
-    return el;
-  }
-
-  function sendToActor(message) {
-    var refs = Object.keys(mountedActors);
-    if (refs.length === 0) return;
-    var actorRef = refs[0];
-    var state = blimp.getState();
-    var varName = null;
-    if (state.vars) { for (var v of state.vars) { if (v.value === actorRef) { varName = v.name; break; } } }
-    if (varName) {
-      blimp.eval(varName + ' <- :' + message);
-      var viewResult = blimp.eval(varName + ' <- :view');
-      if (viewResult.ok && viewResult.view) { mountedActors[actorRef] = { view: viewResult.view }; renderMountedViews(); }
-      updateState(blimp.getState());
-    }
-  }
-
-  function renderMountedViews() {
-    viewPane.innerHTML = '';
-    for (var ref in mountedActors) { if (mountedActors[ref].view) viewPane.appendChild(renderView(mountedActors[ref].view)); }
-  }
-
-  // ── REPL ───────────────────────────────────────────────
-
-  function createPrompt() {
-    inputRow = document.createElement('div');
-    inputRow.className = 'input-row';
-    var prompt = document.createElement('span');
-    prompt.className = 'prompt-char';
-    prompt.textContent = depth > 0 ? '   ... ' : 'blimp> ';
-    inputEl = document.createElement('textarea');
-    inputEl.rows = 1;
-    inputEl.spellcheck = false;
-    inputEl.autocomplete = 'off';
-    inputEl.addEventListener('keydown', handleKey);
-    inputEl.addEventListener('input', function() { autoResize.call(this); autoComplete(); });
-    inputRow.appendChild(prompt);
-    inputRow.appendChild(inputEl);
-    repl.appendChild(inputRow);
-    inputEl.focus();
-    repl.scrollTop = repl.scrollHeight;
-  }
-
-  function freezeInput() {
-    if (!inputRow || !inputEl) return;
-    var text = inputEl.value;
-    var prompt = depth > 0 ? '   ... ' : 'blimp> ';
-    inputRow.remove();
-    addLine('prompt-line', prompt + text);
-    inputRow = null; inputEl = null;
-    return text;
-  }
-
-  function handleKey(e) {
-    // Autocomplete navigation
-    if (acMenu) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = Math.min(acIdx + 1, acItems.length - 1); renderAc(); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = Math.max(acIdx - 1, 0); renderAc(); return; }
-      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); acceptAc(); return; }
-      if (e.key === 'Escape') { e.preventDefault(); closeAc(); return; }
-    }
-
-    // Tab: trigger autocomplete
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      showAc();
-      return;
-    }
-
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      closeAc();
-      var line = freezeInput();
-      buffer += (buffer ? '\n' : '') + line;
-      depth += countDepth(line);
-      if (depth > 0) { createPrompt(); return; }
-      submitBuffer();
-      createPrompt();
-      return;
-    }
-    if (e.key === 'ArrowUp' && !buffer && inputEl.selectionStart === 0) {
-      e.preventDefault();
-      if (historyIdx > 0) { historyIdx--; inputEl.value = history[historyIdx]; autoResize.call(inputEl); }
-    }
-    if (e.key === 'ArrowDown' && !buffer && inputEl.selectionStart === inputEl.value.length) {
-      e.preventDefault();
-      if (historyIdx < history.length - 1) { historyIdx++; inputEl.value = history[historyIdx]; }
-      else { historyIdx = history.length; inputEl.value = ''; }
-      autoResize.call(inputEl);
-    }
-
-    // Don't close on regular typing -- autoComplete on input event handles it
-  }
-
-  function getPrefix() {
-    if (!inputEl) return '';
-    var val = inputEl.value;
-    var pos = inputEl.selectionStart;
-    var before = val.substring(0, pos);
-    var match = before.match(/[\w.!?]*$/);
-    return match ? match[0] : '';
-  }
-
-  function showAc() {
-    var prefix = getPrefix();
-    if (!prefix) return;
-    var completions = blimp.complete(prefix);
-    if (!completions || completions.length === 0) return;
-
-    acItems = completions;
-    acIdx = 0;
-
-    if (!acMenu) {
-      acMenu = document.createElement('div');
-      acMenu.className = 'ac-menu';
-      document.body.appendChild(acMenu);
-    }
-
-    renderAc();
-    positionAc();
-  }
-
-  function renderAc() {
-    if (!acMenu) return;
-    acMenu.innerHTML = '';
-    for (var i = 0; i < acItems.length; i++) {
-      var item = acItems[i];
-      var div = document.createElement('div');
-      div.className = 'ac-item' + (i === acIdx ? ' selected' : '');
-      div.innerHTML = '<span class="ac-name">' + esc(item.insert || item.label) + '</span>' +
-        (item.label !== item.insert ? '<span class="ac-sig">' + esc(item.label) + '</span>' : '');
-      (function(idx) { div.addEventListener('click', function() { acIdx = idx; acceptAc(); }); })(i);
-      acMenu.appendChild(div);
-    }
-    // Scroll selected into view
-    var sel = acMenu.querySelector('.selected');
-    if (sel) sel.scrollIntoView({ block: 'nearest' });
-  }
-
-  function positionAc() {
-    if (!acMenu || !inputEl) return;
-    var rect = inputEl.getBoundingClientRect();
-    acMenu.style.left = rect.left + 'px';
-    acMenu.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
-    acMenu.style.top = 'auto';
-  }
-
-  function acceptAc() {
-    if (acIdx < 0 || acIdx >= acItems.length) { closeAc(); return; }
-    var item = acItems[acIdx];
-    var insert = item.insert || item.label;
-    var prefix = getPrefix();
-    // Replace prefix with full completion
-    var val = inputEl.value;
-    var pos = inputEl.selectionStart;
-    var before = val.substring(0, pos - prefix.length);
-    var after = val.substring(pos);
-    inputEl.value = before + insert + after;
-    inputEl.selectionStart = inputEl.selectionEnd = before.length + insert.length;
-    closeAc();
-    inputEl.focus();
-  }
-
-  function closeAc() {
-    if (acMenu) { acMenu.remove(); acMenu = null; }
-    acItems = [];
-    acIdx = -1;
-  }
-
-  function autoComplete() {
-    var prefix = getPrefix();
-    if (prefix.length < 2) { closeAc(); return; }
-    var completions = blimp.complete(prefix);
-    if (!completions || completions.length === 0) { closeAc(); return; }
-    // Don't show if the only completion is an exact match
-    if (completions.length === 1 && (completions[0].insert === prefix || completions[0].label === prefix)) { closeAc(); return; }
-    acItems = completions;
-    acIdx = 0;
-    if (!acMenu) {
-      acMenu = document.createElement('div');
-      acMenu.className = 'ac-menu';
-      document.body.appendChild(acMenu);
-    }
-    renderAc();
-    positionAc();
-  }
-
-  function autoResize() { this.style.height = 'auto'; this.style.height = Math.min(this.scrollHeight, 320) + 'px'; }
-
-  function countDepth(text) {
-    var d = 0, words = text.replace(/#.*/g, '').match(/\b(do|end)\b/g) || [];
-    for (var w of words) { if (w === 'do') d++; else if (w === 'end') d--; }
-    return d;
-  }
-
-  function submitBuffer() {
-    var source = buffer.trim();
-    if (!source) { buffer = ''; depth = 0; return; }
-
-    // Meta commands
-    if (source === '/lessons') { currentLesson = 0; blimp.reset(); saveProgress(); addLine('lesson-line', 'Restarting lessons...'); showLesson(); buffer = ''; depth = 0; return; }
-    if (source === '/skip') { advanceLesson(); buffer = ''; depth = 0; return; }
-
-    history.push(source);
-    historyIdx = history.length;
-
-    var result = blimp.eval(source);
-    if (result.ok) {
-      if (result.view) {
-        addLine('result-line', '=> <view>');
-        var state = blimp.getState();
-        if (state.actors && state.actors.length) { mountedActors[state.actors[state.actors.length-1].ref] = { view: result.view }; }
-        else { mountedActors['__repl__'] = { view: result.view }; }
-        renderMountedViews();
-      } else if (result.value) {
-        addLine('result-line', '=> ' + result.value);
-      }
-    } else {
-      addLine('error-line', result.error);
-    }
-
-    addLine('spacer-line', '');
-    var state = blimp.getState();
-    updateState(state);
-    if (blimpCanvas) blimpCanvas.feed(state, source);
-
-    // Check lesson
-    var lesson = lessons[currentLesson];
-    if (lesson && !lesson.freeplay && lesson.check) {
-      var passed = lesson.check(result.ok ? result.value : null, state, result);
-      if (passed === true) {
-        addLine('lesson-pass', 'Correct!');
-        if (lesson.then) { addLine('lesson-hint', lesson.then); }
-        else { advanceLesson(); }
-      }
-      // Don't show fail on every line -- only hint if they seem stuck
-    }
-
-    buffer = '';
-    depth = 0;
-  }
-
-  function advanceLesson() {
-    currentLesson++;
-    saveProgress();
-    if (currentLesson < lessons.length) {
-      showLesson();
-    } else {
-      addLine('lesson-pass', 'You completed all lessons! The REPL is yours.');
-      lessonInfoEl.textContent = 'done';
-    }
-  }
-
-  function saveProgress() { try { localStorage.setItem('blimp_lesson', currentLesson.toString()); } catch(e) {} }
-
-  function updateState(state) {
-    stateContent.innerHTML = '';
-    if (state.vars && state.vars.length) {
-      for (var v of state.vars) {
-        var div = document.createElement('div'); div.className = 'var';
-        div.innerHTML = '<span class="var-name">' + esc(v.name) + '</span> <span class="var-eq">=</span> <span class="var-val">' + esc(v.value) + '</span>';
-        stateContent.appendChild(div);
-      }
-    }
-    if (state.actors && state.actors.length) {
-      var h = document.createElement('h2'); h.textContent = 'Actors'; h.style.marginTop = '1rem'; stateContent.appendChild(h);
-      for (var a of state.actors) {
-        var rd = document.createElement('div'); rd.className = 'var';
-        rd.innerHTML = '<span class="var-name">' + esc(a.type) + '</span>';
-        stateContent.appendChild(rd);
-        for (var key in a.state) {
-          var fd = document.createElement('div'); fd.className = 'var'; fd.style.paddingLeft = '1rem';
-          fd.innerHTML = '<span class="var-eq">' + esc(key) + ':</span> <span class="var-val">' + esc(a.state[key]) + '</span>';
-          stateContent.appendChild(fd);
-        }
-      }
-    }
-  }
-
-  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-  function addLine(cls, text) {
-    var div = document.createElement('div');
-    div.className = 'line ' + cls;
-    if (cls === 'spacer-line') { div.innerHTML = '&nbsp;'; }
-    else { div.textContent = text; }
-    repl.appendChild(div);
-    repl.scrollTop = repl.scrollHeight;
-  }
+  await loadChapter(idFromHash());
 })();
 </script>
 </body>

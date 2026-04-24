@@ -89,6 +89,35 @@ class Blimp {
     this.instance.exports.blimp_reset();
   }
 
+  /**
+   * Run every `test` block found in the given source.
+   * Returns { ok, total, passed, failed, tests: [{actor, name, ok, detail?}] }
+   * or { ok: false, error } on parse failure.
+   */
+  runTests(source) {
+    const encoded = new TextEncoder().encode(source);
+    const ptr = this.instance.exports.blimp_alloc(encoded.length);
+    if (!ptr) return { ok: false, error: 'Failed to allocate memory' };
+
+    const view = new Uint8Array(this.memory.buffer, ptr, encoded.length);
+    view.set(encoded);
+
+    const status = this.instance.exports.blimp_run_tests(ptr, encoded.length);
+    this.instance.exports.blimp_free(ptr, encoded.length);
+
+    const reportPtr = this.instance.exports.blimp_get_test_report_ptr();
+    const reportLen = this.instance.exports.blimp_get_test_report_len();
+    const json = this._readString(reportPtr, reportLen);
+    let parsed;
+    try { parsed = JSON.parse(json); }
+    catch (e) { return { ok: false, error: 'Invalid test report JSON', raw: json }; }
+
+    if (status === 2 || parsed.error) {
+      return { ok: false, error: parsed.error || 'parse error', total: 0, passed: 0, failed: 0, tests: [] };
+    }
+    return { ok: status === 0, ...parsed };
+  }
+
   onPrint(callback) {
     this._onPrint = callback;
   }
