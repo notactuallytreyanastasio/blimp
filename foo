@@ -1,0 +1,6 @@
+rm -rf .claude/worktrees/agent-a29a62a7
+rm -rf .claude/worktrees/agent-a34cbc3d
+rm -rf .claude/worktrees/agent-a543dfd4
+rm -rf .claude/worktrees/agent-a9e7d82a
+rm -rf .claude/worktrees/agent-abb79420
+rm -rf .claude/worktrees/agent-af21c92

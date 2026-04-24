@@ -3,7 +3,7 @@
 # Subdomain: blimp.bobbby.online
 
 DEPLOY_HOST="root@5.161.181.91"
-DEPLOY_DIR="/srv/blimp"
+DEPLOY_DIR="/opt/blimp"
 
 echo "Deploying blimp docs to $DEPLOY_HOST:$DEPLOY_DIR..."
 

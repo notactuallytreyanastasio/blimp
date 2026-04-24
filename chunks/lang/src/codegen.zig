@@ -12,6 +12,7 @@ const c = @cImport({
 
 pub const CodegenError = error{
     UnsupportedNode,
+
     UndefinedVariable,
     LLVMError,
     VerificationFailed,

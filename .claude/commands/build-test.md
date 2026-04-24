@@ -10,7 +10,7 @@ Run the full quality cycle for the Elixir project.
 
 ## Instructions
 
-1. Find the nearest mix.exs (check cwd, then chunks/term_diff/, etc.)
+1. Find the nearest mix.exs (check cwd, then chunks/, etc.)
 
 2. Run the full quality cycle in order. Stop at the first failure:
    ```bash
