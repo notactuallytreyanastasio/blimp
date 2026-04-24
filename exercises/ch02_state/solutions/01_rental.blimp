@@ -1,0 +1,69 @@
+# Chapter 2 -- Solution
+# Reference implementation. Don't peek until you've tried the stub.
+
+actor Bike do
+  state id: String :: "unknown"
+  state status: Atom :: :available
+
+  on :status do
+    reply status
+  end
+
+  on :rent when status == :available do
+    become status: :rented
+    reply :ok
+  end
+
+  on :rent do
+    reply {:error, :unavailable}
+  end
+
+  on :return do
+    become status: :available
+    reply :ok
+  end
+
+  on :report_broken do
+    become status: :broken
+    reply :ok
+  end
+end
+
+actor BikeTests do
+  state bike: Bike :: spawn Bike, id: "b-001"
+
+  test "fresh bike is available" do
+    assert_eq(bike <- :status, :available)
+  end
+
+  test "first rent returns :ok" do
+    assert_eq(bike <- :rent, :ok)
+  end
+
+  test "first rent flips status to :rented" do
+    bike <- :rent
+    assert_eq(bike <- :status, :rented)
+  end
+
+  test "second rent returns error tuple" do
+    bike <- :rent
+    assert_eq(bike <- :rent, {:error, :unavailable})
+  end
+
+  test "refused rent does not change status" do
+    bike <- :rent
+    bike <- :rent
+    assert_eq(bike <- :status, :rented)
+  end
+
+  test "broken bike refuses rent" do
+    bike <- :report_broken
+    assert_eq(bike <- :rent, {:error, :unavailable})
+  end
+
+  test "after return, can rent again" do
+    bike <- :rent
+    bike <- :return
+    assert_eq(bike <- :rent, :ok)
+  end
+end

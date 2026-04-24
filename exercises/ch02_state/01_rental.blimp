@@ -1,0 +1,79 @@
+# Chapter 2 -- State, become, and the free lock
+# Run: blimp exercises/ch02_state/01_rental.blimp --test
+#
+# Fill in the four handler bodies so all seven tests pass.
+# Each one currently replies :TODO and does no state work.
+
+actor Bike do
+  state id: String :: "unknown"
+  state status: Atom :: :available
+
+  on :status do
+    reply status
+  end
+
+  # --- :rent ----------------------------------------------------
+
+  on :rent when status == :available do
+    # Exercise: change status to :rented, reply :ok
+    reply :TODO
+  end
+
+  on :rent do
+    # Exercise: reply the tagged tuple {:error, :unavailable}
+    reply :TODO
+  end
+
+  # --- :return --------------------------------------------------
+
+  on :return do
+    # Exercise: change status to :available, reply :ok
+    reply :TODO
+  end
+
+  # --- :report_broken -------------------------------------------
+
+  on :report_broken do
+    # Exercise: change status to :broken, reply :ok
+    reply :TODO
+  end
+end
+
+actor BikeTests do
+  state bike: Bike :: spawn Bike, id: "b-001"
+
+  test "fresh bike is available" do
+    assert_eq(bike <- :status, :available)
+  end
+
+  test "first rent returns :ok" do
+    assert_eq(bike <- :rent, :ok)
+  end
+
+  test "first rent flips status to :rented" do
+    bike <- :rent
+    assert_eq(bike <- :status, :rented)
+  end
+
+  test "second rent returns error tuple" do
+    bike <- :rent
+    assert_eq(bike <- :rent, {:error, :unavailable})
+  end
+
+  test "refused rent does not change status" do
+    bike <- :rent
+    bike <- :rent
+    assert_eq(bike <- :status, :rented)
+  end
+
+  test "broken bike refuses rent" do
+    bike <- :report_broken
+    assert_eq(bike <- :rent, {:error, :unavailable})
+  end
+
+  test "after return, can rent again" do
+    bike <- :rent
+    bike <- :return
+    assert_eq(bike <- :rent, :ok)
+  end
+end
