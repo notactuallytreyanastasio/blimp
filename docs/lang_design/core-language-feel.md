@@ -18,7 +18,7 @@ This means:
 
 ## Syntax Identity
 
-**Ruby's skin, Elixir's soul.** The syntax reads like Ruby — expressive, readable, `do/end` blocks, optional parens, "programmer happiness." But the data model is Elixir — immutable data, pattern matching everywhere, pipe operators, atoms.
+**Surface like Ruby, data model like Elixir.** The syntax is expressive and readable with `do/end` blocks, optional parens, "programmer happiness" vibes. Underneath it the data model is Elixir's: immutable data, pattern matching everywhere, pipe operators, atoms.
 
 **Pattern-matched immutability is king.** No mutation. Multi-clause message handlers with pattern matching and guards. State transitions are explicit, not side effects.
 
