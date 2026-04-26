@@ -124,22 +124,9 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
 .tab-pane { display: none; flex-direction: column; overflow: hidden; height: 100%; }
 .tab-pane.active { display: flex; }
 
-/* Layered editor: <pre> behind, <textarea> in front with transparent text */
-.editor-stack { position: relative; flex: 1; overflow: hidden; background: var(--code-bg); }
-.editor-highlight, #editor {
-  position: absolute; inset: 0;
-  margin: 0; padding: 0.85rem 1rem;
-  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
-  white-space: pre; overflow: auto; tab-size: 2;
-  border: 0; outline: 0;
-}
-.editor-highlight { color: var(--code-fg); background: transparent; pointer-events: none; z-index: 0; }
-.editor-highlight code { color: inherit; background: transparent; padding: 0; font: inherit; }
-#editor {
-  background: transparent; color: transparent; caret-color: #fff;
-  z-index: 1; resize: none;
-}
-#editor:disabled { caret-color: transparent; }
+/* Monaco editor host -- fills the flex column, automaticLayout watches resize. */
+#editor { flex: 1; min-height: 0; background: var(--code-bg); }
+#editor.disabled { opacity: 0.55; }
 
 .solution-view {
   flex: 1; margin: 0; padding: 0.85rem 1rem;
@@ -216,10 +203,7 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
     </div>
 
     <div class="tab-pane active" id="pane-editor">
-      <div class="editor-stack">
-        <pre class="editor-highlight" aria-hidden="true"><code id="editor-highlight"></code></pre>
-        <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"># This chapter has no exercise yet.</textarea>
-      </div>
+      <div id="editor"></div>
       <div class="repl-controls">
         <button id="run-tests" class="primary" disabled>Run Tests (⌘⏎)</button>
         <button id="reset-stub" disabled>Reset to stub</button>
@@ -239,6 +223,7 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
 <script src="blimp.js"></script>
 <script src="blimp-highlight.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.46.0/min/vs/loader.js"></script>
 <script>
 const CHAPTERS = [
   { id: '00', title: 'Why actors?',                        md: '00-why-actors.md' },
@@ -248,7 +233,9 @@ const CHAPTERS = [
   { id: '02', title: 'State, become, and the free lock',   md: '02-state-and-locks.md',
     stub: './exercises/ch02_state/01_rental.blimp',
     solution: './exercises/ch02_state/solutions/01_rental.blimp' },
-  { id: '03', title: 'Actors talking to actors',           md: null },
+  { id: '03', title: 'Actors talking to actors',           md: '03-actors-talking.md',
+    stub: './exercises/ch03_actors/01_station.blimp',
+    solution: './exercises/ch03_actors/solutions/01_station.blimp' },
   { id: '04', title: 'Supervision tree',                   md: null },
   { id: '05', title: 'Bulkheads',                          md: null },
   { id: '06', title: 'Riders',                             md: null },
@@ -261,8 +248,7 @@ const CHAPTERS = [
 
 const statusEl = document.getElementById('status');
 const contentEl = document.getElementById('content');
-const editorEl = document.getElementById('editor');
-const editorHighlightEl = document.getElementById('editor-highlight');
+const editorHostEl = document.getElementById('editor');
 const solutionEl = document.getElementById('solution-view');
 const runBtn = document.getElementById('run-tests');
 const resetBtn = document.getElementById('reset-stub');
@@ -273,14 +259,17 @@ const prevLink = document.getElementById('prev-link');
 const nextLink = document.getElementById('next-link');
 
 const blimp = new Blimp();
+let editor = null;            // monaco.editor instance, set after Monaco loads
 let currentChapter = null;
 let currentStubSource = null;
 let currentSolutionSource = null;
 
-function paintEditor() {
-  // Trailing newline keeps the last line visible when the buffer ends without \n
-  const src = editorEl.value;
-  editorHighlightEl.innerHTML = blimpHighlight(src.endsWith('\n') ? src : src + '\n');
+function setEditorValue(s)   { if (editor) editor.setValue(s); }
+function getEditorValue()    { return editor ? editor.getValue() : ''; }
+function setEditorReadOnly(ro) {
+  if (!editor) return;
+  editor.updateOptions({ readOnly: ro });
+  editorHostEl.classList.toggle('disabled', ro);
 }
 
 function highlightCodeBlocks(root) {
@@ -359,25 +348,24 @@ async function loadChapter(id) {
   if (ch.stub) {
     try {
       currentStubSource = await fetchText(ch.stub);
-      editorEl.value = currentStubSource;
-      editorEl.readOnly = false;
+      setEditorValue(currentStubSource);
+      setEditorReadOnly(false);
       runBtn.disabled = false;
       resetBtn.disabled = false;
     } catch (e) {
       currentStubSource = null;
-      editorEl.value = `# Failed to load stub: ${e.message}`;
-      editorEl.readOnly = true;
+      setEditorValue(`# Failed to load stub: ${e.message}`);
+      setEditorReadOnly(true);
       runBtn.disabled = true;
       resetBtn.disabled = true;
     }
   } else {
     currentStubSource = null;
-    editorEl.value = '# This chapter has no exercise yet.';
-    editorEl.readOnly = true;
+    setEditorValue('# This chapter has no exercise yet.');
+    setEditorReadOnly(true);
     runBtn.disabled = true;
     resetBtn.disabled = true;
   }
-  paintEditor();
 
   if (ch.solution) {
     try {
@@ -420,7 +408,7 @@ function renderResults(report) {
 }
 
 runBtn.addEventListener('click', () => {
-  const src = editorEl.value;
+  const src = getEditorValue();
   try {
     const report = blimp.runTests(src);
     renderResults(report);
@@ -431,26 +419,16 @@ runBtn.addEventListener('click', () => {
 
 resetBtn.addEventListener('click', () => {
   if (currentStubSource != null) {
-    editorEl.value = currentStubSource;
-    paintEditor();
+    setEditorValue(currentStubSource);
     resultsEl.innerHTML = '';
   }
 });
 
 copyBtn.addEventListener('click', () => {
   if (currentSolutionSource == null) return;
-  editorEl.value = currentSolutionSource;
-  paintEditor();
+  setEditorValue(currentSolutionSource);
   for (const b of document.querySelectorAll('[data-tab]')) b.classList.toggle('active', b.dataset.tab === 'editor');
   for (const p of document.querySelectorAll('.tab-pane')) p.classList.toggle('active', p.id === 'pane-editor');
-});
-
-// Live syntax highlighting + scroll sync for the editor
-editorEl.addEventListener('input', paintEditor);
-editorEl.addEventListener('scroll', () => {
-  const pre = editorHighlightEl.parentElement;
-  pre.scrollTop = editorEl.scrollTop;
-  pre.scrollLeft = editorEl.scrollLeft;
 });
 
 for (const btn of document.querySelectorAll('[data-tab]')) {
@@ -460,26 +438,155 @@ for (const btn of document.querySelectorAll('[data-tab]')) {
   });
 }
 
-editorEl.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-    e.preventDefault();
-    if (!runBtn.disabled) runBtn.click();
-  }
-});
-
 function idFromHash() {
   const h = window.location.hash.match(/^#ch(\d{2})/);
   return h ? h[1] : '00';
 }
 window.addEventListener('hashchange', () => loadChapter(idFromHash()));
 
+// ---- Monaco setup --------------------------------------------------------
+// Mirrors blimp-highlight.js: keyword/constant/builtin lists are kept in sync
+// with that file. Grammar handles strings with #{...} interpolation, atoms,
+// numbers, operators, and capitalized type-like identifiers.
+const BLIMP_KEYWORDS = [
+  'actor','state','on','do','end','become','reply','spawn',
+  'test','property','given','when','case','situation',
+  'def','fn','for','in','self','bubble','bubbles','orelse','if','else',
+];
+const BLIMP_CONSTANTS = ['true','false','nil'];
+const BLIMP_BUILTINS = [
+  'assert','assert_eq','assert_ne','refute',
+  'length','append','reverse','head','tail','sort','merge',
+  'flat','zip','uniq','slice','elem','range',
+  'map','filter','reduce','each',
+  'lookup','put','keys','values',
+  'concat','split','contains','upcase','downcase','to_string',
+  'char_at','char_code','from_char_code',
+  'max','min','abs','rem','floor','ceil','round','random','sum',
+  'now','to_int','type_of','print','nil?','empty?','size','not',
+  'gen_int','gen_atom','gen_list','gen_boolean','gen_string','gen_one_of',
+  'stack','row','grid','heading','text','bold','italic','code',
+  'code_block','blockquote','button','divider','list','link','image',
+];
+
+const BLIMP_MONARCH = {
+  defaultToken: '',
+  tokenPostfix: '.blimp',
+  keywords: BLIMP_KEYWORDS,
+  constants: BLIMP_CONSTANTS,
+  builtins: BLIMP_BUILTINS,
+  tokenizer: {
+    root: [
+      [/#.*$/, 'comment'],
+      [/"/, { token: 'string.quote', next: '@string' }],
+      [/::/, 'operator'],
+      [/:[a-zA-Z_]\w*[?!]?/, 'atom'],
+      [/-?\d+\.\d+/, 'number.float'],
+      [/-?\d+/, 'number'],
+      // Map key / property: ident immediately followed by ":" then space.
+      [/[a-zA-Z_]\w*[?!]?(?=:\s)/, 'property'],
+      [/[a-zA-Z_]\w*[?!]?/, {
+        cases: {
+          '@keywords': 'keyword',
+          '@constants': 'constant',
+          '@builtins': 'builtin',
+          '[A-Z].*': 'type',
+          '@default': 'identifier',
+        },
+      }],
+      [/<-|\|>|==|!=|<=|>=|&&|\|\||->|\+\+/, 'operator'],
+      [/[+\-*/=<>!|]/, 'operator'],
+      [/[\s]+/, 'white'],
+    ],
+    string: [
+      [/[^\\"#]+/, 'string'],
+      [/\\./, 'string.escape'],
+      [/#\{/, { token: 'string.interp', next: '@interp' }],
+      [/#/, 'string'],
+      [/"/, { token: 'string.quote', next: '@pop' }],
+    ],
+    interp: [
+      [/\}/, { token: 'string.interp', next: '@pop' }],
+      [/[a-zA-Z_]\w*[?!]?/, {
+        cases: {
+          '@keywords': 'keyword',
+          '@constants': 'constant',
+          '@builtins': 'builtin',
+          '@default': 'identifier',
+        },
+      }],
+      [/-?\d+(\.\d+)?/, 'number'],
+      [/[^}]/, ''],
+    ],
+  },
+};
+
+const BLIMP_THEME = {
+  base: 'vs-dark',
+  inherit: true,
+  rules: [
+    { token: 'comment.blimp',       foreground: '6a9955', fontStyle: 'italic' },
+    { token: 'string.blimp',        foreground: 'ce9178' },
+    { token: 'string.quote.blimp',  foreground: 'ce9178' },
+    { token: 'string.escape.blimp', foreground: 'd7ba7d' },
+    { token: 'string.interp.blimp', foreground: 'ffb86c' },
+    { token: 'atom.blimp',          foreground: 'd7ba7d' },
+    { token: 'number.blimp',        foreground: 'b5cea8' },
+    { token: 'number.float.blimp',  foreground: 'b5cea8' },
+    { token: 'operator.blimp',      foreground: 'd4d4d4' },
+    { token: 'keyword.blimp',       foreground: 'c586c0', fontStyle: 'bold' },
+    { token: 'constant.blimp',      foreground: '569cd6' },
+    { token: 'builtin.blimp',       foreground: '4ec9b0' },
+    { token: 'type.blimp',          foreground: '4ec9b0' },
+    { token: 'property.blimp',      foreground: '9cdcfe' },
+  ],
+  colors: {
+    'editor.background':                '#1a1a2e',
+    'editor.foreground':                '#d4d4d4',
+    'editorLineNumber.foreground':      '#444466',
+    'editorLineNumber.activeForeground':'#9090b0',
+    'editorCursor.foreground':          '#ffffff',
+    'editor.selectionBackground':       '#33335a',
+    'editor.lineHighlightBackground':   '#22223a',
+  },
+};
+
+async function initMonaco() {
+  await new Promise((resolve, reject) => {
+    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.46.0/min/vs' } });
+    require(['vs/editor/editor.main'], resolve, reject);
+  });
+  monaco.languages.register({ id: 'blimp' });
+  monaco.languages.setMonarchTokensProvider('blimp', BLIMP_MONARCH);
+  monaco.editor.defineTheme('blimp-dark', BLIMP_THEME);
+  editor = monaco.editor.create(editorHostEl, {
+    value: '# This chapter has no exercise yet.',
+    language: 'blimp',
+    theme: 'blimp-dark',
+    fontFamily: "'IBM Plex Mono','Fira Code','JetBrains Mono','Cascadia Code','SF Mono',Consolas,monospace",
+    fontSize: 12,
+    lineHeight: 19,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+    tabSize: 2,
+    insertSpaces: true,
+    wordWrap: 'on',
+    renderLineHighlight: 'line',
+    padding: { top: 8, bottom: 8 },
+  });
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+    if (!runBtn.disabled) runBtn.click();
+  });
+}
+
 (async function() {
   try {
-    await blimp.init('blimp.wasm');
+    await Promise.all([blimp.init('blimp.wasm'), initMonaco()]);
     statusEl.textContent = 'ready';
     statusEl.classList.add('ready');
   } catch (e) {
-    statusEl.textContent = 'wasm error: ' + e.message;
+    statusEl.textContent = 'init error: ' + e.message;
     statusEl.classList.add('error');
   }
   await loadChapter(idFromHash());
