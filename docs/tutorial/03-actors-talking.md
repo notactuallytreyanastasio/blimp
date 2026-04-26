@@ -1,7 +1,7 @@
 # Chapter 3: Actors talking to actors
 
-Chapter 1 gave you a Bike.
-Chapter 2 made the Bike careful about double-rentals.
+Chapter 1 gave you a `Bike`.
+Chapter 2 made the `Bike` careful about double-rentals.
 The whole system has been one actor and a test harness, which is the smallest interesting thing you can build but not yet a system.
 
 This chapter adds a second actor.
@@ -10,30 +10,30 @@ By the end you'll have eight tests passing, an actor that owns a list of referen
 
 ## Why a second actor at all?
 
-A reasonable first instinct is to put the list of bikes inside the Bike actor itself, or maybe to make a single actor that holds everything: bikes, riders, stations, the works.
+A reasonable first instinct is to put the list of bikes inside the `Bike` actor itself, or maybe to make a single actor that holds everything: bikes, riders, stations, the works.
 That works for about ten lines of code and then it stops working, and the reason is the same reason classes in object-oriented languages get split: one piece of state shouldn't be responsible for knowing about every other piece of state.
 
-In bike share terms, a single Bike already has its own job.
+In bike share terms, a single `Bike` already has its own job.
 It tracks its operational status, refuses double rentals, and later in the tutorial it'll flag itself broken and phone home with GPS.
 That's plenty of clipboard for one dispatcher.
 
-A DockingStation has a different job.
+A `DockingStation` has a different job.
 It tracks which bikes are physically parked at it right now, hands one out on request, accepts returns.
 The bikes themselves don't know which station they're at, and they don't need to.
 That's the station's clipboard.
 
 So we get two actors.
-The Bike still owns its own status.
-The DockingStation owns the inventory list.
+The `Bike` still owns its own status.
+The `DockingStation` owns the inventory list.
 Renting a bike at a station is going to be the station pulling a bike off its inventory and telling that bike to flip its own status to `:rented`.
 The work gets done in two places, the way it would in any system that's actually shaped like the world.
 
 There's a deeper reason this matters that won't pay off until Chapter 5.
 When two pieces of state live in two actors, a crash in one doesn't take the other down.
-A buggy Bike can fall over and the station still knows where its other bikes are.
+A buggy `Bike` can fall over and the station still knows where its other bikes are.
 One actor holding everything doesn't give you that, and there's no clean way to add it later.
 
-## The shape of a DockingStation
+## The shape of a `DockingStation`
 
 Here's the actor definition with no handlers, just state:
 
@@ -52,12 +52,12 @@ What's new is the second field.
 
 `[Bike]` is a list of `Bike`.
 The square brackets in a type position mean "a list of these."
-A `[Int]` is a list of integers, a `[String]` is a list of strings, and `[Bike]` is a list of references to Bike actors.
+A `[Int]` is a list of integers, a `[String]` is a list of strings, and `[Bike]` is a list of references to `Bike` actors.
 
 `[]` on the right of the `::` is the empty list.
-A fresh DockingStation starts with no bikes parked at it, which is the right default for "you just spawned a new station and haven't told it about any bikes yet."
+A fresh `DockingStation` starts with no bikes parked at it, which is the right default for "you just spawned a new station and haven't told it about any bikes yet."
 
-When you wrote `spawn Bike, id: "b-01"` in Chapter 1, the value you got back wasn't a copy of the Bike actor, it was a _reference_ to the Bike actor that now lives in the runtime.
+When you wrote `spawn Bike, id: "b-01"` in Chapter 1, the value you got back wasn't a copy of the `Bike` actor, it was a _reference_ to the `Bike` actor that now lives in the runtime.
 Two variables can hold the same reference and they both point at the same actor.
 You can stuff a reference in a list, pass it as a message argument, store it in another actor's state, and the actor on the other end of the reference is still just one actor with one mailbox.
 
@@ -67,7 +67,7 @@ Actor references are file handles for actors.
 
 ## What a station session looks like
 
-Before you fill in any handlers, look at how a fully-built DockingStation is used:
+Before you fill in any handlers, look at how a fully-built `DockingStation` is used:
 
 ```blimp
 fulton = spawn DockingStation, name: "fulton"
@@ -88,7 +88,7 @@ Each `spawn` call creates one live actor and the variable on the left holds a re
 
 `fulton <- :dock(b1)` carries `b1`, the reference, as a message argument.
 The station's `:dock` handler will receive that reference and stash it inside its own `bikes` list.
-After that line runs, the station's state holds a reference to a Bike that no top-level variable points to anymore.
+After that line runs, the station's state holds a reference to a `Bike` that no top-level variable points to anymore.
 
 The pair of lines at the end is where the chapter pays off.
 `fulton <- :rent` returns `{:ok, "b-02"}`, and immediately after, `b2 <- :status` reports `:rented`.
@@ -96,7 +96,7 @@ The station handed out a bike _and_ the bike's own status changed.
 Two actors saw their state change as a result of one external message, which is what the station's `:rent` handler is going to make happen by sending `:rent` to the bike inside its own body.
 
 Open `exercises/ch03_actors/01_station.blimp` in the editor on the right.
-You'll see the Bike from Chapter 2, the DockingStation skeleton with three `:TODO` handlers, and a test actor at the bottom with eight tests.
+You'll see the `Bike` from Chapter 2, the `DockingStation` skeleton with three `:TODO` handlers, and a test actor at the bottom with eight tests.
 Three of them already pass, since `:name` and `:count` are wired up and one test exercises both.
 The other five are red until you fill in the handlers.
 
@@ -118,11 +118,11 @@ Two pieces here that haven't shown up before in this tutorial.
 In Chapter 1 your messages were bare atoms like `:rent` and `:status`.
 Some messages need to carry data, and that's what the parens after the atom are for.
 
-`(b: Bike)` says "this message takes one argument named `b`, of type Bike."
-Inside the handler body, `b` is in scope as an ordinary variable holding a reference to whichever Bike was passed.
+`(b: Bike)` says "this message takes one argument named `b`, of type `Bike`."
+Inside the handler body, `b` is in scope as an ordinary variable holding a reference to whichever `Bike` was passed.
 
 The type annotation isn't optional decoration.
-It's how Blimp checks at the call site that you're not passing a String when the handler expected a Bike.
+It's how Blimp checks at the call site that you're not passing a `String` when the handler expected a `Bike`.
 You can pass any number of arguments and you can mix types: `on :install(name: String, b: Bike)` and so on.
 For now we just need one.
 
@@ -155,7 +155,7 @@ on :dock(b: Bike) do
 end
 ```
 
-`become bikes: [b | bikes]` says the next version of this DockingStation has the new list as its `bikes` field.
+`become bikes: [b | bikes]` says the next version of this `DockingStation` has the new list as its `bikes` field.
 Everything else (the `name`) is left alone, exactly the same way it was in Chapter 1's `become status: :rented`.
 `reply :ok` answers the sender so the caller knows the dock succeeded.
 
@@ -176,7 +176,7 @@ Inside an `on` block, you can write any expression you'd write at the top level,
 Nothing about the actor model says handlers are sealed.
 An actor can send messages while it's processing one.
 
-So when the DockingStation receives `:rent`, the handler will:
+So when the `DockingStation` receives `:rent`, the handler will:
 
 1. Pick the bike at the front of its list
 2. Set the new list to everything except that bike
@@ -185,10 +185,10 @@ So when the DockingStation receives `:rent`, the handler will:
 
 Step 3 is a send from inside a handler.
 The bike is a separate actor, so this is two actors talking.
-The DockingStation pauses its own work for the duration of that send (every send blocks until the reply, remember from Chapter 1) and resumes when the bike replies.
+The `DockingStation` pauses its own work for the duration of that send (every send blocks until the reply, remember from Chapter 1) and resumes when the bike replies.
 
 That blocking matters.
-While the DockingStation is waiting for the bike, the DockingStation's own mailbox is _not_ being processed.
+While the `DockingStation` is waiting for the bike, the `DockingStation`'s own mailbox is _not_ being processed.
 Other clients trying to dock, rent, or count from this station will wait their turn.
 This is fine for now because everything happens in microseconds and the bike replies fast, but in a deeper chapter you'll see how a chain of slow synchronous sends can starve a system, and you'll see what to do about it.
 
@@ -206,7 +206,7 @@ on :rent do
 end
 ```
 
-This runs when the guarded clause didn't match, which on the DockingStation means the bikes list is empty.
+This runs when the guarded clause didn't match, which on the `DockingStation` means the bikes list is empty.
 There's no state to change (an empty station stays empty when somebody tries to rent from it), so no `become`.
 Just a reply with the standard tagged error tuple from Chapter 2.
 
@@ -258,7 +258,7 @@ After this line, `b` holds a reference to the bike at the front of the list.
 `tail` returns everything except the first element.
 `tail([x, y, z])` is `[y, z]`, and `tail([x])` is `[]`.
 
-`become bikes: tail(bikes)` declares that the next version of the DockingStation has a bikes list with the front bike removed.
+`become bikes: tail(bikes)` declares that the next version of the `DockingStation` has a bikes list with the front bike removed.
 This is the dock-side bookkeeping: the bike we're about to rent is no longer parked at this station.
 
 Notice that the order is `head` first, then `become tail`.
@@ -268,18 +268,18 @@ But "look first, then write" is a habit worth keeping in any language.
 
 ### `b <- :rent`
 
-`b` is a reference to a Bike.
-Sending it `:rent` runs the Bike's own `:rent` handler from Chapter 2, which checks the bike's status, flips it to `:rented` if it was available, and replies `:ok` (or `{:error, :unavailable}` if it wasn't).
+`b` is a reference to a `Bike`.
+Sending it `:rent` runs the `Bike`'s own `:rent` handler from Chapter 2, which checks the bike's status, flips it to `:rented` if it was available, and replies `:ok` (or `{:error, :unavailable}` if it wasn't).
 
 Three consequences of this single line, in increasing order of how much they bend your model.
 
-The DockingStation pauses while the send is in flight. The send is synchronous,
+The `DockingStation` pauses while the send is in flight. The send is synchronous,
 the handler is blocked until the bike replies, and any messages arriving at the
-DockingStation in the meantime queue up in its mailbox.
+`DockingStation` in the meantime queue up in its mailbox.
 
 A different actor's state changes.
-After this line returns, the Bike actor on the other end of `b` has a `status` field of `:rented` instead of `:available`.
-The DockingStation didn't reach into the bike and set the field, it asked the bike to do it.
+After this line returns, the `Bike` actor on the other end of `b` has a `status` field of `:rented` instead of `:available`.
+The `DockingStation` didn't reach into the bike and set the field, it asked the bike to do it.
 The bike is the only thing that can change the bike's status, by design.
 
 The reply gets thrown away.
@@ -313,16 +313,16 @@ end
 
 **Your task:** fill in the body of the guarded `on :rent`.
 The remaining tests should all go green: rent returns the right tuple, rent removes the bike from the station's count, and rent flips the bike's own status to `:rented`.
-That last one is the one that proves something interesting happened: the test asserts state on a different actor than the one it sent the message to, and the assertion succeeds because the DockingStation reached out and told the bike to change.
+That last one is the one that proves something interesting happened: the test asserts state on a different actor than the one it sent the message to, and the assertion succeeds because the `DockingStation` reached out and told the bike to change.
 
 ## Who owns what?
 
-The Bike actor owns one piece of state: its status.
-Nothing outside the Bike can read or write that field directly.
+The `Bike` actor owns one piece of state: its status.
+Nothing outside the `Bike` can read or write that field directly.
 The only way to make a bike `:rented` is to send the bike a `:rent` message and let the bike's own handler do the work.
-That's true even when the sender is another actor, like our DockingStation.
+That's true even when the sender is another actor, like our `DockingStation`.
 
-The DockingStation actor owns one piece of state: its inventory list.
+The `DockingStation` actor owns one piece of state: its inventory list.
 Nothing outside the station can read or write that list.
 The only way to add a bike to the inventory is to send the station a `:dock` message.
 The only way to remove one is to send `:rent`.
@@ -332,7 +332,7 @@ The station can read the bike's status by asking, and the bike can be told to fl
 
 This is what people mean by "isolation by construction."
 The language handed you this isolation the moment you defined two actors instead of one, not because you wrote careful code or remembered a convention.
-A bug in the Bike's status logic cannot corrupt the station's list because it can't reach the list.
+A bug in the `Bike`'s status logic cannot corrupt the station's list because it can't reach the list.
 A bug in the station's `:rent` handler cannot accidentally read the bike's private state because it has no direct access.
 The mailbox is the only door.
 
@@ -347,7 +347,7 @@ The whole tutorial keeps taking that deal.
 
 ## What you built
 
-A DockingStation actor that keeps a list of references to Bike actors.
+A `DockingStation` actor that keeps a list of references to `Bike` actors.
 Eight tests passing, and one of them asserts that an action sent to the station produces an observable effect on a different actor.
 
 Three new things showed up:
@@ -364,11 +364,11 @@ The actor on the other end is one thing with one mailbox no matter how many refe
 
 Two loose ends from this chapter.
 
-The DockingStation has no `:return` handler.
+The `DockingStation` has no `:return` handler.
 A rented bike never comes back, which is a bug a real bike share would notice on day one.
 You can write it yourself right now if you want the practice; it's the mirror of `:dock`.
 
-The bigger thing: this chapter has one DockingStation and a couple of bikes.
+The bigger thing: this chapter has one `DockingStation` and a couple of bikes.
 A real bike share has dozens of stations across a city, and somebody has to manage them all.
 That's Chapter 4, where you'll meet supervision trees and Blimp's dotted naming convention.
 You'll see how the runtime groups actors under shared parents, and you'll use that grouping to decide what should crash together and what shouldn't.

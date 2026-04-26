@@ -1,6 +1,6 @@
 # Chapter 1: Your First Actor
 
-By the end of this chapter you'll have a single Bike that can tell you its id, tell you its status, and flip between rented and available when asked.
+By the end of this chapter you'll have a single `Bike` that can tell you its `id`, tell you its `status`, and flip between rented and available when asked.
 Four handlers, four tests, walked through one small piece at a time.
 
 If you've never used an actor-model language, this chapter goes slowly on purpose.
@@ -28,9 +28,9 @@ The data model is Elixir's: immutable values, pattern matching everywhere, pipe 
 You'll feel both influences in these chapters.
 If you haven't used either language, don't worry, everything you need gets introduced as we go.
 
-## The shape of a Bike
+## The shape of a `Bike`
 
-The smallest Bike actor that means anything is five lines of shell, no handlers yet:
+The smallest `Bike` actor that means anything is five lines of shell, no handlers yet:
 
 ```blimp
 actor Bike do
@@ -46,7 +46,7 @@ Three pieces worth walking through.
 Defines an actor template.
 A template, not a live instance.
 The block between `do` and `end` is where state fields and message handlers go.
-When you eventually write `spawn Bike` to bring a Bike to life, this template is what the runtime clones.
+When you eventually write `spawn Bike` to bring a `Bike` to life, this template is what the runtime clones.
 
 Names starting with a capital letter are types.
 Lowercase names are variables and functions.
@@ -59,7 +59,7 @@ Both the type and the default are **required**, and you'll see that pattern repe
 Two reasons.
 
 First, the type gives the runtime and the reader the shape of the actor at a glance.
-You can't spawn a Bike and then find out three function calls later that its `id` is actually an integer.
+You can't `spawn` a `Bike` and then find out three function calls later that its `id` is actually an integer.
 
 Second, the default means you can always write `spawn Bike` and get a usable actor with zero arguments.
 No constructors, no "I forgot to initialize this field" bugs.
@@ -108,7 +108,7 @@ You don't need `self.id` or `this.id`, just `id`.
 Every handler can call `reply` to produce a return value.
 If you don't call `reply` you still get a default reply (nil or the next state depending on context), but being explicit is clearer to read and easier to test.
 
-Before you fill it in, look at what using a Bike actually looks like in a program:
+Before you fill it in, look at what using a `Bike` actually looks like in a program:
 
 ```blimp
 b = spawn Bike, id: "b-001"
@@ -117,9 +117,9 @@ b <- :id           # => "b-001"
 
 Two things are happening on the first line.
 
-`spawn Bike` creates a live instance of the Bike template, and `, id: "b-001"` overrides the `id` state field for this specific bike.
+`spawn Bike` creates a live instance of the `Bike` template, and `, id: "b-001"` overrides the `id` state field for this specific bike.
 Any state field can be overridden at spawn time.
-If you skip the override, you get the defaults you declared; `spawn Bike` with nothing after it gives you a Bike whose id is `"unknown"` and status is `:available`.
+If you skip the override, you get the defaults you declared; `spawn Bike` with nothing after it gives you a `Bike` whose `id` is `"unknown"` and `status` is `:available`.
 
 The variable `b` holds a reference to the actor, not the actor itself.
 Actors don't live in your expression's scope, they live in the runtime registry.
@@ -235,8 +235,8 @@ All four tests should go green.
 
 ## What you built
 
-A Bike actor with four handlers.
-You can ask it for its id, ask it for its status, rent it, and return it.
+A `Bike` actor with four handlers.
+You can ask it for its `id`, ask it for its `status`, rent it, and return it.
 It remembers what happened, because the `become` inside `:rent` committed a new version of the actor's state, and the next `:rent` or `:status` message reads that new version.
 
 There's a bug in it, though.

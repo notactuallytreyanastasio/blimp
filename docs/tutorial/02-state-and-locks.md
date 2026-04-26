@@ -1,8 +1,8 @@
 # Chapter 2: State, become, and the free lock
 
-The Bike from Chapter 1 has a bug.
+The `Bike` from Chapter 1 has a bug.
 If you send it `:rent` twice in a row, both times succeed.
-The status stays `:rented`, and the handler happily replies `:ok` each time.
+The `status` stays `:rented`, and the handler happily replies `:ok` each time.
 In a real bike share that would mean two people think they rented the same bike.
 
 The usual fix for "make sure only one rental succeeds" is a mutex.
@@ -12,7 +12,7 @@ If you forget the lock, the bug ships and shows up three weeks later in prod.
 Blimp doesn't have mutexes.
 By the end of this chapter you'll see why it doesn't need them.
 
-What we're adding to the Bike:
+What we're adding to the `Bike`:
 
 - a guard on `:rent` so it only succeeds when the bike is actually available
 - a fallback `:rent` clause that refuses, replying with an error tuple
@@ -69,7 +69,7 @@ on :rent when status == :available do
 end
 ```
 
-The guard filters for "only when status is `:available`", the `become` commits the new state, and the `reply :ok` answers the sender.
+The guard filters for "only when `status` is `:available`", the `become` commits the new state, and the `reply :ok` answers the sender.
 
 **Your task:** replace the `:TODO` in the guarded `on :rent` with `become status: :rented` followed by `reply :ok`.
 Run tests.
@@ -108,7 +108,7 @@ Errors in Blimp are values that flow back through `reply`, not exceptions you ha
 ## Step 2: fill in the fallback `:rent`
 
 The fallback runs whenever the guarded first clause doesn't match.
-For the Bike that means the status is something other than `:available`, which we'll report as `:unavailable` so the caller can tell what went wrong:
+For the `Bike` that means the `status` is something other than `:available`, which we'll report as `:unavailable` so the caller can tell what went wrong:
 
 ```blimp
 on :rent do
@@ -209,7 +209,7 @@ It can't race the first one because it isn't running yet.
 The second part is that a handler runs to completion before the next one starts.
 Blimp's scheduler is modeled on Erlang's BEAM: actors get preempted between messages, not mid-handler.
 By the time the second `:rent` is pulled off the mailbox, the first one has already committed its `become` and the actor's status is `:rented`.
-The guard on the first clause reads that fresh status, evaluates to false, and the fallback clause runs.
+The guard on the first clause reads that fresh `status`, evaluates to false, and the fallback clause runs.
 
 There's no inconsistent "both see available" window at any point.
 The actor has no window of inconsistency at all, because no other code can observe or modify the actor's state while a handler is running.
@@ -221,7 +221,7 @@ The mailbox is the lock and the handler is the critical section, and both came w
 
 ## What you built
 
-A Bike that refuses double rentals, refuses to be rented when broken, and lets you take it out of service and put it back in.
+A `Bike` that refuses double rentals, refuses to be rented when broken, and lets you take it out of service and put it back in.
 Seven green tests, zero mutexes, zero shared-memory hazards.
 
 The whole thing comes from two language rules working together: each actor has a private mailbox, and handlers run to completion.
@@ -230,5 +230,5 @@ You didn't add either rule, they come from defining an actor in the first place.
 ## What's next
 
 Chapter 3 adds a second actor.
-A `DockingStation` that holds a pile of bikes and hands them out on request, while each individual Bike still owns its own state.
+A `DockingStation` that holds a pile of bikes and hands them out on request, while each individual `Bike` still owns its own state.
 Once there's more than one actor in the system, the only way they can interact is by sending each other messages, and you'll start to feel why that constraint actually buys you something instead of just feeling like a limitation.
