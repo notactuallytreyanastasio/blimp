@@ -1,0 +1,100 @@
+# Chapter 3 -- Solution
+# Reference implementation. Don't peek until you've tried the stub.
+
+actor Bike do
+  state id: String :: "unknown"
+  state status: Atom :: :available
+
+  on :id do
+    reply id
+  end
+
+  on :status do
+    reply status
+  end
+
+  on :rent when status == :available do
+    become status: :rented
+    reply :ok
+  end
+
+  on :rent do
+    reply {:error, :unavailable}
+  end
+end
+
+actor DockingStation do
+  state name: String :: "unnamed"
+  state bikes: [Bike] :: []
+
+  on :name do
+    reply name
+  end
+
+  on :count do
+    reply length(bikes)
+  end
+
+  on :dock(b: Bike) do
+    become bikes: [b | bikes]
+    reply :ok
+  end
+
+  on :rent when length(bikes) > 0 do
+    b = head(bikes)
+    become bikes: tail(bikes)
+    b <- :rent
+    reply {:ok, b <- :id}
+  end
+
+  on :rent do
+    reply {:error, :empty}
+  end
+end
+
+actor StationTests do
+  state st: DockingStation :: spawn DockingStation, name: "fulton"
+
+  test "name reports the spawn-time name" do
+    assert_eq(st <- :name, "fulton")
+  end
+
+  test "starts with zero bikes" do
+    assert_eq(st <- :count, 0)
+  end
+
+  test "dock replies :ok" do
+    a = spawn Bike
+    assert_eq(st <- :dock(a), :ok)
+  end
+
+  test "dock increments count" do
+    a = spawn Bike
+    st <- :dock(a)
+    assert_eq(st <- :count, 1)
+  end
+
+  test "rent on empty station returns {:error, :empty}" do
+    assert_eq(st <- :rent, {:error, :empty})
+  end
+
+  test "rent returns {:ok, bike_id}" do
+    a = spawn Bike, id: "b-01"
+    st <- :dock(a)
+    assert_eq(st <- :rent, {:ok, "b-01"})
+  end
+
+  test "rent removes the bike from the station" do
+    a = spawn Bike
+    st <- :dock(a)
+    st <- :rent
+    assert_eq(st <- :count, 0)
+  end
+
+  test "rent flips the bike's own status to :rented" do
+    a = spawn Bike, id: "b-77"
+    st <- :dock(a)
+    st <- :rent
+    assert_eq(a <- :status, :rented)
+  end
+end
