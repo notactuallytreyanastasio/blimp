@@ -129,7 +129,11 @@ receipt = items
 
 Elm-quality diagnostics with region underlines, "Did you mean?" suggestions, and language-refugee detection that tells you the Blimp way when you write Python/JS/Rust syntax by accident.
 
-## Compiler
+## Self-hosted compiler
+
+Blimp is self-hosted.
+The lexer, parser, evaluator, codegen, and stdlib are all written in Blimp (~4,200 lines of compiler, ~3,500 lines of tests).
+A Zig bootstrap (~20,000 lines) handles the initial compilation and provides the WASM API, TUI REPL, and LLVM IR generation.
 
 `blimp-compile` takes a `.blimp` file, generates LLVM IR, links with an 846-line C runtime, and produces a native binary.
 
@@ -220,35 +224,46 @@ Bidirectional WebSocket messaging works end-to-end.
 
 ## Implementation
 
-~20,000 lines of Zig plus an 846-line C runtime, across 26 source files.
+### Self-hosted compiler (Blimp)
+
+The compiler that Blimp uses to compile itself, in `chunks/lang/lib/`:
+
+| Component | Lines | What it does |
+|-----------|-------|-------------|
+| Parser | 750 | Recursive descent, written in Blimp. |
+| Evaluator | 479 | Tree-walking interpreter, written in Blimp. |
+| Lexer | 441 | Tokenizer, written in Blimp. |
+| Codegen | 235 | Code generation, written in Blimp. |
+| Stdlib | 204 | Standard library, written in Blimp. |
+| Completion | 69 | Auto-complete engine, written in Blimp. |
+| Compiler | 37 | Top-level compiler driver. |
+| Tests | 3,466 | Parser, lexer, eval, codegen, stdlib, operator, builtin, language, property, bootstrap tests. |
+
+### Bootstrap (Zig + C)
+
+The bootstrap compiler that gets Blimp off the ground, in `chunks/lang/src/`:
 
 | Component | Lines | What it does |
 |-----------|-------|-------------|
 | Evaluator | 3,043 | Tree-walking interpreter for REPL and browser. |
 | Builtins | 2,739 | 40 built-in functions. |
-| Parser | 2,500 | Recursive descent. Actors, handlers, guards, pipes, situations, holes. |
-| Codegen | 2,010 | AST to LLVM IR. Full language support. |
-| Type Checker | 1,889 | 2-pass cross-actor registry. Validates state types, handler signatures, message sends. |
+| Parser | 2,500 | Recursive descent. |
+| Codegen | 2,010 | AST to LLVM IR. |
+| Type Checker | 1,889 | 2-pass cross-actor registry. |
 | Main | 1,007 | CLI: REPL mode, file mode, introspect mode. Split-pane TUI. |
-| Runtime (C) | 846 | Tagged values with ref counting, actor registry, round-robin scheduler, mailboxes, canvas event logging. |
-| Introspect | 736 | AST to JSON export for IDE/external tool integration. |
+| Runtime (C) | 846 | Tagged values with ref counting, actor registry, scheduler, mailboxes, canvas logging. |
+| Introspect | 736 | AST to JSON export for IDE integration. |
 | Errors | 598 | Elm-style diagnostics with region underlines and suggestions. |
 | Types | 574 | Structural type system with subtyping. |
 | WASM API | 568 | Browser bindings. Init, eval, test runner. 184KB module. |
 | Compile Main | 559 | Compiler CLI. Parse, codegen, verify, link, canvas HTML generation. |
 | Lexer | 514 | Atoms, strings with interpolation, numbers, operators, comments. |
-| Value | 403 | Runtime value representation. |
-| AST | 306 | 58 node kinds covering the full language. |
-| Registry | 300 | Actor template storage, instance management, state mutation tracking. |
-| Completion | 239 | Type-aware auto-complete for REPL. |
-| Env | 174 | Variable binding store with scope chains. |
-| Token | 130 | Token type definitions. |
 
 ## Project structure
 
 ```
-chunks/lang/             Zig compiler, evaluator, WASM target
-chunks/lang/src/         20 source files (20,000+ lines)
+chunks/lang/lib/         Self-hosted compiler (~7,700 lines of Blimp)
+chunks/lang/src/         Zig bootstrap (~20,000 lines)
 chunks/lang/examples/    30 example programs
 chunks/lang/bench/       Benchmark suite (C, Zig, Rust, Python, Ruby)
 chunks/lang/web/         Browser REPL, chat server, concurrent server
