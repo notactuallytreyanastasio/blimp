@@ -93,21 +93,13 @@ First match wins.
 
 ## The self-hosted compiler
 
-In `chunks/lang/lib/`, all written in Blimp:
+Blimp compiles Blimp.
+The self-hosted compiler lives in `chunks/lang/lib/` -- lexer, parser, evaluator, codegen, stdlib, completion engine, all written in Blimp.
+A Zig bootstrap evaluates the Blimp-written compiler, which then handles user code.
 
-| Component | Lines |
-|-----------|-------|
-| Parser | 750 |
-| Evaluator | 479 |
-| Lexer | 441 |
-| Safe strings | 426 |
-| Codegen | 235 |
-| Stdlib | 204 |
-| Completion engine | 69 |
-| Compiler driver | 37 |
-| **Tests** | **3,466** |
+### How the bootstrap works
 
-The compiler actor pipeline:
+The compiler is actors talking to actors:
 
 ```
 def blimp_compile(source: String, mode: Atom) -> Any do
@@ -130,9 +122,88 @@ def blimp_compile(source: String, mode: Atom) -> Any do
 end
 ```
 
-The stdlib replaces Zig builtins with Blimp implementations.
-Property-based tests generate random inputs and check invariants like commutativity and associativity.
-Safe string types (`SafeHtml`, `SafeSql`, `SafeUrl`) enforce context-sensitive escaping at the type level.
+You spawn a `Lexer` actor, send it source code, get back tokens.
+Spawn a `Parser` actor, send it tokens, get back an AST made of maps.
+The `Evaluator` tree-walks those maps with an `Env` actor managing lexical scope and an `ActorRegistry` actor managing instances.
+
+### How we got here
+
+The self-hosting happened in a single day -- lexer, parser, evaluator, bootstrap tests, then the loop closed.
+
+**Step 0: teach Blimp to see characters.**
+Before you can write a lexer in Blimp, Blimp needs `char_at` and `char_code`.
+These went into the Zig bootstrap as new builtins.
+Without them, Blimp couldn't scan strings one character at a time.
+
+**Step 1: lexer (441 lines).**
+The `Lexer` is an actor with state for source text, position, line, and column.
+You send it `:tokenize` and get back a list of token maps: `%{kind: :identifier, lexeme: "x", line: 1, col: 1}`.
+Writing the lexer immediately found two bugs in the Zig bootstrap -- nil comparisons crashed the type checker, and `slice()` used end-index semantics instead of length.
+Both had to be fixed before the Blimp lexer could pass its own tests.
+
+**Step 2: parser (750 lines).**
+Recursive descent, but the AST is just maps.
+`%{kind: :integer_lit, value: 42, line: 1, col: 1}`.
+No special AST struct needed -- Blimp already has maps.
+
+**Step 3: evaluator (479 lines).**
+Tree-walks the map AST.
+The `Env` actor manages scope as a stack of maps -- `:push` and `:pop` for entering and leaving blocks, `:define` and `:lookup` for bindings.
+The `ActorRegistry` actor tracks templates and live instances.
+
+**Step 4: close the loop.**
+The bootstrap test runs `blimp_self_eval` on a program that defines a function and calls it:
+
+```
+actor BootstrapTests do
+  test "bootstrap: self-hosted compiler compiles a mini-compiler" do
+    code = concat(
+      "def tokenize(src: String) -> List do\n",
+      concat("case length(src) == 0 do\n",
+      concat("true -> []\n",
+      concat("_ -> append([], src)\n",
+      concat("end\n",
+      concat("end\n",
+      concat("tokenize(\"hello\")\n", "")))))))
+    result = blimp_self_eval(code)
+    assert_eq(length(result), 1)
+    assert_eq(head(result), "hello")
+  end
+end
+```
+
+Blimp compiling a program that defines and calls a tokenizer.
+56 tests green.
+
+**Bugs the compiler found in the language.**
+Writing a recursive descent parser in Blimp stressed the language harder than any example program had.
+`and`/`or` weren't expression operators, just statement-level -- the lexer needed them in boolean expressions.
+Pipes didn't compose with higher-order functions like `map` and `filter`.
+The type checker leaked scope across `def` bodies.
+No user program had hit these because no user program had tried to write a compiler.
+
+**After the loop closed:**
+the completion engine was rewritten in Blimp (replacing `complete.zig`),
+the stdlib moved 185 lines of builtins from Zig to Blimp (`abs`, `max`, `min`, `sum`...),
+property-based testing landed (75 properties, 7,500 random cases checking arithmetic commutativity and associativity),
+the WASM codegen started emitting bytecode from Blimp,
+and the `--self-hosted` flag wired it together so the Zig bootstrap loads the Blimp compiler and gets out of the way.
+
+### What's in the self-hosted compiler
+
+| Component | Lines |
+|-----------|-------|
+| Parser | 750 |
+| Evaluator | 479 |
+| Lexer | 441 |
+| Safe strings | 426 |
+| Codegen | 235 |
+| Stdlib | 204 |
+| Completion engine | 69 |
+| Compiler driver | 37 |
+| **Tests** | **3,466** |
+
+Safe string types (`SafeHtml`, `SafeSql`, `SafeUrl`) enforce context-sensitive escaping at the type level -- you can't create a `SafeHtml` from a raw string, you have to compose it through an accumulator that applies the correct escaper at each interpolation point.
 
 ## Native compiler
 
