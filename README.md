@@ -1,15 +1,19 @@
 # Blimp
 
-An actor-oriented programming language where code structure is runtime structure.
-Actors are the only abstraction -- there are no modules, no classes, no separate concept of "pure functions."
-A helper function is just an actor with one handler that replies immediately.
+A self-hosted, actor-oriented programming language.
+Code structure is runtime structure.
+Actors are the only abstraction.
 
-Blimp compiles to native code via LLVM.
-On recursive benchmarks it runs within 1-2x of C, Rust, and Zig.
+Blimp compiles itself.
+The lexer, parser, evaluator, and codegen are written in Blimp.
+A Zig bootstrap gets the first generation off the ground, then Blimp takes over.
 
-**[Try it in your browser](https://blimp.bobbby.online/blog/playground.html)** -- the full language runs as a 184KB WASM module, no install required.
+The native compiler targets LLVM IR and runs within 1-2x of C on recursive benchmarks.
+The whole language also runs in the browser as a 184KB WASM module.
 
-**[Tutorial](https://blimp.bobbby.online/tutorial/)** -- build a bike-share simulation from scratch, with an embedded REPL in every chapter.
+**[Try it](https://blimp.bobbby.online/blog/playground.html)** -- nothing to install.
+
+**[Tutorial](https://blimp.bobbby.online/tutorial/)** -- build a bike-share simulation with an embedded REPL in every chapter.
 
 ## What it looks like
 
@@ -39,23 +43,33 @@ b <- :rent      # => {:error, "already rented"}
 b <- :return    # => :ok
 ```
 
-Multi-clause handlers with guards give you safe state transitions without mutexes.
-The mailbox serializes messages; each handler runs to completion before the next one starts.
+Multi-clause handlers with guards.
+The mailbox serializes messages.
+Each handler runs to completion before the next starts.
 No locks, no races, by construction.
 
 ## Key ideas
 
 **Actors all the way down.**
-State lives inside actors. You talk to actors by sending messages with `<-`. An actor transitions state with `become` (Hewitt's original primitive, not mutation). It talks back with `reply`.
+No modules, no classes.
+A helper function is just an actor with one handler that replies immediately.
+State lives inside actors.
+You talk to them with `<-`, transition state with `become`, and talk back with `reply`.
 
 **Namespaces are supervision trees.**
-`Shop.Checkout` means Checkout is supervised by Shop. When a `CascadeBubble` fires, all children of the same parent restart. The structure of your code IS the structure of your running system.
+`Shop.Checkout` means Checkout is supervised by Shop.
+When a `CascadeBubble` fires, all siblings restart.
+The structure of your code IS the structure of your running system.
 
-**Typed state, pattern-matched handlers.**
-State fields require types and defaults (`state balance: Int :: 0`). Handlers use guards and multi-clause dispatch. First match wins.
+**Self-hosted.**
+The Blimp compiler is written in Blimp.
+The Zig code is the bootstrap -- it evaluates the Blimp-written compiler, which then handles user code.
+`blimp_compile(source, :eval)` spawns a Lexer actor, pipes tokens to a Parser actor, and walks the AST through an Evaluator actor.
 
-**Holes for humans and agents.**
-A Hole (`_` with a trailing comment) is a typed gap. It compiles, it runs, it just doesn't do anything yet. The comment is a directive to an agent or your future self.
+**Holes.**
+`_` with a trailing comment is a typed gap in your program.
+It compiles, it runs, it just doesn't do anything yet.
+The comment is a directive to an agent or your future self.
 
 ```
 situation validate(payment) do
@@ -67,7 +81,92 @@ end
 ```
 
 **Bubbles, not exceptions.**
-Failure propagates through Bubble actors that walk the supervision tree. Different bubbles have different blast radii. Callers catch bubbles with `orelse`.
+Bubbles are actors that walk the supervision tree deciding who restarts.
+Different bubbles have different blast radii.
+`on :charge bubbles(CascadeBubble)` takes out all siblings; a plain handler defaults to `SelfBubble`.
+Callers catch bubbles with `orelse`.
+
+**Typed state, pattern-matched handlers.**
+State fields require types and defaults: `state balance: Int :: 0`.
+Handlers use guards and multi-clause dispatch.
+First match wins.
+
+## The self-hosted compiler
+
+In `chunks/lang/lib/`, all written in Blimp:
+
+| Component | Lines |
+|-----------|-------|
+| Parser | 750 |
+| Evaluator | 479 |
+| Lexer | 441 |
+| Safe strings | 426 |
+| Codegen | 235 |
+| Stdlib | 204 |
+| Completion engine | 69 |
+| Compiler driver | 37 |
+| **Tests** | **3,466** |
+
+The compiler actor pipeline:
+
+```
+def blimp_compile(source: String, mode: Atom) -> Any do
+  case mode do
+    :eval -> blimp_self_eval(source)
+    :wasm -> compile_to_wasm(source)
+    :tokens ->
+      l = spawn Lexer
+      l <- :set_source(source)
+      l <- :tokenize
+    :ast ->
+      l = spawn Lexer
+      l <- :set_source(source)
+      tokens = l <- :tokenize
+      p = spawn Parser
+      p <- :set_tokens(tokens)
+      p <- :parse
+    _ -> blimp_self_eval(source)
+  end
+end
+```
+
+The stdlib replaces Zig builtins with Blimp implementations.
+Property-based tests generate random inputs and check invariants like commutativity and associativity.
+Safe string types (`SafeHtml`, `SafeSql`, `SafeUrl`) enforce context-sensitive escaping at the type level.
+
+## Native compiler
+
+`blimp-compile` generates LLVM IR, links with an 846-line C runtime, and produces a native binary.
+
+```
+$ blimp-compile marketplace.blimp -o marketplace
+$ ./marketplace
+
+$ blimp-compile bench_fib.blimp --run       # compile + run + cleanup
+$ blimp-compile marketplace.blimp --canvas  # compile + run + HTML visualization
+```
+
+### Canvas visualization
+
+`--canvas` generates a self-contained HTML replaying the program's actor events as animation.
+Actors appear as hexagons with generative art fills derived from their state hash.
+Message sends animate as rays.
+State changes flash borders.
+Parent-child relationships render as dashed lines following the namespace hierarchy.
+
+### Benchmarks
+
+Median of 3 runs on Apple Silicon.
+
+| Benchmark | C | Zig | Rust | Blimp | Python | Ruby |
+|-----------|---|-----|------|-------|--------|------|
+| fib(40) | 453ms | 447ms | 451ms | 579ms (1.3x) | 13107ms | 9550ms |
+| binary tree (depth 25) | 167ms | 169ms | 169ms | 338ms (2.0x) | 3390ms | 2753ms |
+| KNN grid (1000x1000) | 170ms | 167ms | 169ms | 173ms (1.0x) | 469ms | 296ms |
+
+1-2x C on pure computation.
+Matches C exactly on arithmetic-heavy code (KNN).
+With LTO and tail-call optimization enabled, Blimp is fastest on fib and KNN.
 
 ## The language
 
@@ -127,50 +226,13 @@ receipt = items
 
 ### Error messages
 
-Elm-quality diagnostics with region underlines, "Did you mean?" suggestions, and language-refugee detection that tells you the Blimp way when you write Python/JS/Rust syntax by accident.
+Elm-style diagnostics with region underlines, "Did you mean?" suggestions, and language-refugee detection that tells you the Blimp way when you write Python/JS/Rust syntax by accident.
 
-## Self-hosted compiler
+## Programs written in Blimp
 
-Blimp is self-hosted.
-The lexer, parser, evaluator, codegen, and stdlib are all written in Blimp (~4,200 lines of compiler, ~3,500 lines of tests).
-A Zig bootstrap (~20,000 lines) handles the initial compilation and provides the WASM API, TUI REPL, and LLVM IR generation.
+### Marketplace (287 lines)
 
-`blimp-compile` takes a `.blimp` file, generates LLVM IR, links with an 846-line C runtime, and produces a native binary.
-
-```
-$ blimp-compile marketplace.blimp -o marketplace
-$ ./marketplace
-
-$ blimp-compile bench_fib.blimp --run       # compile + run + cleanup
-$ blimp-compile marketplace.blimp --canvas  # compile + run + HTML visualization
-```
-
-### Canvas visualization
-
-`--canvas` generates a self-contained HTML file that replays the program's actor events as animation.
-Actors appear as hexagons with generative art fills derived from their state.
-Message sends animate as rays between actors.
-State changes flash borders white.
-Parent-child relationships render as persistent dashed lines following the namespace hierarchy.
-
-### Benchmarks
-
-Recursive benchmarks compiled with `blimp-compile`, compared against C (`-O2`), Zig (`-OReleaseFast`), Rust (`-O`), Python 3, and Ruby.
-Median of 3 runs on Apple Silicon.
-
-| Benchmark | C | Zig | Rust | Blimp | Python | Ruby |
-|-----------|---|-----|------|-------|--------|------|
-| fib(40) | 453ms | 447ms | 451ms | 579ms (1.3x) | 13107ms | 9550ms |
-| binary tree (depth 25) | 167ms | 169ms | 169ms | 338ms (2.0x) | 3390ms | 2753ms |
-| KNN grid (1000x1000) | 170ms | 167ms | 169ms | 173ms (1.0x) | 469ms | 296ms |
-
-1-2x C on pure computation.
-On arithmetic-heavy code (KNN), it matches C exactly.
-The overhead comes from `situation` branching (compare-and-branch chains vs. a single conditional).
-
-## The marketplace
-
-The flagship example: a marketplace simulation with 12 actors across 7 types (287 lines).
+12 actors across 7 types.
 The supervision hierarchy reflects real ownership -- your account and wallet belong to you, not to the marketplace.
 
 ```
@@ -183,30 +245,41 @@ Marketplace
   Marketplace.Thief
 ```
 
-5 days of simulation: commerce, cash withdrawals, theft attempts (some blocked by insufficient funds), inter-business supplier payments.
-Compiling with `--canvas` produces an animated HTML visualization showing all 12 actors, 156+ message events, and state changes over time.
+5 days of simulation: commerce, cash withdrawals, theft attempts, inter-business supplier payments.
+`--canvas` produces an animated visualization with all 12 actors and 156+ message events.
+
+### Blimp Chat (706 lines)
+
+HTTP server, WebSocket handshake, frame parsing, poll-based accept loop, broadcast to connected clients.
+Bidirectional WebSocket messaging works end-to-end.
+Written entirely in Blimp, including the HTTP parsing and WebSocket frame encoding.
+
+### Concurrent server (263 lines)
+
+Poll-based multiplexed accept loop with shared session state.
+Demonstrates non-blocking IO without threads -- `tcp_poll` over multiple file descriptors, round-robin dispatch.
 
 ## Tooling
 
 ### Terminal REPL
 
-Split-pane TUI.
-Left pane: input history with multi-line support and bracket-depth tracking.
-Right pane: live state showing all variable bindings and actor instances with their current state.
-Tab completion with type-aware signatures.
+Split-pane TUI (889 lines of Rust + the Zig evaluator).
+Left pane: input with multi-line support and bracket-depth tracking.
+Right pane: live state showing all variable bindings and actor instances.
+Tab toggles between state view and live LLVM IR view.
+Type-aware tab completion.
 
 ### Browser REPL
 
 The same language compiled to WebAssembly (184KB).
-Canvas visualization shows actors as hexagons with generative art fills.
-Runs entirely client-side, zero server dependencies.
+Canvas visualization with generative art.
+Runs entirely client-side.
 
 ### Tutorial
 
-A [bike-share simulation tutorial](https://blimp.bobbby.online/tutorial/) that builds up from a single Bike actor to a multi-actor system with supervision.
-Each chapter has an embedded REPL with a Monaco editor, a test runner, and canvas visualization -- all in-browser via WASM.
+A [bike-share simulation](https://blimp.bobbby.online/tutorial/) that builds from a single Bike actor to a multi-actor system with supervision.
+Each chapter has an embedded REPL with a Monaco editor, a test runner, and canvas visualization.
 
-Chapters so far:
 - Ch 0: Why actors?
 - Ch 1: Your first actor
 - Ch 2: State, `become`, and the free lock
@@ -214,59 +287,17 @@ Chapters so far:
 
 ### Tree-sitter grammar
 
-Published at [tree-sitter-blimp](https://github.com/notactuallytreyanastasio/tree-sitter-blimp) with a Zed extension for editor highlighting.
-
-### Blimp Chat (experimental)
-
-A chat server written entirely in Blimp: HTTP server, WebSocket handshake, frame parsing, poll-based accept loop, broadcast to connected clients.
-23,000 lines of Blimp.
-Bidirectional WebSocket messaging works end-to-end.
-
-## Implementation
-
-### Self-hosted compiler (Blimp)
-
-The compiler that Blimp uses to compile itself, in `chunks/lang/lib/`:
-
-| Component | Lines | What it does |
-|-----------|-------|-------------|
-| Parser | 750 | Recursive descent, written in Blimp. |
-| Evaluator | 479 | Tree-walking interpreter, written in Blimp. |
-| Lexer | 441 | Tokenizer, written in Blimp. |
-| Codegen | 235 | Code generation, written in Blimp. |
-| Stdlib | 204 | Standard library, written in Blimp. |
-| Completion | 69 | Auto-complete engine, written in Blimp. |
-| Compiler | 37 | Top-level compiler driver. |
-| Tests | 3,466 | Parser, lexer, eval, codegen, stdlib, operator, builtin, language, property, bootstrap tests. |
-
-### Bootstrap (Zig + C)
-
-The bootstrap compiler that gets Blimp off the ground, in `chunks/lang/src/`:
-
-| Component | Lines | What it does |
-|-----------|-------|-------------|
-| Evaluator | 3,043 | Tree-walking interpreter for REPL and browser. |
-| Builtins | 2,739 | 40 built-in functions. |
-| Parser | 2,500 | Recursive descent. |
-| Codegen | 2,010 | AST to LLVM IR. |
-| Type Checker | 1,889 | 2-pass cross-actor registry. |
-| Main | 1,007 | CLI: REPL mode, file mode, introspect mode. Split-pane TUI. |
-| Runtime (C) | 846 | Tagged values with ref counting, actor registry, scheduler, mailboxes, canvas logging. |
-| Introspect | 736 | AST to JSON export for IDE integration. |
-| Errors | 598 | Elm-style diagnostics with region underlines and suggestions. |
-| Types | 574 | Structural type system with subtyping. |
-| WASM API | 568 | Browser bindings. Init, eval, test runner. 184KB module. |
-| Compile Main | 559 | Compiler CLI. Parse, codegen, verify, link, canvas HTML generation. |
-| Lexer | 514 | Atoms, strings with interpolation, numbers, operators, comments. |
+[tree-sitter-blimp](https://github.com/notactuallytreyanastasio/tree-sitter-blimp) with a Zed extension.
 
 ## Project structure
 
 ```
-chunks/lang/lib/         Self-hosted compiler (~7,700 lines of Blimp)
-chunks/lang/src/         Zig bootstrap (~20,000 lines)
+chunks/lang/lib/         Self-hosted compiler (Blimp)
+chunks/lang/src/         Bootstrap compiler (Zig) + C runtime
 chunks/lang/examples/    30 example programs
-chunks/lang/bench/       Benchmark suite (C, Zig, Rust, Python, Ruby)
-chunks/lang/web/         Browser REPL, chat server, concurrent server
+chunks/lang/bench/       Benchmarks (C, Zig, Rust, Python, Ruby)
+chunks/lang/web/         Chat server, concurrent server, DOM playground
+chunks/repl_tui/         Split-pane terminal REPL (Rust)
 docs/tutorial/           Bike-share tutorial with embedded REPL
 docs/lang_design/        Design documents
 docs/blog/               Design journal
