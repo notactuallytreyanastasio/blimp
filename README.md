@@ -11,8 +11,6 @@ On recursive benchmarks it runs within 1-2x of C, Rust, and Zig.
 
 **[Tutorial](https://blimp.bobbby.online/tutorial/)** -- build a bike-share simulation from scratch, with an embedded REPL in every chapter.
 
-![Blimp playground with canvas visualization and REPL](docs/blog/img/playground-counters.png)
-
 ## What it looks like
 
 ```
@@ -133,7 +131,7 @@ Elm-quality diagnostics with region underlines, "Did you mean?" suggestions, and
 
 ## Compiler
 
-`blimp-compile` takes a `.blimp` file, generates LLVM IR, links with a C runtime, and produces a native binary.
+`blimp-compile` takes a `.blimp` file, generates LLVM IR, links with an 846-line C runtime, and produces a native binary.
 
 ```
 $ blimp-compile marketplace.blimp -o marketplace
@@ -193,8 +191,6 @@ Left pane: input history with multi-line support and bracket-depth tracking.
 Right pane: live state showing all variable bindings and actor instances with their current state.
 Tab completion with type-aware signatures.
 
-![Blimp REPL with Counter and Light actors](docs/blog/img/repl-actors-state.png)
-
 ### Browser REPL
 
 The same language compiled to WebAssembly (184KB).
@@ -224,29 +220,29 @@ Bidirectional WebSocket messaging works end-to-end.
 
 ## Implementation
 
-20,000+ lines of Zig and C across 20 source files.
+~20,000 lines of Zig plus an 846-line C runtime, across 26 source files.
 
 | Component | Lines | What it does |
 |-----------|-------|-------------|
-| Parser | 2,275 | Recursive descent. Actors, handlers, guards, pipes, situations, holes. |
-| Evaluator | 2,157 | Tree-walking interpreter for REPL and browser. |
-| Codegen | 1,942 | AST to LLVM IR. Full language support. |
-| Type Checker | 1,760 | 2-pass cross-actor registry. Validates state types, handler signatures, message sends. |
-| Builtins | 1,010 | 40 built-in functions. |
+| Evaluator | 3,043 | Tree-walking interpreter for REPL and browser. |
+| Builtins | 2,739 | 40 built-in functions. |
+| Parser | 2,500 | Recursive descent. Actors, handlers, guards, pipes, situations, holes. |
+| Codegen | 2,010 | AST to LLVM IR. Full language support. |
+| Type Checker | 1,889 | 2-pass cross-actor registry. Validates state types, handler signatures, message sends. |
+| Main | 1,007 | CLI: REPL mode, file mode, introspect mode. Split-pane TUI. |
 | Runtime (C) | 846 | Tagged values with ref counting, actor registry, round-robin scheduler, mailboxes, canvas event logging. |
-| Main | 788 | CLI: REPL mode, file mode, introspect mode. Split-pane TUI. |
 | Introspect | 736 | AST to JSON export for IDE/external tool integration. |
-| Errors | 551 | Elm-style diagnostics with region underlines and suggestions. |
-| Lexer | 489 | Atoms, strings with interpolation, numbers, operators, comments. |
-| Types | 470 | Structural type system with subtyping. |
-| Compile Main | 453 | Compiler CLI. Parse, codegen, verify, link, canvas HTML generation. |
-| WASM API | 330 | Browser bindings. Init, eval, test runner. 184KB module. |
-| Value | 360 | Runtime value representation. |
-| Completion | 273 | Type-aware auto-complete for REPL. |
-| Registry | 295 | Actor template storage, instance management, state mutation tracking. |
-| AST | 284 | 58 node kinds covering the full language. |
+| Errors | 598 | Elm-style diagnostics with region underlines and suggestions. |
+| Types | 574 | Structural type system with subtyping. |
+| WASM API | 568 | Browser bindings. Init, eval, test runner. 184KB module. |
+| Compile Main | 559 | Compiler CLI. Parse, codegen, verify, link, canvas HTML generation. |
+| Lexer | 514 | Atoms, strings with interpolation, numbers, operators, comments. |
+| Value | 403 | Runtime value representation. |
+| AST | 306 | 58 node kinds covering the full language. |
+| Registry | 300 | Actor template storage, instance management, state mutation tracking. |
+| Completion | 239 | Type-aware auto-complete for REPL. |
 | Env | 174 | Variable binding store with scope chains. |
-| Token | 119 | Token type definitions. |
+| Token | 130 | Token type definitions. |
 
 ## Project structure
 
