@@ -1,0 +1,144 @@
+# Chapter 5 -- The supervision tree
+# Run: blimp exercises/ch05_supervision/01_supervision.blimp --test
+#
+# Three actors. BikeShare.Vault holds the cash. BikeShare.Inventory
+# holds the bike count. BikeShare ties them together.
+#
+# This chapter introduces three new pieces of language ground:
+#
+#   bubble :reason                       raise a failure that propagates up
+#   target <- :msg(...) orelse fallback  catch a bubble at the call site
+#   on :foo bubbles(CascadeBubble) do    when this handler bubbles, restart
+#                                        every dotted-name sibling under
+#                                        the same supervisor prefix
+#
+# Three TODO handlers; the tests cover both happy path and bubble path.
+
+actor BikeShare.Vault do
+  state cents: Int :: 0
+
+  on :balance do
+    reply cents
+  end
+
+  on :deposit(amount: Int) do
+    become cents: cents + amount
+    reply cents + amount
+  end
+
+  # --- :withdraw ----------------------------------------------------
+  # If amount is bigger than cents, bubble :overdraw. Otherwise become
+  # cents: cents - amount and reply the new balance.
+
+  on :withdraw(amount: Int) do
+    # Exercise:
+    #   case amount > cents do
+    #     true -> bubble :overdraw
+    #     _    -> become cents: cents - amount
+    #             reply cents - amount
+    #   end
+    reply :TODO
+  end
+
+  # --- :corruption --------------------------------------------------
+  # An "everything's broken" handler. The bubbles(CascadeBubble)
+  # annotation tells the runtime to restart every BikeShare.* actor
+  # when this bubble fires.
+
+  on :corruption bubbles(CascadeBubble) do
+    bubble :corrupted
+  end
+end
+
+actor BikeShare.Inventory do
+  state count: Int :: 0
+
+  on :count do
+    reply count
+  end
+
+  on :add(n: Int) do
+    become count: count + n
+    reply count + n
+  end
+end
+
+actor BikeShare do
+  state vault: BikeShare.Vault :: nil
+  state inventory: BikeShare.Inventory :: nil
+
+  on :install(v: BikeShare.Vault, i: BikeShare.Inventory) do
+    become vault: v, inventory: i
+    reply :ok
+  end
+
+  # --- :charge ------------------------------------------------------
+  # Send :withdraw to the vault. If it bubbles :overdraw, swallow the
+  # bubble with orelse and reply {:error, :declined}. Otherwise reply
+  # {:ok, new_balance}.
+
+  on :charge(amount: Int) do
+    # Exercise:
+    #   result = vault <- :withdraw(amount) orelse :declined
+    #   case result do
+    #     :declined -> reply {:error, :declined}
+    #     _         -> reply {:ok, result}
+    #   end
+    reply :TODO
+  end
+
+  on :emergency do
+    vault <- :corruption orelse :handled
+    reply :recovered
+  end
+end
+
+actor BikeShareTests do
+  state share: BikeShare :: spawn BikeShare
+
+  test "charge succeeds when funds suffice" do
+    v = spawn BikeShare.Vault
+    i = spawn BikeShare.Inventory
+    share <- :install(v, i)
+    v <- :deposit(100)
+    assert_eq(share <- :charge(40), {:ok, 60})
+  end
+
+  test "charge returns declined on overdraw" do
+    v = spawn BikeShare.Vault
+    i = spawn BikeShare.Inventory
+    share <- :install(v, i)
+    v <- :deposit(50)
+    assert_eq(share <- :charge(200), {:error, :declined})
+  end
+
+  test "vault resets after a bubble (state lost)" do
+    v = spawn BikeShare.Vault
+    i = spawn BikeShare.Inventory
+    share <- :install(v, i)
+    v <- :deposit(50)
+    share <- :charge(200)
+    assert_eq(v <- :balance, 0)
+  end
+
+  test "inventory survives a vault overdraw" do
+    v = spawn BikeShare.Vault
+    i = spawn BikeShare.Inventory
+    share <- :install(v, i)
+    v <- :deposit(50)
+    i <- :add(7)
+    share <- :charge(200)
+    assert_eq(i <- :count, 7)
+  end
+
+  test "emergency cascades: both vault and inventory reset" do
+    v = spawn BikeShare.Vault
+    i = spawn BikeShare.Inventory
+    share <- :install(v, i)
+    v <- :deposit(500)
+    i <- :add(20)
+    share <- :emergency
+    assert_eq(v <- :balance, 0)
+    assert_eq(i <- :count, 0)
+  end
+end
