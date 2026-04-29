@@ -252,7 +252,7 @@ end
 
 def render_login() -> String do
   html_page("Blimp Chat - Login", concat(
-    "<div class='login-box'><h1>blimp chat</h1><form method='POST' action='/login'>",
+    "<div class='login-box'><h1>blimp chat</h1><form method='POST' action='login'>",
     "<input type='text' name='username' placeholder='Pick a username' autofocus><button type='submit'>Join</button></form></div>"))
 end
 
@@ -262,7 +262,7 @@ def render_chat(username: String, room: ChatRoom) -> String do
   msg_html = render_messages(messages)
   user_html = render_users(users)
   sidebar = concat("<div class='sidebar'><h2>Online</h2><div class='user-list'>", concat(user_html, "</div></div>"))
-  input_form = concat("<form class='chat-input' method='POST' action='/send'><input type='hidden' name='from' value='", concat(username, "'><input type='text' name='text' placeholder='Type a message...' autofocus autocomplete='off'><button type='submit'>Send</button></form>"))
+  input_form = concat("<form class='chat-input' method='POST' action='send'><input type='hidden' name='from' value='", concat(username, "'><input type='text' name='text' placeholder='Type a message...' autofocus autocomplete='off'><button type='submit'>Send</button></form>"))
   main_area = concat("<div class='chat-main'><div class='messages' id='messages'>", concat(msg_html, concat("</div>", concat(input_form, "</div>"))))
   body = concat("<div class='chat-layout'>", concat(sidebar, concat(main_area, "</div>")))
   html_page("Blimp Chat", body)
@@ -476,7 +476,10 @@ def chat_script() do
     (function() {
       var ws, rd = 1000;
       function connect() {
-        ws = new WebSocket('ws://' + location.host + '/ws');
+        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var p = location.pathname;
+        if (p.charAt(p.length - 1) !== '/') p += '/';
+        ws = new WebSocket(proto + '//' + location.host + p + 'ws');
         ws.onopen = function() { rd = 1000; };
         ws.onmessage = function(e) {
           var d = JSON.parse(e.data);
@@ -526,14 +529,14 @@ def route(method: String, path: String, raw: String, sid: String, sdata: Map, ro
           form = parse_form(get_body(raw))
           username = lookup(form, "username")
           case nil?(username) or username == "" do
-            true -> http_redirect("/")
+            true -> http_redirect("./")
             _ ->
               room <- :join(username)
               sess <- :put(sid, %{username: username})
               broadcast(room, conns)
-              http_redirect("/")
+              http_redirect("./")
           end
-        _ -> http_redirect("/")
+        _ -> http_redirect("./")
       end
     "/send" ->
       case method == "POST" do
@@ -542,13 +545,13 @@ def route(method: String, path: String, raw: String, sid: String, sdata: Map, ro
           from_val = lookup(form, "from")
           text_val = lookup(form, "text")
           case nil?(from_val) or nil?(text_val) or text_val == "" do
-            true -> http_redirect("/")
+            true -> http_redirect("./")
             _ ->
               room <- :send_msg(from_val, text_val)
               broadcast(room, conns)
-              http_redirect("/")
+              http_redirect("./")
           end
-        _ -> http_redirect("/")
+        _ -> http_redirect("./")
       end
     "/logout" ->
       username = lookup(sdata, "username")
@@ -557,7 +560,7 @@ def route(method: String, path: String, raw: String, sid: String, sdata: Map, ro
         _ -> room <- :leave(username)
       end
       sess <- :put(sid, %{})
-      http_redirect("/")
+      http_redirect("./")
     _ -> http_ok("404")
   end
 end
@@ -687,7 +690,7 @@ def handle_http(client_fd: Int, raw: String, room: ChatRoom, sess: Sessions, con
   final = case is_new do
     true ->
       case contains(response, "302 Found") do
-        true -> http_redirect_cookie("/", sid)
+        true -> http_redirect_cookie("./", sid)
         _ -> response
       end
     _ -> response
