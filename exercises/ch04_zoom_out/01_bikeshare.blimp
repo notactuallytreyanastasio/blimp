@@ -1,0 +1,115 @@
+# Chapter 4 -- Zoom out
+# Run: blimp exercises/ch04_zoom_out/01_bikeshare.blimp --test
+#
+# A BikeShare actor holds a list of Stations and asks them all the
+# same question at once. Three TODO handlers; closures and the
+# map / filter / reduce builtins do the iteration.
+#
+# At this zoom level we don't track individual Bike actors; the
+# Station just counts how many bikes are at it. The system-level
+# questions only need the totals.
+
+actor Station do
+  state name: String :: "unnamed"
+  state count: Int :: 0
+
+  on :name do
+    reply name
+  end
+
+  on :count do
+    reply count
+  end
+
+  on :add_bike do
+    become count: count + 1
+    reply :ok
+  end
+end
+
+actor BikeShare do
+  state name: String :: "default"
+  state stations: [Station] :: []
+
+  on :name do
+    reply name
+  end
+
+  on :station_count do
+    reply length(stations)
+  end
+
+  # --- :open --------------------------------------------------------
+
+  on :open(s: Station) do
+    # Exercise: prepend s onto the stations list, reply :ok
+    reply :TODO
+  end
+
+  # --- :total_bikes -------------------------------------------------
+  # Ask every station for its :count, sum the answers.
+
+  on :total_bikes do
+    # Exercise:
+    #   counts = map(stations, fn(s: Station) do s <- :count end)
+    #   reply reduce(counts, 0, fn(acc: Int, n: Int) do acc + n end)
+    reply :TODO
+  end
+
+  # --- :busy_stations -----------------------------------------------
+  # Filter stations with at least one bike, return their names.
+
+  on :busy_stations do
+    # Exercise:
+    #   busy = filter(stations, fn(s: Station) do (s <- :count) > 0 end)
+    #   reply map(busy, fn(s: Station) do s <- :name end)
+    reply :TODO
+  end
+end
+
+actor BikeShareTests do
+  state share: BikeShare :: spawn BikeShare, name: "brooklyn"
+
+  test "name reports the spawn-time name" do
+    assert_eq(share <- :name, "brooklyn")
+  end
+
+  test "starts with zero stations" do
+    assert_eq(share <- :station_count, 0)
+  end
+
+  test "open replies :ok" do
+    s = spawn Station, name: "fulton"
+    assert_eq(share <- :open(s), :ok)
+  end
+
+  test "open registers the station" do
+    s = spawn Station, name: "fulton"
+    share <- :open(s)
+    assert_eq(share <- :station_count, 1)
+  end
+
+  test "total_bikes is 0 when empty" do
+    assert_eq(share <- :total_bikes, 0)
+  end
+
+  test "total_bikes sums across stations" do
+    s1 = spawn Station, name: "fulton"
+    s2 = spawn Station, name: "atlantic"
+    share <- :open(s1)
+    share <- :open(s2)
+    s1 <- :add_bike
+    s1 <- :add_bike
+    s2 <- :add_bike
+    assert_eq(share <- :total_bikes, 3)
+  end
+
+  test "busy_stations names only the non-empty ones" do
+    s1 = spawn Station, name: "fulton"
+    s2 = spawn Station, name: "atlantic"
+    share <- :open(s1)
+    share <- :open(s2)
+    s1 <- :add_bike
+    assert_eq(share <- :busy_stations, ["fulton"])
+  end
+end

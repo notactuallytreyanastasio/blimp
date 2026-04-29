@@ -61,8 +61,8 @@ I am a novice at programming language design and at the actor model. I've read E
 - Chapter 1: a single `Bike` actor, four handlers
 - Chapter 2: guards and the free mutex the actor model hands you
 - Chapter 3: actors talking to actors, a `DockingStation`
-- Chapter 4: the supervision tree, dotted names, zoom out
-- Chapter 5: bulkheads, crash isolation, fault injection
+- Chapter 4: zoom out, anonymous functions, fan out from a parent actor
+- Chapter 5: the supervision tree, dotted names, bulkheads, crash isolation
 - Chapter 6: `Rider` as its own actor
 - Chapter 7: the `Clock`, our first live loop
 - Chapter 8: stale rentals and fines
