@@ -2083,7 +2083,9 @@ fn builtinTcpCloseNative(allocator: std.mem.Allocator, args: []const *const Valu
 // WebSocket builtins
 // ============================================================
 
-const ws_magic_guid = "258EAFA5-E914-47DA-95CA-5AB9DC80CB65";
+// RFC 6455 Section 1.3 fixed magic string. Used to derive
+// Sec-WebSocket-Accept from the client's Sec-WebSocket-Key.
+const ws_magic_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// ws_accept_key(client_key: String) -> String
 /// Computes the Sec-WebSocket-Accept value for the WS handshake.
@@ -2599,9 +2601,9 @@ test "type_of view_node returns :view_node" {
 // ============================================================
 
 test "ws_accept_key produces correct accept value for RFC example" {
-    // RFC 6455 Section 4.2.2 example key: "dGhlIHNhbXBsZSBub25jZQ=="
-    // SHA-1("dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-5AB9DC80CB65") -> Base64
-    // Verified with: echo -n "..." | shasum -a 1 | xxd -r -p | base64
+    // RFC 6455 Section 1.3 example: key "dGhlIHNhbXBsZSBub25jZQ==" must
+    // produce accept "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" via
+    // Base64(SHA-1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")).
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -2612,7 +2614,7 @@ test "ws_accept_key produces correct accept value for RFC example" {
     args[0] = key_val;
 
     const result = try builtinWsAcceptKeyNative(alloc, args);
-    try std.testing.expectEqualStrings("kHmeXU03Cu63H3svTFHa4eO+ylQ=", result.string);
+    try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", result.string);
 }
 
 test "ws_accept_key rejects non-string arg" {

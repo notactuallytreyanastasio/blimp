@@ -18,3 +18,27 @@ The `blimp.bobbby.online/chat/*` block reverse-proxies to
 `blog_default` network. The chat itself runs as the `blimp-chat`
 systemd service on the host (binary + source under
 `/srv/blimp-chat/`).
+
+## Rebuilding and deploying the chat binary
+
+The chat is a `chunks/lang/web/chat.blimp` script run by the Blimp
+interpreter. Both live under `/srv/blimp-chat/` on the box. To
+rebuild and ship a new interpreter:
+
+```bash
+# from chunks/lang/
+zig build -Dtarget=x86_64-linux -Doptimize=ReleaseFast
+scp zig-out/bin/blimp root@5.161.181.91:/srv/blimp-chat/blimp.new
+ssh root@5.161.181.91 '
+  chmod +x /srv/blimp-chat/blimp.new
+  systemctl stop blimp-chat
+  mv /srv/blimp-chat/blimp.new /srv/blimp-chat/blimp
+  systemctl start blimp-chat'
+```
+
+To ship just an updated `chat.blimp` (no interpreter changes):
+
+```bash
+scp chunks/lang/web/chat.blimp root@5.161.181.91:/srv/blimp-chat/chat.blimp
+ssh root@5.161.181.91 'systemctl restart blimp-chat'
+```
