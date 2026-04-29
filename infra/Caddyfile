@@ -1,0 +1,76 @@
+bobbby.online, www.bobbby.online {
+	reverse_proxy app:4000
+
+	encode gzip zstd
+
+	header {
+		# WebSocket support (LiveView)
+		X-Forwarded-Proto {scheme}
+	}
+}
+
+gifmaker.bobbby.online {
+	reverse_proxy nathan:4001
+
+	encode gzip zstd
+
+	header {
+		# WebSocket support (LiveView)
+		X-Forwarded-Proto {scheme}
+	}
+}
+
+deciduous.dev, www.deciduous.dev {
+	root * /srv/deciduous
+	file_server
+
+	encode gzip zstd
+
+	header {
+		Cache-Control "public, max-age=3600"
+	}
+}
+
+donny.bobbby.online {
+	root * /srv/donny
+	file_server
+
+	encode gzip zstd
+
+	header {
+		Cache-Control "public, max-age=300"
+	}
+}
+
+blimp.bobbby.online {
+	encode gzip zstd
+
+	# /chat -> Blimp Chat (systemd service blimp-chat.service on host).
+	# 172.18.0.1 is the blog_default docker-bridge gateway; the chat
+	# process listens on the host's 0.0.0.0:8080.
+	redir /chat /chat/ 308
+
+	handle_path /chat/* {
+		reverse_proxy 172.18.0.1:8080
+	}
+
+	handle {
+		root * /srv/blimp
+		file_server
+		header Cache-Control "public, max-age=300"
+	}
+}
+
+phishjamexplorer.com, www.phishjamexplorer.com {
+	root * /srv/phstats
+	file_server
+
+	encode gzip zstd
+
+	header {
+		Cache-Control "public, max-age=3600"
+	}
+
+	# SPA fallback - serve index.html for all routes
+	try_files {path} /index.html
+}
