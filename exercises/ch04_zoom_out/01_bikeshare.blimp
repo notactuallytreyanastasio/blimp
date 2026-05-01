@@ -50,9 +50,10 @@ actor BikeShare do
   # Ask every station for its :count, sum the answers.
 
   on :total_bikes do
-    # Exercise:
-    #   counts = map(stations, fn(s: Station) do s <- :count end)
-    #   reply reduce(counts, 0, fn(acc: Int, n: Int) do acc + n end)
+    # Exercise: map the stations to a list of their counts (the
+    # per-element closure sends :count to each station), then
+    # reduce that list to a single sum starting from 0. Reply with
+    # the total.
     reply :TODO
   end
 
@@ -60,9 +61,10 @@ actor BikeShare do
   # Filter stations with at least one bike, return their names.
 
   on :busy_stations do
-    # Exercise:
-    #   busy = filter(stations, fn(s: Station) do (s <- :count) > 0 end)
-    #   reply map(busy, fn(s: Station) do s <- :name end)
+    # Exercise: filter stations to keep only the ones whose :count
+    # is positive (the predicate sends :count and tests against 0),
+    # then map the survivors to their :name. Reply with the
+    # resulting list of station names.
     reply :TODO
   end
 end

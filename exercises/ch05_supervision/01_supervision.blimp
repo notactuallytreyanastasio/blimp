@@ -31,12 +31,11 @@ actor BikeShare.Vault do
   # cents: cents - amount and reply the new balance.
 
   on :withdraw(amount: Int) do
-    # Exercise:
-    #   case amount > cents do
-    #     true -> bubble :overdraw
-    #     _    -> become cents: cents - amount
-    #             reply cents - amount
-    #   end
+    # Exercise: case on whether amount is bigger than cents. On the
+    # true branch, bubble :overdraw. On the false branch, become
+    # cents: cents - amount and reply the new balance (which is
+    # cents - amount, since cents inside the handler still holds
+    # the pre-become value).
     reply :TODO
   end
 
@@ -78,12 +77,11 @@ actor BikeShare do
   # {:ok, new_balance}.
 
   on :charge(amount: Int) do
-    # Exercise:
-    #   result = vault <- :withdraw(amount) orelse :declined
-    #   case result do
-    #     :declined -> reply {:error, :declined}
-    #     _         -> reply {:ok, result}
-    #   end
+    # Exercise: send :withdraw(amount) to the vault, using
+    # `orelse :declined` so a bubble lands as the sentinel atom
+    # instead of propagating. Bind the result to a local. Case on
+    # it: reply {:error, :declined} on the sentinel, reply
+    # {:ok, balance} on anything else.
     reply :TODO
   end
 
