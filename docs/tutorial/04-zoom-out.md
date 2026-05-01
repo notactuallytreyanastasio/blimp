@@ -160,92 +160,75 @@ The other five are red until you fill in the handlers.
 
 ## Step 1: fill in `:open`
 
-Same shape as `:dock` from chapter 3.
+Exactly the shape as `:dock` from Chapter 3, with the names shifted up one level: a typed message arg holding a `Station` reference, a cons onto the `stations` list, a `:become`, a `reply :ok`.
+Nothing new.
 
-```blimp
-on :open(s: Station) do
-  become stations: [s | stations]
-  reply :ok
-end
-```
-
-`(s: Station)` is a typed message argument carrying a station reference.
-`[s | stations]` cons it onto the front of the existing list.
-`become` commits the new list, `reply :ok` answers the caller.
-
-**Your task:** in the editor, find `on :open(s: Station)`, replace the two `:TODO` lines with the `become` and the `reply`, click Run Tests.
+**Your task:** in the editor, fill in `on :open(s: Station)`.
 "open replies :ok" and "open registers the station" should both go green, leaving three.
 
-## Sending into a closure
+## Step 2: `:total_bikes`
 
-A closure body is just code.
-It can do anything the surrounding actor's handler body can do, including a `<-` send to another actor.
+Two builtins, two closures, one binding, one reply.
+Build it up from the pieces.
+
+The summing pattern with `reduce`, on a list of integers you already have:
+
+```blimp
+reduce([2, 1, 7], 0, fn(acc: Int, n: Int) do acc + n end)   # => 10
+```
+
+The transform pattern with `map`, on a list you already have:
+
+```blimp
+map([1, 2, 3], fn(x: Int) do x * 10 end)                    # => [10, 20, 30]
+```
+
+The new move in this chapter is a closure that *sends a message* instead of doing arithmetic.
+The closure body is just code, so a `<-` works there as it works anywhere else:
 
 ```blimp
 fn(s: Station) do s <- :count end
 ```
 
 That function, given a station reference, sends `:count` to the station and evaluates to whatever the station replies.
-It's a perfectly normal closure.
+Pass it to `map` over the `stations` list and you get back a list of integers, one per station.
+Pass *that* list to `reduce` with `0` as the seed and an `acc + n` adder, and you get the total.
 
-When you pass that closure to `map` over a list of stations, `map` calls it once per station and returns a list of the answers.
-That's the fan-out: one outer message in (`:total_bikes`), one outer message out (the sum), and inside the handler a small flurry of `:count` sends to each station.
+The handler is two lines: a `map` to produce the per-station counts, then a `reply` whose value comes from a `reduce` over those counts.
 
-Each of those inner sends is synchronous, the same as every other send in Blimp.
-The `BikeShare` waits for each station's reply before moving to the next one.
-For a system with ten or twenty stations this is fine.
-For a system with thousands you'd want non-blocking sends, which is later in the tutorial.
-
-## Step 2: `:total_bikes`
-
-Two builtins, one short handler.
-
-```blimp
-on :total_bikes do
-  counts = map(stations, fn(s: Station) do s <- :count end)
-  reply reduce(counts, 0, fn(acc: Int, n: Int) do acc + n end)
-end
-```
-
-Walk through it.
-
-`map(stations, fn(s: Station) do s <- :count end)` produces a list of integers.
-For each station in `stations`, the closure sends `:count` to that station and gets back the count.
-If `stations` is `[fulton, atlantic]` and fulton has 2 bikes and atlantic has 1, then `counts` becomes `[2, 1]`.
-
-`reduce(counts, 0, fn(acc: Int, n: Int) do acc + n end)` adds the integers up.
-Start the accumulator at `0`, and for each `n` in the list, replace `acc` with `acc + n`.
-After the fold, the accumulator holds the total.
-
-`reply` sends that total back as the answer to the original `:total_bikes` request.
-
-The handler is two lines, but a lot is happening: one outer message in, a `map` of N synchronous sends to children, a fold, one reply.
+A lot happens in those two lines.
+One outer message in, a `map` of N synchronous sends to children, a fold, one reply.
 The whole exchange is synchronous from end to end, which is why you can write it as if it were a list comprehension instead of as a callback nightmare.
+For ten or twenty stations this is fine; for thousands you'd want non-blocking sends, which we'll see later in the tutorial.
 
-**Your task:** fill in the body of `on :total_bikes` with the `map` and the `reduce` above.
+**Your task:** fill in `on :total_bikes`.
 "total_bikes is 0 when empty" and "total_bikes sums across stations" should both go green.
 
 ## Step 3: `:busy_stations`
 
-A filter, then a map.
+Same fan-out shape, swapped pieces.
+The work is to keep some stations and drop the rest, then turn each survivor into its name.
+
+`filter` is the keep-some part:
 
 ```blimp
-on :busy_stations do
-  busy = filter(stations, fn(s: Station) do (s <- :count) > 0 end)
-  reply map(busy, fn(s: Station) do s <- :name end)
-end
+filter([1, 2, 3, 4, 5], fn(x: Int) do x > 2 end)   # => [3, 4, 5]
 ```
 
-`filter(stations, fn(s) do (s <- :count) > 0 end)` keeps the stations whose count is positive.
-The predicate sends `:count` to the station and tests it against zero.
+It calls the closure on every element and keeps the ones where the closure returns truthy.
+The predicate can do anything, including sending a message to an actor and comparing the reply against zero.
 
-`map(busy, fn(s: Station) do s <- :name end)` extracts the names of the survivors.
+The "extract a field" pattern is `map` again, with a closure that sends one message and returns the reply:
 
-The result is a list of strings: the names of the stations that have at least one bike.
+```blimp
+map(bikes, fn(b: Bike) do b <- :id end)
+```
 
-This handler is doing two passes over the list, and a more efficient version could combine them into a single `reduce` that builds up the right answer in one walk.
-For seven stations the difference is invisible.
-For seven thousand it might matter, and the same `reduce` builtin is the way out.
+For `:busy_stations` you want the same shape: filter `stations` by `(s <- :count) > 0`, then map the survivors to their `:name`.
+
+This handler is doing two passes over the same list.
+A more efficient version could combine them into a single `reduce` that builds the answer in one walk.
+For seven stations the difference is invisible; for seven thousand it would matter, and the same `reduce` builtin is the way out.
 
 **Your task:** fill in `on :busy_stations`.
 "busy_stations names only the non-empty ones" goes green and that's all seven.

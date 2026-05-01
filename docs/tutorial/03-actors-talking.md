@@ -102,218 +102,186 @@ The other five are red until you fill in the handlers.
 
 ## Step 1: fill in `:dock`
 
-The first handler to write is the simplest of the three.
+`:dock` has three moves: pull the bike out of the message, prepend it onto the `bikes` list, reply.
+Two of those moves use language pieces you haven't seen yet.
 
-```blimp
-on :dock(b: Bike) do
-  become bikes: [b | bikes]
-  reply :ok
-end
-```
-
-Two pieces here that haven't shown up before in this tutorial.
-
-### `(b: Bike)`: a typed message argument
+### Typed message arguments: `(name: Type)`
 
 In Chapter 1 your messages were bare atoms like `:rent` and `:status`.
-Some messages need to carry data, and that's what the parens after the atom are for.
-
-`(b: Bike)` says "this message takes one argument named `b`, of type `Bike`."
-Inside the handler body, `b` is in scope as an ordinary variable holding a reference to whichever `Bike` was passed.
-
-The type annotation isn't optional decoration.
-It's how Blimp checks at the call site that you're not passing a `String` when the handler expected a `Bike`.
-You can pass any number of arguments and you can mix types: `on :install(name: String, b: Bike)` and so on.
-For now we just need one.
-
-The shape is the same as a state field: name first, then type.
-You don't get to write `(b)` with no type and let the runtime guess.
-Being explicit at the boundary keeps the actor honest.
-
-### `[b | bikes]`: cons
-
-The expression `[b | bikes]` builds a new list whose first element is `b` and whose tail is the existing `bikes` list.
-The pipe is the cons operator, lifted from Erlang and Elixir.
-Read it as "b in front of bikes."
-
-If `bikes` was `[]` (empty), then `[b | bikes]` evaluates to `[b]`.
-If `bikes` was `[x, y]`, then `[b | bikes]` evaluates to `[b, x, y]`.
-The original `bikes` list is untouched.
-Lists in Blimp are immutable, just like state, so cons doesn't modify the old list, it constructs a new one that shares the tail with the old one.
-
-This is fast.
-Cons is constant time because all you're doing is allocating a small "head plus pointer-to-tail" pair.
-A list isn't a contiguous array, it's a chain of these pairs, so prepending is cheap and appending to the end is expensive.
-We'll never need to append in this chapter.
-
-### Putting it together
+Messages can also carry data; that's what the parens after the atom are for.
+Here's a small actor whose `:put` message accepts an integer and returns the new size:
 
 ```blimp
-on :dock(b: Bike) do
-  become bikes: [b | bikes]
+actor Counter do
+  state n: Int :: 0
+  on :put(x: Int) do
+    become n: n + x
+    reply n + x
+  end
+end
+```
+
+`(x: Int)` says "this message takes one argument named `x`, of type `Int`."
+Inside the body, `x` is an ordinary variable holding whatever the sender passed.
+
+The shape is the same as a state field: `name: Type`.
+You can have multiple parameters: `on :install(name: String, count: Int) do ...`.
+The type isn't optional decoration; it's how Blimp checks at the call site that you didn't pass a `String` where an `Int` was expected.
+
+`:dock`'s argument is `(b: Bike)`.
+The type is `Bike` instead of `Int`, but the shape is the same.
+
+### Cons: `[head | tail]`
+
+The expression `[h | rest]` builds a new list whose first element is `h` and whose tail is the existing list `rest`.
+The pipe is the cons operator, lifted from Erlang and Elixir, and it works on any list type:
+
+```blimp
+[1 | [2, 3]]      # => [1, 2, 3]
+["a" | []]        # => ["a"]
+[bike | bikes]    # one bike in front of an existing bike list
+```
+
+Cons is fast.
+It allocates one "head plus pointer-to-tail" pair, regardless of how long the tail is.
+The original list is untouched, since lists are immutable.
+
+The most common use of cons inside a handler is to add to a state-held list and `become` the result:
+
+```blimp
+on :record(event: String) do
+  become events: [event | events]
   reply :ok
 end
 ```
 
-`become bikes: [b | bikes]` says the next version of this `DockingStation` has the new list as its `bikes` field.
-Everything else (the `name`) is left alone, exactly the same way it was in Chapter 1's `become status: :rented`.
-`reply :ok` answers the sender so the caller knows the dock succeeded.
+`:dock` does the same dance.
+The state field is `bikes` instead of `events`, the argument is a `Bike` instead of a `String`, but the rhythm is identical: typed arg in, cons onto state, become, reply `:ok`.
 
-**Your task:** in the editor, find `on :dock(b: Bike)`, replace the two `:TODO` lines with the `become` and the `reply`, click Run Tests.
-"dock replies :ok" and "dock increments count" should both go green, and that's two more tests in the bag.
-
-## Sending messages from inside a handler
-
-The next handler does the actual work.
-Before you write it, look at what's new about it.
-
-So far, every `<-` you've seen has been at the top level of a script.
-You spawned an actor, then you wrote `b <- :rent` to send it a message.
-The send sat in the script's flow, the same place an ordinary expression would sit.
-
-A handler body is also a place where ordinary expressions can sit.
-Inside an `on` block, you can write any expression you'd write at the top level, including a `<-` send to another actor.
-Nothing about the actor model says handlers are sealed.
-An actor can send messages while it's processing one.
-
-So when the `DockingStation` receives `:rent`, the handler will:
-
-1. Pick the bike at the front of its list
-2. Set the new list to everything except that bike
-3. Send the bike a `:rent` message
-4. Reply to whoever asked
-
-Step 3 is a send from inside a handler.
-The bike is a separate actor, so this is two actors talking.
-The `DockingStation` pauses its own work for the duration of that send (every send blocks until the reply, remember from Chapter 1) and resumes when the bike replies.
-
-That blocking matters.
-While the `DockingStation` is waiting for the bike, the `DockingStation`'s own mailbox is _not_ being processed.
-Other clients trying to dock, rent, or count from this station will wait their turn.
-This is fine for now because everything happens in microseconds and the bike replies fast, but in a deeper chapter you'll see how a chain of slow synchronous sends can starve a system, and you'll see what to do about it.
-
-For now: in a handler, `b <- :rent` works exactly the way it does at the top level.
-The handler pauses, the bike runs its `:rent` handler, the reply comes back, the handler continues.
+**Your task:** in the editor, fill in `on :dock(b: Bike)` so it prepends `b` onto `bikes` and replies `:ok`.
+Run Tests.
+"dock replies :ok" and "dock increments count" should both go green.
 
 ## Step 2: fill in the empty `:rent` clause
 
 Two clauses for `:rent`, same as Chapter 2.
 The fallback is easier so we'll do it first.
 
-```blimp
-on :rent do
-  reply {:error, :empty}
-end
-```
+It runs when the guarded clause didn't match, which on the `DockingStation` means the bikes list is empty.
+An empty station stays empty when somebody tries to rent from it, so the body has no `become`, just a reply with a tagged error tuple in the `{:error, reason}` shape from Chapter 2.
 
-This runs when the guarded clause didn't match, which on the `DockingStation` means the bikes list is empty.
-There's no state to change (an empty station stays empty when somebody tries to rent from it), so no `become`.
-Just a reply with the standard tagged error tuple from Chapter 2.
+The reason atom should be `:empty` so callers can pattern-match on a specific cause and tell the user "this station has no bikes right now."
 
-`{:error, :empty}` follows the `{:error, reason}` convention.
-Callers can pattern-match on the `:empty` atom to give the user a useful message ("this station has no bikes right now").
-
-**Your task:** replace the `:TODO` in the unguarded `on :rent` with `reply {:error, :empty}`.
+**Your task:** fill in the unguarded `on :rent`.
 "rent on empty station returns {:error, :empty}" should go green.
 
 ## Step 3: fill in the guarded `:rent` clause
 
 The guarded clause is where the chapter's whole point lives.
-Here's what it looks like done:
-
-```blimp
-on :rent when length(bikes) > 0 do
-  b = head(bikes)
-  become bikes: tail(bikes)
-  b <- :rent
-  reply {:ok, b <- :id}
-end
-```
-
-Walk through it line by line.
+Five new pieces show up here, none of them complicated; the trick is fitting them together.
 
 ### The guard: `when length(bikes) > 0`
 
-`length` is a builtin that returns the number of elements in a list.
-`length([])` is `0`, `length([b])` is `1`, and so on.
-The guard says this clause only runs when there's at least one bike to hand out.
+`length` returns the number of elements in a list:
 
-If the list is empty, the guard fails, Blimp moves on to the next `:rent` clause (the fallback), and that one replies `{:error, :empty}`.
-The two clauses together cover both possibilities, with no `if` needed.
+```blimp
+length([])           # => 0
+length(["a", "b"])   # => 2
+```
 
-### `b = head(bikes)`
-
-`head` is a builtin that returns the first element of a list.
-`head([x, y, z])` is `x`.
-On an empty list it would crash, which is why we guarded for `length(bikes) > 0` first.
-
-`b = ...` binds the result to a local variable named `b`, in scope for the rest of this handler body.
-Local variables don't survive past the end of the handler and aren't visible to other actors.
-It's the same variable binding you'd get in Ruby or Elixir or any expression-oriented language.
-
-After this line, `b` holds a reference to the bike at the front of the list.
-
-### `become bikes: tail(bikes)`
-
-`tail` returns everything except the first element.
-`tail([x, y, z])` is `[y, z]`, and `tail([x])` is `[]`.
-
-`become bikes: tail(bikes)` declares that the next version of the `DockingStation` has a bikes list with the front bike removed.
-This is the dock-side bookkeeping: the bike we're about to rent is no longer parked at this station.
-
-Notice that the order is `head` first, then `become tail`.
-We bind `b` to the front of the list _before_ we change the list.
-Since `bikes` is immutable and `tail(bikes)` is a fresh list, the order doesn't actually matter for correctness here.
-But "look first, then write" is a habit worth keeping in any language.
-
-### `b <- :rent`
-
-`b` is a reference to a `Bike`.
-Sending it `:rent` runs the `Bike`'s own `:rent` handler from Chapter 2, which checks the bike's status, flips it to `:rented` if it was available, and replies `:ok` (or `{:error, :unavailable}` if it wasn't).
-
-Three consequences of this single line, in increasing order of how much they bend your model.
-
-The `DockingStation` pauses while the send is in flight. The send is synchronous,
-the handler is blocked until the bike replies, and any messages arriving at the
-`DockingStation` in the meantime queue up in its mailbox.
-
-A different actor's state changes.
-After this line returns, the `Bike` actor on the other end of `b` has a `status` field of `:rented` instead of `:available`.
-The `DockingStation` didn't reach into the bike and set the field, it asked the bike to do it.
-The bike is the only thing that can change the bike's status, by design.
-
-The reply gets thrown away.
-`b <- :rent` evaluates to whatever the bike replies, but we don't bind it to anything on this line.
-That's fine for the tutorial because we know the bike will say `:ok` (it just came off the dock, so it was available).
-A more paranoid handler would catch the reply and act on it, and you'll write one of those later in the tutorial.
-
-### `reply {:ok, b <- :id}`
-
-The last line is the reply, and it does one more send inside the same handler.
-
-`b <- :id` sends `:id` to the bike and evaluates to the bike's reply.
-Wrap that in a `{:ok, ...}` tuple and you get the success-with-data shape from Chapter 2.
-
-The caller of `:rent` gets back something like `{:ok, "b-77"}`, where `"b-77"` is the id the bike reported.
-That's enough information to tell the user "you rented bike b-77, off you go."
-
-This handler does _three_ sends total: it sends `:rent` to the bike, it sends `:id` to the bike, and it `:reply`s to the original caller.
-Three message exchanges to handle one external `:rent` request, which is normal in actor systems and not something you should worry about until benchmarks tell you to.
-
-### Putting it together
+A guard is just a boolean expression that has access to state.
+The same `when ... do` shape from Chapter 2's `on :rent when status == :available do`, with a different test:
 
 ```blimp
 on :rent when length(bikes) > 0 do
-  b = head(bikes)
-  become bikes: tail(bikes)
-  b <- :rent
-  reply {:ok, b <- :id}
+  ...
 end
 ```
 
+If the list is empty, the guard fails, Blimp moves on to the fallback clause from Step 2, and that one replies `{:error, :empty}`.
+Together the two clauses cover both cases without an `if` in sight.
+
+### `head` and `tail`: pulling the front off a list
+
+Two builtins for taking a list apart:
+
+```blimp
+head([10, 20, 30])    # => 10
+tail([10, 20, 30])    # => [20, 30]
+tail([10])            # => []
+head([])              # crash
+```
+
+`head` is the front, `tail` is everything else.
+`head` on an empty list crashes, which is why the guard above exists; once you're inside the body, you've already proven the list isn't empty.
+
+The "pop the front" pattern is a `head` to grab the value, then a `become` with `tail` to commit the shorter list:
+
+```blimp
+actor Stack do
+  state items: [Int] :: []
+  on :pop when length(items) > 0 do
+    top = head(items)
+    become items: tail(items)
+    reply top
+  end
+end
+```
+
+`top = head(items)` binds a local variable.
+Local variables live for the duration of one handler invocation; they aren't state, they don't survive past the `end`, and they aren't visible to other actors.
+
+The order matters in spirit if not in fact: bind `top` *before* you change the list.
+Lists are immutable so it doesn't actually break, but "look first, then write" is the habit that will protect you in any language.
+
+`:rent` does the same dance with a `Bike` reference instead of an `Int`.
+
+### `b <- :rent`: sending into another actor from inside a handler
+
+So far every `<-` you've seen has been at the top level of a script.
+A handler body is also a place where ordinary expressions can sit, and a `<-` send is an ordinary expression.
+Nothing about the actor model says handlers are sealed.
+
+```blimp
+on :poke(other: Counter) do
+  other <- :put(1)
+  reply :ok
+end
+```
+
+That handler sends `:put(1)` to whatever `Counter` reference was passed in.
+The send is synchronous: this handler pauses until `:put(1)` has been processed and replied to.
+While it's paused, messages arriving at *this* actor queue up in its mailbox.
+The reply value is discarded (the line doesn't bind it to anything), which is fine if you don't need it.
+
+For `:rent`, the `<- :rent` send goes to the bike you just popped off the front of `bikes`.
+The bike's own `:rent` handler from Chapter 2 will check its status, flip it to `:rented`, and reply `:ok`.
+Two actors changed state because of one external message.
+
+A more paranoid handler would bind the reply and check it; we know the bike was available because we just popped it off a dock, so we let it go.
+
+### `{:ok, b <- :id}`: a send inside an expression
+
+A `<-` send is an expression that evaluates to the reply.
+You can use it anywhere an expression goes, including inside a tuple literal:
+
+```blimp
+{:ok, counter <- :get}    # build a tuple containing the counter's reply
+```
+
+`:rent` will use the same trick to ask the bike for its id and wrap the answer in a success tuple, so the caller gets back something like `{:ok, "b-77"}`.
+
+That's three sends in one handler: one to `:rent` the bike, one to ask its `:id`, one `:reply` back to whoever invoked `:rent`.
+Three message exchanges to handle one outside request, which is normal in actor systems and not worth worrying about until benchmarks tell you to.
+
+### Composing it
+
+Five moves: a guard, a `head` into a local, a `become tail`, a discarded send, and a reply that contains a send.
+The exercise file has the `case`-free pattern for each piece elsewhere; the new thing is wiring them together in one handler.
+
 **Your task:** fill in the body of the guarded `on :rent`.
-The remaining tests should all go green: rent returns the right tuple, rent removes the bike from the station's count, and rent flips the bike's own status to `:rented`.
-That last one is the one that proves something interesting happened: the test asserts state on a different actor than the one it sent the message to, and the assertion succeeds because the `DockingStation` reached out and told the bike to change.
+The remaining tests should all go green.
+The interesting one is "rent flips the bike's own status to `:rented`": the test asserts state on a *different* actor than the one it sent the message to, and the assertion succeeds because your handler reached out and told the bike to change.
 
 ## Who owns what?
 

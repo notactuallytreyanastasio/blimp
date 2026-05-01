@@ -193,70 +193,75 @@ Two pass already; the other three are red until you fill in the handlers.
 ## Step 1: fill in `:withdraw`
 
 The vault's `:withdraw` is the bubble source.
-If the request asks for more cents than the vault has, that's an invariant violation; bubble.
-Otherwise commit the new balance and reply.
+The shape is a `case` (which you've used since Chapter 2) with one branch that bubbles instead of replying.
+
+A small parallel for the bubble move:
 
 ```blimp
-on :withdraw(amount: Int) do
-  case amount > cents do
-    true -> bubble :overdraw
-    _ ->
-      become cents: cents - amount
-      reply cents - amount
+on :divide(by: Int) do
+  case by == 0 do
+    true -> bubble :divide_by_zero
+    _    -> reply 100 / by
   end
 end
 ```
 
-The `case` here is the same shape you've used since chapter 2, just with a `bubble` in the failure branch instead of a `reply`.
-The reply on the success branch returns the post-`become` balance, which is `cents - amount` (you have to compute it explicitly because `cents` inside the handler refers to the pre-`become` value).
+`bubble :reason` raises the failure with an atom payload.
+The handler stops at that point; nothing downstream of the `bubble` runs.
+A caller can let it propagate or catch it (Step 2).
 
-**Your task:** in the editor, find `on :withdraw(amount: Int)`, replace the `:TODO` body with the case + bubble + become + reply above, click Run Tests.
+For `:withdraw`, the failure case is "amount is bigger than cents" with payload `:overdraw`.
+The success case is the rhythm you already know: `become` with the new field value, then `reply` with the post-`become` balance.
+Note that `cents` inside the handler still refers to the *pre*-`become` value, so the reply has to compute the new value explicitly (`cents - amount`), the same way Chapter 1's `:rent` reply was the new status.
+
+**Your task:** fill in `on :withdraw(amount: Int)`.
 Two more tests turn green: "vault resets after a bubble (state lost)" and "inventory survives a vault overdraw" both lean on the bubble actually firing here.
 
 ## Step 2: fill in `:charge`
 
-The parent's `:charge` is the bubble catcher.
+The parent's `:charge` translates a bubble from the vault into a tagged tuple at its boundary.
+Two moves: the `orelse` to catch, then a `case` on the result to wrap.
+
+The `orelse` shape, on its own:
 
 ```blimp
-on :charge(amount: Int) do
-  result = vault <- :withdraw(amount) orelse :declined
-  case result do
-    :declined -> reply {:error, :declined}
-    _ -> reply {:ok, result}
-  end
+n = counter <- :get orelse 0   # if :get bubbles, n becomes 0
+```
+
+If the send returns normally, `n` is the reply.
+If the send bubbles, `orelse` catches the bubble and `n` is whatever the right side evaluates to.
+The right side is just an expression, so it can be a literal, an atom, or a more complex fallback.
+
+The `case` shape on the result, also familiar from Chapter 2:
+
+```blimp
+case result do
+  :missing -> reply {:error, :missing}
+  _        -> reply {:ok, result}
 end
 ```
 
-The first line attempts the withdraw.
-If it returns normally, `result` is the new balance, an integer.
-If it bubbles, the `orelse` catches the bubble and `result` is the atom `:declined`.
+A success replies with `{:ok, value}`; the sentinel atom from the `orelse` fallback gets translated to `{:error, reason}`.
 
-The `case` then dispatches.
-On `:declined` we wrap as a tagged tuple so the original caller (whoever sent `:charge`) gets a clean `{:error, ...}` to pattern-match on.
-On any other value (the success integer) we wrap as `{:ok, integer}`.
+For `:charge`, the call is `vault <- :withdraw(amount)`, the orelse fallback is `:declined`, and the case wraps either `{:error, :declined}` or `{:ok, balance}`.
 
 This is the standard "bubble to tuple" translation.
-Your handler bubbles when something downstream is broken; the parent handler decides whether to keep bubbling, recover with a default, or repackage the bubble as a tuple for callers that prefer the tuple convention.
+The downstream handler bubbles when an invariant is broken; the parent decides whether to keep bubbling, recover silently with a default, or repackage the bubble as a tuple for callers that prefer that convention.
 
 **Your task:** fill in `on :charge(amount: Int)`.
 "charge returns declined on overdraw" should go green.
 
 ## Step 3: fill in `:corruption`
 
-The corruption handler in the stub is already most of the way there: it has the `bubble :corrupted` and the `bubbles(CascadeBubble)` annotation.
-The only thing that's wrong is the bubble payload.
-The stub has `bubble :TODO`; replace `:TODO` with `:corrupted`.
-
-```blimp
-on :corruption bubbles(CascadeBubble) do
-  bubble :corrupted
-end
-```
+The corruption handler in the stub already has the `bubbles(CascadeBubble)` annotation in place.
+The only thing left is the bubble payload, which the stub has as `bubble :TODO`.
 
 The annotation doesn't change the value of the bubble, just the strategy.
-A caller catching the bubble with `orelse` would still see `:corrupted`; the difference is that *also*, before the bubble propagates back, every `BikeShare.*` actor has been restarted to defaults.
+A caller catching the bubble with `orelse` will see whatever atom you bubble; the difference from a default-strategy bubble is that *also*, before the bubble propagates back, every `BikeShare.*` actor has been restarted to defaults.
 
-**Your task:** fix the bubble payload.
+The chapter has been calling this case `:corrupted`.
+
+**Your task:** replace `:TODO` with `:corrupted`.
 "emergency cascades: both vault and inventory reset" should go green and that's all five.
 
 ## Designing failures: when to bubble, when to tuple
