@@ -1,0 +1,117 @@
+# Chapter 6 -- Solution
+# Reference implementation. Don't peek until you've tried the stub.
+
+actor Bike do
+  state id: String :: "unknown"
+  state status: Atom :: :available
+
+  on :id do
+    reply id
+  end
+
+  on :status do
+    reply status
+  end
+
+  on :rent when status == :available do
+    become status: :rented
+    reply :ok
+  end
+
+  on :rent do
+    reply {:error, :unavailable}
+  end
+
+  on :return do
+    become status: :available
+    reply :ok
+  end
+end
+
+actor BikeShare.Rider do
+  state name: String :: "anon"
+  state bike: Bike :: nil
+
+  on :name do
+    reply name
+  end
+
+  on :status do
+    case bike == nil do
+      true -> reply :idle
+      _ -> reply :riding
+    end
+  end
+
+  on :pickup(b: Bike) when bike == nil do
+    result = b <- :rent
+    case result do
+      :ok ->
+        become bike: b
+        reply :ok
+      _ -> reply {:error, :unavailable}
+    end
+  end
+
+  on :pickup(b: Bike) do
+    reply {:error, :already_riding}
+  end
+
+  on :return when bike != nil do
+    bike <- :return
+    become bike: nil
+    reply :ok
+  end
+
+  on :return do
+    reply {:error, :no_bike}
+  end
+end
+
+actor RiderTests do
+  test "fresh rider is idle" do
+    r = spawn BikeShare.Rider, name: "alice"
+    assert_eq(r <- :status, :idle)
+  end
+
+  test "pickup an available bike returns :ok" do
+    r = spawn BikeShare.Rider
+    b = spawn Bike, id: "b-01"
+    assert_eq(r <- :pickup(b), :ok)
+  end
+
+  test "after pickup, rider is :riding" do
+    r = spawn BikeShare.Rider
+    b = spawn Bike
+    r <- :pickup(b)
+    assert_eq(r <- :status, :riding)
+  end
+
+  test "pickup while already riding refuses" do
+    r = spawn BikeShare.Rider
+    b1 = spawn Bike
+    b2 = spawn Bike
+    r <- :pickup(b1)
+    assert_eq(r <- :pickup(b2), {:error, :already_riding})
+  end
+
+  test "pickup of an already-rented bike returns :unavailable" do
+    r = spawn BikeShare.Rider
+    b = spawn Bike
+    b <- :rent
+    assert_eq(r <- :pickup(b), {:error, :unavailable})
+  end
+
+  test "return frees the bike" do
+    r = spawn BikeShare.Rider
+    b = spawn Bike
+    r <- :pickup(b)
+    r <- :return
+    assert_eq(b <- :status, :available)
+  end
+
+  test "return when idle returns :no_bike" do
+    r = spawn BikeShare.Rider
+    assert_eq(r <- :return, {:error, :no_bike})
+  end
+end
