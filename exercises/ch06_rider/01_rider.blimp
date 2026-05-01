@@ -47,11 +47,8 @@ actor BikeShare.Rider do
   # Reply :idle when there's no bike, :riding otherwise.
 
   on :status do
-    # Exercise:
-    #   case bike == nil do
-    #     true -> reply :idle
-    #     _    -> reply :riding
-    #   end
+    # Exercise: case on whether `bike` is nil. Reply :idle when it
+    # is, :riding when it isn't.
     reply :TODO
   end
 
@@ -62,14 +59,9 @@ actor BikeShare.Rider do
   # error tuple. The fallback runs when the rider already has a bike.
 
   on :pickup(b: Bike) when bike == nil do
-    # Exercise:
-    #   result = b <- :rent
-    #   case result do
-    #     :ok ->
-    #       become bike: b
-    #       reply :ok
-    #     _ -> reply {:error, :unavailable}
-    #   end
+    # Exercise: send :rent to b and bind the reply to a local. Case
+    # on it. On :ok, become bike: b and reply :ok. On anything else,
+    # reply {:error, :unavailable} without touching state.
     reply :TODO
   end
 
@@ -83,10 +75,9 @@ actor BikeShare.Rider do
   # fallback runs when the rider is already idle.
 
   on :return when bike != nil do
-    # Exercise:
-    #   bike <- :return
-    #   become bike: nil
-    #   reply :ok
+    # Exercise: send :return to the held bike, become bike: nil to
+    # clear the slot, reply :ok. Send before the become so the
+    # reference is still in scope when you use it.
     reply :TODO
   end
 
