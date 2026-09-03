@@ -117,6 +117,8 @@ pub const BuiltinRegistry = struct {
         reg.register("video", &viewVideo);
         reg.register("canvas", &viewCanvas);
         reg.register("button", &viewButton);
+        reg.register("timer", &viewTimer);
+        reg.register("key", &viewKey);
         reg.register("input", &viewInput);
         reg.register("textarea", &viewTextarea);
         reg.register("select", &viewSelect);
@@ -1359,6 +1361,26 @@ fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     return makeViewNode(allocator, "button", &.{}, args[0..1]);
 }
 
+/// timer(ms, sends_atom) — effect node: while mounted, the host sends the atom every ms milliseconds
+fn viewTimer(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .integer or args[1].* != .atom) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "ms", .val = args[0] };
+    attrs[1] = .{ .key = "sends", .val = args[1] };
+    return makeViewNode(allocator, "timer", attrs, &.{});
+}
+
+/// key("ArrowLeft", sends_atom) — effect node: while mounted, that KeyboardEvent.key sends the atom
+fn viewKey(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .atom) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "code", .val = args[0] };
+    attrs[1] = .{ .key = "sends", .val = args[1] };
+    return makeViewNode(allocator, "key", attrs, &.{});
+}
+
 /// input("name", "placeholder") — text input field
 /// input("name", "placeholder", :type) — typed input (e.g. :password, :email, :number)
 fn viewInput(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
@@ -1749,6 +1771,58 @@ test "view canvas with id" {
     try std.testing.expectEqualStrings("id", result.view_node.attrs[0].key);
 }
 
+test "view timer with ms and sends" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ms = try alloc.create(Value);
+    ms.* = Value{ .integer = 500 };
+    const msg = try alloc.create(Value);
+    msg.* = Value{ .atom = "tick" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = ms;
+    args[1] = msg;
+    const result = try viewTimer(alloc, args);
+    try std.testing.expectEqualStrings("timer", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 2), result.view_node.attrs.len);
+    try std.testing.expectEqualStrings("ms", result.view_node.attrs[0].key);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .integer = 500 }));
+    try std.testing.expectEqualStrings("sends", result.view_node.attrs[1].key);
+    try std.testing.expect(result.view_node.attrs[1].val.eql(Value{ .atom = "tick" }));
+    try std.testing.expectEqual(@as(usize, 0), result.view_node.children.len);
+
+    // wrong arg types raise TypeError
+    args[0] = msg;
+    try std.testing.expectError(error.TypeError, viewTimer(alloc, args));
+}
+
+test "view key with code and sends" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const code = try alloc.create(Value);
+    code.* = Value{ .string = "ArrowLeft" };
+    const msg = try alloc.create(Value);
+    msg.* = Value{ .atom = "left" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = code;
+    args[1] = msg;
+    const result = try viewKey(alloc, args);
+    try std.testing.expectEqualStrings("key", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 2), result.view_node.attrs.len);
+    try std.testing.expectEqualStrings("code", result.view_node.attrs[0].key);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .string = "ArrowLeft" }));
+    try std.testing.expectEqualStrings("sends", result.view_node.attrs[1].key);
+    try std.testing.expect(result.view_node.attrs[1].val.eql(Value{ .atom = "left" }));
+    try std.testing.expectEqual(@as(usize, 0), result.view_node.children.len);
+
+    // wrong arg types raise TypeError
+    args[1] = code;
+    try std.testing.expectError(error.TypeError, viewKey(alloc, args));
+}
+
 test "view divider takes no args" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1840,6 +1914,8 @@ fn builtinToHtmlNative(allocator: std.mem.Allocator, args: []const *const Value)
 fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayListUnmanaged(u8)) !void {
     switch (val.*) {
         .view_node => |node| {
+            // Effect nodes (timer, key) are host instructions, not markup.
+            if (std.mem.eql(u8, node.tag, "timer") or std.mem.eql(u8, node.tag, "key")) return;
             const tag = blimpTagToHtml(node.tag);
             try buf.appendSlice(allocator, "<");
             try buf.appendSlice(allocator, tag);

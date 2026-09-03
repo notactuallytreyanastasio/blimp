@@ -66,6 +66,8 @@ All view functions return `view_node` values -- a tagged tree with attributes an
 |----------|-----------|---------|
 | `button(label)` | `<button>` | Static button |
 | `button(label, :msg)` | `<button onclick>` | Button that sends `:msg` to the actor |
+| `timer(ms, :msg)` | nothing | Effect: while mounted, the host sends `:msg` every `ms` milliseconds |
+| `key(code, :msg)` | nothing | Effect: while mounted, pressing the key whose `KeyboardEvent.key` equals `code` sends `:msg` |
 
 ## Actors as Components
 
@@ -106,6 +108,25 @@ The view handler reads from the actor's state fields directly. No props, no bind
 `button("label", :message_name)` creates a button that, when tapped, sends `:message_name` to the actor that owns this view. The runtime then re-calls `:view` and re-renders.
 
 This means any actor handler can be triggered from the UI. The same message that another actor would send via `send(ref, :increment)` is the same message the button sends. There's no separate "UI event" concept. Messages are messages.
+
+## Effects
+
+`timer(ms, :msg)` and `key(code, :msg)` are view nodes that render nothing.
+They are instructions to the host: as long as the current view contains them, the host keeps the effect alive.
+`timer(500, :tick)` builds `<timer ms=500 sends=:tick />`, and `key("ArrowLeft", :left)` builds `<key code="ArrowLeft" sends=:left />`.
+Both take exactly two arguments and raise a `TypeError` otherwise: `ms` must be an Int, `code` must be a String, and the message must be an atom.
+The actor decides what is running by deciding what is in the view, so pausing a game is just leaving the `timer` out of the view tree.
+
+The host contract, which `blimp-view.js` implements, is:
+
+- After every render the host walks the view tree and collects the `timer` and `key` nodes.
+- Timers are keyed by `ms|sends`. A key that was not present before starts a `setInterval` that sends `:msg` to the actor and re-renders; a key that is no longer present is cleared. Changing `ms` therefore restarts the timer.
+- Key nodes are collected into a map from `code` to `:msg`. One `keydown` listener on the document looks up `KeyboardEvent.key` in that map, sends the message if it matches, and calls `preventDefault` only for matched keys.
+- Unmounting the view clears every timer and drops the key map.
+
+In the WASM view JSON the two nodes arrive as `{"tag":"timer","attrs":{"ms":{"text":"500"},"sends":"tick"},"children":[]}` and `{"tag":"key","attrs":{"code":{"text":"ArrowLeft"},"sends":"left"},"children":[]}`.
+Integer and string attrs serialize as `{"text":"..."}` objects while atoms serialize as bare strings, so the host must accept both forms when reading `ms`.
+`to_html` skips both nodes, since server-rendered HTML has no host loop to run them.
 
 ## View Nodes as Values
 
