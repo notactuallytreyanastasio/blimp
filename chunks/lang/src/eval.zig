@@ -350,6 +350,7 @@ pub const Evaluator = struct {
                                 'n' => { buf.append(self.allocator, '\n') catch return error.OutOfMemory; i += 2; },
                                 'r' => { buf.append(self.allocator, '\r') catch return error.OutOfMemory; i += 2; },
                                 't' => { buf.append(self.allocator, '\t') catch return error.OutOfMemory; i += 2; },
+                                'e' => { buf.append(self.allocator, 0x1b) catch return error.OutOfMemory; i += 2; },
                                 '\\' => { buf.append(self.allocator, '\\') catch return error.OutOfMemory; i += 2; },
                                 '"' => { buf.append(self.allocator, '"') catch return error.OutOfMemory; i += 2; },
                                 else => { buf.append(self.allocator, s[i]) catch return error.OutOfMemory; i += 1; },
@@ -850,6 +851,8 @@ pub const Evaluator = struct {
         return self.callClosure(callee_val, ce.args);
     }
 
+    /// Call a closure with AST argument nodes. Arguments are evaluated in the
+    /// caller's scope, then the call is delegated to callClosureWithValues.
     fn callClosure(self: *Evaluator, callee_val: *const Value, arg_nodes: []const ast.Node) EvalError!*const Value {
         switch (callee_val.*) {
             .closure => |c| {
@@ -857,56 +860,11 @@ pub const Evaluator = struct {
                     self.last_error = errors.wrongArgCount("fn", c.params.len, arg_nodes.len, self.source);
                     return error.TypeError;
                 }
-
-                // Push a new scope with captured env + params
-                self.env.pushScope();
-
-                // Bind captured variables
-                for (c.env) |binding| {
-                    self.env.define(binding.name, binding.val);
+                const args = self.allocator.alloc(*const Value, arg_nodes.len) catch return error.OutOfMemory;
+                for (arg_nodes, 0..) |arg_node, i| {
+                    args[i] = try self.eval(arg_node);
                 }
-
-                // Bind parameters with optional type checking
-                for (c.params, 0..) |param, i| {
-                    const arg_val = self.eval(arg_nodes[i]) catch |err| {
-                        self.env.popScope();
-                        return err;
-                    };
-
-                    // Runtime type check if annotation present
-                    if (param.type_name) |expected_type| {
-                        if (!self.checkType(arg_val, expected_type)) {
-                            self.env.popScope();
-                            self.last_error = errors.typeMismatchDetailed(
-                                arg_val.typeName(),
-                                expected_type,
-                                param.name,
-                                self.source,
-                            );
-                            return error.TypeError;
-                        }
-                    }
-
-                    self.env.define(param.name, arg_val);
-                }
-
-                // Evaluate body
-                var last_val: *const Value = undefined;
-                var has_val = false;
-                for (c.body) |stmt| {
-                    last_val = self.eval(stmt) catch |err| {
-                        self.env.popScope();
-                        return err;
-                    };
-                    has_val = true;
-                }
-
-                self.env.popScope();
-
-                if (has_val) return last_val;
-                const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
-                nil_val.* = Value.nil;
-                return nil_val;
+                return self.callClosureWithValues(callee_val, args);
             },
             else => {
                 self.last_error = errors.notCallable(self.source);
@@ -1472,49 +1430,154 @@ pub const Evaluator = struct {
         return v;
     }
 
-    /// Call a closure with pre-evaluated Value arguments (not AST nodes)
-    fn callClosureWithValues(self: *Evaluator, callee_val: *const Value, args: []const *const Value) EvalError!*const Value {
-        switch (callee_val.*) {
-            .closure => |c| {
-                if (c.params.len != args.len) return error.TypeError;
+    /// Result of evaluating an expression in tail position: either a finished
+    /// value, or a pending closure call that the enclosing call loop runs in
+    /// place of the current frame (tail call elimination).
+    const TailResult = union(enum) {
+        value: *const Value,
+        call: struct { callee: *const Value, args: []const *const Value },
+    };
 
-                self.env.pushScope();
+    /// Turn a TailResult into a value, running any pending tail call. A
+    /// pending call owns whatever scopes were pushed above `base` on its way
+    /// out (case pattern bindings), so the callee still sees them, exactly as
+    /// it would have if the call had run inside the branch. They are popped
+    /// once the call is done.
+    fn resolveTail(self: *Evaluator, tr: TailResult, base: usize) EvalError!*const Value {
+        switch (tr) {
+            .value => |v| return v,
+            .call => |c| {
+                const result = self.callClosureWithValues(c.callee, c.args);
+                self.env.popTo(base);
+                return result;
+            },
+        }
+    }
 
-                // Bind captured variables
-                for (c.env) |binding| {
-                    self.env.define(binding.name, binding.val);
-                }
+    /// Evaluate a body: every statement but the last normally, the last one in
+    /// tail position. An empty body yields nil.
+    fn evalBodyTail(self: *Evaluator, body: []const ast.Node) EvalError!TailResult {
+        if (body.len == 0) {
+            const result = self.allocator.create(Value) catch return error.OutOfMemory;
+            result.* = .nil;
+            return .{ .value = result };
+        }
+        for (body[0 .. body.len - 1]) |stmt| {
+            _ = try self.eval(stmt);
+        }
+        return self.evalTail(body[body.len - 1]);
+    }
 
-                // Bind parameters with type checking
-                for (c.params, 0..) |param, i| {
-                    if (param.type_name) |expected_type| {
-                        if (!self.checkType(args[i], expected_type)) {
-                            self.env.popScope();
+    /// Evaluate a node in tail position. A call to a closure becomes a pending
+    /// .call (args evaluated here, in the current scope); case/situation select
+    /// their branch and evaluate its body in tail position; anything else is
+    /// evaluated normally.
+    fn evalTail(self: *Evaluator, node: ast.Node) EvalError!TailResult {
+        switch (node.kind) {
+            .func_call => |call| {
+                if (self.env.lookup(call.name)) |val| {
+                    if (val.* == .closure) {
+                        // Same reduction accounting as eval()
+                        self.reductions -= 1;
+                        if (self.reductions <= 0) {
+                            self.reductions = 4000;
+                            self.runScheduler(100);
+                        }
+                        const c = val.closure;
+                        if (c.params.len != call.args.len) {
+                            self.last_error = errors.wrongArgCount("fn", c.params.len, call.args.len, self.source);
                             return error.TypeError;
                         }
+                        const args = self.allocator.alloc(*const Value, call.args.len) catch return error.OutOfMemory;
+                        for (call.args, 0..) |arg_node, i| {
+                            args[i] = try self.eval(arg_node);
+                        }
+                        return .{ .call = .{ .callee = val, .args = args } };
                     }
-                    self.env.define(param.name, args[i]);
                 }
-
-                // Evaluate body
-                var last_val: *const Value = undefined;
-                var has_val = false;
-                for (c.body) |stmt| {
-                    last_val = self.eval(stmt) catch |err| {
-                        self.env.popScope();
-                        return err;
-                    };
-                    has_val = true;
-                }
-
-                self.env.popScope();
-
-                if (has_val) return last_val;
-                const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
-                nil_val.* = Value.nil;
-                return nil_val;
+                return .{ .value = try self.eval(node) };
             },
-            else => return error.TypeError,
+            .situation => |sit| return self.evalSituationTail(sit),
+            .case_expr => |ce| return self.evalSituationTail(ast.Node.Situation{
+                .subject = ce.subject,
+                .branches = ce.branches,
+            }),
+            else => return .{ .value = try self.eval(node) },
+        }
+    }
+
+    /// Call a closure with pre-evaluated Value arguments (not AST nodes).
+    /// Runs as a loop: when the body ends in a tail call to another closure the
+    /// loop continues with the new callee and args instead of recursing, so
+    /// tail-recursive defs run in constant stack.
+    ///
+    /// Scoping is deliberately the same as a plain call. A Blimp closure sees
+    /// its caller's locals (scopes stack, lookups fall through), so instead of
+    /// popping the frame before the tail call, the frame and any case scopes
+    /// left above it are collapsed into one scope and the callee's bindings go
+    /// on top. The callee sees exactly what it would have seen without the
+    /// elimination, and the scope stack stays flat.
+    fn callClosureWithValues(self: *Evaluator, callee_val: *const Value, args_in: []const *const Value) EvalError!*const Value {
+        var callee = callee_val;
+        var args = args_in;
+        const base = self.env.depth();
+        self.env.pushScope();
+        while (true) {
+            const c = switch (callee.*) {
+                .closure => |c| c,
+                else => {
+                    self.env.popTo(base);
+                    self.last_error = errors.notCallable(self.source);
+                    return error.TypeError;
+                },
+            };
+            if (c.params.len != args.len) {
+                self.env.popTo(base);
+                self.last_error = errors.wrongArgCount("fn", c.params.len, args.len, self.source);
+                return error.TypeError;
+            }
+
+            // Bind captured variables
+            for (c.env) |binding| {
+                self.env.define(binding.name, binding.val);
+            }
+
+            // Bind parameters with runtime type checking
+            for (c.params, 0..) |param, i| {
+                if (param.type_name) |expected_type| {
+                    if (!self.checkType(args[i], expected_type)) {
+                        self.env.popTo(base);
+                        self.last_error = errors.typeMismatchDetailed(
+                            args[i].typeName(),
+                            expected_type,
+                            param.name,
+                            self.source,
+                        );
+                        return error.TypeError;
+                    }
+                }
+                self.env.define(param.name, args[i]);
+            }
+
+            // Evaluate body with the last statement in tail position
+            const tr = self.evalBodyTail(c.body) catch |err| {
+                self.env.popTo(base);
+                return err;
+            };
+
+            switch (tr) {
+                .value => |v| {
+                    self.env.popTo(base);
+                    return v;
+                },
+                .call => |next| {
+                    // Keep the frame (and any case scopes above it) as one
+                    // scope, then bind the next callee on top of it
+                    self.env.collapseTo(base);
+                    callee = next.callee;
+                    args = next.args;
+                },
+            }
         }
     }
 
@@ -1983,6 +2046,16 @@ pub const Evaluator = struct {
     }
 
     fn evalSituation(self: *Evaluator, sit: ast.Node.Situation) EvalError!*const Value {
+        const base = self.env.depth();
+        return self.resolveTail(try self.evalSituationTail(sit), base);
+    }
+
+    /// Select the matching branch of a case/situation and evaluate its body in
+    /// tail position. When the branch ends in a pending call the pattern
+    /// bindings' scope is left on the stack for the call to see (see
+    /// resolveTail and callClosureWithValues, which pop it); otherwise it is
+    /// popped here.
+    fn evalSituationTail(self: *Evaluator, sit: ast.Node.Situation) EvalError!TailResult {
         const subject = try self.eval(sit.subject.*);
 
         for (sit.branches) |branch| {
@@ -2005,8 +2078,11 @@ pub const Evaluator = struct {
                         }
                     }
 
-                    const result = self.evalBody(branch.body);
-                    self.env.popScope();
+                    const result = self.evalBodyTail(branch.body) catch |err| {
+                        self.env.popScope();
+                        return err;
+                    };
+                    if (result == .value) self.env.popScope();
                     return result;
                 }
             } else {
@@ -2014,16 +2090,16 @@ pub const Evaluator = struct {
                 // If the body contains a Hole node (directive-only `_ # comment`),
                 // shell out to Claude to fill it in.
                 if (branch.body.len == 1 and branch.body[0].kind == .hole) {
-                    return self.evalHole(branch.body[0].kind.hole, branch.body[0].loc, subject);
+                    return .{ .value = try self.evalHole(branch.body[0].kind.hole, branch.body[0].loc, subject) };
                 }
-                return self.evalBody(branch.body);
+                return self.evalBodyTail(branch.body);
             }
         }
 
         // No branch matched, return nil
         const result = self.allocator.create(Value) catch return error.OutOfMemory;
         result.* = .nil;
-        return result;
+        return .{ .value = result };
     }
 
     /// Hole operator: called when a situation hits a `_ # directive` branch.
@@ -2063,7 +2139,9 @@ pub const Evaluator = struct {
             "  Math:        max  min  abs  rem  floor  ceil  round  random\n" ++
             "  Logic:       not  nil?\n" ++
             "  Maps:        put  lookup  keys  values  merge\n" ++
-            "  IO:          print  now\n\n" ++
+            "  IO:          print  now  now_ms\n" ++
+            "  Terminal:    term_raw  term_write  read_key  sleep_ms\n" ++
+            "  Views:       stack  row  grid  text  heading  code_block  button  timer  key\n\n" ++
             "Write one or more handler-body statements. No explanation, no markdown, no code fences,\n" ++
             "no surrounding do/end. Just the raw statements.\n\n"
         ) catch return error.OutOfMemory;
@@ -3030,6 +3108,83 @@ test "handler with guard" {
     // Check balance persisted
     const r2 = try evalStmt(alloc, &evaluator, "acc <- :get_balance");
     try std.testing.expect(r2.eql(Value{ .integer = 70 }));
+}
+
+test "tail call still sees the caller's locals" {
+    // Blimp closures see their caller's locals (scopes stack). Tail call
+    // elimination must not change that.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = try evalProgram(alloc, &evaluator,
+        \\def show() do msg end
+        \\def run() do
+        \\  msg = "hi"
+        \\  show()
+        \\end
+        \\run()
+    );
+    try std.testing.expect(result.eql(Value{ .string = "hi" }));
+    try std.testing.expectEqual(@as(usize, 1), evaluator.env.depth());
+}
+
+test "tail call in a case branch sees the pattern bindings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    // case in tail position of a def
+    const r1 = try evalProgram(alloc, &evaluator,
+        \\def show() do a end
+        \\def pick(t: Tuple) do
+        \\  case t do
+        \\    {a, _} -> show()
+        \\  end
+        \\end
+        \\pick({7, 8})
+    );
+    try std.testing.expect(r1.eql(Value{ .integer = 7 }));
+    // case not in tail position (assigned), inside and outside a def
+    const r2 = try evalProgram(alloc, &evaluator,
+        \\def pick2(t: Tuple) do
+        \\  v = case t do
+        \\    {a, _} -> show()
+        \\  end
+        \\  v + 1
+        \\end
+        \\pick2({7, 8})
+    );
+    try std.testing.expect(r2.eql(Value{ .integer = 8 }));
+    const r3 = try evalProgram(alloc, &evaluator,
+        \\w = case {3, 4} do
+        \\  {a, b} -> show()
+        \\end
+        \\w
+    );
+    try std.testing.expect(r3.eql(Value{ .integer = 3 }));
+    try std.testing.expectEqual(@as(usize, 1), evaluator.env.depth());
+}
+
+test "tail recursion runs in constant stack" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = try evalProgram(alloc, &evaluator,
+        \\def count(n: Int, acc: Int) -> Int do
+        \\  case n do
+        \\    0 -> acc
+        \\    _ -> count(n - 1, acc + 1)
+        \\  end
+        \\end
+        \\count(50000, 0)
+    );
+    try std.testing.expect(result.eql(Value{ .integer = 50000 }));
+    try std.testing.expectEqual(@as(usize, 1), evaluator.env.depth());
 }
 
 test "spawn template not found error" {
