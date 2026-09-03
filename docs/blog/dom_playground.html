@@ -467,6 +467,7 @@ reg <- :view';
 
     setTimeout(function() {
       if (simInterval) { clearInterval(simInterval); simInterval = null; }
+      stopEffects();
       blimp.reset();
       mountedActors = {};
       viewArea.innerHTML = '';
@@ -575,6 +576,7 @@ reg <- :view';
       code: 'actor Counter do\n  state count: Int :: 0\n  on :up do become count: count + 1 end\n  on :down do become count: count - 1 end\n  on :view do\n    stack(\n      heading("Counter"),\n      heading(to_string(count), 2),\n      row(button("- 1", :down), button("+ 1", :up))\n    )\n  end\nend\nc = spawn Counter\nc <- :view' },
     { title: 'Toggle', desc: 'On/off switch',
       code: 'actor Toggle do\n  state on: Bool :: false\n  on :flip do become on: not(on) end\n  on :view do\n    stack(\n      heading("Toggle"),\n      text(if on do "ON" else "OFF" end),\n      button("Flip", :flip)\n    )\n  end\nend\nt = spawn Toggle\nt <- :view' },
+    { title: 'Tetris', desc: 'Full game: timer + key effects, buttons for touch', src: 'tetris.blimp' },
     { title: 'Hello View', desc: 'No actors, just view primitives',
       code: 'stack(\n  heading("Hello from Blimp"),\n  text("Views are first-class values."),\n  divider(),\n  row(bold("Bold"), italic("Italic"), code("code")),\n  blockquote("Actors are alive.")\n)' },
     { title: 'Scoreboard', desc: 'Two teams',
@@ -587,7 +589,14 @@ reg <- :view';
       var d = document.createElement('div');
       d.className = 'ex-item';
       d.innerHTML = '<div class="ex-title">' + esc(ex.title) + '</div><div class="ex-desc">' + esc(ex.desc) + '</div>';
-      d.addEventListener('click', function() { editor.value = ex.code; overlay.classList.remove('open'); showTab('code'); });
+      d.addEventListener('click', function() {
+        overlay.classList.remove('open'); showTab('code');
+        if (ex.code !== undefined) { editor.value = ex.code; return; }
+        editor.value = '# loading ' + ex.src + ' ...';
+        fetch(ex.src, { cache: 'no-store' }).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+          .then(function(t) { editor.value = t; })
+          .catch(function(e) { editor.value = '# could not load ' + ex.src + ': ' + e.message; });
+      });
       drawer.appendChild(d);
     });
   }
@@ -608,7 +617,7 @@ reg <- :view';
       case 'grid': el = mk('div', 'blimp-grid'); break;
       case 'text': el = mk('span', 'blimp-text'); break;
       case 'heading':
-        var lv = Math.max(1, Math.min(6, (typeof attrs.level === 'number') ? attrs.level : 1));
+        var lv = Math.max(1, Math.min(6, parseInt(attrVal(attrs.level), 10) || 1));
         el = document.createElement('h' + lv); break;
       case 'bold': el = mk('strong', 'blimp-bold'); break;
       case 'italic': el = mk('em', 'blimp-italic'); break;
@@ -626,6 +635,7 @@ reg <- :view';
         el = mk('button', 'blimp-button');
         if (attrs.sends) (function(msg) { el.addEventListener('click', function() { sendToActor(msg); }); })(attrs.sends);
         break;
+      case 'timer': case 'key': return document.createTextNode(''); // effects, see reconcileEffects
       default: el = document.createElement('div');
     }
     children.forEach(function(c) { el.appendChild(renderView(c)); });
@@ -633,6 +643,49 @@ reg <- :view';
   }
 
   function mk(tag, cls) { var e = document.createElement(tag); e.className = cls; return e; }
+  function attrVal(v) { return (v && typeof v === 'object' && v.text !== undefined) ? v.text : v; }
+
+  // ── Effects: timer(ms, :msg) and key("ArrowLeft", :msg) nodes ──
+
+  var timers = {}, keyMap = {};
+
+  function collectEffects(node, fx) {
+    if (!node || node.text !== undefined) return;
+    var a = node.attrs || {};
+    if (node.tag === 'timer') {
+      var ms = parseInt(attrVal(a.ms), 10), sends = attrVal(a.sends);
+      if (ms > 0 && sends) fx.timers[ms + '|' + sends] = { ms: ms, sends: sends };
+    } else if (node.tag === 'key' && a.sends) {
+      fx.keys[String(attrVal(a.code))] = attrVal(a.sends);
+    }
+    (node.children || []).forEach(function(c) { collectEffects(c, fx); });
+  }
+
+  function reconcileEffects() {
+    var fx = { timers: {}, keys: {} };
+    for (var r in mountedActors) if (mountedActors[r].view) collectEffects(mountedActors[r].view, fx);
+    for (var k in timers) if (!fx.timers[k]) { clearInterval(timers[k]); delete timers[k]; }
+    Object.keys(fx.timers).forEach(function(k) {
+      if (timers[k]) return;
+      timers[k] = setInterval(function() { if (timers[k]) sendToActor(fx.timers[k].sends); }, fx.timers[k].ms);
+    });
+    keyMap = fx.keys;
+  }
+
+  function stopEffects() {
+    for (var k in timers) clearInterval(timers[k]);
+    timers = {}; keyMap = {};
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    var msg = keyMap[e.key];
+    if (!msg) return;
+    e.preventDefault();
+    sendToActor(msg);
+  });
 
   function mountView(viewData) {
     var state = blimp.getState();
@@ -649,6 +702,7 @@ reg <- :view';
     for (var r in mountedActors) {
       if (mountedActors[r].view) viewArea.appendChild(renderView(mountedActors[r].view));
     }
+    reconcileEffects();
   }
 
   function sendToActor(message) {
@@ -661,12 +715,18 @@ reg <- :view';
       for (var v of state.vars) { if (v.value === ref) { varName = v.name; break; } }
     }
     if (!varName) return;
-    blimp.eval(varName + ' <- :' + message);
-    var vr = blimp.eval(varName + ' <- :view');
+    var sr = blimp.eval(varName + ' <- :' + message);
+    var vr = sr.ok ? blimp.eval(varName + ' <- :view') : sr;
     if (viz) viz.feed(blimp.getState(), varName + ' <- :' + message);
     if (vr.ok && vr.view) {
       mountedActors[ref] = { view: vr.view };
       renderAll();
+    } else if (!vr.ok) {
+      stopEffects();
+      var div = document.createElement('div');
+      div.className = 'view-error';
+      div.textContent = vr.error;
+      viewArea.appendChild(div);
     }
     refreshState();
   }
