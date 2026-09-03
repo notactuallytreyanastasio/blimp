@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tetris in Blimp</title>
+
+<meta name="description" content="Tetris written in Blimp, running in the browser through Blimp's own view DSL. No game logic in JavaScript.">
+<meta name="author" content="Bobby Grayson">
+
+<meta property="og:type" content="article">
+<meta property="og:title" content="Tetris in Blimp">
+<meta property="og:description" content="Tetris written in Blimp, running in the browser through Blimp's own view DSL. No game logic in JavaScript.">
+<meta property="og:url" content="https://blimp.bobbby.online/blog/tetris.html">
+<meta property="og:site_name" content="Blimp Design Journal">
+
+<link rel="stylesheet" href="style.css">
+<style>
+body {
+  max-width: 48ch;
+  padding-bottom: 3rem;
+}
+
+.status {
+  color: #999;
+  font-size: 0.85rem;
+  margin-bottom: 1.5rem;
+}
+
+.status .src { margin-left: 0.75rem; }
+
+#game {
+  min-height: 20rem;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* view DSL elements, light theme */
+.blimp-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.blimp-row { display: flex; flex-direction: row; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.blimp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 0.5rem; }
+.blimp-text { color: #222; }
+.blimp-bold { font-weight: 600; color: #000; }
+.blimp-italic { font-style: italic; color: #555; }
+.blimp-code { background: #f0f0f0; padding: 0.1em 0.4em; border-radius: 3px; color: #c7254e; }
+.blimp-code-block {
+  background: #1a1a2e;
+  border: 1px solid #2a2a3e;
+  color: #d4d4d4;
+  padding: 0.6rem 0.75rem;
+  margin: 0;
+  border-radius: 3px;
+  white-space: pre;
+  overflow: hidden;
+  font-size: 18px;
+  line-height: 1.15;
+  letter-spacing: 0;
+  width: max-content;
+  max-width: 100%;
+}
+.blimp-blockquote { border-left: 2px solid #ccc; padding-left: 1rem; color: #666; margin: 0; }
+.blimp-divider { border: none; border-top: 1px solid #e0e0e0; margin: 0.4rem 0; }
+.blimp-list { list-style: disc; padding-left: 1.5rem; margin: 0; }
+.blimp-list li { margin-bottom: 0.2rem; }
+.blimp-link { color: #0066cc; text-decoration: underline; }
+.blimp-image { max-width: 100%; border-radius: 3px; }
+.blimp-button {
+  background: #fff;
+  color: #222;
+  border: 1px solid #bbb;
+  padding: 0.5rem 0.9rem;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 15px;
+  min-height: 44px;
+  min-width: 44px;
+  -webkit-appearance: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.blimp-button:hover { border-color: #0066cc; }
+.blimp-button:active { background: #e8f0fa; }
+.blimp-error {
+  background: #fff5f5;
+  border: 1px solid #f0c0c0;
+  color: #a00;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  font-size: 12px;
+  margin: 0;
+}
+
+#game h1 { font-size: 1.2rem; margin: 0; }
+#game h2 { font-size: 1rem; margin: 0; }
+#game h3 { font-size: 0.95rem; margin: 0; }
+
+@media (max-width: 480px) {
+  body { padding: 0.75rem 0.75rem 2rem 0.75rem; }
+  .blimp-code-block { font-size: 14px; line-height: 1.1; padding: 0.4rem 0.5rem; }
+  .blimp-row { gap: 0.35rem; }
+  .blimp-button { padding: 0.4rem 0.6rem; font-size: 14px; }
+}
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="index.html">&larr; blimp / design journal</a></div>
+
+<h1>Tetris in Blimp</h1>
+<div class="status"><span id="status">loading wasm...</span><a class="src" href="tetris.blimp">view source</a></div>
+
+<div id="game"></div>
+
+<script src="repl/blimp.js"></script>
+<script src="repl/blimp-view.js"></script>
+<script>
+(async function () {
+  var statusEl = document.getElementById('status');
+  var container = document.getElementById('game');
+  function status(msg, color) { statusEl.textContent = msg; statusEl.style.color = color || '#999'; }
+
+  var blimp = new Blimp();
+  blimp.onPrint(function () {});
+  blimp.onError(function (msg) { console.error(msg); });
+
+  try {
+    await blimp.init('repl/blimp.wasm');
+  } catch (e) {
+    status('wasm failed to load: ' + e.message, '#c7254e');
+    return;
+  }
+
+  var source;
+  try {
+    var res = await fetch('tetris.blimp', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    source = await res.text();
+  } catch (e) {
+    status('could not fetch tetris.blimp: ' + e.message, '#c7254e');
+    return;
+  }
+
+  var view = new BlimpView(blimp, container, {
+    onError: function (err) { status('error (see below)', '#c7254e'); },
+    onRender: function () { status('mounted'); }
+  });
+  window.__blimpView = view;
+
+  status('evaluating...');
+  view.mount(source, 'game');
+})();
+</script>
+</body>
+</html>
