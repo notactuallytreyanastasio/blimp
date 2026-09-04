@@ -285,7 +285,17 @@ fn updateStateJson() void {
         w.print("{d}", .{msg.target_id}) catch {};
         w.writeAll(">\",\"message\":\"") catch {};
         w.writeAll(msg.message) catch {};
-        w.writeAll("\"}") catch {};
+        w.writeAll("\",\"from\":") catch {};
+        if (msg.source_type) |src_type| {
+            w.writeAll("\"ref<") catch {};
+            w.writeAll(src_type) catch {};
+            w.writeAll(":") catch {};
+            w.print("{d}", .{msg.source_id.?}) catch {};
+            w.writeAll(">\"") catch {};
+        } else {
+            w.writeAll("null") catch {};
+        }
+        w.writeAll("}") catch {};
     }
     w.writeAll("]}") catch {};
 

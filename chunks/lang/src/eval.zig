@@ -26,7 +26,7 @@ pub const Evaluator = struct {
     /// Original argv for re-exec after Hole patching.
     restart_argv: ?[]const [:0]const u8 = null,
     actor_ctx: ?*ActorContext = null,
-    msg_log: [64]MsgLogEntry = undefined,
+    msg_log: [msg_log_cap]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
     bubble_reason: ?*const Value = null,
     /// Reduction counter: decremented on each eval. Yield when 0.
@@ -34,11 +34,16 @@ pub const Evaluator = struct {
     /// Scheduler instance (null in non-scheduled mode)
     scheduler: ?*@import("scheduler.zig").Scheduler = null,
 
-    // Message log for canvas rays
+    // Message log for canvas rays. Each send records its target and, when it
+    // happens inside a handler, the actor that sent it. Cleared by the host
+    // after every read (wasm_api state JSON).
+    pub const msg_log_cap = 256;
     pub const MsgLogEntry = struct {
         target_id: u64,
         target_type: []const u8,
         message: []const u8,
+        source_id: ?u64 = null,
+        source_type: ?[]const u8 = null,
     };
 
     pub const ActorContext = struct {
@@ -347,13 +352,34 @@ pub const Evaluator = struct {
                     while (i < s.len) {
                         if (s[i] == '\\' and i + 1 < s.len) {
                             switch (s[i + 1]) {
-                                'n' => { buf.append(self.allocator, '\n') catch return error.OutOfMemory; i += 2; },
-                                'r' => { buf.append(self.allocator, '\r') catch return error.OutOfMemory; i += 2; },
-                                't' => { buf.append(self.allocator, '\t') catch return error.OutOfMemory; i += 2; },
-                                'e' => { buf.append(self.allocator, 0x1b) catch return error.OutOfMemory; i += 2; },
-                                '\\' => { buf.append(self.allocator, '\\') catch return error.OutOfMemory; i += 2; },
-                                '"' => { buf.append(self.allocator, '"') catch return error.OutOfMemory; i += 2; },
-                                else => { buf.append(self.allocator, s[i]) catch return error.OutOfMemory; i += 1; },
+                                'n' => {
+                                    buf.append(self.allocator, '\n') catch return error.OutOfMemory;
+                                    i += 2;
+                                },
+                                'r' => {
+                                    buf.append(self.allocator, '\r') catch return error.OutOfMemory;
+                                    i += 2;
+                                },
+                                't' => {
+                                    buf.append(self.allocator, '\t') catch return error.OutOfMemory;
+                                    i += 2;
+                                },
+                                'e' => {
+                                    buf.append(self.allocator, 0x1b) catch return error.OutOfMemory;
+                                    i += 2;
+                                },
+                                '\\' => {
+                                    buf.append(self.allocator, '\\') catch return error.OutOfMemory;
+                                    i += 2;
+                                },
+                                '"' => {
+                                    buf.append(self.allocator, '"') catch return error.OutOfMemory;
+                                    i += 2;
+                                },
+                                else => {
+                                    buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
+                                    i += 1;
+                                },
                             }
                         } else {
                             buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
@@ -751,7 +777,8 @@ pub const Evaluator = struct {
         v.* = Value{ .closure = .{
             .params = ds.params,
             .body = ds.body,
-            .env = captured, .return_type = ds.return_type,
+            .env = captured,
+            .return_type = ds.return_type,
         } };
 
         self.env.define(ds.name, v);
@@ -880,11 +907,14 @@ pub const Evaluator = struct {
         switch (target_val.*) {
             .actor_ref => |ref| {
                 // Log for canvas rays
-                if (self.msg_log_count < 64) {
+                if (self.msg_log_count < msg_log_cap) {
+                    const source: ?registry_mod.ActorRef = if (self.actor_ctx) |ctx| ctx.entry.ref else null;
                     self.msg_log[self.msg_log_count] = .{
                         .target_id = ref.id,
                         .target_type = ref.type_name,
                         .message = ms.message,
+                        .source_id = if (source) |src| src.id else null,
+                        .source_type = if (source) |src| src.type_name else null,
                     };
                     self.msg_log_count += 1;
                 }
@@ -1157,19 +1187,31 @@ pub const Evaluator = struct {
             },
             // Comparisons: nil on either side returns false instead of TypeError
             .lt => {
-                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                if (left.* == .nil or right.* == .nil) {
+                    result.* = Value{ .boolean = false };
+                    return result;
+                }
                 return self.evalCompareOp(left.*, right.*, result, .lt);
             },
             .gt => {
-                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                if (left.* == .nil or right.* == .nil) {
+                    result.* = Value{ .boolean = false };
+                    return result;
+                }
                 return self.evalCompareOp(left.*, right.*, result, .gt);
             },
             .lte => {
-                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                if (left.* == .nil or right.* == .nil) {
+                    result.* = Value{ .boolean = false };
+                    return result;
+                }
                 return self.evalCompareOp(left.*, right.*, result, .lte);
             },
             .gte => {
-                if (left.* == .nil or right.* == .nil) { result.* = Value{ .boolean = false }; return result; }
+                if (left.* == .nil or right.* == .nil) {
+                    result.* = Value{ .boolean = false };
+                    return result;
+                }
                 return self.evalCompareOp(left.*, right.*, result, .gte);
             },
             .and_op => {
@@ -1786,7 +1828,10 @@ pub const Evaluator = struct {
                 // Check for hole args -- substitute left value for _
                 var has_hole = false;
                 for (call.args) |arg| {
-                    if (arg.kind == .hole) { has_hole = true; break; }
+                    if (arg.kind == .hole) {
+                        has_hole = true;
+                        break;
+                    }
                 }
 
                 // Build a modified func_call node with the hole replaced by a synthetic node
@@ -2116,8 +2161,7 @@ pub const Evaluator = struct {
         var ctx_buf: std.ArrayListUnmanaged(u8) = .{};
         defer ctx_buf.deinit(self.allocator);
 
-        ctx_buf.appendSlice(self.allocator,
-            "You are filling in a Hole inside a Blimp actor message handler.\n" ++
+        ctx_buf.appendSlice(self.allocator, "You are filling in a Hole inside a Blimp actor message handler.\n" ++
             "Blimp is an actor-model language. You are writing the BODY of a handler branch.\n\n" ++
             "Syntax:\n" ++
             "  Atoms: :ok  :error  :valid  :unknown\n" ++
@@ -2143,8 +2187,7 @@ pub const Evaluator = struct {
             "  Terminal:    term_raw  term_write  read_key  sleep_ms\n" ++
             "  Views:       stack  row  grid  text  heading  code_block  button  timer  key\n\n" ++
             "Write one or more handler-body statements. No explanation, no markdown, no code fences,\n" ++
-            "no surrounding do/end. Just the raw statements.\n\n"
-        ) catch return error.OutOfMemory;
+            "no surrounding do/end. Just the raw statements.\n\n") catch return error.OutOfMemory;
 
         if (hole.directive) |dir| {
             ctx_buf.appendSlice(self.allocator, "Directive: ") catch return error.OutOfMemory;
@@ -2192,9 +2235,7 @@ pub const Evaluator = struct {
         const prompt = ctx_buf.items[0 .. ctx_buf.items.len - 1]; // without null
 
         // Announce the Hole to stderr
-        std.debug.print("\n[Hole] Calling Claude to fill in: {s}\n", .{
-            if (hole.directive) |d| d else "(no directive)"
-        });
+        std.debug.print("\n[Hole] Calling Claude to fill in: {s}\n", .{if (hole.directive) |d| d else "(no directive)"});
 
         // Shell out: claude -p "<prompt>"
         var argv = [_][]const u8{ "claude", "-p", prompt };
@@ -2257,7 +2298,10 @@ pub const Evaluator = struct {
         const saved_source = self.source;
         self.source = src_copy;
         var last: *const Value = blk: {
-            const v = self.allocator.create(Value) catch { self.source = saved_source; return error.OutOfMemory; };
+            const v = self.allocator.create(Value) catch {
+                self.source = saved_source;
+                return error.OutOfMemory;
+            };
             v.* = .nil;
             break :blk v;
         };
@@ -2302,7 +2346,7 @@ pub const Evaluator = struct {
         // Detect indentation of the original line
         var indent_len: usize = 0;
         while (indent_len < original_line.len and
-               (original_line[indent_len] == ' ' or original_line[indent_len] == '\t'))
+            (original_line[indent_len] == ' ' or original_line[indent_len] == '\t'))
         {
             indent_len += 1;
         }
@@ -2973,6 +3017,56 @@ test "ref comparison" {
     // c1 == c2 should be false
     const r2 = try evalStmt(alloc, &evaluator, "c1 == c2");
     try std.testing.expect(r2.eql(Value{ .boolean = false }));
+}
+
+test "message log records the sending actor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = try evalProgram(alloc, &evaluator,
+        \\actor Ponger do
+        \\  on :ping do reply :pong end
+        \\end
+        \\actor Pinger do
+        \\  state peer: Any :: nil
+        \\  on :go do reply peer <- :ping end
+        \\end
+        \\b = spawn Ponger
+        \\a = spawn Pinger, peer: b
+        \\a <- :go
+    );
+    try std.testing.expect(result.* == .atom);
+    try std.testing.expectEqualStrings("pong", result.atom);
+
+    try std.testing.expectEqual(@as(u32, 2), evaluator.msg_log_count);
+    // top-level send: no source actor
+    try std.testing.expectEqualStrings("Pinger", evaluator.msg_log[0].target_type);
+    try std.testing.expectEqualStrings("go", evaluator.msg_log[0].message);
+    try std.testing.expect(evaluator.msg_log[0].source_type == null);
+    // the send inside Pinger's handler names Pinger as the source
+    try std.testing.expectEqualStrings("Ponger", evaluator.msg_log[1].target_type);
+    try std.testing.expectEqualStrings("ping", evaluator.msg_log[1].message);
+    try std.testing.expectEqualStrings("Pinger", evaluator.msg_log[1].source_type.?);
+    try std.testing.expectEqual(evaluator.msg_log[0].target_id, evaluator.msg_log[1].source_id.?);
+}
+
+test "message log stops at its capacity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Ponger do
+        \\  on :ping do reply :pong end
+        \\end
+        \\b = spawn Ponger
+        \\for i in range(1, 300) do b <- :ping end
+    );
+    try std.testing.expectEqual(@as(u32, Evaluator.msg_log_cap), evaluator.msg_log_count);
+    try std.testing.expect(Evaluator.msg_log_cap >= 256);
 }
 
 test "actor state persists across messages" {
