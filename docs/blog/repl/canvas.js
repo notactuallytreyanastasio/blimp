@@ -62,6 +62,7 @@ class BlimpCanvas {
       for (var v of state.vars) {
         if (v.value && v.value.startsWith('ref<')) continue; // skip actor refs
         if (v.value && v.value.startsWith(':')) continue; // skip actor templates
+        if (v.value && v.value.startsWith('fn')) continue; // skip defs and closures
         var vid = 'var:' + v.name;
         var h = this._hash('val|' + v.name + '=' + v.value);
         var existing = this.nodes.find(n => n.id === vid);
@@ -112,19 +113,24 @@ class BlimpCanvas {
     // msg.from is the sending actor when the send happened inside a handler,
     // null for sends from the page or REPL. A burst of sends from one eval is
     // staggered so it reads as a sequence instead of a single flash.
+    // The same send repeated in one eval (a board asking itself :blocked?
+    // once per cell) collapses into one ray labelled with the count.
     if (state.messages) {
-      var t0 = performance.now(), i = 0;
+      var t0 = performance.now(), i = 0, seen = {};
       for (var msg of state.messages) {
-        if (this.nodes.find(n => n.id === msg.target)) {
-          this.rays.push({
-            fromId: msg.from || null,
-            toId: msg.target,
-            t0: t0 + Math.min(i, 40) * 30,
-            color: this._strColor(msg.message),
-            label: ':' + msg.message
-          });
-          i++;
-        }
+        if (!this.nodes.find(n => n.id === msg.target)) continue;
+        var key = (msg.from || '') + '>' + msg.target + ':' + msg.message;
+        if (seen[key]) { seen[key].count++; seen[key].label = ':' + msg.message + ' \u00d7' + seen[key].count; continue; }
+        seen[key] = {
+          fromId: msg.from || null,
+          toId: msg.target,
+          t0: t0 + Math.min(i, 40) * 30,
+          color: this._strColor(msg.message),
+          label: ':' + msg.message,
+          count: 1
+        };
+        this.rays.push(seen[key]);
+        i++;
       }
     }
 
