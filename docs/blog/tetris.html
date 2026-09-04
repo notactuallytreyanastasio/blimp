@@ -41,6 +41,32 @@ body {
 }
 #viz { display: block; }
 .viz .caption { color: #999; font-size: 0.85rem; margin: 0.6rem 0 0; line-height: 1.4; }
+
+/* inspector: actor detail + live ticker */
+.inspect { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; font-size: 12px; }
+.inspect h3 { font-size: 0.8rem; color: #999; font-weight: 400; margin: 0 0 0.4rem; letter-spacing: 0.05em; }
+.inspect .pane { min-width: 0; }
+#detail, #ticker { background: #f6f6f8; border: 1px solid #e0e0e4; border-radius: 4px; padding: 0.5rem 0.6rem; }
+.bi-actors { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.5rem; }
+.bi-chip { font: inherit; font-size: 11px; border: 1px solid #ccc; background: #fff; border-radius: 3px; padding: 0.15rem 0.4rem; cursor: pointer; color: #444; }
+.bi-chip.bi-selected, .bi-ref.bi-selected { border-color: #0066cc; color: #0066cc; }
+.bi-head { font-weight: 600; margin-bottom: 0.2rem; }
+.bi-id { color: #888; font-weight: 400; }
+.bi-counts { color: #666; margin-bottom: 0.4rem; white-space: pre; }
+.bi-state { border-collapse: collapse; margin-bottom: 0.5rem; width: 100%; table-layout: fixed; }
+.bi-state th { text-align: left; color: #666; font-weight: 400; padding: 0.1rem 0.5rem 0.1rem 0; width: 6.5em; vertical-align: top; }
+.bi-state td { padding: 0.1rem 0; word-break: break-all; color: #222; }
+.bi-history, .bi-ticker { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+.bi-row { padding: 0.1rem 0; border-top: 1px solid #ececf0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bi-row.bi-hit { background: #eef4fb; }
+.bi-seq { color: #aaa; margin-right: 0.3rem; }
+.bi-ref { color: #444; cursor: pointer; }
+.bi-ref:hover { text-decoration: underline; }
+.bi-arrow, .bi-dir { color: #999; }
+.bi-msg { color: #c7254e; }
+.bi-reply { color: #2a7f3f; }
+.bi-hint { color: #999; margin: 0; }
+@media (max-width: 900px) { .inspect { grid-template-columns: 1fr; } }
 @media (max-width: 900px) {
   .layout { flex-direction: column; }
   .layout > .viz { position: static; width: 100%; }
@@ -142,13 +168,18 @@ body {
   </div>
   <div class="viz">
     <div id="viz-wrap"><canvas id="viz"></canvas></div>
-    <p class="caption">Every actor in the game and every message they send, straight from the runtime's message log. A ray from one hexagon to another is a send inside a handler. A ray from the blob is the page sending <code>:tick</code> or a key.</p>
+    <p class="caption">Every actor in the game and every message they send, straight from the runtime's message log. A ray from one hexagon to another is a send inside a handler. A ray from the blob is the page sending <code>:tick</code> or a key. Click a hexagon to inspect that actor.</p>
+    <div class="inspect">
+      <div class="pane"><h3>actor</h3><div id="detail"></div></div>
+      <div class="pane"><h3>ticker</h3><div id="ticker"></div></div>
+    </div>
   </div>
 </div>
 
 <script src="repl/blimp.js"></script>
 <script src="repl/blimp-view.js"></script>
-<script src="repl/canvas.js?v=2026-09-04"></script>
+<script src="repl/canvas.js?v=2026-09-04b"></script>
+<script src="repl/blimp-inspector.js?v=2026-09-04b"></script>
 <script>
 (async function () {
   var statusEl = document.getElementById('status');
@@ -158,12 +189,23 @@ body {
   var viz = new BlimpCanvas(document.getElementById('viz'));
   window.__viz = viz;
 
+  // ledger of every send, per actor and as a ticker; clicking a hexagon or
+  // a chip selects an actor in both places
+  var ledger = new BlimpInspector.Ledger({ historyCap: 60, tickerCap: 80 });
+  var inspector = new BlimpInspector.Panel(ledger, {
+    tickerEl: document.getElementById('ticker'),
+    detailEl: document.getElementById('detail'),
+    onSelect: function (ref) { viz.select(ref); }
+  });
+  viz.onSelect = function (ref) { inspector.select(ref); };
+  window.__inspector = inspector;
+
   var blimp = new Blimp();
   blimp.onPrint(function () {});
   blimp.onError(function (msg) { console.error(msg); });
 
   try {
-    await blimp.init('repl/blimp.wasm?v=2026-09-04');
+    await blimp.init('repl/blimp.wasm?v=2026-09-04b');
   } catch (e) {
     status('wasm failed to load: ' + e.message, '#c7254e');
     return;
@@ -182,8 +224,18 @@ body {
   var view = new BlimpView(blimp, container, {
     onError: function (err) { status('error (see below)', '#c7254e'); },
     // after every render, hand the runtime's actor table and message log to
-    // the canvas. getState() clears the log, so this is the only reader.
-    onRender: function () { status('mounted'); viz.feed(blimp.getState(), null); }
+    // the canvas and the inspector. getState() clears the log, so it is
+    // read once here and shared.
+    onRender: function () {
+      status('mounted');
+      var st = blimp.getState();
+      viz.feed(st, null);
+      inspector.feed(st);
+      if (!inspector.selected) {
+        var game = ledger.actors().filter(function (a) { return a.type === 'Tetris.Game'; })[0];
+        if (game) inspector.select(game.ref);
+      }
+    }
   });
   window.__blimpView = view;
 
