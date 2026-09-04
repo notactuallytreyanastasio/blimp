@@ -167,61 +167,62 @@
   };
 
   // -- live streaming: raw ESC/POS, continuous paper --------------------------
-  var ESC = '\x1b', GS = '\x1d';
+  var ESC = '\x1b';
   var INIT = ESC + '@', FONT_B = ESC + 'M\x01', BOLD_ON = ESC + 'E\x01', BOLD_OFF = ESC + 'E\x00';
-  var CUT = '\n\n\n' + GS + 'VB\x14';   // GS V 66 20: feed then partial cut
 
-  // The console allows maxPerMinute posts per client; the header and the
-  // final cut count too, so chunks go out at most every `every` ms and only
-  // when the sliding window has room. tick() should be called about once a
-  // second by the host so deferred chunks and the cut still go out.
+  // Live printing over a WebSocket to the console's /api/live/ws. The
+  // upgrade counts as one print; after that every frame goes straight to
+  // the paper and the server feeds and cuts when the socket closes.
+  // `socket` is a factory returning a WebSocket-like object (send, close,
+  // readyState, onopen/onclose/onerror); tests pass a fake.
   function LivePrinter(opts) {
     opts = opts || {};
-    this.sender = opts.sender || function () {};
+    this.socketFactory = opts.socket || function () { throw new Error('no socket factory'); };
     this.title = opts.title || 'BLIMP TRACE live';
-    this.clock = opts.clock || function () { return Date.now(); };
-    this.every = opts.every || 12500;
-    this.maxPerMinute = opts.maxPerMinute || 5;
-    this.maxLinesPerChunk = opts.maxLinesPerChunk || 60;
     this.mode = opts.mode || 'notable';
+    this.maxLinesPerChunk = opts.maxLinesPerChunk || 60;
     this.onChange = opts.onChange || function () {};
     this.active = false;
-    this.closing = false;
+    this.status = 'idle';     // idle | connecting | live | closed | error
+    this.error = null;
     this.pending = [];
     this.framer = null;
-    this.posts = [];
-    this.lastFlush = 0;
+    this.sock = null;
     this.sentLines = 0;
   }
 
-  LivePrinter.prototype._hasSlot = function () {
-    var now = this.clock();
-    this.posts = this.posts.filter(function (t) { return now - t <= 60000; });
-    return this.posts.length < this.maxPerMinute;
-  };
-
-  LivePrinter.prototype._post = function (bytes) {
-    this.posts.push(this.clock());
-    this.lastFlush = this.clock();
-    this.sender(bytes);
-  };
-
-  // Seconds until the next chunk can go out (0 = now).
-  LivePrinter.prototype.waitSeconds = function () {
-    var now = this.clock();
-    var wait = Math.max(0, this.every - (now - this.lastFlush));
-    if (!this._hasSlot()) wait = Math.max(wait, this.posts[0] + 60000 - now);
-    return Math.ceil(wait / 1000);
-  };
-
   LivePrinter.prototype.start = function () {
+    var self = this;
     this.active = true;
-    this.closing = false;
     this.pending = [];
     this.framer = new Framer(this.mode);
     this.sentLines = 0;
-    var when = new Date().toTimeString().slice(0, 8);
-    this._post(INIT + FONT_B + BOLD_ON + this.title + BOLD_OFF + '\n' + when + '\n\n');
+    this.error = null;
+    this.status = 'connecting';
+    var sock = this.socketFactory();
+    this.sock = sock;
+    sock.onopen = function () {
+      if (self.sock !== sock) return;
+      self.status = 'live';
+      var when = new Date().toTimeString().slice(0, 8);
+      sock.send(INIT + FONT_B + BOLD_ON + self.title + BOLD_OFF + '\n' + when + '\n\n');
+      self._flush();
+      self.onChange(self);
+    };
+    sock.onerror = function (e) {
+      if (self.sock !== sock) return;
+      self.error = (e && e.message) || 'socket error';
+      self.status = 'error';
+      self.onChange(self);
+    };
+    sock.onclose = function () {
+      if (self.sock !== sock) return;
+      self.active = false;
+      self.status = self.status === 'error' ? 'error' : 'closed';
+      self.sock = null;
+      self.onChange(self);
+    };
+    if (sock.readyState === 1) sock.onopen();
     this.onChange(this);
   };
 
@@ -232,24 +233,11 @@
       self.pending.push(BOLD_ON + headingText(f) + BOLD_OFF);
       self.pending = self.pending.concat(bodyLines(f), ['']);
     });
-    this.tick();
-  };
-
-  LivePrinter.prototype.tick = function () {
-    if (this.closing) {
-      if (this._hasSlot()) {
-        var lines = this._takePending();
-        this.sentLines += lines.length;
-        this.closing = false;
-        this._post((lines.length ? lines.join('\n') + '\n' : '') + CUT);
-      }
-    } else if (this.active && this.pending.length && this.clock() - this.lastFlush >= this.every && this._hasSlot()) {
-      this.flush();
-    }
+    this._flush();
     this.onChange(this);
   };
 
-  // Paper is finite: a chunk keeps only its newest lines and says so.
+  // Paper is finite: a burst keeps only its newest lines and says so.
   LivePrinter.prototype._takePending = function () {
     var lines = this.pending;
     this.pending = [];
@@ -260,20 +248,31 @@
     return lines;
   };
 
-  LivePrinter.prototype.flush = function () {
-    if (!this.pending.length) return false;
+  LivePrinter.prototype._flush = function () {
+    if (!this.sock || this.sock.readyState !== 1 || !this.pending.length) return false;
     var lines = this._takePending();
     this.sentLines += lines.length;
-    this._post(lines.join('\n') + '\n');
+    this.sock.send(lines.join('\n') + '\n');
     return true;
   };
 
+  // Close the socket; the console feeds and cuts on its side.
   LivePrinter.prototype.stop = function () {
     if (!this.active) return;
+    this._flush();
     this.active = false;
-    this.closing = true;
-    this.tick();
+    var sock = this.sock;
+    this.sock = null;
+    this.status = 'closed';
+    if (sock) sock.close();
+    this.onChange(this);
   };
+
+  // WebSocket factory for the console: ws://host/api/live/ws?backend=usb
+  function liveSocket(url, backend) {
+    var qs = Object.keys(backend).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(backend[k]); }).join('&');
+    return function () { return new WebSocket(url + (qs ? '?' + qs : '')); };
+  }
 
   // Raw bytes to /api/print/raw; backend goes in the query string.
   function postRaw(url, backend) {
@@ -296,5 +295,5 @@
     };
   }
 
-  return { Recorder: Recorder, LivePrinter: LivePrinter, Framer: Framer, postRaw: postRaw, splitFrames: splitFrames, stateDiffs: stateDiffs, isNotable: isNotable, render: render, postToConsole: postToConsole, shortRef: shortRef, COLS: COLS };
+  return { Recorder: Recorder, LivePrinter: LivePrinter, Framer: Framer, liveSocket: liveSocket, postRaw: postRaw, splitFrames: splitFrames, stateDiffs: stateDiffs, isNotable: isNotable, render: render, postToConsole: postToConsole, shortRef: shortRef, COLS: COLS };
 });

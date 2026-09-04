@@ -193,7 +193,7 @@ body {
 <script src="repl/blimp-view.js"></script>
 <script src="repl/canvas.js?v=2026-09-04b"></script>
 <script src="repl/blimp-inspector.js?v=2026-09-04b"></script>
-<script src="repl/blimp-receipt.js?v=2026-09-04d"></script>
+<script src="repl/blimp-receipt.js?v=2026-09-04e"></script>
 <script>
 (async function () {
   var statusEl = document.getElementById('status');
@@ -244,24 +244,26 @@ body {
     recorder.start();
   });
 
-  // live: raw ESC/POS straight to the paper, continuous until the box is
-  // unticked, which feeds and cuts. The console allows five posts a minute
-  // (header and cut included), so chunks go out every 12.5s at most.
+  // live: a WebSocket to the console (one print against its rate limit),
+  // then every frame goes straight to the paper; unticking closes the
+  // socket and the console feeds and cuts.
   var liveBox = document.getElementById('live');
-  var rawSender = BlimpReceipt.postRaw('http://localhost:4090/api/print/raw', backend);
   var live = new BlimpReceipt.LivePrinter({
     title: 'BLIMP TRACE live: tetris',
-    sender: function (bytes) {
-      rawSender(bytes).catch(function (e) { rstatus.textContent = 'no console on localhost:4090 (' + e.message + ')'; liveBox.checked = false; live.active = false; });
-    },
+    socket: BlimpReceipt.liveSocket('ws://localhost:4090/api/live/ws', backend),
     onChange: function (l) {
-      if (l.active) rstatus.textContent = 'live, ' + l.sentLines + ' line(s) on paper, ' + l.pending.length + ' waiting, next chunk in ' + l.waitSeconds() + 's';
-      else if (l.closing) rstatus.textContent = 'finishing, cut in ' + l.waitSeconds() + 's';
-      else if (l.sentLines) rstatus.textContent = 'stopped after ' + l.sentLines + ' line(s)';
+      if (l.status === 'connecting') rstatus.textContent = 'connecting to the printer console...';
+      else if (l.status === 'live') rstatus.textContent = 'live, ' + l.sentLines + ' line(s) on paper';
+      else if (l.status === 'error') { rstatus.textContent = 'printer console refused or dropped the socket (localhost:4090, rate limit is 5 a minute)'; liveBox.checked = false; }
+      else if (l.status === 'closed') { rstatus.textContent = 'stopped after ' + l.sentLines + ' line(s)'; liveBox.checked = false; }
     }
   });
   window.__live = live;
-  setInterval(function () { if (live.active || live.closing) live.tick(); }, 1000);
+  liveBox.addEventListener('change', function () {
+    live.mode = document.getElementById('printmode').value;
+    if (liveBox.checked) live.start(); else live.stop();
+  });
+  window.addEventListener('pagehide', function () { live.stop(); });
   liveBox.addEventListener('change', function () {
     live.mode = document.getElementById('printmode').value;
     if (liveBox.checked) live.start(); else live.stop();
