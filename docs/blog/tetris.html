@@ -125,7 +125,7 @@ body {
   blimp.onError(function (msg) { console.error(msg); });
 
   try {
-    await blimp.init('repl/blimp.wasm');
+    await blimp.init('repl/blimp.wasm?v=2026-09-03');
   } catch (e) {
     status('wasm failed to load: ' + e.message, '#c7254e');
     return;
