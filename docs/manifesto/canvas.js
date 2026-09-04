@@ -108,16 +108,22 @@ class BlimpCanvas {
       this.nodes = this.nodes.filter(n => ids[n.id] || n.shape === 'square');
     }
 
-    // Add rays from runtime message log (catches sends inside closures)
+    // Add rays from runtime message log (catches sends inside closures).
+    // msg.from is the sending actor when the send happened inside a handler,
+    // null for sends from the page or REPL. A burst of sends from one eval is
+    // staggered so it reads as a sequence instead of a single flash.
     if (state.messages) {
+      var t0 = performance.now(), i = 0;
       for (var msg of state.messages) {
         if (this.nodes.find(n => n.id === msg.target)) {
           this.rays.push({
+            fromId: msg.from || null,
             toId: msg.target,
-            t0: performance.now(),
+            t0: t0 + Math.min(i, 40) * 30,
             color: this._strColor(msg.message),
             label: ':' + msg.message
           });
+          i++;
         }
       }
     }
@@ -219,15 +225,46 @@ class BlimpCanvas {
       this._drawHex(node, now);
     }
 
-    // Rays on top of everything
+    // Rays on top of everything. A ray starts at its sending actor when the
+    // runtime named one, otherwise at the REPL blob.
     for (var i = this.rays.length - 1; i >= 0; i--) {
       var ray = this.rays[i];
       var t = (now - ray.t0) / 1200;
       if (t > 1) { this.rays.splice(i, 1); continue; }
+      if (t < 0) continue;
       var target = this.nodes.find(n => n.id === ray.toId);
       if (!target) { this.rays.splice(i, 1); continue; }
-      this._drawRay(bx, by, target.x, target.y, t, ray.color, ray.label);
+      var source = ray.fromId ? this.nodes.find(n => n.id === ray.fromId) : null;
+      if (source && source === target) {
+        this._drawSelfRay(target.x, target.y, t, ray.color, ray.label);
+      } else if (source) {
+        this._drawRay(source.x, source.y, target.x, target.y, t, ray.color, ray.label);
+      } else {
+        this._drawRay(bx, by, target.x, target.y, t, ray.color, ray.label);
+      }
     }
+  }
+
+  // An actor sending to itself: a ring that grows out of the node.
+  _drawSelfRay(x, y, t, color, label) {
+    var ctx = this.ctx;
+    var r = (32 * (this._hexScale || 1)) * (1 + t * 0.8);
+    ctx.save();
+    ctx.globalAlpha = 1 - t;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    if (t < 0.5) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, x, y - r - 6);
+    }
+    ctx.restore();
   }
 
   _drawBlob(x, y, now) {
