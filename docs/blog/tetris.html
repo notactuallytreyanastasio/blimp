@@ -181,7 +181,8 @@ body {
       <div class="pane"><h3>ticker</h3><div id="ticker"></div></div>
     </div>
     <div class="receipt">
-      <button id="print10" type="button" title="posts one receipt to a nerves_receipts console on localhost:4090">🧾 print the next 10 seconds</button>
+      <label><input type="checkbox" id="live"> 🧾 print live</label>
+      <button id="print10" type="button" title="posts one receipt to a nerves_receipts console on localhost:4090">print the next 10 seconds</button>
       <select id="printmode"><option value="notable">moves, locks and clears</option><option value="everything">every tick</option></select>
       <span class="rstatus" id="rstatus"></span>
     </div>
@@ -192,7 +193,7 @@ body {
 <script src="repl/blimp-view.js"></script>
 <script src="repl/canvas.js?v=2026-09-04b"></script>
 <script src="repl/blimp-inspector.js?v=2026-09-04b"></script>
-<script src="repl/blimp-receipt.js?v=2026-09-04c"></script>
+<script src="repl/blimp-receipt.js?v=2026-09-04d"></script>
 <script>
 (async function () {
   var statusEl = document.getElementById('status');
@@ -243,6 +244,30 @@ body {
     recorder.start();
   });
 
+  // live: raw ESC/POS straight to the paper, continuous until the box is
+  // unticked, which feeds and cuts. The console allows five posts a minute
+  // (header and cut included), so chunks go out every 12.5s at most.
+  var liveBox = document.getElementById('live');
+  var rawSender = BlimpReceipt.postRaw('http://localhost:4090/api/print/raw', backend);
+  var live = new BlimpReceipt.LivePrinter({
+    title: 'BLIMP TRACE live: tetris',
+    sender: function (bytes) {
+      rawSender(bytes).catch(function (e) { rstatus.textContent = 'no console on localhost:4090 (' + e.message + ')'; liveBox.checked = false; live.active = false; });
+    },
+    onChange: function (l) {
+      if (l.active) rstatus.textContent = 'live, ' + l.sentLines + ' line(s) on paper, ' + l.pending.length + ' waiting, next chunk in ' + l.waitSeconds() + 's';
+      else if (l.closing) rstatus.textContent = 'finishing, cut in ' + l.waitSeconds() + 's';
+      else if (l.sentLines) rstatus.textContent = 'stopped after ' + l.sentLines + ' line(s)';
+    }
+  });
+  window.__live = live;
+  setInterval(function () { if (live.active || live.closing) live.tick(); }, 1000);
+  liveBox.addEventListener('change', function () {
+    live.mode = document.getElementById('printmode').value;
+    if (liveBox.checked) live.start(); else live.stop();
+  });
+  window.addEventListener('pagehide', function () { live.stop(); });
+
   var blimp = new Blimp();
   blimp.onPrint(function () {});
   blimp.onError(function (msg) { console.error(msg); });
@@ -275,6 +300,7 @@ body {
       viz.feed(st, null);
       inspector.feed(st);
       recorder.feed(st);
+      live.feed(st);
       if (!inspector.selected) {
         var game = ledger.actors().filter(function (a) { return a.type === 'Tetris.Game'; })[0];
         if (game) inspector.select(game.ref);

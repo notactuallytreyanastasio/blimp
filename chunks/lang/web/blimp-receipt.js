@@ -71,8 +71,13 @@
     return frame.diffs.some(function (d) { return !(/Piece$/.test(d.type) && d.field === 'y'); });
   }
 
-  function frameLines(frame) {
-    var lines = ['## ' + shortRef(frame.head.target) + ' ' + call(frame.head.message, frame.head.args), '', '```'];
+  function headingText(frame) {
+    return clip(shortRef(frame.head.target) + ' ' + call(frame.head.message, frame.head.args));
+  }
+
+  // The lines under a heading: sends, state changes, reply.
+  function bodyLines(frame) {
+    var lines = [];
     frame.sends.forEach(function (s) {
       var arrow = ' -> ' + (s.from === s.to ? 'self' : shortRef(s.to)) + ' ';
       var tail = (s.reply !== null ? ' => ' + s.reply : '') + (s.count > 1 ? ' x' + s.count : '');
@@ -82,8 +87,11 @@
       lines.push(clip('  * ' + shortRef(d.actor) + '.' + d.field + ' ' + (d.from === undefined ? '' : d.from + ' ') + '-> ' + d.to));
     });
     lines.push(clip('  => ' + (frame.head.reply === null ? 'queued' : frame.head.reply)));
-    lines.push('```', '');
     return lines;
+  }
+
+  function frameLines(frame) {
+    return ['## ' + headingText(frame), '', '```'].concat(bodyLines(frame), ['```', '']);
   }
 
   function render(frames, title, when, maxLines) {
@@ -113,14 +121,14 @@
     this.onChange = opts.onChange || function () {};
     this.active = false;
     this.frames = [];
-    this.prev = null;
+    this.framer = null;
     this.startedAt = 0;
   }
 
   Recorder.prototype.start = function () {
     this.active = true;
     this.frames = [];
-    this.prev = null;
+    this.framer = new Framer(this.mode);
     this.startedAt = this.clock();
     this.onChange(this);
   };
@@ -132,18 +140,7 @@
 
   Recorder.prototype.feed = function (state) {
     if (!this.active || !state) return;
-    if (this.prev === null) {
-      this.prev = state.actors || [];   // baseline: the eval before start already happened
-    } else {
-      var frames = splitFrames(state.messages);
-      var diffs = stateDiffs(this.prev, state.actors);
-      this.prev = state.actors || [];
-      if (frames.length) frames[0].diffs = diffs;
-      var self = this;
-      frames.forEach(function (f) {
-        if (self.mode === 'everything' || isNotable(f)) self.frames.push(f);
-      });
-    }
+    this.frames = this.frames.concat(this.framer.feed(state));
     if (this.clock() - this.startedAt >= this.seconds * 1000) this.stop();
     else this.onChange(this);
   };
@@ -155,6 +152,136 @@
     if (frames.length) this.sender(render(frames, this.title, null, this.maxLines), frames.length);
     this.onChange(this);
   };
+
+  // Frames from one feed, honouring the mode. Shared by Recorder and LivePrinter.
+  function Framer(mode) { this.mode = mode || 'notable'; this.prev = null; }
+  Framer.prototype.feed = function (state) {
+    if (!state) return [];
+    if (this.prev === null) { this.prev = state.actors || []; return []; }
+    var frames = splitFrames(state.messages);
+    var diffs = stateDiffs(this.prev, state.actors);
+    this.prev = state.actors || [];
+    if (frames.length) frames[0].diffs = diffs;
+    var mode = this.mode;
+    return frames.filter(function (f) { return mode === 'everything' || isNotable(f); });
+  };
+
+  // -- live streaming: raw ESC/POS, continuous paper --------------------------
+  var ESC = '\x1b', GS = '\x1d';
+  var INIT = ESC + '@', FONT_B = ESC + 'M\x01', BOLD_ON = ESC + 'E\x01', BOLD_OFF = ESC + 'E\x00';
+  var CUT = '\n\n\n' + GS + 'VB\x14';   // GS V 66 20: feed then partial cut
+
+  // The console allows maxPerMinute posts per client; the header and the
+  // final cut count too, so chunks go out at most every `every` ms and only
+  // when the sliding window has room. tick() should be called about once a
+  // second by the host so deferred chunks and the cut still go out.
+  function LivePrinter(opts) {
+    opts = opts || {};
+    this.sender = opts.sender || function () {};
+    this.title = opts.title || 'BLIMP TRACE live';
+    this.clock = opts.clock || function () { return Date.now(); };
+    this.every = opts.every || 12500;
+    this.maxPerMinute = opts.maxPerMinute || 5;
+    this.maxLinesPerChunk = opts.maxLinesPerChunk || 60;
+    this.mode = opts.mode || 'notable';
+    this.onChange = opts.onChange || function () {};
+    this.active = false;
+    this.closing = false;
+    this.pending = [];
+    this.framer = null;
+    this.posts = [];
+    this.lastFlush = 0;
+    this.sentLines = 0;
+  }
+
+  LivePrinter.prototype._hasSlot = function () {
+    var now = this.clock();
+    this.posts = this.posts.filter(function (t) { return now - t <= 60000; });
+    return this.posts.length < this.maxPerMinute;
+  };
+
+  LivePrinter.prototype._post = function (bytes) {
+    this.posts.push(this.clock());
+    this.lastFlush = this.clock();
+    this.sender(bytes);
+  };
+
+  // Seconds until the next chunk can go out (0 = now).
+  LivePrinter.prototype.waitSeconds = function () {
+    var now = this.clock();
+    var wait = Math.max(0, this.every - (now - this.lastFlush));
+    if (!this._hasSlot()) wait = Math.max(wait, this.posts[0] + 60000 - now);
+    return Math.ceil(wait / 1000);
+  };
+
+  LivePrinter.prototype.start = function () {
+    this.active = true;
+    this.closing = false;
+    this.pending = [];
+    this.framer = new Framer(this.mode);
+    this.sentLines = 0;
+    var when = new Date().toTimeString().slice(0, 8);
+    this._post(INIT + FONT_B + BOLD_ON + this.title + BOLD_OFF + '\n' + when + '\n\n');
+    this.onChange(this);
+  };
+
+  LivePrinter.prototype.feed = function (state) {
+    if (!this.active) return;
+    var self = this;
+    this.framer.feed(state).forEach(function (f) {
+      self.pending.push(BOLD_ON + headingText(f) + BOLD_OFF);
+      self.pending = self.pending.concat(bodyLines(f), ['']);
+    });
+    this.tick();
+  };
+
+  LivePrinter.prototype.tick = function () {
+    if (this.closing) {
+      if (this._hasSlot()) {
+        var lines = this._takePending();
+        this.sentLines += lines.length;
+        this.closing = false;
+        this._post((lines.length ? lines.join('\n') + '\n' : '') + CUT);
+      }
+    } else if (this.active && this.pending.length && this.clock() - this.lastFlush >= this.every && this._hasSlot()) {
+      this.flush();
+    }
+    this.onChange(this);
+  };
+
+  // Paper is finite: a chunk keeps only its newest lines and says so.
+  LivePrinter.prototype._takePending = function () {
+    var lines = this.pending;
+    this.pending = [];
+    if (lines.length > this.maxLinesPerChunk) {
+      var skipped = lines.length - this.maxLinesPerChunk;
+      lines = ['... ' + skipped + ' lines skipped ...'].concat(lines.slice(skipped));
+    }
+    return lines;
+  };
+
+  LivePrinter.prototype.flush = function () {
+    if (!this.pending.length) return false;
+    var lines = this._takePending();
+    this.sentLines += lines.length;
+    this._post(lines.join('\n') + '\n');
+    return true;
+  };
+
+  LivePrinter.prototype.stop = function () {
+    if (!this.active) return;
+    this.active = false;
+    this.closing = true;
+    this.tick();
+  };
+
+  // Raw bytes to /api/print/raw; backend goes in the query string.
+  function postRaw(url, backend) {
+    var qs = Object.keys(backend).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(backend[k]); }).join('&');
+    return function (bytes) {
+      return fetch(url + (qs ? '?' + qs : ''), { method: 'POST', mode: 'no-cors', headers: { 'content-type': 'text/plain' }, body: bytes });
+    };
+  }
 
   // POST to the nerves_receipts console without CORS: text/plain keeps it a
   // simple request (no preflight); the opaque response is fine, the console
@@ -169,5 +296,5 @@
     };
   }
 
-  return { Recorder: Recorder, splitFrames: splitFrames, stateDiffs: stateDiffs, isNotable: isNotable, render: render, postToConsole: postToConsole, shortRef: shortRef, COLS: COLS };
+  return { Recorder: Recorder, LivePrinter: LivePrinter, Framer: Framer, postRaw: postRaw, splitFrames: splitFrames, stateDiffs: stateDiffs, isNotable: isNotable, render: render, postToConsole: postToConsole, shortRef: shortRef, COLS: COLS };
 });
