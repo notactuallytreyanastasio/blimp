@@ -26,8 +26,25 @@
 <link rel="stylesheet" href="style.css">
 <style>
 body {
-  max-width: 48ch;
+  max-width: 1100px;
   padding-bottom: 3rem;
+}
+
+.layout { display: flex; gap: 2.5rem; align-items: flex-start; }
+.layout > .play { flex: 0 0 auto; max-width: 48ch; }
+.layout > .viz { flex: 1 1 320px; min-width: 0; position: sticky; top: 1rem; }
+#viz-wrap {
+  height: 520px;
+  background: #0e0e1a;
+  border-radius: 6px;
+  overflow: hidden;
+}
+#viz { display: block; }
+.viz .caption { color: #999; font-size: 0.85rem; margin: 0.6rem 0 0; line-height: 1.4; }
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .layout > .viz { position: static; width: 100%; }
+  #viz-wrap { height: 340px; }
 }
 
 .status {
@@ -119,22 +136,34 @@ body {
 <h1>Tetris in Blimp</h1>
 <div class="status"><span id="status">loading wasm...</span><a class="src" href="tetris.blimp">view source</a></div>
 
-<div id="game"></div>
+<div class="layout">
+  <div class="play">
+    <div id="game"></div>
+  </div>
+  <div class="viz">
+    <div id="viz-wrap"><canvas id="viz"></canvas></div>
+    <p class="caption">Every actor in the game and every message they send, straight from the runtime's message log. A ray from one hexagon to another is a send inside a handler. A ray from the blob is the page sending <code>:tick</code> or a key.</p>
+  </div>
+</div>
 
 <script src="repl/blimp.js"></script>
 <script src="repl/blimp-view.js"></script>
+<script src="repl/canvas.js?v=2026-09-04"></script>
 <script>
 (async function () {
   var statusEl = document.getElementById('status');
   var container = document.getElementById('game');
   function status(msg, color) { statusEl.textContent = msg; statusEl.style.color = color || '#999'; }
 
+  var viz = new BlimpCanvas(document.getElementById('viz'));
+  window.__viz = viz;
+
   var blimp = new Blimp();
   blimp.onPrint(function () {});
   blimp.onError(function (msg) { console.error(msg); });
 
   try {
-    await blimp.init('repl/blimp.wasm?v=2026-09-03');
+    await blimp.init('repl/blimp.wasm?v=2026-09-04');
   } catch (e) {
     status('wasm failed to load: ' + e.message, '#c7254e');
     return;
@@ -152,7 +181,9 @@ body {
 
   var view = new BlimpView(blimp, container, {
     onError: function (err) { status('error (see below)', '#c7254e'); },
-    onRender: function () { status('mounted'); }
+    // after every render, hand the runtime's actor table and message log to
+    // the canvas. getState() clears the log, so this is the only reader.
+    onRender: function () { status('mounted'); viz.feed(blimp.getState(), null); }
   });
   window.__blimpView = view;
 
