@@ -8,12 +8,12 @@ pub const Environment = struct {
     scopes: std.ArrayList(Scope),
     allocator: std.mem.Allocator,
 
-    const Binding = struct {
+    pub const Binding = struct {
         name: []const u8,
         val: *const Value,
     };
 
-    const Scope = struct {
+    pub const Scope = struct {
         bindings: std.ArrayList(Binding),
     };
 
@@ -41,18 +41,49 @@ pub const Environment = struct {
         }
     }
 
+    /// Number of scopes on the stack. Callers record this to pop back to it.
+    pub fn depth(self: *const Environment) usize {
+        return self.scopes.items.len;
+    }
+
+    /// Pop scopes until only `n` remain (no-op if already at or below n).
+    pub fn popTo(self: *Environment, n: usize) void {
+        if (self.scopes.items.len > n) {
+            self.scopes.shrinkRetainingCapacity(n);
+        }
+    }
+
+    /// Merge every scope above index `base` into scopes[base], inner bindings
+    /// winning, then pop them. The visible bindings are unchanged, there is
+    /// just one scope holding them. Used when a closure's frame is reused for
+    /// a tail call so the callee still sees everything the caller could see.
+    pub fn collapseTo(self: *Environment, base: usize) void {
+        if (base + 1 >= self.scopes.items.len) return;
+        var i: usize = base + 1;
+        while (i < self.scopes.items.len) : (i += 1) {
+            for (self.scopes.items[i].bindings.items) |b| {
+                self.defineIn(base, b.name, b.val);
+            }
+        }
+        self.scopes.shrinkRetainingCapacity(base + 1);
+    }
+
     /// Define (or update) a variable in the current scope.
     pub fn define(self: *Environment, name: []const u8, value: *const Value) void {
         if (self.scopes.items.len == 0) return;
-        const current = &self.scopes.items[self.scopes.items.len - 1];
+        self.defineIn(self.scopes.items.len - 1, name, value);
+    }
+
+    fn defineIn(self: *Environment, index: usize, name: []const u8, value: *const Value) void {
+        const scope = &self.scopes.items[index];
         // Check for existing binding to update
-        for (current.bindings.items) |*binding| {
+        for (scope.bindings.items) |*binding| {
             if (std.mem.eql(u8, binding.name, name)) {
                 binding.val = value;
                 return;
             }
         }
-        current.bindings.append(self.allocator, .{ .name = name, .val = value }) catch {};
+        scope.bindings.append(self.allocator, .{ .name = name, .val = value }) catch {};
     }
 
     /// Return all bindings visible from the current scope (innermost wins).
@@ -151,6 +182,42 @@ test "nested scopes" {
     // After pop, y is gone
     try std.testing.expect(env.lookup("x") != null);
     try std.testing.expect(env.lookup("y") == null);
+}
+
+test "collapseTo keeps the visible bindings in one scope" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const one = try alloc.create(Value);
+    one.* = Value{ .integer = 1 };
+    const two = try alloc.create(Value);
+    two.* = Value{ .integer = 2 };
+    const three = try alloc.create(Value);
+    three.* = Value{ .integer = 3 };
+
+    env.define("g", one);
+    const base = env.depth();
+    env.pushScope();
+    env.define("x", one);
+    env.define("y", one);
+    env.pushScope();
+    env.define("x", two);
+    env.pushScope();
+    env.define("z", three);
+
+    env.collapseTo(base);
+    try std.testing.expectEqual(base + 1, env.depth());
+    try std.testing.expect(env.lookup("x").?.eql(Value{ .integer = 2 }));
+    try std.testing.expect(env.lookup("y").?.eql(Value{ .integer = 1 }));
+    try std.testing.expect(env.lookup("z").?.eql(Value{ .integer = 3 }));
+    try std.testing.expect(env.lookup("g").?.eql(Value{ .integer = 1 }));
+
+    env.popTo(base);
+    try std.testing.expectEqual(base, env.depth());
+    try std.testing.expect(env.lookup("x") == null);
+    try std.testing.expect(env.lookup("g") != null);
 }
 
 test "inner scope shadows outer" {

@@ -8,12 +8,15 @@ class BlimpCanvas {
     this.nodes = [];      // {id, type, state, x, y, hash, scale, flashT}
     this.rays = [];       // {fromId, toId, t0, color, label}
     this.varMap = {};     // variable name -> actor ref string
+    this.selectedId = null; // actor ref highlighted (see select/onSelect)
+    this.onSelect = null;   // function(ref|null) called on click
     this.w = 0;
     this.h = 0;
     this.dpr = 1;
 
     this._resize();
     window.addEventListener('resize', () => this._resize());
+    this.canvas.addEventListener('click', (ev) => this._click(ev));
 
     // ResizeObserver catches cases window resize misses (mobile rotation, flex layout changes)
     if (typeof ResizeObserver !== 'undefined') {
@@ -44,6 +47,24 @@ class BlimpCanvas {
     this._layout();
   }
 
+  // Highlight one actor (null clears). Clicking a hexagon does this too.
+  select(id) {
+    this.selectedId = id;
+  }
+
+  _click(ev) {
+    var r = this.canvas.getBoundingClientRect();
+    var x = ev.clientX - r.left, y = ev.clientY - r.top;
+    var reach = 36 * (this._hexScale || 1);
+    var hit = null;
+    for (var node of this.nodes) {
+      if (node.shape === 'square') continue;
+      if (Math.hypot(node.x - x, node.y - y) <= reach) { hit = node; break; }
+    }
+    this.selectedId = hit ? hit.id : null;
+    if (this.onSelect) this.onSelect(this.selectedId);
+  }
+
   // Called after each eval with fresh state + source text
   feed(state, source) {
     if (!state) return;
@@ -62,6 +83,7 @@ class BlimpCanvas {
       for (var v of state.vars) {
         if (v.value && v.value.startsWith('ref<')) continue; // skip actor refs
         if (v.value && v.value.startsWith(':')) continue; // skip actor templates
+        if (v.value && v.value.startsWith('fn')) continue; // skip defs and closures
         var vid = 'var:' + v.name;
         var h = this._hash('val|' + v.name + '=' + v.value);
         var existing = this.nodes.find(n => n.id === vid);
@@ -108,17 +130,28 @@ class BlimpCanvas {
       this.nodes = this.nodes.filter(n => ids[n.id] || n.shape === 'square');
     }
 
-    // Add rays from runtime message log (catches sends inside closures)
+    // Add rays from runtime message log (catches sends inside closures).
+    // msg.from is the sending actor when the send happened inside a handler,
+    // null for sends from the page or REPL. A burst of sends from one eval is
+    // staggered so it reads as a sequence instead of a single flash.
+    // The same send repeated in one eval (a board asking itself :blocked?
+    // once per cell) collapses into one ray labelled with the count.
     if (state.messages) {
+      var t0 = performance.now(), i = 0, seen = {};
       for (var msg of state.messages) {
-        if (this.nodes.find(n => n.id === msg.target)) {
-          this.rays.push({
-            toId: msg.target,
-            t0: performance.now(),
-            color: this._strColor(msg.message),
-            label: ':' + msg.message
-          });
-        }
+        if (!this.nodes.find(n => n.id === msg.target)) continue;
+        var key = (msg.from || '') + '>' + msg.target + ':' + msg.message;
+        if (seen[key]) { seen[key].count++; seen[key].label = ':' + msg.message + ' \u00d7' + seen[key].count; continue; }
+        seen[key] = {
+          fromId: msg.from || null,
+          toId: msg.target,
+          t0: t0 + Math.min(i, 40) * 30,
+          color: this._strColor(msg.message),
+          label: ':' + msg.message,
+          count: 1
+        };
+        this.rays.push(seen[key]);
+        i++;
       }
     }
 
@@ -219,15 +252,46 @@ class BlimpCanvas {
       this._drawHex(node, now);
     }
 
-    // Rays on top of everything
+    // Rays on top of everything. A ray starts at its sending actor when the
+    // runtime named one, otherwise at the REPL blob.
     for (var i = this.rays.length - 1; i >= 0; i--) {
       var ray = this.rays[i];
       var t = (now - ray.t0) / 1200;
       if (t > 1) { this.rays.splice(i, 1); continue; }
+      if (t < 0) continue;
       var target = this.nodes.find(n => n.id === ray.toId);
       if (!target) { this.rays.splice(i, 1); continue; }
-      this._drawRay(bx, by, target.x, target.y, t, ray.color, ray.label);
+      var source = ray.fromId ? this.nodes.find(n => n.id === ray.fromId) : null;
+      if (source && source === target) {
+        this._drawSelfRay(target.x, target.y, t, ray.color, ray.label);
+      } else if (source) {
+        this._drawRay(source.x, source.y, target.x, target.y, t, ray.color, ray.label);
+      } else {
+        this._drawRay(bx, by, target.x, target.y, t, ray.color, ray.label);
+      }
     }
+  }
+
+  // An actor sending to itself: a ring that grows out of the node.
+  _drawSelfRay(x, y, t, color, label) {
+    var ctx = this.ctx;
+    var r = (32 * (this._hexScale || 1)) * (1 + t * 0.8);
+    ctx.save();
+    ctx.globalAlpha = 1 - t;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    if (t < 0.5) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, x, y - r - 6);
+    }
+    ctx.restore();
   }
 
   _drawBlob(x, y, now) {
@@ -307,8 +371,18 @@ class BlimpCanvas {
     }
     ctx.stroke();
 
+    // Selection ring
+    if (node.id === this.selectedId) {
+      ctx.beginPath();
+      ctx.arc(0, 0, r + 7, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
+
     // Label
-    ctx.fillStyle = '#556';
+    ctx.fillStyle = node.id === this.selectedId ? '#dde' : '#556';
     ctx.font = '9px monospace';
     ctx.textAlign = 'center';
     ctx.fillText(node.type, 0, r + 13);

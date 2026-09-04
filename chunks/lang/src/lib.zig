@@ -17,6 +17,7 @@ pub const Evaluator = @import("eval.zig").Evaluator;
 pub const errors = @import("errors.zig");
 pub const Registry = @import("registry.zig").Registry;
 pub const CompletionEngine = @import("complete.zig").CompletionEngine;
+pub const gc = @import("gc.zig");
 
 test {
     // Pull in tests from all modules

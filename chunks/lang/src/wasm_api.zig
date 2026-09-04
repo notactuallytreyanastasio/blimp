@@ -13,15 +13,55 @@ extern "env" fn blimp_js_error(ptr: [*]const u8, len: u32) void;
 // ── Global state ────────────────────────────────────────
 
 const allocator = std.heap.wasm_allocator;
+const gc = @import("gc.zig");
 
 var evaluator: ?Evaluator = null;
+
+// The evaluator allocates every value on one of two arenas and never frees.
+// After each eval, gc.compact copies what is still reachable into the other
+// arena and the old one is released, so a long browser session does not
+// grow without bound.  Source text and ASTs stay on `allocator` because
+// closures and handlers keep pointing into them.
+var heaps: [2]std.heap.ArenaAllocator = .{
+    std.heap.ArenaAllocator.init(std.heap.wasm_allocator),
+    std.heap.ArenaAllocator.init(std.heap.wasm_allocator),
+};
+var live_heap: usize = 0;
+
+fn heap() std.mem.Allocator {
+    return heaps[live_heap].allocator();
+}
+
+fn freshEvaluator() Evaluator {
+    _ = heaps[0].reset(.free_all);
+    _ = heaps[1].reset(.free_all);
+    live_heap = 0;
+    return Evaluator.init(heap());
+}
+
+/// Copy the live evaluator data into the idle arena and free the busy one.
+/// If the copy fails the evaluator keeps using its current arena.
+fn compactHeap() void {
+    var eval = &(evaluator orelse return);
+    const next = 1 - live_heap;
+    gc.compact(eval, heaps[next].allocator(), allocator) catch return;
+    _ = heaps[live_heap].reset(.free_all);
+    live_heap = next;
+    // Error details were already formatted into error_buf.
+    eval.last_error = null;
+}
+
+/// Bytes currently held by the evaluator's arena (for host-side monitoring).
+export fn blimp_heap_bytes() u32 {
+    return @intCast(heaps[live_heap].queryCapacity());
+}
 
 // Result/error buffers - we write into these, JS reads them
 var result_buf: [16384]u8 = undefined;
 var result_len: u32 = 0;
 var error_buf: [4096]u8 = undefined;
 var error_len: u32 = 0;
-var state_buf: [65536]u8 = undefined;
+var state_buf: [262144]u8 = undefined;
 var state_len: u32 = 0;
 var last_status: i32 = 0;
 var view_buf: [65536]u8 = undefined;
@@ -43,7 +83,7 @@ var message_count: u32 = 0;
 
 /// Initialize the Blimp interpreter. Call once before eval.
 export fn blimp_init() void {
-    evaluator = Evaluator.init(allocator);
+    evaluator = freshEvaluator();
     result_len = 0;
     error_len = 0;
     state_len = 0;
@@ -62,6 +102,9 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     // actor names), so the source must live as long as the evaluator.
     const source = allocator.dupe(u8, source_slice) catch return 3;
     eval.setSource(source);
+    // The message log holds pointers into the previous eval's heap, which
+    // compactHeap has already dropped, so it starts empty every eval.
+    eval.msg_log_count = 0;
 
     // Parse -- use the global allocator, NOT a temporary arena.
     // The AST must live as long as the evaluator because the actor
@@ -94,6 +137,7 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
             }
             result_len = 0;
             last_status = 2;
+            compactHeap();
             return 2;
         };
     }
@@ -128,7 +172,39 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     // Update state JSON for sidebar
     updateStateJson();
 
+    // Everything the JS side needs is in the buffers now, so drop the
+    // garbage this eval produced.
+    compactHeap();
+
     return 0;
+}
+
+/// Format a value into a quoted JSON string, capped so a board full of rows
+/// does not blow up the state buffer. Quotes, backslashes and control
+/// characters are escaped; a truncated value ends in "...".
+const value_string_cap = 80;
+fn writeValueJsonString(w: anytype, val: *const Value) void {
+    var buf: [value_string_cap]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    writeJsonEscaped(fbs.writer(), val);
+    const truncated = fbs.pos == value_string_cap;
+    w.writeAll("\"") catch {};
+    for (buf[0..fbs.pos]) |c| {
+        switch (c) {
+            '"' => w.writeAll("\\\"") catch {},
+            '\\' => w.writeAll("\\\\") catch {},
+            '\n' => w.writeAll("\\n") catch {},
+            '\r' => w.writeAll("\\r") catch {},
+            '\t' => w.writeAll("\\t") catch {},
+            else => if (c < 0x20) {
+                w.print("\\u{x:0>4}", .{c}) catch {};
+            } else {
+                w.writeByte(c) catch {};
+            },
+        }
+    }
+    if (truncated) w.writeAll("...") catch {};
+    w.writeAll("\"") catch {};
 }
 
 fn writeJsonEscaped(w: anytype, val: *const Value) void {
@@ -240,7 +316,28 @@ fn updateStateJson() void {
         w.print("{d}", .{msg.target_id}) catch {};
         w.writeAll(">\",\"message\":\"") catch {};
         w.writeAll(msg.message) catch {};
-        w.writeAll("\"}") catch {};
+        w.writeAll("\",\"from\":") catch {};
+        if (msg.source_type) |src_type| {
+            w.writeAll("\"ref<") catch {};
+            w.writeAll(src_type) catch {};
+            w.writeAll(":") catch {};
+            w.print("{d}", .{msg.source_id.?}) catch {};
+            w.writeAll(">\"") catch {};
+        } else {
+            w.writeAll("null") catch {};
+        }
+        w.writeAll(",\"args\":[") catch {};
+        for (msg.args, 0..) |arg, ai| {
+            if (ai > 0) w.writeAll(",") catch {};
+            writeValueJsonString(w, arg);
+        }
+        w.writeAll("],\"reply\":") catch {};
+        if (msg.reply) |reply| {
+            writeValueJsonString(w, reply);
+        } else {
+            w.writeAll("null") catch {};
+        }
+        w.writeAll("}") catch {};
     }
     w.writeAll("]}") catch {};
 
@@ -358,7 +455,7 @@ export fn blimp_get_state_len() u32 {
 
 /// Reset the interpreter to a clean state.
 export fn blimp_reset() void {
-    evaluator = Evaluator.init(allocator);
+    evaluator = freshEvaluator();
     result_len = 0;
     error_len = 0;
     state_len = 0;
@@ -452,7 +549,7 @@ fn writeJsonStr(w: anytype, s: []const u8) void {
 /// Returns: 0 = all passed, 1 = at least one failure, 2 = parse error, 3 = not initialized.
 export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
     // Start fresh each call so the tutorial's red/green cycle is clean.
-    evaluator = Evaluator.init(allocator);
+    evaluator = freshEvaluator();
     var eval = &(evaluator orelse return 3);
 
     const source_slice = source_ptr[0..source_len];

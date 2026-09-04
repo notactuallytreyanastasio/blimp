@@ -22,11 +22,9 @@ test:
 	$(ZIG) build-lib -Mblimp=src/lib.zig -target $(TARGET) -lSystem
 
 wasm:
-	$(ZIG) build-exe -Mmain=src/wasm_api.zig --name blimp \
-	  -target wasm32-freestanding \
-	  -O ReleaseSmall \
-	  -rdynamic \
-	  -fno-entry
+	$(ZIG) build-exe -target wasm32-freestanding -O ReleaseSmall \
+	  -rdynamic -fno-entry --name blimp \
+	  -Mmain=src/wasm_api.zig
 	cp blimp.wasm web/blimp.wasm
 
 clean:

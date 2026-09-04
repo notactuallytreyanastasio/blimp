@@ -92,6 +92,7 @@ pub const BuiltinRegistry = struct {
         reg.register("round", &builtinRound);
         reg.register("not", &builtinNot);
         reg.register("random", &builtinRandom);
+        reg.register("seed", &builtinSeed);
         reg.register("size", &builtinSize);
         reg.register("empty?", &builtinIsEmpty);
         reg.register("flat", &builtinFlat);
@@ -117,6 +118,8 @@ pub const BuiltinRegistry = struct {
         reg.register("video", &viewVideo);
         reg.register("canvas", &viewCanvas);
         reg.register("button", &viewButton);
+        reg.register("timer", &viewTimer);
+        reg.register("key", &viewKey);
         reg.register("input", &viewInput);
         reg.register("textarea", &viewTextarea);
         reg.register("select", &viewSelect);
@@ -874,7 +877,6 @@ fn builtinElem(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
             return items[idx];
         },
         .list => |items| {
-            
             if (idx >= items.len) {
                 const result = allocator.create(Value) catch return error.OutOfMemory;
                 result.* = .nil;
@@ -996,7 +998,10 @@ fn builtinUniq(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     for (args[0].list) |item| {
         var found = false;
         for (items.items) |existing| {
-            if (existing.eql(item.*)) { found = true; break; }
+            if (existing.eql(item.*)) {
+                found = true;
+                break;
+            }
         }
         if (!found) items.append(allocator, item) catch return error.OutOfMemory;
     }
@@ -1051,6 +1056,102 @@ fn builtinRandom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = val };
     return result;
+}
+
+/// seed(n: Int) -> :ok
+/// Reseeds the xorshift generator behind random/2. The same seed replays the
+/// same sequence, which is what tests want; hosts that want a fresh game
+/// every load pass the clock in (tetris.html does seed(Date.now())).
+fn builtinSeed(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    if (args[0].* != .integer) return error.TypeError;
+    // xorshift is stuck at zero forever, so mix the seed with a nonzero
+    // constant (splitmix-style) instead of storing it raw.
+    const raw: u64 = @bitCast(args[0].integer);
+    var z = raw +% 0x9e3779b97f4a7c15;
+    z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+    z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+    z ^= z >> 31;
+    random_state = if (z == 0) 0x853c49e6748fea9b else z;
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .atom = "ok" };
+    return result;
+}
+
+test "seed makes random reproducible" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const lo = try alloc.create(Value);
+    lo.* = Value{ .integer = 1 };
+    const hi = try alloc.create(Value);
+    hi.* = Value{ .integer = 1_000_000 };
+    const range_args = try alloc.alloc(*const Value, 2);
+    range_args[0] = lo;
+    range_args[1] = hi;
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = 42 };
+    const seed_args = try alloc.alloc(*const Value, 1);
+    seed_args[0] = n;
+
+    const ok = try builtinSeed(alloc, seed_args);
+    try std.testing.expect(ok.eql(Value{ .atom = "ok" }));
+    const a1 = (try builtinRandom(alloc, range_args)).integer;
+    const a2 = (try builtinRandom(alloc, range_args)).integer;
+    _ = try builtinSeed(alloc, seed_args);
+    const b1 = (try builtinRandom(alloc, range_args)).integer;
+    const b2 = (try builtinRandom(alloc, range_args)).integer;
+    try std.testing.expectEqual(a1, b1);
+    try std.testing.expectEqual(a2, b2);
+
+    // a different seed gives a different first draw
+    n.* = Value{ .integer = 43 };
+    _ = try builtinSeed(alloc, seed_args);
+    const c1 = (try builtinRandom(alloc, range_args)).integer;
+    try std.testing.expect(c1 != a1);
+}
+
+test "seed zero does not wedge xorshift" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = 0 };
+    const seed_args = try alloc.alloc(*const Value, 1);
+    seed_args[0] = n;
+    _ = try builtinSeed(alloc, seed_args);
+
+    const lo = try alloc.create(Value);
+    lo.* = Value{ .integer = 0 };
+    const hi = try alloc.create(Value);
+    hi.* = Value{ .integer = 1_000_000 };
+    const range_args = try alloc.alloc(*const Value, 2);
+    range_args[0] = lo;
+    range_args[1] = hi;
+    var saw_nonzero = false;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        if ((try builtinRandom(alloc, range_args)).integer != 0) saw_nonzero = true;
+    }
+    try std.testing.expect(saw_nonzero);
+}
+
+test "seed rejects bad args" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const s = try alloc.create(Value);
+    s.* = Value{ .string = "42" };
+    const one = try alloc.alloc(*const Value, 1);
+    one[0] = s;
+    try std.testing.expectError(error.TypeError, builtinSeed(alloc, one));
+    const none = try alloc.alloc(*const Value, 0);
+    try std.testing.expectError(error.TypeError, builtinSeed(alloc, none));
 }
 
 // ============================================================
@@ -1357,6 +1458,26 @@ fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
         return makeViewNode(allocator, "button", attrs, args[0..1]);
     }
     return makeViewNode(allocator, "button", &.{}, args[0..1]);
+}
+
+/// timer(ms, sends_atom) — effect node: while mounted, the host sends the atom every ms milliseconds
+fn viewTimer(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .integer or args[1].* != .atom) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "ms", .val = args[0] };
+    attrs[1] = .{ .key = "sends", .val = args[1] };
+    return makeViewNode(allocator, "timer", attrs, &.{});
+}
+
+/// key("ArrowLeft", sends_atom) — effect node: while mounted, that KeyboardEvent.key sends the atom
+fn viewKey(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .atom) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "code", .val = args[0] };
+    attrs[1] = .{ .key = "sends", .val = args[1] };
+    return makeViewNode(allocator, "key", attrs, &.{});
 }
 
 /// input("name", "placeholder") — text input field
@@ -1749,6 +1870,58 @@ test "view canvas with id" {
     try std.testing.expectEqualStrings("id", result.view_node.attrs[0].key);
 }
 
+test "view timer with ms and sends" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ms = try alloc.create(Value);
+    ms.* = Value{ .integer = 500 };
+    const msg = try alloc.create(Value);
+    msg.* = Value{ .atom = "tick" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = ms;
+    args[1] = msg;
+    const result = try viewTimer(alloc, args);
+    try std.testing.expectEqualStrings("timer", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 2), result.view_node.attrs.len);
+    try std.testing.expectEqualStrings("ms", result.view_node.attrs[0].key);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .integer = 500 }));
+    try std.testing.expectEqualStrings("sends", result.view_node.attrs[1].key);
+    try std.testing.expect(result.view_node.attrs[1].val.eql(Value{ .atom = "tick" }));
+    try std.testing.expectEqual(@as(usize, 0), result.view_node.children.len);
+
+    // wrong arg types raise TypeError
+    args[0] = msg;
+    try std.testing.expectError(error.TypeError, viewTimer(alloc, args));
+}
+
+test "view key with code and sends" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const code = try alloc.create(Value);
+    code.* = Value{ .string = "ArrowLeft" };
+    const msg = try alloc.create(Value);
+    msg.* = Value{ .atom = "left" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = code;
+    args[1] = msg;
+    const result = try viewKey(alloc, args);
+    try std.testing.expectEqualStrings("key", result.view_node.tag);
+    try std.testing.expectEqual(@as(usize, 2), result.view_node.attrs.len);
+    try std.testing.expectEqualStrings("code", result.view_node.attrs[0].key);
+    try std.testing.expect(result.view_node.attrs[0].val.eql(Value{ .string = "ArrowLeft" }));
+    try std.testing.expectEqualStrings("sends", result.view_node.attrs[1].key);
+    try std.testing.expect(result.view_node.attrs[1].val.eql(Value{ .atom = "left" }));
+    try std.testing.expectEqual(@as(usize, 0), result.view_node.children.len);
+
+    // wrong arg types raise TypeError
+    args[1] = code;
+    try std.testing.expectError(error.TypeError, viewKey(alloc, args));
+}
+
 test "view divider takes no args" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1840,6 +2013,8 @@ fn builtinToHtmlNative(allocator: std.mem.Allocator, args: []const *const Value)
 fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayListUnmanaged(u8)) !void {
     switch (val.*) {
         .view_node => |node| {
+            // Effect nodes (timer, key) are host instructions, not markup.
+            if (std.mem.eql(u8, node.tag, "timer") or std.mem.eql(u8, node.tag, "key")) return;
             const tag = blimpTagToHtml(node.tag);
             try buf.appendSlice(allocator, "<");
             try buf.appendSlice(allocator, tag);
