@@ -61,7 +61,7 @@ var result_buf: [16384]u8 = undefined;
 var result_len: u32 = 0;
 var error_buf: [4096]u8 = undefined;
 var error_len: u32 = 0;
-var state_buf: [65536]u8 = undefined;
+var state_buf: [262144]u8 = undefined;
 var state_len: u32 = 0;
 var last_status: i32 = 0;
 var view_buf: [65536]u8 = undefined;
@@ -102,6 +102,9 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     // actor names), so the source must live as long as the evaluator.
     const source = allocator.dupe(u8, source_slice) catch return 3;
     eval.setSource(source);
+    // The message log holds pointers into the previous eval's heap, which
+    // compactHeap has already dropped, so it starts empty every eval.
+    eval.msg_log_count = 0;
 
     // Parse -- use the global allocator, NOT a temporary arena.
     // The AST must live as long as the evaluator because the actor
@@ -174,6 +177,34 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     compactHeap();
 
     return 0;
+}
+
+/// Format a value into a quoted JSON string, capped so a board full of rows
+/// does not blow up the state buffer. Quotes, backslashes and control
+/// characters are escaped; a truncated value ends in "...".
+const value_string_cap = 80;
+fn writeValueJsonString(w: anytype, val: *const Value) void {
+    var buf: [value_string_cap]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    writeJsonEscaped(fbs.writer(), val);
+    const truncated = fbs.pos == value_string_cap;
+    w.writeAll("\"") catch {};
+    for (buf[0..fbs.pos]) |c| {
+        switch (c) {
+            '"' => w.writeAll("\\\"") catch {},
+            '\\' => w.writeAll("\\\\") catch {},
+            '\n' => w.writeAll("\\n") catch {},
+            '\r' => w.writeAll("\\r") catch {},
+            '\t' => w.writeAll("\\t") catch {},
+            else => if (c < 0x20) {
+                w.print("\\u{x:0>4}", .{c}) catch {};
+            } else {
+                w.writeByte(c) catch {};
+            },
+        }
+    }
+    if (truncated) w.writeAll("...") catch {};
+    w.writeAll("\"") catch {};
 }
 
 fn writeJsonEscaped(w: anytype, val: *const Value) void {
@@ -292,6 +323,17 @@ fn updateStateJson() void {
             w.writeAll(":") catch {};
             w.print("{d}", .{msg.source_id.?}) catch {};
             w.writeAll(">\"") catch {};
+        } else {
+            w.writeAll("null") catch {};
+        }
+        w.writeAll(",\"args\":[") catch {};
+        for (msg.args, 0..) |arg, ai| {
+            if (ai > 0) w.writeAll(",") catch {};
+            writeValueJsonString(w, arg);
+        }
+        w.writeAll("],\"reply\":") catch {};
+        if (msg.reply) |reply| {
+            writeValueJsonString(w, reply);
         } else {
             w.writeAll("null") catch {};
         }

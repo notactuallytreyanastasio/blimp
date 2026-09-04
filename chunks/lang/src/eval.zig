@@ -44,6 +44,10 @@ pub const Evaluator = struct {
         message: []const u8,
         source_id: ?u64 = null,
         source_type: ?[]const u8 = null,
+        /// Evaluated arguments, filled in once the send has evaluated them.
+        args: []const *const Value = &.{},
+        /// What the handler replied (sync sends only; null while queued).
+        reply: ?*const Value = null,
     };
 
     pub const ActorContext = struct {
@@ -906,8 +910,11 @@ pub const Evaluator = struct {
         // Target must be a spawned actor_ref. Atoms (template names) are not instances.
         switch (target_val.*) {
             .actor_ref => |ref| {
-                // Log for canvas rays
+                // Log for canvas rays and the inspector. log_idx lets the
+                // send fill in args and reply once it has them.
+                var log_idx: ?usize = null;
                 if (self.msg_log_count < msg_log_cap) {
+                    log_idx = self.msg_log_count;
                     const source: ?registry_mod.ActorRef = if (self.actor_ctx) |ctx| ctx.entry.ref else null;
                     self.msg_log[self.msg_log_count] = .{
                         .target_id = ref.id,
@@ -926,6 +933,7 @@ pub const Evaluator = struct {
                     for (ms.args, 0..) |arg, i| {
                         args[i] = try self.eval(arg);
                     }
+                    if (log_idx) |li| self.msg_log[li].args = args;
                     const MailboxMsg = @import("mailbox.zig").Message;
                     entry.mailbox.enqueue(self.allocator, MailboxMsg{
                         .name = ms.message,
@@ -979,14 +987,20 @@ pub const Evaluator = struct {
                     // Execute the handler body
                     self.env.pushScope();
 
-                    // Bind handler params
+                    // Bind handler params, keeping the values for the log
+                    const logged_args: []*const Value = if (log_idx != null and handler.params.len > 0)
+                        self.allocator.alloc(*const Value, handler.params.len) catch return error.OutOfMemory
+                    else
+                        &.{};
                     for (handler.params, 0..) |param, i| {
                         const arg_val = self.eval(ms.args[i]) catch |err| {
                             self.env.popScope();
                             return err;
                         };
                         self.env.define(param.name, arg_val);
+                        if (log_idx != null) logged_args[i] = arg_val;
                     }
+                    if (log_idx) |li| self.msg_log[li].args = logged_args;
 
                     // Bind state fields as variables
                     for (entry.state_fields) |field| {
@@ -1018,12 +1032,14 @@ pub const Evaluator = struct {
                     self.actor_ctx = prev_ctx;
                     self.env.popScope();
 
-                    // Return reply value if set, otherwise last value or nil
-                    if (ctx.reply_value) |rv| return rv;
-                    if (has_val) return last_val;
-                    const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
-                    nil_val.* = .nil;
-                    return nil_val;
+                    // Reply value if set, otherwise last value or nil
+                    const reply_val: *const Value = if (ctx.reply_value) |rv| rv else if (has_val) last_val else blk: {
+                        const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
+                        nil_val.* = .nil;
+                        break :blk nil_val;
+                    };
+                    if (log_idx) |li| self.msg_log[li].reply = reply_val;
+                    return reply_val;
                 }
 
                 // No handler matched
@@ -3050,6 +3066,58 @@ test "message log records the sending actor" {
     try std.testing.expectEqualStrings("ping", evaluator.msg_log[1].message);
     try std.testing.expectEqualStrings("Pinger", evaluator.msg_log[1].source_type.?);
     try std.testing.expectEqual(evaluator.msg_log[0].target_id, evaluator.msg_log[1].source_id.?);
+}
+
+test "message log records args and reply of a sync send" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = try evalProgram(alloc, &evaluator,
+        \\actor Adder do
+        \\  on :add(x: Int, y: Int) do reply x + y end
+        \\  on :noop do end
+        \\end
+        \\a = spawn Adder
+        \\a <- :add(2, 3)
+        \\a <- :noop
+    );
+    try std.testing.expect(result.* == .nil);
+    try std.testing.expectEqual(@as(u32, 2), evaluator.msg_log_count);
+
+    const add = evaluator.msg_log[0];
+    try std.testing.expectEqualStrings("add", add.message);
+    try std.testing.expectEqual(@as(usize, 2), add.args.len);
+    try std.testing.expectEqual(@as(i64, 2), add.args[0].integer);
+    try std.testing.expectEqual(@as(i64, 3), add.args[1].integer);
+    try std.testing.expectEqual(@as(i64, 5), add.reply.?.integer);
+
+    const noop = evaluator.msg_log[1];
+    try std.testing.expectEqual(@as(usize, 0), noop.args.len);
+    try std.testing.expect(noop.reply.?.* == .nil);
+}
+
+test "message log records args of an async send without a reply" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Sink do
+        \\  state seen: Int :: 0
+        \\  on :put(n: Int) do become seen: n end
+        \\end
+        \\s = spawn Sink
+        \\s <-- :put(7)
+    );
+    try std.testing.expect(evaluator.msg_log_count >= 1);
+    const put = evaluator.msg_log[0];
+    try std.testing.expectEqualStrings("put", put.message);
+    try std.testing.expectEqual(@as(usize, 1), put.args.len);
+    try std.testing.expectEqual(@as(i64, 7), put.args[0].integer);
+    try std.testing.expect(put.reply == null);
 }
 
 test "message log stops at its capacity" {
