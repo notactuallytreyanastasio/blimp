@@ -28,11 +28,17 @@ pub const Evaluator = struct {
     actor_ctx: ?*ActorContext = null,
     msg_log: [msg_log_cap]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
+    /// Live trace sink (blimp --trace). One tab-separated line per event:
+    /// spawn/send/cast/state, see traceSend and evalBecomeStmt.
+    trace_fn: ?TraceFn = null,
+    trace_ctx: ?*anyopaque = null,
     bubble_reason: ?*const Value = null,
     /// Reduction counter: decremented on each eval. Yield when 0.
     reductions: i32 = 4_000_000, // high default for non-scheduled mode
     /// Scheduler instance (null in non-scheduled mode)
     scheduler: ?*@import("scheduler.zig").Scheduler = null,
+
+    pub const TraceFn = *const fn (ctx: ?*anyopaque, line: []const u8) void;
 
     // Message log for canvas rays. Each send records its target and, when it
     // happens inside a handler, the actor that sent it. Cleared by the host
@@ -599,6 +605,59 @@ pub const Evaluator = struct {
         return v;
     }
 
+    // ── Live trace ──────────────────────────────────────────
+    // Values are capped like the wasm state JSON so a board full of rows
+    // stays one line on the receipt.
+    const trace_value_cap = 80;
+
+    fn traceValue(buf: []u8, val: *const Value) []const u8 {
+        var fbs = std.io.fixedBufferStream(buf[0..trace_value_cap]);
+        val.format(fbs.writer());
+        if (fbs.pos < trace_value_cap) return buf[0..fbs.pos];
+        @memcpy(buf[trace_value_cap .. trace_value_cap + 3], "...");
+        return buf[0 .. trace_value_cap + 3];
+    }
+
+    fn traceArgs(buf: []u8, args: []const *const Value) []const u8 {
+        var fbs = std.io.fixedBufferStream(buf);
+        const w = fbs.writer();
+        var vbuf: [trace_value_cap + 3]u8 = undefined;
+        for (args, 0..) |arg, i| {
+            if (i > 0) w.writeAll(", ") catch {};
+            w.writeAll(traceValue(&vbuf, arg)) catch {};
+        }
+        return buf[0..fbs.pos];
+    }
+
+    fn traceSpawn(self: *Evaluator, ref: registry_mod.ActorRef) void {
+        const fn_ptr = self.trace_fn orelse return;
+        var buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "spawn\t{s}#{d}", .{ ref.type_name, ref.id }) catch return;
+        fn_ptr(self.trace_ctx, line);
+    }
+
+    fn traceSend(self: *Evaluator, to: registry_mod.ActorRef, message: []const u8, args: []const *const Value, reply: ?*const Value) void {
+        const fn_ptr = self.trace_fn orelse return;
+        var abuf: [1024]u8 = undefined;
+        var rbuf: [trace_value_cap + 3]u8 = undefined;
+        var buf: [1600]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        const w = fbs.writer();
+        w.writeAll(if (reply != null) "send\t" else "cast\t") catch return;
+        if (self.actor_ctx) |ctx| w.print("{s}#{d}", .{ ctx.entry.ref.type_name, ctx.entry.ref.id }) catch return;
+        w.print("\t{s}#{d}\t{s}\t{s}", .{ to.type_name, to.id, message, traceArgs(&abuf, args) }) catch return;
+        if (reply) |r| w.print("\t{s}", .{traceValue(&rbuf, r)}) catch return;
+        fn_ptr(self.trace_ctx, buf[0..fbs.pos]);
+    }
+
+    fn traceState(self: *Evaluator, ref: registry_mod.ActorRef, field: []const u8, val: *const Value) void {
+        const fn_ptr = self.trace_fn orelse return;
+        var vbuf: [trace_value_cap + 3]u8 = undefined;
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "state\t{s}#{d}\t{s}\t{s}", .{ ref.type_name, ref.id, field, traceValue(&vbuf, val) }) catch return;
+        fn_ptr(self.trace_ctx, line);
+    }
+
     fn evalSpawnExpr(self: *Evaluator, se: ast.Node.SpawnExpr) EvalError!*const Value {
         // Look up the template in the registry
         const template = self.registry.lookupTemplate(se.actor_name) orelse {
@@ -619,6 +678,7 @@ pub const Evaluator = struct {
 
         // Spawn a new instance
         const ref = self.registry.spawn(template, overrides);
+        self.traceSpawn(ref);
 
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
         v.* = Value{ .actor_ref = ref };
@@ -855,6 +915,7 @@ pub const Evaluator = struct {
         const overrides = overrides_list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
 
         const ref = self.registry.spawn(template, overrides);
+        self.traceSpawn(ref);
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
         v.* = Value{ .actor_ref = ref };
         return v;
@@ -934,6 +995,7 @@ pub const Evaluator = struct {
                         args[i] = try self.eval(arg);
                     }
                     if (log_idx) |li| self.msg_log[li].args = args;
+                    self.traceSend(ref, ms.message, args, null);
                     const MailboxMsg = @import("mailbox.zig").Message;
                     entry.mailbox.enqueue(self.allocator, MailboxMsg{
                         .name = ms.message,
@@ -988,7 +1050,8 @@ pub const Evaluator = struct {
                     self.env.pushScope();
 
                     // Bind handler params, keeping the values for the log
-                    const logged_args: []*const Value = if (log_idx != null and handler.params.len > 0)
+                    const keep_args = (log_idx != null or self.trace_fn != null) and handler.params.len > 0;
+                    const logged_args: []*const Value = if (keep_args)
                         self.allocator.alloc(*const Value, handler.params.len) catch return error.OutOfMemory
                     else
                         &.{};
@@ -998,7 +1061,7 @@ pub const Evaluator = struct {
                             return err;
                         };
                         self.env.define(param.name, arg_val);
-                        if (log_idx != null) logged_args[i] = arg_val;
+                        if (keep_args) logged_args[i] = arg_val;
                     }
                     if (log_idx) |li| self.msg_log[li].args = logged_args;
 
@@ -1039,6 +1102,7 @@ pub const Evaluator = struct {
                         break :blk nil_val;
                     };
                     if (log_idx) |li| self.msg_log[li].reply = reply_val;
+                    self.traceSend(ref, ms.message, logged_args, reply_val);
                     return reply_val;
                 }
 
@@ -1066,6 +1130,7 @@ pub const Evaluator = struct {
             for (ctx.entry.state_fields) |*state_field| {
                 if (std.mem.eql(u8, state_field.key, field.key)) {
                     state_field.val = new_val;
+                    self.traceState(ctx.entry.ref, field.key, new_val);
                     break;
                 }
             }
@@ -3118,6 +3183,117 @@ test "message log records args of an async send without a reply" {
     try std.testing.expectEqual(@as(usize, 1), put.args.len);
     try std.testing.expectEqual(@as(i64, 7), put.args[0].integer);
     try std.testing.expect(put.reply == null);
+}
+
+const TraceCapture = struct {
+    lines: std.ArrayList([]const u8),
+    alloc: std.mem.Allocator,
+
+    fn onLine(ctx: ?*anyopaque, line: []const u8) void {
+        const self: *TraceCapture = @ptrCast(@alignCast(ctx.?));
+        const copy = self.alloc.dupe(u8, line) catch return;
+        self.lines.append(self.alloc, copy) catch {};
+    }
+
+    fn has(self: *TraceCapture, needle: []const u8) bool {
+        for (self.lines.items) |l| if (std.mem.eql(u8, l, needle)) return true;
+        return false;
+    }
+
+    fn indexOf(self: *TraceCapture, needle: []const u8) ?usize {
+        for (self.lines.items, 0..) |l, i| if (std.mem.eql(u8, l, needle)) return i;
+        return null;
+    }
+};
+
+test "trace callback reports spawns, sends, replies and state changes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TraceCapture{ .lines = .{}, .alloc = alloc };
+    var evaluator = Evaluator.init(alloc);
+    evaluator.trace_fn = TraceCapture.onLine;
+    evaluator.trace_ctx = &cap;
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Account do
+        \\  state balance: Int :: 0
+        \\  on :withdraw(amount: Int) do
+        \\    become balance: balance - amount
+        \\    reply balance - amount
+        \\  end
+        \\  on :get do reply balance end
+        \\end
+        \\actor Bank do
+        \\  on :take(from: Any, amount: Int) do
+        \\    from <- :withdraw(amount)
+        \\    reply from <- :get
+        \\  end
+        \\end
+        \\alice = spawn Account, balance: 1000
+        \\bank = spawn Bank
+        \\bank <- :take(alice, 200)
+    );
+
+    try std.testing.expect(cap.has("spawn\tAccount#1"));
+    try std.testing.expect(cap.has("spawn\tBank#2"));
+    // nested sends are reported as they complete, the outer one last
+    const inner = cap.indexOf("send\tBank#2\tAccount#1\twithdraw\t200\t800").?;
+    const state = cap.indexOf("state\tAccount#1\tbalance\t800").?;
+    const get = cap.indexOf("send\tBank#2\tAccount#1\tget\t\t800").?;
+    const outer = cap.indexOf("send\t\tBank#2\ttake\tref<Account:1>, 200\t800").?;
+    try std.testing.expect(state < inner);
+    try std.testing.expect(inner < get);
+    try std.testing.expect(get < outer);
+}
+
+test "trace callback reports async sends without a reply" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TraceCapture{ .lines = .{}, .alloc = alloc };
+    var evaluator = Evaluator.init(alloc);
+    evaluator.trace_fn = TraceCapture.onLine;
+    evaluator.trace_ctx = &cap;
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Sink do
+        \\  state seen: Int :: 0
+        \\  on :put(n: Int) do become seen: n end
+        \\end
+        \\s = spawn Sink
+        \\s <-- :put(7)
+    );
+    try std.testing.expect(cap.has("cast\t\tSink#1\tput\t7"));
+    try std.testing.expect(cap.has("state\tSink#1\tseen\t7"));
+}
+
+test "trace formats long values capped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TraceCapture{ .lines = .{}, .alloc = alloc };
+    var evaluator = Evaluator.init(alloc);
+    evaluator.trace_fn = TraceCapture.onLine;
+    evaluator.trace_ctx = &cap;
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Big do
+        \\  on :len(l: List) do reply length(l) end
+        \\end
+        \\b = spawn Big
+        \\b <- :len(range(1, 200))
+    );
+    var found = false;
+    for (cap.lines.items) |l| {
+        if (std.mem.startsWith(u8, l, "send\t\tBig#1\tlen\t")) {
+            found = true;
+            try std.testing.expect(l.len < 200);
+            try std.testing.expect(std.mem.indexOf(u8, l, "...") != null);
+            try std.testing.expect(std.mem.endsWith(u8, l, "\t200"));
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "message log stops at its capacity" {
