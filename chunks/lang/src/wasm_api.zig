@@ -63,6 +63,12 @@ var error_buf: [4096]u8 = undefined;
 var error_len: u32 = 0;
 var state_buf: [262144]u8 = undefined;
 var state_len: u32 = 0;
+// Messages accumulate here, already serialized, across evals until JS reads
+// the state (a view host runs two evals per send and reads once). Value
+// pointers in eval.msg_log only live for one eval, so the text is kept.
+var messages_buf: [196608]u8 = undefined;
+var messages_len: u32 = 0;
+var messages_read: bool = false;
 var last_status: i32 = 0;
 var view_buf: [65536]u8 = undefined;
 var view_len: u32 = 0;
@@ -305,11 +311,29 @@ fn updateStateJson() void {
         actor_idx += 1;
     }
 
-    // Message log for canvas rays
+    // Message log for canvas rays and the inspector: this eval's entries are
+    // appended to the accumulated text, which JS clears by reading it.
+    if (messages_read) {
+        messages_len = 0;
+        messages_read = false;
+    }
+    appendMessagesJson(eval);
     w.writeAll("],\"messages\":[") catch {};
+    w.writeAll(messages_buf[0..messages_len]) catch {};
+    w.writeAll("]}") catch {};
+
+    eval.msg_log_count = 0;
+
+    state_len = @intCast(fbs.pos);
+}
+
+fn appendMessagesJson(eval: *Evaluator) void {
+    var fbs = std.io.fixedBufferStream(messages_buf[messages_len..]);
+    const w = fbs.writer();
     for (0..eval.msg_log_count) |mi| {
-        if (mi > 0) w.writeAll(",") catch {};
+        const start = fbs.pos;
         const msg = eval.msg_log[mi];
+        if (messages_len > 0 or mi > 0) w.writeAll(",") catch {};
         w.writeAll("{\"target\":\"ref<") catch {};
         w.writeAll(msg.target_type) catch {};
         w.writeAll(":") catch {};
@@ -337,14 +361,17 @@ fn updateStateJson() void {
         } else {
             w.writeAll("null") catch {};
         }
-        w.writeAll("}") catch {};
+        w.writeAll("}") catch {
+            // out of room: drop this partial entry, keep what fit
+            fbs.pos = start;
+            break;
+        };
+        if (fbs.pos >= fbs.buffer.len - 1) {
+            fbs.pos = start;
+            break;
+        }
     }
-    w.writeAll("]}") catch {};
-
-    // Clear the message log after reading
-    eval.msg_log_count = 0;
-
-    state_len = @intCast(fbs.pos);
+    messages_len += @intCast(fbs.pos);
 }
 
 /// Serialize a view_node tree as JSON for the JS renderer.
@@ -445,6 +472,7 @@ export fn blimp_get_error_len() u32 {
 
 /// Get the state JSON pointer (for introspection sidebar).
 export fn blimp_get_state_ptr() [*]const u8 {
+    messages_read = true;
     return &state_buf;
 }
 
@@ -459,6 +487,8 @@ export fn blimp_reset() void {
     result_len = 0;
     error_len = 0;
     state_len = 0;
+    messages_len = 0;
+    messages_read = false;
     view_len = 0;
     has_view = false;
     last_status = 0;
