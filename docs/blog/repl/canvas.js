@@ -8,12 +8,15 @@ class BlimpCanvas {
     this.nodes = [];      // {id, type, state, x, y, hash, scale, flashT}
     this.rays = [];       // {fromId, toId, t0, color, label}
     this.varMap = {};     // variable name -> actor ref string
+    this.selectedId = null; // actor ref highlighted (see select/onSelect)
+    this.onSelect = null;   // function(ref|null) called on click
     this.w = 0;
     this.h = 0;
     this.dpr = 1;
 
     this._resize();
     window.addEventListener('resize', () => this._resize());
+    this.canvas.addEventListener('click', (ev) => this._click(ev));
 
     // ResizeObserver catches cases window resize misses (mobile rotation, flex layout changes)
     if (typeof ResizeObserver !== 'undefined') {
@@ -42,6 +45,24 @@ class BlimpCanvas {
     this.canvas.style.width = this.w + 'px';
     this.canvas.style.height = this.h + 'px';
     this._layout();
+  }
+
+  // Highlight one actor (null clears). Clicking a hexagon does this too.
+  select(id) {
+    this.selectedId = id;
+  }
+
+  _click(ev) {
+    var r = this.canvas.getBoundingClientRect();
+    var x = ev.clientX - r.left, y = ev.clientY - r.top;
+    var reach = 36 * (this._hexScale || 1);
+    var hit = null;
+    for (var node of this.nodes) {
+      if (node.shape === 'square') continue;
+      if (Math.hypot(node.x - x, node.y - y) <= reach) { hit = node; break; }
+    }
+    this.selectedId = hit ? hit.id : null;
+    if (this.onSelect) this.onSelect(this.selectedId);
   }
 
   // Called after each eval with fresh state + source text
@@ -350,8 +371,18 @@ class BlimpCanvas {
     }
     ctx.stroke();
 
+    // Selection ring
+    if (node.id === this.selectedId) {
+      ctx.beginPath();
+      ctx.arc(0, 0, r + 7, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
+
     // Label
-    ctx.fillStyle = '#556';
+    ctx.fillStyle = node.id === this.selectedId ? '#dde' : '#556';
     ctx.font = '9px monospace';
     ctx.textAlign = 'center';
     ctx.fillText(node.type, 0, r + 13);
