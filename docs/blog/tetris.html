@@ -147,6 +147,11 @@ body {
   });
   window.__blimpView = view;
 
+  // the wasm build has no clock, so the page hands one in. without this
+  // every load would deal the same piece sequence.
+  var seeded = blimp.eval('seed(' + Date.now() + ')');
+  if (!seeded.ok) { status('could not seed: ' + seeded.error, '#c7254e'); return; }
+
   status('evaluating...');
   view.mount(source, 'game');
 })();
