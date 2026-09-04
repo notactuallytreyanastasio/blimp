@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blimp — Design Journal</title>
+<style>
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #fafafa;
+  color: #222;
+  font-family: 'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.content {
+  padding: 2rem;
+  max-width: 72ch;
+  margin: 0 auto;
+}
+
+a {
+  color: #0066cc;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.site-title {
+  font-size: 1rem;
+  color: #999;
+  margin-bottom: 3rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.post-list {
+  list-style: none;
+}
+
+.post-list li {
+  margin-bottom: 1.5rem;
+}
+
+.post-date {
+  color: #999;
+  font-size: 0.85rem;
+}
+
+.post-title {
+  color: #000;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.post-summary {
+  color: #666;
+  font-size: 0.9rem;
+  margin-top: 0.2rem;
+}
+
+.repl-section {
+  margin-top: 2rem;
+  border-top: 1px solid #e0e0e0;
+  padding-top: 1.5rem;
+}
+
+.repl-section h2 {
+  font-size: 0.85rem;
+  color: #999;
+  font-weight: 400;
+  margin-bottom: 1rem;
+  text-align: center;
+  letter-spacing: 0.05em;
+}
+</style>
+</head>
+<body>
+
+<div class="content">
+  <div class="site-title">blimp / design journal</div>
+
+  <ul class="post-list">
+  <li>
+    <div class="post-date">September 3, 2026</div>
+    <a class="post-title" href="tetris.html">Tetris in Blimp</a>
+    <div class="post-summary">Tetris written entirely in Blimp actors, running in the browser through the view DSL. Arrow keys, space, p to pause. No game logic in JavaScript.</div>
+  </li>
+  <li>
+    <div class="post-date">March 24, 2026</div>
+    <a class="post-title" href="2026-03-24-you-can-try-it-now.html">You Can Try It Now</a>
+    <div class="post-summary">Closures, pattern matching, loops, WASM REPL in the browser, generative canvas, Perceus RC. There's a REPL at the bottom. Go play with it.</div>
+  </li>
+  <li>
+    <div class="post-date">March 23, 2026</div>
+    <a class="post-title" href="2026-03-23-actors-are-alive.html">Actors Are Alive</a>
+    <div class="post-summary">A diff viewer, a multiplexer running AI agents, a tree-walking interpreter, actors that spawn and talk, Elm-style errors, and LLVM compilation to native code.</div>
+  </li>
+  <li>
+    <div class="post-date">March 21, 2026</div>
+    <a class="post-title" href="2026-03-21-the-construction-of-blimp.html">The Construction of Blimp</a>
+    <div class="post-summary">Walking through the grammar piece by piece. Actors, typed state, pipes, message sends, guards, Holes, situations, bubbles, and jazz computers.</div>
+  </li>
+  <li>
+    <div class="post-date">March 18, 2026</div>
+    <a class="post-title" href="2026-03-18-a-radical-approach-to-programming.html">Blimp: A Radical Approach to Programming</a>
+    <div class="post-summary">Actors, agents, multiplexers, and the language that builds itself.</div>
+  </li>
+  </ul>
+
+  <div class="repl-section">
+    <h2>try blimp &mdash; <a href="playground.html" style="color:#a6e22e;">open full playground</a></h2>
+  </div>
+</div>
+
+<div id="repl" style="height:600px;overflow:hidden;"></div>
+
+<script src="repl/blimp-repl.js"></script>
+<script>BlimpRepl.embed('#repl');</script>
+</body>
+</html>

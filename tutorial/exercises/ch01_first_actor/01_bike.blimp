@@ -1,0 +1,54 @@
+# Chapter 1 -- Your first actor
+# Run: blimp exercises/ch01_first_actor/01_bike.blimp --test
+#
+# Four handlers, four tests. Replace each :TODO with the right
+# expression. Some handlers need a `become` statement before the
+# reply. Read the tests to figure out what each handler should do.
+
+actor Bike do
+  state id: String :: "unknown"
+  state status: Atom :: :available
+
+  on :id do
+    # Exercise: reply with the bike's id
+    reply :TODO
+  end
+
+  on :status do
+    # Exercise: reply with the current status
+    reply :TODO
+  end
+
+  on :rent do
+    # Exercise: change status to :rented
+    reply :TODO
+  end
+
+  on :return do
+    # Exercise: change status to :available
+    reply :TODO
+  end
+end
+
+actor BikeTests do
+  state bike: Bike :: spawn Bike, id: "b-001"
+
+  test "reports its id" do
+    assert_eq(bike <- :id, "b-001")
+  end
+
+  test "starts available" do
+    assert_eq(bike <- :status, :available)
+  end
+
+  test "rent flips status to :rented" do
+    bike <- :rent
+    assert_eq(bike <- :status, :rented)
+  end
+
+  test "return flips status back" do
+    bike <- :rent
+    bike <- :return
+    assert_eq(bike <- :status, :available)
+  end
+end

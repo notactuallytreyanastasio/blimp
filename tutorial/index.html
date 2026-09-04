@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blimp Tutorial</title>
+<style>
+:root {
+  --bg: #fafafa;
+  --fg: #222;
+  --muted: #666;
+  --subtle: #999;
+  --border: #e0e0e0;
+  --code-bg: #1a1a2e;
+  --code-fg: #d4d4d4;
+  --green: #2ea043;
+  --green-dim: #d6f0db;
+  --red: #cf222e;
+  --red-dim: #ffebe9;
+  --blue: #0066cc;
+  --accent: #a6e22e;
+  --font-mono: 'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; background: var(--bg); color: var(--fg); }
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.5rem 1rem; border-bottom: 1px solid var(--border);
+  height: 42px; flex-shrink: 0;
+}
+.topbar .brand { font-weight: 600; }
+.topbar .brand a { color: var(--fg); text-decoration: none; }
+.topbar .status { font-size: 11px; color: var(--subtle); }
+.topbar .status.ready { color: var(--green); }
+.topbar .status.error { color: var(--red); }
+
+.app {
+  display: grid;
+  grid-template-columns: 180px 1fr 1fr;
+  height: calc(100vh - 42px);
+  overflow: hidden;
+}
+
+/* -- left rail: chapter list -- */
+.chapters {
+  border-right: 1px solid var(--border);
+  overflow-y: auto; padding: 0.5rem 0;
+  background: #f3f3f3;
+}
+.chapters a {
+  display: block; padding: 0.35rem 1rem;
+  font-size: 12px; color: var(--muted);
+  text-decoration: none; border-left: 2px solid transparent;
+}
+.chapters a .id { color: var(--subtle); margin-right: 0.5rem; }
+.chapters a.active { background: #fff; color: var(--fg); border-left-color: var(--blue); }
+.chapters a:hover:not(.active) { background: #eaeaea; color: var(--fg); }
+.chapters a.unavailable { opacity: 0.45; cursor: not-allowed; }
+
+/* -- center: rendered markdown -- */
+.content-wrap {
+  overflow-y: auto; padding: 2rem 2.5rem 4rem; border-right: 1px solid var(--border);
+}
+.content h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 0.4rem; letter-spacing: -0.02em; }
+.content h2 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.75rem; letter-spacing: -0.01em; }
+.content h3 { font-size: 0.95rem; font-weight: 600; margin: 1.5rem 0 0.5rem; color: var(--muted); }
+.content p { margin-bottom: 1.1rem; }
+.content ul, .content ol { margin: 0 0 1.1rem 1.25rem; }
+.content li { margin-bottom: 0.35rem; }
+.content strong { font-weight: 600; color: #000; }
+.content em { font-style: italic; color: #555; }
+.content a { color: var(--blue); text-decoration: none; border-bottom: 1px dotted var(--blue); }
+.content code { background: #eaeaea; padding: 0.08em 0.32em; border-radius: 3px; font-size: 0.95em; color: #6a3fb0; }
+.content pre {
+  background: var(--code-bg); color: var(--code-fg);
+  padding: 0.85rem 1rem; border-radius: 6px; overflow-x: auto;
+  margin-bottom: 1.1rem; font-size: 12px; line-height: 1.55;
+}
+.content pre code { background: transparent; padding: 0; color: var(--code-fg); font-size: 12px; }
+
+/* Syntax highlighting tokens (Blimp) */
+.tok-c  { color: #6a9955; font-style: italic; }            /* comments */
+.tok-s  { color: #ce9178; }                                /* strings */
+.tok-si { color: #ffb86c; }                                /* string interpolation delimiters */
+.tok-a  { color: #d7ba7d; }                                /* atoms */
+.tok-n  { color: #b5cea8; }                                /* numbers */
+.tok-o  { color: #d4d4d4; }                                /* operators */
+.tok-k  { color: #c586c0; font-weight: 600; }              /* keywords */
+.tok-cn { color: #569cd6; }                                /* true / false / nil */
+.tok-bi { color: #4ec9b0; }                                /* builtins */
+.tok-t  { color: #4ec9b0; }                                /* types / PascalCase */
+.tok-p  { color: #9cdcfe; }                                /* property / map key */
+.content table { border-collapse: collapse; margin-bottom: 1.25rem; font-size: 12px; }
+.content th, .content td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; }
+.content th { background: #f0f0f0; font-weight: 600; }
+.content blockquote { border-left: 3px solid var(--border); padding: 0.25rem 0 0.25rem 0.85rem; color: var(--muted); margin-bottom: 1.1rem; }
+.content hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+.prevnext {
+  display: flex; justify-content: space-between;
+  margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.prevnext a { color: var(--blue); text-decoration: none; }
+.prevnext a.disabled { color: var(--subtle); pointer-events: none; }
+
+/* -- right: repl pane -- */
+.repl {
+  display: grid; grid-template-rows: 36px 1fr;
+  background: #fff; overflow: hidden;
+}
+.repl-tabs {
+  display: flex; border-bottom: 1px solid var(--border); background: #f3f3f3;
+}
+.repl-tabs button {
+  flex: 1; padding: 0.5rem; border: 0; background: transparent;
+  font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+  cursor: pointer; border-bottom: 2px solid transparent;
+}
+.repl-tabs button.active { background: #fff; color: var(--fg); border-bottom-color: var(--blue); }
+
+.tab-pane { display: none; flex-direction: column; overflow: hidden; height: 100%; }
+.tab-pane.active { display: flex; }
+
+/* Monaco editor host -- fills the flex column, automaticLayout watches resize. */
+#editor { flex: 1; min-height: 0; background: var(--code-bg); }
+#editor.disabled { opacity: 0.55; }
+
+.solution-view {
+  flex: 1; margin: 0; padding: 0.85rem 1rem;
+  background: var(--code-bg); color: var(--code-fg);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+  white-space: pre; overflow: auto; tab-size: 2; user-select: text;
+}
+.solution-view code { color: inherit; background: transparent; padding: 0; font: inherit; }
+
+.repl-controls {
+  display: flex; gap: 0.5rem; padding: 0.5rem;
+  border-top: 1px solid var(--border); background: #f8f8f8;
+  flex-shrink: 0;
+}
+.repl-controls button {
+  font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+  padding: 0.45rem 0.85rem; border: 1px solid var(--border);
+  background: #fff; color: var(--fg); border-radius: 4px; cursor: pointer;
+}
+.repl-controls button:hover { background: #f0f0f0; }
+.repl-controls button.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.repl-controls button.primary:hover { background: #0052a3; }
+.repl-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+#results {
+  max-height: 40%; overflow-y: auto;
+  padding: 0.5rem 0.85rem 1rem;
+  border-top: 1px solid var(--border); background: #fcfcfc;
+  font-size: 12px; flex-shrink: 0;
+}
+#results:empty { display: none; }
+.badge { display: inline-block; padding: 0.2rem 0.55rem; border-radius: 999px; font-weight: 600; font-size: 11px; margin-bottom: 0.5rem; }
+.badge.pass { background: var(--green-dim); color: var(--green); }
+.badge.fail { background: var(--red-dim); color: var(--red); }
+.test { padding: 0.25rem 0; border-bottom: 1px solid #f0f0f0; }
+.test:last-child { border-bottom: 0; }
+.test .sym { font-weight: 700; margin-right: 0.4rem; }
+.test.pass .sym { color: var(--green); }
+.test.fail .sym { color: var(--red); }
+.test code { color: var(--muted); font-size: 11px; background: transparent; padding: 0; }
+.test .detail { margin-left: 1.3rem; color: var(--red); font-size: 11px; margin-top: 0.15rem; font-style: italic; }
+.parse-error { color: var(--red); padding: 0.5rem; background: var(--red-dim); border-radius: 4px; white-space: pre-wrap; }
+
+/* Tiny-screen fallback */
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
+  .chapters { border-right: 0; border-bottom: 1px solid var(--border); max-height: 160px; }
+  .content-wrap { border-right: 0; border-bottom: 1px solid var(--border); max-height: 50vh; }
+  .repl { min-height: 40vh; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand"><a href="/">blimp</a> / tutorial</div>
+  <div class="status" id="status">loading wasm…</div>
+</div>
+
+<div class="app">
+  <aside class="chapters" id="chapter-list"></aside>
+
+  <section class="content-wrap">
+    <article class="content" id="content"><p>Loading…</p></article>
+    <nav class="prevnext">
+      <a id="prev-link" class="disabled">← Previous</a>
+      <a id="next-link" class="disabled">Next →</a>
+    </nav>
+  </section>
+
+  <aside class="repl">
+    <div class="repl-tabs">
+      <button data-tab="editor" class="active">Editor</button>
+      <button data-tab="cheat">Cheat</button>
+    </div>
+
+    <div class="tab-pane active" id="pane-editor">
+      <div id="editor"></div>
+      <div class="repl-controls">
+        <button id="run-tests" class="primary" disabled>Run Tests (⌘⏎)</button>
+        <button id="reset-stub" disabled>Reset to stub</button>
+      </div>
+      <div id="results"></div>
+    </div>
+
+    <div class="tab-pane" id="pane-cheat">
+      <pre class="solution-view"><code id="solution-view"># Select a chapter with an exercise to see its solution.</code></pre>
+      <div class="repl-controls">
+        <button id="copy-solution" disabled>Copy to editor</button>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script src="blimp.js"></script>
+<script src="blimp-highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.46.0/min/vs/loader.js"></script>
+<script>
+const CHAPTERS = [
+  { id: '00', title: 'Why actors?',                        md: '00-why-actors.md' },
+  { id: '01', title: 'Your first actor',                   md: '01-first-actor.md',
+    stub: './exercises/ch01_first_actor/01_bike.blimp',
+    solution: './exercises/ch01_first_actor/solutions/01_bike.blimp' },
+  { id: '02', title: 'State, become, and the free lock',   md: '02-state-and-locks.md',
+    stub: './exercises/ch02_state/01_rental.blimp',
+    solution: './exercises/ch02_state/solutions/01_rental.blimp' },
+  { id: '03', title: 'Actors talking to actors',           md: '03-actors-talking.md',
+    stub: './exercises/ch03_actors/01_station.blimp',
+    solution: './exercises/ch03_actors/solutions/01_station.blimp' },
+  { id: '04', title: 'Zoom out',                           md: '04-zoom-out.md',
+    stub: './exercises/ch04_zoom_out/01_bikeshare.blimp',
+    solution: './exercises/ch04_zoom_out/solutions/01_bikeshare.blimp' },
+  { id: '05', title: 'The supervision tree',               md: '05-supervision.md',
+    stub: './exercises/ch05_supervision/01_supervision.blimp',
+    solution: './exercises/ch05_supervision/solutions/01_supervision.blimp' },
+  { id: '06', title: 'The Rider',                          md: '06-rider.md',
+    stub: './exercises/ch06_rider/01_rider.blimp',
+    solution: './exercises/ch06_rider/solutions/01_rider.blimp' },
+  { id: '07', title: 'The Clock',                          md: '07-clock.md',
+    stub: './exercises/ch07_clock/01_clock.blimp',
+    solution: './exercises/ch07_clock/solutions/01_clock.blimp' },
+  { id: '08', title: 'Stale rentals',                      md: null },
+  { id: '09', title: 'GPS phone-home',                     md: null },
+  { id: '10', title: 'The dashboard',                      md: null },
+  { id: '11', title: 'Where to go next',                   md: null },
+];
+
+const statusEl = document.getElementById('status');
+const contentEl = document.getElementById('content');
+const editorHostEl = document.getElementById('editor');
+const solutionEl = document.getElementById('solution-view');
+const runBtn = document.getElementById('run-tests');
+const resetBtn = document.getElementById('reset-stub');
+const copyBtn = document.getElementById('copy-solution');
+const resultsEl = document.getElementById('results');
+const chapterListEl = document.getElementById('chapter-list');
+const prevLink = document.getElementById('prev-link');
+const nextLink = document.getElementById('next-link');
+
+const blimp = new Blimp();
+let editor = null;            // monaco.editor instance, set after Monaco loads
+let currentChapter = null;
+let currentStubSource = null;
+let currentSolutionSource = null;
+
+function setEditorValue(s)   { if (editor) editor.setValue(s); }
+function getEditorValue()    { return editor ? editor.getValue() : ''; }
+function setEditorReadOnly(ro) {
+  if (!editor) return;
+  editor.updateOptions({ readOnly: ro });
+  editorHostEl.classList.toggle('disabled', ro);
+}
+
+function highlightCodeBlocks(root) {
+  // Only language-blimp blocks; leave bash/python/etc alone.
+  const blocks = root.querySelectorAll('pre code.language-blimp');
+  for (const el of blocks) {
+    el.innerHTML = blimpHighlight(el.textContent);
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s ?? '';
+  return d.innerHTML;
+}
+
+function renderChapterList(activeId) {
+  chapterListEl.innerHTML = '';
+  for (const ch of CHAPTERS) {
+    const a = document.createElement('a');
+    a.href = '#ch' + ch.id;
+    a.dataset.ch = ch.id;
+    a.innerHTML = `<span class="id">Ch ${ch.id}</span>${escapeHtml(ch.title)}`;
+    if (ch.id === activeId) a.classList.add('active');
+    if (!ch.md) a.classList.add('unavailable');
+    chapterListEl.appendChild(a);
+  }
+}
+
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return await r.text();
+}
+
+function findChapter(id) {
+  return CHAPTERS.find(c => c.id === id) || CHAPTERS[0];
+}
+
+async function loadChapter(id) {
+  const ch = findChapter(id);
+  currentChapter = ch;
+  renderChapterList(ch.id);
+
+  const idx = CHAPTERS.indexOf(ch);
+  if (idx > 0) {
+    prevLink.href = '#ch' + CHAPTERS[idx - 1].id;
+    prevLink.classList.remove('disabled');
+    prevLink.textContent = `← Ch ${CHAPTERS[idx - 1].id}: ${CHAPTERS[idx - 1].title}`;
+  } else {
+    prevLink.classList.add('disabled');
+    prevLink.textContent = '← Previous';
+  }
+  if (idx < CHAPTERS.length - 1) {
+    nextLink.href = '#ch' + CHAPTERS[idx + 1].id;
+    nextLink.classList.remove('disabled');
+    nextLink.textContent = `Ch ${CHAPTERS[idx + 1].id}: ${CHAPTERS[idx + 1].title} →`;
+  } else {
+    nextLink.classList.add('disabled');
+    nextLink.textContent = 'Next →';
+  }
+
+  if (ch.md) {
+    try {
+      const md = await fetchText(ch.md);
+      contentEl.innerHTML = marked.parse(md);
+      highlightCodeBlocks(contentEl);
+    } catch (e) {
+      contentEl.innerHTML = `<p class="parse-error">Failed to load ${escapeHtml(ch.md)}: ${escapeHtml(e.message)}</p>`;
+    }
+  } else {
+    contentEl.innerHTML = `<h1>Chapter ${escapeHtml(ch.id)}: ${escapeHtml(ch.title)}</h1><p>This chapter is planned but not written yet. Come back later, or pick another chapter from the left rail.</p>`;
+  }
+
+  resultsEl.innerHTML = '';
+  if (ch.stub) {
+    try {
+      currentStubSource = await fetchText(ch.stub);
+      setEditorValue(currentStubSource);
+      setEditorReadOnly(false);
+      runBtn.disabled = false;
+      resetBtn.disabled = false;
+    } catch (e) {
+      currentStubSource = null;
+      setEditorValue(`# Failed to load stub: ${e.message}`);
+      setEditorReadOnly(true);
+      runBtn.disabled = true;
+      resetBtn.disabled = true;
+    }
+  } else {
+    currentStubSource = null;
+    setEditorValue('# This chapter has no exercise yet.');
+    setEditorReadOnly(true);
+    runBtn.disabled = true;
+    resetBtn.disabled = true;
+  }
+
+  if (ch.solution) {
+    try {
+      currentSolutionSource = await fetchText(ch.solution);
+      solutionEl.innerHTML = blimpHighlight(currentSolutionSource);
+      copyBtn.disabled = false;
+    } catch (e) {
+      currentSolutionSource = null;
+      solutionEl.textContent = `# Failed to load solution: ${e.message}`;
+      copyBtn.disabled = true;
+    }
+  } else {
+    currentSolutionSource = null;
+    solutionEl.textContent = '# No solution available (this chapter has no exercise).';
+    copyBtn.disabled = true;
+  }
+}
+
+function renderResults(report) {
+  if (report.error && report.total === 0) {
+    resultsEl.innerHTML = `<div class="parse-error">${escapeHtml(report.error)}</div>`;
+    return;
+  }
+  const badgeClass = report.failed === 0 ? 'pass' : 'fail';
+  const badgeText = report.failed === 0
+    ? `✓ ${report.passed}/${report.total} passed`
+    : `${report.passed}/${report.total} passed · ${report.failed} failed`;
+  let html = `<span class="badge ${badgeClass}">${badgeText}</span>`;
+  for (const t of report.tests) {
+    if (t.ok) {
+      html += `<div class="test pass"><span class="sym">✓</span><code>${escapeHtml(t.actor)}</code> › ${escapeHtml(t.name)}</div>`;
+    } else {
+      html += `<div class="test fail"><span class="sym">✗</span><code>${escapeHtml(t.actor)}</code> › ${escapeHtml(t.name)}`;
+      if (t.detail) html += `<div class="detail">${escapeHtml(t.detail)}</div>`;
+      html += `</div>`;
+    }
+  }
+  resultsEl.innerHTML = html;
+  resultsEl.scrollTop = 0;
+}
+
+runBtn.addEventListener('click', () => {
+  const src = getEditorValue();
+  try {
+    const report = blimp.runTests(src);
+    renderResults(report);
+  } catch (e) {
+    resultsEl.innerHTML = `<div class="parse-error">${escapeHtml(e.message)}</div>`;
+  }
+});
+
+resetBtn.addEventListener('click', () => {
+  if (currentStubSource != null) {
+    setEditorValue(currentStubSource);
+    resultsEl.innerHTML = '';
+  }
+});
+
+copyBtn.addEventListener('click', () => {
+  if (currentSolutionSource == null) return;
+  setEditorValue(currentSolutionSource);
+  for (const b of document.querySelectorAll('[data-tab]')) b.classList.toggle('active', b.dataset.tab === 'editor');
+  for (const p of document.querySelectorAll('.tab-pane')) p.classList.toggle('active', p.id === 'pane-editor');
+});
+
+for (const btn of document.querySelectorAll('[data-tab]')) {
+  btn.addEventListener('click', () => {
+    for (const b of document.querySelectorAll('[data-tab]')) b.classList.toggle('active', b === btn);
+    for (const p of document.querySelectorAll('.tab-pane')) p.classList.toggle('active', p.id === 'pane-' + btn.dataset.tab);
+  });
+}
+
+function idFromHash() {
+  const h = window.location.hash.match(/^#ch(\d{2})/);
+  return h ? h[1] : '00';
+}
+window.addEventListener('hashchange', () => loadChapter(idFromHash()));
+
+// ---- Monaco setup --------------------------------------------------------
+// Mirrors blimp-highlight.js: keyword/constant/builtin lists are kept in sync
+// with that file. Grammar handles strings with #{...} interpolation, atoms,
+// numbers, operators, and capitalized type-like identifiers.
+const BLIMP_KEYWORDS = [
+  'actor','state','on','do','end','become','reply','spawn',
+  'test','property','given','when','case','situation',
+  'def','fn','for','in','self','bubble','bubbles','orelse','if','else',
+];
+const BLIMP_CONSTANTS = ['true','false','nil'];
+const BLIMP_BUILTINS = [
+  'assert','assert_eq','assert_ne','refute',
+  'length','append','reverse','head','tail','sort','merge',
+  'flat','zip','uniq','slice','elem','range',
+  'map','filter','reduce','each',
+  'lookup','put','keys','values',
+  'concat','split','contains','upcase','downcase','to_string',
+  'char_at','char_code','from_char_code',
+  'max','min','abs','rem','floor','ceil','round','random','sum',
+  'now','to_int','type_of','print','nil?','empty?','size','not',
+  'gen_int','gen_atom','gen_list','gen_boolean','gen_string','gen_one_of',
+  'stack','row','grid','heading','text','bold','italic','code',
+  'code_block','blockquote','button','divider','list','link','image',
+];
+
+const BLIMP_MONARCH = {
+  defaultToken: '',
+  tokenPostfix: '.blimp',
+  keywords: BLIMP_KEYWORDS,
+  constants: BLIMP_CONSTANTS,
+  builtins: BLIMP_BUILTINS,
+  tokenizer: {
+    root: [
+      [/#.*$/, 'comment'],
+      [/"/, { token: 'string.quote', next: '@string' }],
+      [/::/, 'operator'],
+      [/:[a-zA-Z_]\w*[?!]?/, 'atom'],
+      [/-?\d+\.\d+/, 'number.float'],
+      [/-?\d+/, 'number'],
+      // Map key / property: ident immediately followed by ":" then space.
+      [/[a-zA-Z_]\w*[?!]?(?=:\s)/, 'property'],
+      [/[a-zA-Z_]\w*[?!]?/, {
+        cases: {
+          '@keywords': 'keyword',
+          '@constants': 'constant',
+          '@builtins': 'builtin',
+          '[A-Z].*': 'type',
+          '@default': 'identifier',
+        },
+      }],
+      [/<-|\|>|==|!=|<=|>=|&&|\|\||->|\+\+/, 'operator'],
+      [/[+\-*/=<>!|]/, 'operator'],
+      [/[\s]+/, 'white'],
+    ],
+    string: [
+      [/[^\\"#]+/, 'string'],
+      [/\\./, 'string.escape'],
+      [/#\{/, { token: 'string.interp', next: '@interp' }],
+      [/#/, 'string'],
+      [/"/, { token: 'string.quote', next: '@pop' }],
+    ],
+    interp: [
+      [/\}/, { token: 'string.interp', next: '@pop' }],
+      [/[a-zA-Z_]\w*[?!]?/, {
+        cases: {
+          '@keywords': 'keyword',
+          '@constants': 'constant',
+          '@builtins': 'builtin',
+          '@default': 'identifier',
+        },
+      }],
+      [/-?\d+(\.\d+)?/, 'number'],
+      [/[^}]/, ''],
+    ],
+  },
+};
+
+const BLIMP_THEME = {
+  base: 'vs-dark',
+  inherit: true,
+  rules: [
+    { token: 'comment.blimp',       foreground: '6a9955', fontStyle: 'italic' },
+    { token: 'string.blimp',        foreground: 'ce9178' },
+    { token: 'string.quote.blimp',  foreground: 'ce9178' },
+    { token: 'string.escape.blimp', foreground: 'd7ba7d' },
+    { token: 'string.interp.blimp', foreground: 'ffb86c' },
+    { token: 'atom.blimp',          foreground: 'd7ba7d' },
+    { token: 'number.blimp',        foreground: 'b5cea8' },
+    { token: 'number.float.blimp',  foreground: 'b5cea8' },
+    { token: 'operator.blimp',      foreground: 'd4d4d4' },
+    { token: 'keyword.blimp',       foreground: 'c586c0', fontStyle: 'bold' },
+    { token: 'constant.blimp',      foreground: '569cd6' },
+    { token: 'builtin.blimp',       foreground: '4ec9b0' },
+    { token: 'type.blimp',          foreground: '4ec9b0' },
+    { token: 'property.blimp',      foreground: '9cdcfe' },
+  ],
+  colors: {
+    'editor.background':                '#1a1a2e',
+    'editor.foreground':                '#d4d4d4',
+    'editorLineNumber.foreground':      '#444466',
+    'editorLineNumber.activeForeground':'#9090b0',
+    'editorCursor.foreground':          '#ffffff',
+    'editor.selectionBackground':       '#33335a',
+    'editor.lineHighlightBackground':   '#22223a',
+  },
+};
+
+async function initMonaco() {
+  await new Promise((resolve, reject) => {
+    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.46.0/min/vs' } });
+    require(['vs/editor/editor.main'], resolve, reject);
+  });
+  monaco.languages.register({ id: 'blimp' });
+  monaco.languages.setMonarchTokensProvider('blimp', BLIMP_MONARCH);
+  monaco.editor.defineTheme('blimp-dark', BLIMP_THEME);
+  editor = monaco.editor.create(editorHostEl, {
+    value: '# This chapter has no exercise yet.',
+    language: 'blimp',
+    theme: 'blimp-dark',
+    fontFamily: "'IBM Plex Mono','Fira Code','JetBrains Mono','Cascadia Code','SF Mono',Consolas,monospace",
+    fontSize: 12,
+    lineHeight: 19,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+    tabSize: 2,
+    insertSpaces: true,
+    wordWrap: 'on',
+    renderLineHighlight: 'line',
+    padding: { top: 8, bottom: 8 },
+  });
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+    if (!runBtn.disabled) runBtn.click();
+  });
+}
+
+(async function() {
+  try {
+    await Promise.all([blimp.init('blimp.wasm'), initMonaco()]);
+    statusEl.textContent = 'ready';
+    statusEl.classList.add('ready');
+  } catch (e) {
+    statusEl.textContent = 'init error: ' + e.message;
+    statusEl.classList.add('error');
+  }
+  await loadChapter(idFromHash());
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blimp: The Manifesto</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0e0e1a; color: #c4c4d4; font-family: 'IBM Plex Mono', 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 15px; line-height: 1.8; -webkit-text-size-adjust: 100%;
+}
+.page { max-width: 820px; margin: 0 auto; padding: 2rem 1.5rem 6rem; }
+
+/* Typography */
+h1 { color: #a855f7; font-size: 2.5rem; font-weight: 600; margin: 3rem 0 0.5rem; line-height: 1.2; }
+h2 { color: #a855f7; font-size: 1.4rem; font-weight: 600; margin: 3rem 0 1rem; padding-top: 1rem; border-top: 1px solid #1e1e2e; }
+h3 { color: #d4d4d4; font-size: 1rem; font-weight: 600; margin: 2rem 0 0.5rem; }
+p { margin: 0.75rem 0; }
+em { color: #999; }
+strong { color: #e4e4e7; }
+a { color: #6cb6ff; }
+.subtitle { color: #666; font-size: 1rem; margin-bottom: 2rem; }
+.quote { border-left: 3px solid #a855f7; padding-left: 1rem; color: #999; font-style: italic; margin: 1.5rem 0; }
+.aside { background: #12122a; border: 1px solid #1e1e3e; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; font-size: 13px; color: #999; }
+.aside strong { color: #a855f7; }
+ul { margin: 0.5rem 0 0.5rem 1.5rem; }
+li { margin: 0.25rem 0; }
+
+/* Live code blocks */
+.live-block { margin: 1.5rem 0; border: 1px solid #1e1e3e; border-radius: 10px; overflow: hidden; }
+.live-block .code-area {
+  background: #1a1a2e; padding: 1rem 1.25rem; font-size: 13px; line-height: 1.6;
+  position: relative;
+}
+.live-block textarea {
+  width: 100%; background: transparent; border: none; color: #a6e22e; font: inherit;
+  font-size: 13px; line-height: 1.6; resize: vertical; outline: none; min-height: 2em;
+}
+.live-block .run-btn {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  background: #a855f7; color: white; border: none; border-radius: 5px;
+  padding: 4px 14px; font: inherit; font-size: 11px; font-weight: 600;
+  cursor: pointer; opacity: 0.8; transition: opacity 0.2s;
+}
+.live-block .run-btn:hover { opacity: 1; }
+.live-block .output {
+  background: #0e0e1a; border-top: 1px solid #1e1e3e; padding: 0.75rem 1.25rem;
+  font-size: 13px; min-height: 1.5em; color: #d4d4d4;
+}
+.live-block .output:empty::after { content: 'click Run'; color: #333; font-style: italic; }
+.live-block .output .err { color: #f92672; }
+.live-block .output .val { color: #d4d4d4; }
+.live-block .output .print { color: #6cb6ff; }
+.live-block .canvas-mini { border-top: 1px solid #1e1e3e; height: 180px; position: relative; background: #0a0a14; }
+.live-block .canvas-mini canvas { width: 100%; height: 100%; display: block; }
+
+/* View rendering */
+.view-out { border-top: 1px solid #1e1e3e; padding: 0.75rem 1.25rem; background: #0e0e1a; }
+.blimp-stack { display: flex; flex-direction: column; gap: 0.4rem; }
+.blimp-row { display: flex; flex-direction: row; gap: 0.4rem; align-items: center; }
+.blimp-text { color: #d4d4d4; }
+.blimp-bold { font-weight: bold; }
+.blimp-italic { font-style: italic; }
+.blimp-code { background: #1a1a2e; padding: 0.1em 0.4em; border-radius: 3px; color: #a6e22e; font-family: inherit; }
+.blimp-code-block { background: #1a1a2e; padding: 0.5rem 0.75rem; border-radius: 4px; color: #a6e22e; white-space: pre-wrap; font-family: inherit; }
+.blimp-divider { border: none; border-top: 1px solid #2a2a3e; margin: 0.3rem 0; }
+.blimp-list { list-style: disc; padding-left: 1.5rem; }
+.blimp-button { background: #1a1a2e; color: #a6e22e; border: 1px solid #2a2a4e; padding: 0.3rem 0.8rem; border-radius: 4px; cursor: pointer; font: inherit; font-size: 12px; }
+.blimp-blockquote { border-left: 3px solid #a6e22e; padding-left: 0.75rem; color: #999; font-style: italic; }
+
+/* Responsive */
+@media (max-width: 600px) {
+  body { font-size: 14px; }
+  .page { padding: 1rem; }
+  h1 { font-size: 1.8rem; }
+  .live-block textarea { font-size: 14px; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>blimp</h1>
+<p class="subtitle">an actor language for people who build things</p>
+
+<p>Blimp is a programming language where your code structure is your runtime structure. There are no modules, no classes, no namespaces pretending to be boundaries. There are actors. They hold state, they receive messages, they respond. The hierarchy you write is the supervision tree that keeps your system alive.</p>
+
+<p>The language compiles to native code via LLVM and runs in the browser via WebAssembly. The REPL is the development environment. The canvas shows your system breathing. Every example on this page is live. Hit <strong>Run</strong> and watch.</p>
+
+<div class="quote">"you are the craftsperson with a beautiful team of helpers that make you work at the speed of thought"</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Values</h2>
+
+<p>Blimp has the types you'd expect. Integers, floats, strings, booleans, atoms, lists, tuples, maps. Nothing surprising here. The point isn't novelty in the data model. The point is what you do with it.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="5">x = 42
+name = "Blimp"
+items = [1, 2, 3, 4, 5]
+config = %{debug: true, port: 8080}
+print(concat(name, concat(" has ", concat(to_string(length(items)), " items"))))</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<p>Atoms start with a colon and represent themselves. They're your enums, your status codes, your message names. Cheap to compare, impossible to misspell at runtime because the compiler checks them.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="3">status = :ok
+direction = :north
+print(status)</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Functions and Pipes</h2>
+
+<p>Functions are defined with <code>def</code>. Parameters require type annotations. Always. The compiler rejects untyped parameters at compile time, no exceptions. This was a deliberate decision -- we audited every parameter position in the language (handlers, defs, lambdas) and closed every hole.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="7">def greet(name: String) do
+  concat("Hello, ", name)
+end
+
+def add(a: Int, b: Int) do
+  a + b
+end
+
+print(greet("world"))
+print(add(17, 25))</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<p>The pipe operator <code>|></code> threads a value through a chain of function calls. The underscore <code>_</code> marks where the piped value goes. This solves the "which argument position" problem that plagues every other pipe implementation.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="4">[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  |> filter(_, fn(x: Int) do x > 5 end)
+  |> map(_, fn(x: Int) do x * x end)
+  |> sort(_) |> reverse(_)</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<p>Lambdas are first-class. <code>map</code>, <code>filter</code>, <code>reduce</code> do what you think. Lambda parameters need types too.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="5">names = ["alice", "bob", "carol"]
+
+names
+  |> map(_, fn(n: String) do upcase(n) end)
+  |> print</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Actors: The Only Abstraction</h2>
+
+<p>There are no modules in Blimp. No classes. No structs separate from behavior. There are actors. An actor holds state, defines message handlers, and communicates via <code>&lt;-</code>. That's it. That's the whole language.</p>
+
+<p>This isn't a limitation. It's the point. When your only tool for organizing code is the thing that also defines your runtime behavior, your code structure and your system architecture are the same thing. You can't have them drift apart.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="15">actor Counter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+
+  on :decrement do
+    become count: count - 1
+    reply count - 1
+  end
+
+  on :get do
+    reply count
+  end
+end
+
+c = spawn Counter
+c <- :increment
+c <- :increment
+c <- :increment
+print(c <- :get)</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+  <div class="canvas-mini"><canvas></canvas></div>
+</div>
+
+<p>Three things happened above that matter:</p>
+
+<p><strong><code>become</code></strong> is the only way to change state. No mutation. No assignment to fields. You declare the new state and the runtime transitions atomically. This means every state transition is a snapshot. History is queryable. Time travel debugging works by replaying <code>become</code> transitions.</p>
+
+<p><strong><code>&lt;-</code></strong> is a blocking message send. The sender waits for a reply. This is synchronous by default because it's the sane default. Async is opt-in, not the other way around.</p>
+
+<p><strong>Defining the actor didn't spawn it.</strong> <code>actor Counter do ... end</code> registers a template. The first message send <code>Counter &lt;- :increment</code> auto-spawns the singleton. <code>spawn Counter</code> creates additional instances. The canvas only shows actors that are alive.</p>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Supervision via Dot Notation</h2>
+
+<p>In Blimp, your namespace IS your supervision tree. <code>Shop.Checkout</code> isn't just a naming convention. It means Checkout is a child process of Shop. When Shop dies, Checkout dies. When Shop restarts, Checkout restarts.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="20">actor Shop do
+  state name: String :: "My Shop"
+  on :get_name do reply name end
+end
+
+actor Shop.Inventory do
+  state stock: Int :: 100
+  on :check do reply stock end
+  on :sell(amount: Int) do
+    become stock: stock - amount
+    reply stock - amount
+  end
+end
+
+actor Shop.Checkout do
+  state total: Float :: 0.0
+  on :add(price: Float) do
+    become total: total + price
+    reply total + price
+  end
+  on :get_total do reply total end
+end
+
+checkout = spawn Shop.Checkout
+inventory = spawn Shop.Inventory
+checkout <- :add(29.99)
+checkout <- :add(9.99)
+inventory <- :sell(2)
+print(checkout <- :get_total)
+print(inventory <- :check)</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+  <div class="canvas-mini"><canvas></canvas></div>
+</div>
+
+<p>Watch the canvas. Three hexagons appear: Shop, Shop.Inventory, Shop.Checkout. The hierarchy is visible. Message rays animate from you to each actor. State fields update in real time. This is the system, breathing.</p>
+
+<div class="aside">
+  <strong>Design decision:</strong> Dot notation was a parser fix that took 3 files. The parser only accepted lowercase identifiers after a dot. We added <code>upper_identifier</code> handling in <code>parsePostfix</code>, flattened DotAccess chains in the evaluator and type checker. Simple change, deep consequence: your code layout IS your runtime topology.
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Views: UI is a Message Response</h2>
+
+<p>In Blimp, rendering a view is just responding to a message. An actor has an <code>on :render</code> handler that returns a view tree. The framework sends <code>:render</code>, gets back a tree, diffs it against the previous tree, and patches the DOM.</p>
+
+<p>This means time-travel debugging works on your UI for free. Replay the state transitions, re-send <code>:render</code>, get the view at any point in history.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="12">stack(
+  heading("Welcome to Blimp"),
+  text("An actor language for people who build things."),
+  divider(),
+  row(
+    button("Get Started"),
+    button("Learn More")
+  ),
+  text("Everything on this page is live."),
+  code("actor Counter do ... end")
+)</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<p>17 view primitives: <code>stack</code>, <code>row</code>, <code>grid</code> for layout. <code>text</code>, <code>heading</code>, <code>bold</code>, <code>italic</code>, <code>code</code>, <code>code_block</code>, <code>blockquote</code>, <code>divider</code>, <code>list</code> for content. <code>link</code>, <code>image</code> for media. <code>button</code>, <code>input</code>, <code>textarea</code>, <code>select</code> for interaction. They compose. They nest. They're just function calls that return view nodes.</p>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Actors That Render</h2>
+
+<p>The real power: <code>mount(Actor)</code> composes actor views. Each actor manages its own state and renders its own view. The framework routes messages to the right actor. No prop drilling. No state management library. Just actors.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="20">actor ProfileCard do
+  state name: String :: "Ada Lovelace"
+  state role: String :: "First Programmer"
+  state likes: Int :: 0
+
+  on :like do
+    become likes: likes + 1
+  end
+
+  on :render do
+    reply stack(
+      heading(name, 2),
+      text(role),
+      divider(),
+      row(
+        button("Like"),
+        text(concat(to_string(likes), " likes"))
+      )
+    )
+  end
+end
+
+card = spawn ProfileCard
+card <- :like
+card <- :like
+card <- :like
+card <- :render</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+  <div class="canvas-mini"><canvas></canvas></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>The Web Framework is Written in Blimp</h2>
+
+<p>The HTTP server is pure Blimp. TCP socket builtins (<code>tcp_listen</code>, <code>tcp_accept</code>, <code>tcp_read</code>, <code>tcp_write</code>, <code>tcp_close</code>) are implemented in Zig. Everything above that -- request parsing, routing, session management, HTML rendering, form handling -- is Blimp code.</p>
+
+<p>The server is an actor. Sessions are an actor. The app is composed of actors. There's no framework separate from the language. The language IS the framework.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="15"># This is how the web server works (simplified).
+# It can't run in WASM (no sockets) but the
+# structure is the point.
+
+actor Sessions do
+  state store: Map :: %{}
+  on :get(id: String) do reply lookup(store, id) end
+  on :put(id: String, data: Map) do
+    become store: put(store, id, data)
+    reply :ok
+  end
+end
+
+# The HTTPServer actor accepts connections,
+# parses requests, dispatches to handlers,
+# and renders views to HTML via to_html().
+print("The web framework is ~200 lines of Blimp.")</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<div class="aside">
+  <strong>WebSocket smart reloads</strong> are coming. The architecture mirrors Phoenix LiveView: persistent WebSocket connection, server-side view diffing via <code>view_diff(old, new)</code>, minimal JSON patches sent to the client. The builtins exist (<code>ws_accept_key</code>, <code>ws_read_frame</code>, <code>ws_write_frame</code>). The client JS has exponential-backoff reconnect. What's missing is the concurrent connection handler -- the single-threaded evaluator blocks on I/O. The actor scheduler (Phase 4 of the runtime plan) fixes this.
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>The Hole Operator</h2>
+
+<p>This is the weird one. Blimp has first-class support for incomplete code.</p>
+
+<p>A <code>situation</code> block with a wildcard <code>_</code> branch containing a comment directive is a Hole. At runtime, when execution reaches the Hole, the evaluator builds a prompt from the directive, the current state, and visible bindings. It shells out to Claude. Claude generates the missing code. The evaluator patches the source file, replaces the Hole with real code, and re-executes.</p>
+
+<p>The second run uses the generated code directly. The Hole is gone. Your codebase grew.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="10"># The Hole operator can't run in WASM (needs Claude),
+# but here's what it looks like:
+#
+# situation validate(payment) do
+#   :valid ->
+#     receipt = process(payment)
+#     reply receipt
+#   _ # Hole: handle invalid payment,
+#     # research transaction failure docs
+# end
+#
+# The _ branch with a # comment triggers Claude.
+print("Holes are AI-native gap-filling in the language itself.")</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Testing</h2>
+
+<p>Blimp has a built-in test runner inspired by ExUnit. Test blocks live inside actors. The suite actor IS the test runtime -- its state fields are the fixture, re-evaluated fresh for each test.</p>
+
+<div class="live-block">
+  <div class="code-area">
+    <textarea rows="18">actor Counter do
+  state count: Int :: 0
+  on :increment do become count: count + 1 end
+  on :get do reply count end
+end
+
+actor CounterTests do
+  state c: Counter :: spawn Counter
+
+  test "starts at zero" do
+    assert_eq(c <- :get, 0)
+  end
+
+  test "increment works" do
+    c <- :increment
+    c <- :increment
+    assert_eq(c <- :get, 2)
+  end
+end
+
+result = blimp_test("actor C do state n: Int :: 0 on :inc do become n: n + 1 end on :get do reply n end end\nactor T do state c: C :: spawn C\ntest \"inc\" do c <- :inc\nassert_eq(c <- :get, 1) end end")
+print(result)</textarea>
+    <button class="run-btn">Run</button>
+  </div>
+  <div class="output"></div>
+</div>
+
+<p><code>blimp_test(code)</code> parses, evaluates, and runs tests at runtime. It returns a map: <code>%{passed: true, total: 1, passed_count: 1, failure: ""}</code>. The interactive tutorial uses this to validate your code in the browser.</p>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>The Runtime</h2>
+
+<h3>Memory: Per-Actor Arenas</h3>
+<p>Each actor owns an arena allocator. All allocations during a handler go into the actor's arena. <code>become</code> reuses memory in place when the refcount is 1 (Perceus reference counting). When an actor dies, its entire arena is freed in O(1). No GC pauses. No fragmentation across actor boundaries.</p>
+
+<h3>Scheduling: Reduction Counting</h3>
+<p>Every operation costs one reduction. After 4,000 reductions, the actor yields. The scheduler saves its full stack, moves it to the back of the FIFO run queue, and picks up the next actor. This is the BEAM model. Predictable latency. No actor can starve others.</p>
+
+<h3>Compilation: Zig to LLVM to Native</h3>
+<p>The compiler is written in Zig. The pipeline: source -> lexer -> parser (recursive descent) -> AST (58 node kinds) -> type checker (2-pass cross-actor registry) -> tree-walking evaluator (for REPL/WASM) -> LLVM IR codegen (for native). The native compiler produces binaries that run at 1-2x C performance on recursive benchmarks.</p>
+
+<h3>WASM: 178KB in the Browser</h3>
+<p>The entire language -- parser, evaluator, builtins, type checker, test runner -- compiles to a 178KB WebAssembly module. Every example on this page runs in your browser. The canvas visualization runs alongside it. No server required.</p>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>The Canvas</h2>
+
+<p>The canvas is the compiler's visual artifact. When you run Blimp code, the canvas shows the living system: actors as generative hexagons (fill pattern hashed from actor state), message sends as animated rays with trailing heads and impact rings, the REPL as a pulsing origin blob, supervision hierarchy through spatial grouping.</p>
+
+<p>This isn't a debugging tool bolted on after the fact. It's produced by the compiler. Every evaluation step feeds the canvas. The canvas IS the program, visualized.</p>
+
+<p>Go back up and run the Counter or Shop examples. Watch the hexagons appear. Watch the rays fire. That's your program running.</p>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Self-Hosting</h2>
+
+<p>The dream: Blimp compiles Blimp.</p>
+
+<p>The compiler is currently written in Zig. The WASM REPL runs the evaluator in the browser. The web framework is written in Blimp. The test runner runs Blimp tests written in Blimp. The tutorial teaches Blimp inside a Blimp REPL running on a Blimp WASM module.</p>
+
+<p>The path to self-hosting:</p>
+<ul>
+  <li><strong>Phase 1 (done):</strong> Zig compiler, tree-walking evaluator, WASM target</li>
+  <li><strong>Phase 2 (done):</strong> Web framework in Blimp, test runner in Blimp</li>
+  <li><strong>Phase 3 (next):</strong> Actor scheduler, concurrent connections, WebSocket push</li>
+  <li><strong>Phase 4:</strong> Blimp parser written in Blimp (the evaluator can parse and eval strings already via <code>blimp_eval</code>)</li>
+  <li><strong>Phase 5:</strong> Blimp codegen written in Blimp, targeting WASM</li>
+  <li><strong>Phase 6:</strong> The compiler compiles itself. Blimp contains itself.</li>
+</ul>
+
+<p>When that happens, the browser REPL compiles your code, the tutorial teaches with live compilation, and the whole thing fits in under 200KB.</p>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Why</h2>
+
+<p>We are building things differently now. The code you write will be read by agents, modified by agents, reviewed by agents. The programmer's job isn't typing characters. It's making decisions. Blimp is a language for that world.</p>
+
+<p>Actors are the right abstraction because they're the thing that maps to both human reasoning ("this component does X") and runtime behavior ("this process handles X"). Modules don't run. Classes are blueprints for things that run. Actors run. Your code IS the running system.</p>
+
+<p>The Hole operator is the bridge. Incomplete code isn't an error, it's a request. The language knows what's missing and asks for help. The agent fills it in. The programmer approves. The decision is captured in the graph.</p>
+
+<div class="quote">"I still want to craft software. I just want to do it at the speed of thought."</div>
+
+<p>Blimp borrows Ruby's surface and Elixir's data model and then puts something new underneath the two of them. Every handler has three beats: compute with pipes, transition with become, communicate with reply. The canvas shows you what's alive. The test runner proves it works. The web framework ships it.</p>
+
+<p>That's the language. That's the manifesto. Hit Run on any block above and see for yourself.</p>
+
+<p style="margin-top:3rem;color:#444"><a href="/tutorial/">Start learning Blimp</a></p>
+
+</div><!-- .page -->
+
+<script src="blimp.js"></script>
+<script src="canvas.js"></script>
+<script>
+(async function() {
+  var blimp = new Blimp();
+  try { await blimp.init('blimp.wasm'); } catch(e) { console.error(e); return; }
+
+  // View renderer
+  function renderView(node) {
+    if (!node) return document.createTextNode('');
+    if (node.text !== undefined) return document.createTextNode(node.text);
+    var tag = node.tag, children = node.children || [], attrs = node.attrs || {}, el;
+    switch (tag) {
+      case 'stack': el = document.createElement('div'); el.className = 'blimp-stack'; break;
+      case 'row': el = document.createElement('div'); el.className = 'blimp-row'; break;
+      case 'text': el = document.createElement('span'); el.className = 'blimp-text'; break;
+      case 'heading': var l = Math.max(1,Math.min(6,attrs.level||1)); el = document.createElement('h'+l); break;
+      case 'bold': el = document.createElement('strong'); el.className = 'blimp-bold'; break;
+      case 'italic': el = document.createElement('em'); el.className = 'blimp-italic'; break;
+      case 'code': el = document.createElement('code'); el.className = 'blimp-code'; break;
+      case 'code_block': el = document.createElement('pre'); el.className = 'blimp-code-block'; break;
+      case 'blockquote': el = document.createElement('blockquote'); el.className = 'blimp-blockquote'; break;
+      case 'divider': el = document.createElement('hr'); el.className = 'blimp-divider'; return el;
+      case 'list':
+        el = document.createElement('ul'); el.className = 'blimp-list';
+        for (var i = 0; i < children.length; i++) { var li = document.createElement('li'); li.appendChild(renderView(children[i])); el.appendChild(li); }
+        return el;
+      case 'button': el = document.createElement('button'); el.className = 'blimp-button'; break;
+      default: el = document.createElement('div'); break;
+    }
+    for (var i = 0; i < children.length; i++) el.appendChild(renderView(children[i]));
+    return el;
+  }
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+  // Wire up all live blocks
+  document.querySelectorAll('.live-block').forEach(function(block) {
+    var textarea = block.querySelector('textarea');
+    var btn = block.querySelector('.run-btn');
+    var output = block.querySelector('.output');
+    var canvasEl = block.querySelector('canvas');
+    var miniCanvas = canvasEl ? new BlimpCanvas(canvasEl) : null;
+
+    btn.addEventListener('click', function() {
+      var code = textarea.value;
+      output.innerHTML = '';
+
+      var prints = [];
+      blimp.onPrint(function(s) { prints.push(s); });
+      blimp.reset();
+      var result = blimp.eval(code);
+      blimp.onPrint(null);
+
+      var state = blimp.getState();
+      if (miniCanvas) miniCanvas.feed(state, code);
+
+      for (var i = 0; i < prints.length; i++) {
+        output.innerHTML += '<div class="print">' + esc(prints[i]) + '</div>';
+      }
+
+      if (!result.ok) {
+        output.innerHTML += '<div class="err">' + esc(result.error) + '</div>';
+        return;
+      }
+
+      if (result.view) {
+        var viewOut = block.querySelector('.view-out');
+        if (!viewOut) { viewOut = document.createElement('div'); viewOut.className = 'view-out'; output.parentNode.insertBefore(viewOut, output.nextSibling); }
+        viewOut.innerHTML = '';
+        viewOut.appendChild(renderView(result.view));
+      }
+
+      if (result.value && result.value !== 'nil' && !result.view) {
+        output.innerHTML += '<div class="val">=> ' + esc(result.value) + '</div>';
+      }
+
+      if (output.innerHTML === '') {
+        output.innerHTML = '<div class="val" style="color:#444">=> nil</div>';
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>

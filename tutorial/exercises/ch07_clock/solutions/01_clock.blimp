@@ -1,0 +1,152 @@
+# Chapter 7 -- Solution
+# Reference implementation. Don't peek until you've tried the stub.
+
+actor Bike do
+  state id: String :: "unknown"
+  state status: Atom :: :available
+
+  on :id do
+    reply id
+  end
+
+  on :status do
+    reply status
+  end
+
+  on :rent when status == :available do
+    become status: :rented
+    reply :ok
+  end
+
+  on :rent do
+    reply {:error, :unavailable}
+  end
+
+  on :return do
+    become status: :available
+    reply :ok
+  end
+end
+
+actor Clock do
+  state tick: Int :: 0
+
+  on :now do
+    reply tick
+  end
+
+  on :tick do
+    become tick: tick + 1
+    reply tick + 1
+  end
+end
+
+actor BikeShare.Rider do
+  state name: String :: "anon"
+  state bike: Bike :: nil
+  state pickup_at: Int :: 0
+
+  on :name do
+    reply name
+  end
+
+  on :status do
+    case bike == nil do
+      true -> reply :idle
+      _ -> reply :riding
+    end
+  end
+
+  on :pickup(b: Bike, clock: Clock) when bike == nil do
+    result = b <- :rent
+    case result do
+      :ok ->
+        become bike: b, pickup_at: clock <- :now
+        reply :ok
+      _ -> reply {:error, :unavailable}
+    end
+  end
+
+  on :pickup(b: Bike, clock: Clock) do
+    reply {:error, :already_riding}
+  end
+
+  on :return when bike != nil do
+    bike <- :return
+    become bike: nil, pickup_at: 0
+    reply :ok
+  end
+
+  on :return do
+    reply {:error, :no_bike}
+  end
+
+  on :elapsed(clock: Clock) when bike != nil do
+    reply (clock <- :now) - pickup_at
+  end
+
+  on :elapsed(clock: Clock) do
+    reply 0
+  end
+end
+
+actor ClockTests do
+  test "clock starts at 0" do
+    c = spawn Clock
+    assert_eq(c <- :now, 0)
+  end
+
+  test "tick advances and returns the new value" do
+    c = spawn Clock
+    assert_eq(c <- :tick, 1)
+    assert_eq(c <- :tick, 2)
+    assert_eq(c <- :now, 2)
+  end
+
+  test "fresh rider's elapsed is 0" do
+    c = spawn Clock
+    r = spawn BikeShare.Rider
+    assert_eq(r <- :elapsed(c), 0)
+  end
+
+  test "elapsed right after pickup is 0" do
+    c = spawn Clock
+    r = spawn BikeShare.Rider
+    b = spawn Bike
+    r <- :pickup(b, c)
+    assert_eq(r <- :elapsed(c), 0)
+  end
+
+  test "elapsed after pickup and three ticks is 3" do
+    c = spawn Clock
+    r = spawn BikeShare.Rider
+    b = spawn Bike
+    r <- :pickup(b, c)
+    c <- :tick
+    c <- :tick
+    c <- :tick
+    assert_eq(r <- :elapsed(c), 3)
+  end
+
+  test "pickup after some ticks captures the right starting time" do
+    c = spawn Clock
+    c <- :tick
+    c <- :tick
+    r = spawn BikeShare.Rider
+    b = spawn Bike
+    r <- :pickup(b, c)
+    c <- :tick
+    assert_eq(r <- :elapsed(c), 1)
+  end
+
+  test "return clears pickup_at" do
+    c = spawn Clock
+    r = spawn BikeShare.Rider
+    b = spawn Bike
+    r <- :pickup(b, c)
+    c <- :tick
+    c <- :tick
+    r <- :return
+    assert_eq(r <- :elapsed(c), 0)
+  end
+end

@@ -1,0 +1,48 @@
+# Chapter 1 -- Solution
+# Reference implementation. Don't peek until you've tried the stub.
+
+actor Bike do
+  state id: String :: "unknown"
+  state status: Atom :: :available
+
+  on :id do
+    reply id
+  end
+
+  on :status do
+    reply status
+  end
+
+  on :rent do
+    become status: :rented
+    reply :ok
+  end
+
+  on :return do
+    become status: :available
+    reply :ok
+  end
+end
+
+actor BikeTests do
+  state bike: Bike :: spawn Bike, id: "b-001"
+
+  test "reports its id" do
+    assert_eq(bike <- :id, "b-001")
+  end
+
+  test "starts available" do
+    assert_eq(bike <- :status, :available)
+  end
+
+  test "rent flips status to :rented" do
+    bike <- :rent
+    assert_eq(bike <- :status, :rented)
+  end
+
+  test "return flips status back" do
+    bike <- :rent
+    bike <- :return
+    assert_eq(bike <- :status, :available)
+  end
+end
