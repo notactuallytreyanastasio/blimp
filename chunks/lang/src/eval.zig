@@ -1132,7 +1132,7 @@ pub const Evaluator = struct {
                 switch (left.*) {
                     .integer => |a| switch (right.*) {
                         .integer => |b| {
-                            result.* = Value{ .integer = a + b };
+                            result.* = Value{ .integer = a +% b };
                             return result;
                         },
                         .float => |b| {
@@ -1249,10 +1249,16 @@ pub const Evaluator = struct {
             .integer => |a| switch (right) {
                 .integer => |b| {
                     result.* = switch (op) {
-                        .sub => Value{ .integer = a - b },
-                        .mul => Value{ .integer = a * b },
+                        .sub => Value{ .integer = a -% b },
+                        .mul => Value{ .integer = a *% b },
                         .div => blk: {
                             if (b == 0) return error.DivisionByZero;
+                            // minInt / -1 is the one quotient with no i64
+                            // representation. @divTrunc panics on it; wrap it
+                            // to minInt so it matches +%, -% and *%.
+                            if (a == std.math.minInt(i64) and b == -1) {
+                                break :blk Value{ .integer = std.math.minInt(i64) };
+                            }
                             break :blk Value{ .integer = @divTrunc(a, b) };
                         },
                     };
@@ -1369,7 +1375,9 @@ pub const Evaluator = struct {
         switch (op.op) {
             .negate => switch (operand.*) {
                 .integer => |n| {
-                    result.* = Value{ .integer = -n };
+                    // -minInt is not an i64, so negate by wrapping subtraction
+                    // rather than `-n`, which panics on that one input.
+                    result.* = Value{ .integer = 0 -% n };
                     return result;
                 },
                 .float => |f| {
