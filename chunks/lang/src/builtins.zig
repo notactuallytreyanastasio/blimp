@@ -872,7 +872,8 @@ fn builtinAbs(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .integer => |n| result.* = Value{ .integer = if (n < 0) -n else n },
+        // abs(minInt) has no i64 answer; wrap to minInt, as the operators do.
+        .integer => |n| result.* = Value{ .integer = if (n < 0) 0 -% n else n },
         .float => |f| result.* = Value{ .float = if (f < 0) -f else f },
         else => return error.TypeError,
     }
@@ -1053,7 +1054,7 @@ fn builtinSum(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     var total: i64 = 0;
     for (args[0].list) |item| {
-        if (item.* == .integer) total += item.integer;
+        if (item.* == .integer) total +%= item.integer;
     }
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = total };
