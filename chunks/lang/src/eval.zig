@@ -3402,3 +3402,105 @@ test "a spawn inside a handler does not invalidate the receiver's entry" {
     const via_become = try evalStmt(alloc, &evaluator, "(p <- :child) <- :hi");
     try std.testing.expect(via_become.eql(Value{ .integer = 1 }));
 }
+
+// ============================================================
+// Integer overflow: wrapping at the i64 boundaries (issue #27)
+//
+// `9223372036854775808` does not lex, so minInt is spelled
+// `0 - 9223372036854775807 - 1` in these sources — the same way the
+// issue's probes spell it.
+// ============================================================
+
+const min_i64_src = "(0 - 9223372036854775807 - 1)";
+
+test "integer add wraps past maxInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "9223372036854775807 + 1");
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "integer add wraps past minInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), min_i64_src ++ " + (0 - 1)");
+    try std.testing.expect(result.eql(Value{ .integer = std.math.maxInt(i64) }));
+}
+
+test "integer subtract wraps past minInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), min_i64_src ++ " - 1");
+    try std.testing.expect(result.eql(Value{ .integer = std.math.maxInt(i64) }));
+}
+
+test "integer subtract wraps past maxInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "9223372036854775807 - (0 - 1)");
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "integer multiply wraps past maxInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "9223372036854775807 * 2");
+    try std.testing.expect(result.eql(Value{ .integer = -2 }));
+}
+
+test "integer multiply wraps minInt by -1 back to minInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), min_i64_src ++ " * (0 - 1)");
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "integer divide minInt by -1 wraps to minInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), min_i64_src ++ " / (0 - 1)");
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "integer divide by zero is still a catchable error, not a wrap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = evalExpr(arena.allocator(), min_i64_src ++ " / 0");
+    try std.testing.expectError(error.DivisionByZero, result);
+}
+
+test "unary negate of minInt wraps to minInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalExpr(arena.allocator(), "-" ++ min_i64_src);
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "float arithmetic at the i64 boundary stays float and does not wrap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const sum = try evalExpr(alloc, "9223372036854775807 + 1.0");
+    try std.testing.expect(sum.* == .float);
+    try std.testing.expect(sum.float > 9.2e18);
+
+    const product = try evalExpr(alloc, "9223372036854775807 * 2.0");
+    try std.testing.expect(product.* == .float);
+    try std.testing.expect(product.float > 1.8e19);
+}
+
+test "in-range integer arithmetic is unchanged at the boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const max_plus_zero = try evalExpr(alloc, "9223372036854775807 + 0");
+    try std.testing.expect(max_plus_zero.eql(Value{ .integer = std.math.maxInt(i64) }));
+
+    const min_plus_max = try evalExpr(alloc, min_i64_src ++ " + 9223372036854775807");
+    try std.testing.expect(min_plus_max.eql(Value{ .integer = -1 }));
+
+    const min_div_two = try evalExpr(alloc, min_i64_src ++ " / 2");
+    try std.testing.expect(min_div_two.eql(Value{ .integer = -4611686018427387904 }));
+}
