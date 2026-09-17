@@ -1,6 +1,46 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 
+/// Values handed out from static storage instead of the evaluator's heap.
+///
+/// The tree-walking evaluator reclaims nothing inside a run (see gc.zig), so
+/// every value it allocates is held until the run ends: an arithmetic step
+/// costs memory for ever, not just for as long as its result is used.  Small
+/// integers, the two booleans and nil are immutable and interchangeable, so
+/// they can come from a fixed table and cost nothing at all.
+///
+/// This is what makes a deep recursion survivable.  `fib(40)` evaluates about
+/// 331M calls; every one subtracts and adds.  All but ~93k of the values those
+/// steps produce are integers below 4096, so the table absorbs them.
+pub const interned = struct {
+    pub const min_int: i64 = -1024;
+    pub const max_int: i64 = 4096;
+
+    const ints = blk: {
+        @setEvalBranchQuota(8 * (max_int - min_int + 1));
+        var table: [max_int - min_int + 1]Value = undefined;
+        var n: i64 = min_int;
+        while (n <= max_int) : (n += 1) table[@intCast(n - min_int)] = .{ .integer = n };
+        break :blk table;
+    };
+    const yes: Value = .{ .boolean = true };
+    const no: Value = .{ .boolean = false };
+    const nothing: Value = .nil;
+
+    /// The shared pointer for `v`, or null when `v` has to be allocated.
+    pub fn get(v: Value) ?*const Value {
+        return switch (v) {
+            .integer => |n| if (n >= min_int and n <= max_int)
+                &ints[@intCast(n - min_int)]
+            else
+                null,
+            .boolean => |b| if (b) &yes else &no,
+            .nil => &nothing,
+            else => null,
+        };
+    }
+};
+
 /// A runtime value in the Blimp language.
 pub const Value = union(enum) {
     integer: i64,
@@ -14,8 +54,14 @@ pub const Value = union(enum) {
     tuple: []const *const Value,
     map: []const MapEntry,
     actor_ref: registry_mod.ActorRef,
-    closure: Closure,
-    view_node: ViewNode,
+    // Boxed: a closure is four slices, and inline it would set the size of
+    // every value in the language, integers included.  See `interned` — the
+    // evaluator retains what it allocates, so the width of a Value is paid on
+    // every arithmetic step that outruns the table.
+    closure: *const Closure,
+    // Boxed for the same reason as `closure`: three slices inline would make
+    // every integer in a program 24 bytes wider.
+    view_node: *const ViewNode,
 
     pub const ViewNode = struct {
         tag: []const u8,
@@ -400,4 +446,23 @@ test "truthy - string is truthy" {
 test "truthy - hole is falsy" {
     const v: Value = .hole;
     try std.testing.expect(!v.truthy());
+}
+
+test "interned values are shared, everything else is allocated" {
+    const interned_seven = interned.get(.{ .integer = 7 }).?;
+    try std.testing.expectEqual(interned_seven, interned.get(.{ .integer = 7 }).?);
+    try std.testing.expectEqual(@as(i64, 7), interned_seven.integer);
+
+    try std.testing.expectEqual(interned.min_int, interned.get(.{ .integer = interned.min_int }).?.integer);
+    try std.testing.expectEqual(interned.max_int, interned.get(.{ .integer = interned.max_int }).?.integer);
+    try std.testing.expect(interned.get(.{ .integer = interned.min_int - 1 }) == null);
+    try std.testing.expect(interned.get(.{ .integer = interned.max_int + 1 }) == null);
+
+    try std.testing.expect(interned.get(.{ .boolean = true }).?.boolean);
+    try std.testing.expect(!interned.get(.{ .boolean = false }).?.boolean);
+    try std.testing.expect(interned.get(.nil).?.* == .nil);
+
+    // Only the tiny immutable shapes: a float or a string still needs a home.
+    try std.testing.expect(interned.get(.{ .float = 1.0 }) == null);
+    try std.testing.expect(interned.get(.{ .string = "x" }) == null);
 }

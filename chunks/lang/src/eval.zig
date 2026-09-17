@@ -321,6 +321,17 @@ pub const Evaluator = struct {
         self.last_error = null;
     }
 
+    /// Hand back a value, sharing it when it is one of the small immutable
+    /// shapes (see `value.interned`).  Every allocation here is permanent for
+    /// the rest of the run, so an arithmetic step that allocates is an
+    /// arithmetic step that leaks.
+    fn make(self: *Evaluator, v: Value) EvalError!*const Value {
+        if (value_mod.interned.get(v)) |shared| return shared;
+        const p = self.allocator.create(Value) catch return error.OutOfMemory;
+        p.* = v;
+        return p;
+    }
+
     /// Evaluate a single AST node to a runtime Value.
     pub fn eval(self: *Evaluator, node: ast.Node) EvalError!*const Value {
         // Reduction counting + auto-schedule: after async sends queue up,
@@ -333,9 +344,7 @@ pub const Evaluator = struct {
         switch (node.kind) {
             // Literals
             .integer_lit => |lit| {
-                const v = self.allocator.create(Value) catch return error.OutOfMemory;
-                v.* = Value{ .integer = lit.value };
-                return v;
+                return self.make(.{ .integer = lit.value });
             },
             .float_lit => |lit| {
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -408,14 +417,10 @@ pub const Evaluator = struct {
                 return v;
             },
             .bool_lit => |lit| {
-                const v = self.allocator.create(Value) catch return error.OutOfMemory;
-                v.* = Value{ .boolean = lit.value };
-                return v;
+                return self.make(.{ .boolean = lit.value });
             },
             .nil_lit => {
-                const v = self.allocator.create(Value) catch return error.OutOfMemory;
-                v.* = .nil;
-                return v;
+                return self.make(.nil);
             },
             .hole => {
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -494,9 +499,7 @@ pub const Evaluator = struct {
 
             // Test/property defs stored during actor eval; standalone is skipped
             .test_def, .property_def => {
-                const v = self.allocator.create(Value) catch return error.OutOfMemory;
-                v.* = .nil;
-                return v;
+                return self.make(.nil);
             },
 
             // State def is handled inside evalActorDef; standalone is an error
@@ -781,13 +784,15 @@ pub const Evaluator = struct {
             captured[i] = .{ .name = b.name, .val = b.val };
         }
 
-        const v = self.allocator.create(Value) catch return error.OutOfMemory;
-        v.* = Value{ .closure = .{
+        const c = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
+        c.* = .{
             .params = ds.params,
             .body = ds.body,
             .env = captured,
             .return_type = ds.return_type,
-        } };
+        };
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .closure = c };
 
         self.env.define(ds.name, v);
         return v;
@@ -829,16 +834,12 @@ pub const Evaluator = struct {
                 self.env.popScope();
 
                 if (catch_has) return catch_result;
-                const nil = self.allocator.create(Value) catch return error.OutOfMemory;
-                nil.* = .nil;
-                return nil;
+                return self.make(.nil);
             };
             has_val = true;
         }
         if (has_val) return last_val;
-        const nil = self.allocator.create(Value) catch return error.OutOfMemory;
-        nil.* = .nil;
-        return nil;
+        return self.make(.nil);
     }
 
     fn evalStructLit(self: *Evaluator, sl: ast.Node.StructLit) EvalError!*const Value {
@@ -871,13 +872,15 @@ pub const Evaluator = struct {
             captured[i] = .{ .name = b.name, .val = b.val };
         }
 
-        const v = self.allocator.create(Value) catch return error.OutOfMemory;
-        v.* = Value{ .closure = .{
+        const c = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
+        c.* = .{
             .params = fe.params,
             .body = fe.body,
             .env = captured,
             .return_type = fe.return_type,
-        } };
+        };
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .closure = c };
         return v;
     }
 
@@ -895,7 +898,8 @@ pub const Evaluator = struct {
                     self.last_error = errors.wrongArgCount("fn", c.params.len, arg_nodes.len, self.source);
                     return error.TypeError;
                 }
-                const args = self.allocator.alloc(*const Value, arg_nodes.len) catch return error.OutOfMemory;
+                var slot: ArgSlot = .{};
+                const args = try slot.take(self, arg_nodes.len);
                 for (arg_nodes, 0..) |arg_node, i| {
                     args[i] = try self.eval(arg_node);
                 }
@@ -1077,9 +1081,7 @@ pub const Evaluator = struct {
 
         // State is updated for the NEXT message. Scope bindings within this
         // handler body keep the old values (become is a snapshot transition).
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return self.make(.nil);
     }
 
     fn evalReplyStmt(self: *Evaluator, rs: ast.Node.ReplyStmt) EvalError!*const Value {
@@ -1129,30 +1131,25 @@ pub const Evaluator = struct {
     fn evalBinaryOp(self: *Evaluator, op: ast.Node.BinaryOp) EvalError!*const Value {
         const left = try self.eval(op.left.*);
         const right = try self.eval(op.right.*);
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
 
         switch (op.op) {
             .add => {
                 switch (left.*) {
                     .integer => |a| switch (right.*) {
                         .integer => |b| {
-                            result.* = Value{ .integer = a +% b };
-                            return result;
+                            return self.make(.{ .integer = a +% b });
                         },
                         .float => |b| {
-                            result.* = Value{ .float = @as(f64, @floatFromInt(a)) + b };
-                            return result;
+                            return self.make(.{ .float = @as(f64, @floatFromInt(a)) + b });
                         },
                         else => return error.TypeError,
                     },
                     .float => |a| switch (right.*) {
                         .integer => |b| {
-                            result.* = Value{ .float = a + @as(f64, @floatFromInt(b)) };
-                            return result;
+                            return self.make(.{ .float = a + @as(f64, @floatFromInt(b)) });
                         },
                         .float => |b| {
-                            result.* = Value{ .float = a + b };
-                            return result;
+                            return self.make(.{ .float = a + b });
                         },
                         else => return error.TypeError,
                     },
@@ -1161,8 +1158,7 @@ pub const Evaluator = struct {
                             const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
                             @memcpy(new_str[0..a.len], a);
                             @memcpy(new_str[a.len..], b);
-                            result.* = Value{ .string = new_str };
-                            return result;
+                            return self.make(.{ .string = new_str });
                         },
                         else => return self.typeError(left, right, "+"),
                     },
@@ -1176,8 +1172,7 @@ pub const Evaluator = struct {
                             var items = self.allocator.alloc(*const Value, a.len + b.len) catch return error.OutOfMemory;
                             @memcpy(items[0..a.len], a);
                             @memcpy(items[a.len..], b);
-                            result.* = Value{ .list = items };
-                            return result;
+                            return self.make(.{ .list = items });
                         },
                         else => return error.TypeError,
                     },
@@ -1186,73 +1181,63 @@ pub const Evaluator = struct {
                             const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
                             @memcpy(new_str[0..a.len], a);
                             @memcpy(new_str[a.len..], b);
-                            result.* = Value{ .string = new_str };
-                            return result;
+                            return self.make(.{ .string = new_str });
                         },
                         else => return error.TypeError,
                     },
                     else => return error.TypeError,
                 }
             },
-            .sub => return self.evalArithOp(left.*, right.*, result, .sub),
-            .mul => return self.evalArithOp(left.*, right.*, result, .mul),
-            .div => return self.evalArithOp(left.*, right.*, result, .div),
+            .sub => return self.evalArithOp(left.*, right.*, .sub),
+            .mul => return self.evalArithOp(left.*, right.*, .mul),
+            .div => return self.evalArithOp(left.*, right.*, .div),
             .eq => {
-                result.* = Value{ .boolean = left.eql(right.*) };
-                return result;
+                return self.make(.{ .boolean = left.eql(right.*) });
             },
             .neq => {
-                result.* = Value{ .boolean = !left.eql(right.*) };
-                return result;
+                return self.make(.{ .boolean = !left.eql(right.*) });
             },
             // Comparisons: nil on either side returns false instead of TypeError
             .lt => {
                 if (left.* == .nil or right.* == .nil) {
-                    result.* = Value{ .boolean = false };
-                    return result;
+                    return self.make(.{ .boolean = false });
                 }
-                return self.evalCompareOp(left.*, right.*, result, .lt);
+                return self.evalCompareOp(left.*, right.*, .lt);
             },
             .gt => {
                 if (left.* == .nil or right.* == .nil) {
-                    result.* = Value{ .boolean = false };
-                    return result;
+                    return self.make(.{ .boolean = false });
                 }
-                return self.evalCompareOp(left.*, right.*, result, .gt);
+                return self.evalCompareOp(left.*, right.*, .gt);
             },
             .lte => {
                 if (left.* == .nil or right.* == .nil) {
-                    result.* = Value{ .boolean = false };
-                    return result;
+                    return self.make(.{ .boolean = false });
                 }
-                return self.evalCompareOp(left.*, right.*, result, .lte);
+                return self.evalCompareOp(left.*, right.*, .lte);
             },
             .gte => {
                 if (left.* == .nil or right.* == .nil) {
-                    result.* = Value{ .boolean = false };
-                    return result;
+                    return self.make(.{ .boolean = false });
                 }
-                return self.evalCompareOp(left.*, right.*, result, .gte);
+                return self.evalCompareOp(left.*, right.*, .gte);
             },
             .and_op => {
-                result.* = Value{ .boolean = left.truthy() and right.truthy() };
-                return result;
+                return self.make(.{ .boolean = left.truthy() and right.truthy() });
             },
             .or_op => {
-                result.* = Value{ .boolean = left.truthy() or right.truthy() };
-                return result;
+                return self.make(.{ .boolean = left.truthy() or right.truthy() });
             },
         }
     }
 
     const ArithOp = enum { sub, mul, div };
 
-    fn evalArithOp(self: *Evaluator, left: Value, right: Value, result: *Value, op: ArithOp) EvalError!*const Value {
-        _ = self;
+    fn evalArithOp(self: *Evaluator, left: Value, right: Value, op: ArithOp) EvalError!*const Value {
         switch (left) {
             .integer => |a| switch (right) {
                 .integer => |b| {
-                    result.* = switch (op) {
+                    return self.make(switch (op) {
                         .sub => Value{ .integer = a -% b },
                         .mul => Value{ .integer = a *% b },
                         .div => blk: {
@@ -1265,46 +1250,42 @@ pub const Evaluator = struct {
                             }
                             break :blk Value{ .integer = @divTrunc(a, b) };
                         },
-                    };
-                    return result;
+                    });
                 },
                 .float => |b| {
                     const fa: f64 = @floatFromInt(a);
-                    result.* = switch (op) {
+                    return self.make(switch (op) {
                         .sub => Value{ .float = fa - b },
                         .mul => Value{ .float = fa * b },
                         .div => blk: {
                             if (b == 0.0) return error.DivisionByZero;
                             break :blk Value{ .float = fa / b };
                         },
-                    };
-                    return result;
+                    });
                 },
                 else => return error.TypeError,
             },
             .float => |a| switch (right) {
                 .integer => |b| {
                     const fb: f64 = @floatFromInt(b);
-                    result.* = switch (op) {
+                    return self.make(switch (op) {
                         .sub => Value{ .float = a - fb },
                         .mul => Value{ .float = a * fb },
                         .div => blk: {
                             if (fb == 0.0) return error.DivisionByZero;
                             break :blk Value{ .float = a / fb };
                         },
-                    };
-                    return result;
+                    });
                 },
                 .float => |b| {
-                    result.* = switch (op) {
+                    return self.make(switch (op) {
                         .sub => Value{ .float = a - b },
                         .mul => Value{ .float = a * b },
                         .div => blk: {
                             if (b == 0.0) return error.DivisionByZero;
                             break :blk Value{ .float = a / b };
                         },
-                    };
-                    return result;
+                    });
                 },
                 else => return error.TypeError,
             },
@@ -1314,58 +1295,53 @@ pub const Evaluator = struct {
 
     const CmpOp = enum { lt, gt, lte, gte };
 
-    fn evalCompareOp(self: *Evaluator, left: Value, right: Value, result: *Value, op: CmpOp) EvalError!*const Value {
-        _ = self;
+    fn evalCompareOp(self: *Evaluator, left: Value, right: Value, op: CmpOp) EvalError!*const Value {
         switch (left) {
             .integer => |a| switch (right) {
                 .integer => |b| {
-                    result.* = Value{
+                    return self.make(.{
                         .boolean = switch (op) {
                             .lt => a < b,
                             .gt => a > b,
                             .lte => a <= b,
                             .gte => a >= b,
                         },
-                    };
-                    return result;
+                    });
                 },
                 .float => |b| {
                     const fa: f64 = @floatFromInt(a);
-                    result.* = Value{
+                    return self.make(.{
                         .boolean = switch (op) {
                             .lt => fa < b,
                             .gt => fa > b,
                             .lte => fa <= b,
                             .gte => fa >= b,
                         },
-                    };
-                    return result;
+                    });
                 },
                 else => return error.TypeError,
             },
             .float => |a| switch (right) {
                 .integer => |b| {
                     const fb: f64 = @floatFromInt(b);
-                    result.* = Value{
+                    return self.make(.{
                         .boolean = switch (op) {
                             .lt => a < fb,
                             .gt => a > fb,
                             .lte => a <= fb,
                             .gte => a >= fb,
                         },
-                    };
-                    return result;
+                    });
                 },
                 .float => |b| {
-                    result.* = Value{
+                    return self.make(.{
                         .boolean = switch (op) {
                             .lt => a < b,
                             .gt => a > b,
                             .lte => a <= b,
                             .gte => a >= b,
                         },
-                    };
-                    return result;
+                    });
                 },
                 else => return error.TypeError,
             },
@@ -1375,24 +1351,20 @@ pub const Evaluator = struct {
 
     fn evalUnaryOp(self: *Evaluator, op: ast.Node.UnaryOp) EvalError!*const Value {
         const operand = try self.eval(op.operand.*);
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
         switch (op.op) {
             .negate => switch (operand.*) {
                 .integer => |n| {
                     // -minInt is not an i64, so negate by wrapping subtraction
                     // rather than `-n`, which panics on that one input.
-                    result.* = Value{ .integer = 0 -% n };
-                    return result;
+                    return self.make(.{ .integer = 0 -% n });
                 },
                 .float => |f| {
-                    result.* = Value{ .float = -f };
-                    return result;
+                    return self.make(.{ .float = -f });
                 },
                 else => return error.TypeError,
             },
             .not => {
-                result.* = Value{ .boolean = !operand.truthy() };
-                return result;
+                return self.make(.{ .boolean = !operand.truthy() });
             },
         }
     }
@@ -1500,6 +1472,23 @@ pub const Evaluator = struct {
         return v;
     }
 
+    /// Room for one call's arguments, owned by the frame that consumes them.
+    ///
+    /// A call's arguments are dead the moment they are bound into the callee's
+    /// scope, but the evaluator allocates from a heap it never reclaims, so a
+    /// vector allocated per call is a vector retained per call — and a
+    /// tail-recursive loop is one call per iteration.  The frame that binds
+    /// the arguments outlives their use, so its own stack is the right place
+    /// for them.  Arities past `buf.len` still come from the heap.
+    const ArgSlot = struct {
+        buf: [8]*const Value = undefined,
+
+        fn take(self: *ArgSlot, ev: *Evaluator, n: usize) EvalError![]*const Value {
+            if (n <= self.buf.len) return self.buf[0..n];
+            return ev.allocator.alloc(*const Value, n) catch return error.OutOfMemory;
+        }
+    };
+
     /// Result of evaluating an expression in tail position: either a finished
     /// value, or a pending closure call that the enclosing call loop runs in
     /// place of the current frame (tail call elimination).
@@ -1526,23 +1515,19 @@ pub const Evaluator = struct {
 
     /// Evaluate a body: every statement but the last normally, the last one in
     /// tail position. An empty body yields nil.
-    fn evalBodyTail(self: *Evaluator, body: []const ast.Node) EvalError!TailResult {
-        if (body.len == 0) {
-            const result = self.allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return .{ .value = result };
-        }
+    fn evalBodyTail(self: *Evaluator, body: []const ast.Node, slot: *ArgSlot) EvalError!TailResult {
+        if (body.len == 0) return .{ .value = try self.make(.nil) };
         for (body[0 .. body.len - 1]) |stmt| {
             _ = try self.eval(stmt);
         }
-        return self.evalTail(body[body.len - 1]);
+        return self.evalTail(body[body.len - 1], slot);
     }
 
     /// Evaluate a node in tail position. A call to a closure becomes a pending
     /// .call (args evaluated here, in the current scope); case/situation select
     /// their branch and evaluate its body in tail position; anything else is
     /// evaluated normally.
-    fn evalTail(self: *Evaluator, node: ast.Node) EvalError!TailResult {
+    fn evalTail(self: *Evaluator, node: ast.Node, slot: *ArgSlot) EvalError!TailResult {
         switch (node.kind) {
             .func_call => |call| {
                 if (self.env.lookup(call.name)) |val| {
@@ -1558,7 +1543,7 @@ pub const Evaluator = struct {
                             self.last_error = errors.wrongArgCount("fn", c.params.len, call.args.len, self.source);
                             return error.TypeError;
                         }
-                        const args = self.allocator.alloc(*const Value, call.args.len) catch return error.OutOfMemory;
+                        const args = try slot.take(self, call.args.len);
                         for (call.args, 0..) |arg_node, i| {
                             args[i] = try self.eval(arg_node);
                         }
@@ -1567,11 +1552,11 @@ pub const Evaluator = struct {
                 }
                 return .{ .value = try self.eval(node) };
             },
-            .situation => |sit| return self.evalSituationTail(sit),
+            .situation => |sit| return self.evalSituationTail(sit, slot),
             .case_expr => |ce| return self.evalSituationTail(ast.Node.Situation{
                 .subject = ce.subject,
                 .branches = ce.branches,
-            }),
+            }, slot),
             else => return .{ .value = try self.eval(node) },
         }
     }
@@ -1590,6 +1575,7 @@ pub const Evaluator = struct {
     fn callClosureWithValues(self: *Evaluator, callee_val: *const Value, args_in: []const *const Value) EvalError!*const Value {
         var callee = callee_val;
         var args = args_in;
+        var slot: ArgSlot = .{};
         const base = self.env.depth();
         self.env.pushScope();
         while (true) {
@@ -1630,7 +1616,7 @@ pub const Evaluator = struct {
             }
 
             // Evaluate body with the last statement in tail position
-            const tr = self.evalBodyTail(c.body) catch |err| {
+            const tr = self.evalBodyTail(c.body, &slot) catch |err| {
                 self.env.popTo(base);
                 return err;
             };
@@ -1680,9 +1666,7 @@ pub const Evaluator = struct {
             .reply_slot = null,
         });
 
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = Value{ .atom = "queued" };
-        return result;
+        return self.make(.{ .atom = "queued" });
     }
 
     /// schedule(ticks) -- run the scheduler for N ticks, processing actor mailboxes
@@ -1693,9 +1677,7 @@ pub const Evaluator = struct {
             if (arg.* == .integer) ticks = @intCast(@max(1, arg.integer));
         }
         self.runScheduler(ticks);
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = Value{ .atom = "ok" };
-        return result;
+        return self.make(.{ .atom = "ok" });
     }
 
     fn runtimeEval(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
@@ -1707,7 +1689,6 @@ pub const Evaluator = struct {
         var parser = Parser.init(self.allocator, code);
         const nodes = parser.parseFile() catch {
             // Parse error -- return error map
-            const result = self.allocator.create(Value) catch return error.OutOfMemory;
             const entries = self.allocator.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
             const ok_val = self.allocator.create(Value) catch return error.OutOfMemory;
             ok_val.* = Value{ .boolean = false };
@@ -1715,8 +1696,7 @@ pub const Evaluator = struct {
             const err_val = self.allocator.create(Value) catch return error.OutOfMemory;
             err_val.* = Value{ .string = "parse error" };
             entries[1] = .{ .key = "error", .val = err_val };
-            result.* = Value{ .map = entries };
-            return result;
+            return self.make(.{ .map = entries });
         };
 
         // Evaluate all nodes, track last value
@@ -1727,7 +1707,6 @@ pub const Evaluator = struct {
             last = self.eval(node) catch {
                 self.env.popScope();
                 // Eval error -- return error map
-                const result = self.allocator.create(Value) catch return error.OutOfMemory;
                 const entries = self.allocator.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
                 const ok_val = self.allocator.create(Value) catch return error.OutOfMemory;
                 ok_val.* = Value{ .boolean = false };
@@ -1735,17 +1714,14 @@ pub const Evaluator = struct {
                 const err_val = self.allocator.create(Value) catch return error.OutOfMemory;
                 err_val.* = Value{ .string = "runtime error" };
                 entries[1] = .{ .key = "error", .val = err_val };
-                result.* = Value{ .map = entries };
-                return result;
+                return self.make(.{ .map = entries });
             };
             has_val = true;
         }
         self.env.popScope();
 
         if (has_val) return last;
-        const nil = self.allocator.create(Value) catch return error.OutOfMemory;
-        nil.* = .nil;
-        return nil;
+        return self.make(.nil);
     }
 
     /// blimp_test("code string") -> %{passed: Bool, total: Int, failures: [...]}
@@ -1842,9 +1818,7 @@ pub const Evaluator = struct {
         fail_val.* = Value{ .string = failure_msg };
         entries[3] = .{ .key = "failure", .val = fail_val };
 
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = Value{ .map = entries };
-        return result;
+        return self.make(.{ .map = entries });
     }
 
     fn evalPipe(self: *Evaluator, pipe: ast.Node.PipeExpr) EvalError!*const Value {
@@ -1963,9 +1937,7 @@ pub const Evaluator = struct {
 
                             if (ctx.reply_value) |rv| return rv;
                             if (has_val) return last_val;
-                            const nil = self.allocator.create(Value) catch return error.OutOfMemory;
-                            nil.* = .nil;
-                            return nil;
+                            return self.make(.nil);
                         }
                         return error.TypeError; // no matching handler
                     },
@@ -1989,18 +1961,14 @@ pub const Evaluator = struct {
             for (tail_items, 0..) |item, i| {
                 items[list.elements.len + i] = item;
             }
-            const result = self.allocator.create(Value) catch return error.OutOfMemory;
-            result.* = Value{ .list = items };
-            return result;
+            return self.make(.{ .list = items });
         }
         // Simple list literal [a, b, c]
         const items = self.allocator.alloc(*const Value, list.elements.len) catch return error.OutOfMemory;
         for (list.elements, 0..) |elem, i| {
             items[i] = try self.eval(elem);
         }
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = Value{ .list = items };
-        return result;
+        return self.make(.{ .list = items });
     }
 
     fn evalTuple(self: *Evaluator, tuple: ast.Node.TupleLit) EvalError!*const Value {
@@ -2008,9 +1976,7 @@ pub const Evaluator = struct {
         for (tuple.elements, 0..) |elem, i| {
             items[i] = try self.eval(elem);
         }
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = Value{ .tuple = items };
-        return result;
+        return self.make(.{ .tuple = items });
     }
 
     fn evalMap(self: *Evaluator, map: ast.Node.MapLit) EvalError!*const Value {
@@ -2019,9 +1985,7 @@ pub const Evaluator = struct {
             const val = try self.eval(entry.value);
             entries[i] = .{ .key = entry.key, .val = val };
         }
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = Value{ .map = entries };
-        return result;
+        return self.make(.{ .map = entries });
     }
 
     fn evalDotAccess(self: *Evaluator, da: ast.Node.DotAccess) EvalError!*const Value {
@@ -2044,9 +2008,7 @@ pub const Evaluator = struct {
                     }
                 }
                 // Field not found, return nil
-                const result = self.allocator.create(Value) catch return error.OutOfMemory;
-                result.* = .nil;
-                return result;
+                return self.make(.nil);
             },
             else => return error.TypeError,
         }
@@ -2120,7 +2082,8 @@ pub const Evaluator = struct {
 
     fn evalSituation(self: *Evaluator, sit: ast.Node.Situation) EvalError!*const Value {
         const base = self.env.depth();
-        return self.resolveTail(try self.evalSituationTail(sit), base);
+        var slot: ArgSlot = .{};
+        return self.resolveTail(try self.evalSituationTail(sit, &slot), base);
     }
 
     /// Select the matching branch of a case/situation and evaluate its body in
@@ -2128,7 +2091,7 @@ pub const Evaluator = struct {
     /// bindings' scope is left on the stack for the call to see (see
     /// resolveTail and callClosureWithValues, which pop it); otherwise it is
     /// popped here.
-    fn evalSituationTail(self: *Evaluator, sit: ast.Node.Situation) EvalError!TailResult {
+    fn evalSituationTail(self: *Evaluator, sit: ast.Node.Situation, slot: *ArgSlot) EvalError!TailResult {
         const subject = try self.eval(sit.subject.*);
 
         for (sit.branches) |branch| {
@@ -2151,7 +2114,7 @@ pub const Evaluator = struct {
                         }
                     }
 
-                    const result = self.evalBodyTail(branch.body) catch |err| {
+                    const result = self.evalBodyTail(branch.body, slot) catch |err| {
                         self.env.popScope();
                         return err;
                     };
@@ -2165,7 +2128,7 @@ pub const Evaluator = struct {
                 if (branch.body.len == 1 and branch.body[0].kind == .hole) {
                     return .{ .value = try self.evalHole(branch.body[0].kind.hole, branch.body[0].loc, subject) };
                 }
-                return self.evalBodyTail(branch.body);
+                return self.evalBodyTail(branch.body, slot);
             }
         }
 
@@ -2181,9 +2144,7 @@ pub const Evaluator = struct {
     fn evalHole(self: *Evaluator, hole: @import("ast.zig").Node.Hole, loc: @import("ast.zig").Loc, subject: *const Value) EvalError!*const Value {
         // Hole operator is not available on WASM (needs filesystem + subprocess)
         if (comptime @import("builtin").target.cpu.arch == .wasm32) {
-            const v = self.allocator.create(Value) catch return error.OutOfMemory;
-            v.* = .nil;
-            return v;
+            return self.make(.nil);
         }
         // Build context string: directive + subject value + visible bindings
         var ctx_buf: std.ArrayListUnmanaged(u8) = .{};
@@ -2272,9 +2233,7 @@ pub const Evaluator = struct {
         child.stderr_behavior = .Ignore;
         child.spawn() catch {
             std.debug.print("[Hole] claude not found — returning nil\n", .{});
-            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
-            nil_val.* = .nil;
-            return nil_val;
+            return self.make(.nil);
         };
 
         // Read stdout
@@ -2302,9 +2261,7 @@ pub const Evaluator = struct {
         std.debug.print("[Hole] Claude returned: {s}\n", .{response});
 
         if (response.len == 0) {
-            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
-            nil_val.* = .nil;
-            return nil_val;
+            return self.make(.nil);
         }
 
         // Parse and evaluate the response as Blimp statements
@@ -2312,15 +2269,11 @@ pub const Evaluator = struct {
         var hole_parser = Parser.init(self.allocator, src_copy);
         const nodes = hole_parser.parseHandlerBodyPublic() catch {
             std.debug.print("[Hole] Failed to parse Claude response as Blimp\n", .{});
-            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
-            nil_val.* = .nil;
-            return nil_val;
+            return self.make(.nil);
         };
 
         if (nodes.len == 0) {
-            const nil_val = self.allocator.create(Value) catch return error.OutOfMemory;
-            nil_val.* = .nil;
-            return nil_val;
+            return self.make(.nil);
         }
 
         const saved_source = self.source;
@@ -2567,9 +2520,7 @@ pub const Evaluator = struct {
             has_val = true;
         }
         if (has_val) return last;
-        const result = self.allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return self.make(.nil);
     }
 };
 

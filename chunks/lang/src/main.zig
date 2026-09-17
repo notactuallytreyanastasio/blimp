@@ -7,6 +7,8 @@ const introspect = @import("introspect.zig");
 const Evaluator = @import("eval.zig").Evaluator;
 const Value = @import("value.zig").Value;
 const errors = @import("errors.zig");
+const gc = @import("gc.zig");
+const HeapLimit = @import("heap_limit.zig").HeapLimit;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,13 +18,19 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Everything a Blimp program allocates comes through here.  Reading the
+    // source, the argv and the ASTs do not: the ceiling is about the program's
+    // appetite, not the tool's.
+    var heap_limit = HeapLimit.fromEnv(allocator);
+    const program_heap = heap_limit.allocator();
+
     // Check for --repl flag
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--repl")) {
         const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
         if (is_tty) {
-            repl(allocator);
+            repl(allocator, &heap_limit);
         } else {
-            replPlain(allocator);
+            replPlain(allocator, &heap_limit);
         }
         return;
     }
@@ -30,7 +38,7 @@ pub fn main() !void {
     // blimp test [dir] -- discover and run *_test.blimp files
     if (args.len >= 2 and std.mem.eql(u8, args[1], "test")) {
         const test_dir = if (args.len >= 3) args[2] else "test";
-        runTestDir(allocator, test_dir);
+        runTestDir(program_heap, test_dir);
         return;
     }
 
@@ -38,9 +46,9 @@ pub fn main() !void {
         // No arguments -- enter REPL mode
         const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
         if (is_tty) {
-            repl(allocator);
+            repl(allocator, &heap_limit);
         } else {
-            replPlain(allocator);
+            replPlain(allocator, &heap_limit);
         }
         return;
     }
@@ -51,7 +59,7 @@ pub fn main() !void {
     };
     defer allocator.free(source);
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    var arena = std.heap.ArenaAllocator.init(program_heap);
     defer arena.deinit();
 
     var parser = Parser.init(arena.allocator(), source);
@@ -126,6 +134,10 @@ pub fn main() !void {
     evaluator.restart_argv = restart_argv;
     for (nodes) |node| {
         _ = evaluator.eval(node) catch |err| {
+            if (heap_limit.hit) {
+                heap_limit.report();
+                std.process.exit(1);
+            }
             if (evaluator.last_error) |blimp_err| {
                 var buf: [2048]u8 = undefined;
                 var fbs = std.io.fixedBufferStream(&buf);
@@ -402,11 +414,64 @@ fn countDepthChange(line: []const u8) i32 {
     return delta;
 }
 
-fn replPlain(allocator: std.mem.Allocator) void {
+/// The evaluator's value heap, in two halves.
+///
+/// The evaluator allocates every value and frees nothing (see gc.zig), which
+/// is fine for a one-shot run but not for a REPL: a session that evaluates
+/// thousands of expressions against one evaluator grows without bound.
+/// Between evals, `compact` copies what is still reachable into the idle half
+/// and releases the busy one.
+///
+/// Source text and ASTs do not live here.  Closures and handlers keep pointing
+/// at them and `compact` does not copy them, so they belong to an arena that
+/// outlives every compaction.
+const ValueHeap = struct {
+    halves: [2]std.heap.ArenaAllocator,
+    live: usize = 0,
+    scratch: std.mem.Allocator,
+
+    fn init(backing: std.mem.Allocator) ValueHeap {
+        return .{
+            .halves = .{
+                std.heap.ArenaAllocator.init(backing),
+                std.heap.ArenaAllocator.init(backing),
+            },
+            .scratch = backing,
+        };
+    }
+
+    fn deinit(self: *ValueHeap) void {
+        self.halves[0].deinit();
+        self.halves[1].deinit();
+    }
+
+    fn allocator(self: *ValueHeap) std.mem.Allocator {
+        return self.halves[self.live].allocator();
+    }
+
+    /// Only between evals: nothing on the Zig stack may hold a value pointer.
+    /// A failed copy leaves the evaluator on the heap it already has, so the
+    /// session keeps working and merely keeps the garbage.
+    fn compact(self: *ValueHeap, eval: *Evaluator) void {
+        const next = 1 - self.live;
+        gc.compact(eval, self.halves[next].allocator(), self.scratch) catch return;
+        _ = self.halves[self.live].reset(.free_all);
+        self.live = next;
+        // Its details have already been formatted for the user.
+        eval.last_error = null;
+    }
+};
+
+fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
+    // Source text and the ASTs parsed from it outlive every compaction.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var evaluator = Evaluator.init(arena.allocator());
+    var heap = ValueHeap.init(heap_limit.allocator());
+    defer heap.deinit();
+
+    var evaluator = Evaluator.init(heap.allocator());
+    var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
     var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
@@ -421,6 +486,11 @@ fn replPlain(allocator: std.mem.Allocator) void {
     var depth: i32 = 0;
 
     while (true) {
+        // Between evals, and only here: no value pointer is on the stack.
+        if (pending_garbage) {
+            heap.compact(&evaluator);
+            pending_garbage = false;
+        }
         if (depth > 0) {
             stdout.writeAll("  ...  ") catch break;
         } else {
@@ -460,6 +530,8 @@ fn replPlain(allocator: std.mem.Allocator) void {
         multi_buf.items.len = 0;
         depth = 0;
 
+        pending_garbage = true;
+
         // Decide whether to use parseFile (multi-line with actor) or parseStatement
         const is_multiline = std.mem.indexOf(u8, source, "\n") != null;
 
@@ -477,7 +549,10 @@ fn replPlain(allocator: std.mem.Allocator) void {
             var had_error = false;
             for (nodes) |node| {
                 last_result = evaluator.eval(node) catch {
-                    if (evaluator.last_error) |rich_err| {
+                    if (heap_limit.hit) {
+                        heap_limit.report();
+                        heap_limit.hit = false;
+                    } else if (evaluator.last_error) |rich_err| {
                         rich_err.formatPlain(&stdout_writer.interface);
                     } else {
                         stdout.writeAll("Error: unknown\n") catch {};
@@ -505,7 +580,10 @@ fn replPlain(allocator: std.mem.Allocator) void {
 
             evaluator.setSource(source);
             const result = evaluator.eval(node) catch {
-                if (evaluator.last_error) |rich_err| {
+                if (heap_limit.hit) {
+                    heap_limit.report();
+                    heap_limit.hit = false;
+                } else if (evaluator.last_error) |rich_err| {
                     rich_err.formatPlain(&stdout_writer.interface);
                 } else {
                     stdout.writeAll("Error: unknown\n") catch {};
@@ -733,11 +811,21 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
     if (any_failed) std.process.exit(1);
 }
 
-fn repl(allocator: std.mem.Allocator) void {
+fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
+    // Source text, ASTs and the history lines outlive every compaction.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var evaluator = Evaluator.init(arena.allocator());
+    // Redrawing formats every binding and actor field again; that text is read
+    // once and thrown away, so it gets an arena of its own.
+    var draw_arena = std.heap.ArenaAllocator.init(allocator);
+    defer draw_arena.deinit();
+
+    var heap = ValueHeap.init(heap_limit.allocator());
+    defer heap.deinit();
+
+    var evaluator = Evaluator.init(heap.allocator());
+    var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
     var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
@@ -755,13 +843,18 @@ fn repl(allocator: std.mem.Allocator) void {
     const right_cols = total_cols - left_cols - 1; // -1 for border
 
     // Initial draw
-    drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
+    drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
     stdout_writer.interface.flush() catch {};
 
     var multi_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
     var depth: i32 = 0;
 
     while (true) {
+        // Between evals, and only here: no value pointer is on the stack.
+        if (pending_garbage) {
+            heap.compact(&evaluator);
+            pending_garbage = false;
+        }
         // Position cursor at input line
         moveCursor(stdout, total_rows, 1);
         // Clear the input line
@@ -802,6 +895,8 @@ fn repl(allocator: std.mem.Allocator) void {
         // Record input
         history.append(arena.allocator(), .{ .kind = .input, .text = source }) catch {};
 
+        pending_garbage = true;
+
         // Decide whether to use parseFile or parseStatement
         const is_multiline = std.mem.indexOf(u8, source, "\n") != null;
 
@@ -811,7 +906,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 const pe = @import("errors.zig").parseError(source);
                 const err_text = formatBlimpError(pe, arena.allocator());
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
-                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             };
@@ -831,7 +926,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 };
             }
             if (had_error) {
-                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             }
@@ -846,7 +941,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 const pe = @import("errors.zig").parseError(source);
                 const err_text = formatBlimpError(pe, arena.allocator());
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
-                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             };
@@ -858,7 +953,7 @@ fn repl(allocator: std.mem.Allocator) void {
                 else
                     "Unknown error";
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
-                drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
+                drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
                 stdout_writer.interface.flush() catch {};
                 continue;
             };
@@ -868,7 +963,7 @@ fn repl(allocator: std.mem.Allocator) void {
             history.append(arena.allocator(), .{ .kind = .output, .text = result_text }) catch {};
         }
 
-        drawScreen(stdout, &history, &evaluator, arena.allocator(), total_rows, left_cols, right_cols);
+        drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
         stdout_writer.interface.flush() catch {};
     }
 
@@ -901,11 +996,14 @@ fn drawScreen(
     writer: anytype,
     history: *const std.ArrayList(HistoryEntry),
     evaluator: *const Evaluator,
-    alloc: std.mem.Allocator,
+    scratch: *std.heap.ArenaAllocator,
     total_rows: u32,
     left_cols: u32,
     right_cols: u32,
 ) void {
+    // Nothing formatted here outlives the draw.
+    defer _ = scratch.reset(.retain_capacity);
+    const alloc = scratch.allocator();
     const content_rows = total_rows - 1; // reserve bottom row for input
 
     // Clear screen

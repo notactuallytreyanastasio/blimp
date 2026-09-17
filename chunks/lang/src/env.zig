@@ -6,6 +6,11 @@ const Value = @import("value.zig").Value;
 /// Follows the same pattern as TypeEnv in types.zig.
 pub const Environment = struct {
     scopes: std.ArrayList(Scope),
+    /// Binding lists left behind by popped scopes, kept for the next push.
+    /// Every call pushes a scope and pops it again, and the evaluator runs on
+    /// an arena that frees nothing, so without this list a call leaves its
+    /// binding buffer in the allocator for the rest of the run.
+    free_scopes: std.ArrayList(std.ArrayList(Binding)),
     allocator: std.mem.Allocator,
 
     pub const Binding = struct {
@@ -20,6 +25,7 @@ pub const Environment = struct {
     pub fn init(allocator: std.mem.Allocator) Environment {
         var env = Environment{
             .scopes = .{ .items = &.{}, .capacity = 0 },
+            .free_scopes = .{ .items = &.{}, .capacity = 0 },
             .allocator = allocator,
         };
         // Push the global scope
@@ -27,18 +33,25 @@ pub const Environment = struct {
         return env;
     }
 
-    /// Push a new scope (entering a block).
+    /// Push a new scope (entering a block), reusing a recycled binding list
+    /// when one is going spare.
     pub fn pushScope(self: *Environment) void {
-        self.scopes.append(self.allocator, .{
-            .bindings = .{ .items = &.{}, .capacity = 0 },
-        }) catch {};
+        const bindings = self.free_scopes.pop() orelse
+            std.ArrayList(Binding){ .items = &.{}, .capacity = 0 };
+        self.scopes.append(self.allocator, .{ .bindings = bindings }) catch {};
     }
 
     /// Pop the current scope (leaving a block).
     pub fn popScope(self: *Environment) void {
-        if (self.scopes.items.len > 0) {
-            _ = self.scopes.pop();
-        }
+        if (self.scopes.pop()) |scope| self.recycle(scope);
+    }
+
+    /// Keep a popped scope's binding buffer for the next push.  Dropping it
+    /// instead is what made a deep recursion grow without bound.
+    fn recycle(self: *Environment, scope: Scope) void {
+        var bindings = scope.bindings;
+        bindings.clearRetainingCapacity();
+        self.free_scopes.append(self.allocator, bindings) catch {};
     }
 
     /// Number of scopes on the stack. Callers record this to pop back to it.
@@ -48,8 +61,8 @@ pub const Environment = struct {
 
     /// Pop scopes until only `n` remain (no-op if already at or below n).
     pub fn popTo(self: *Environment, n: usize) void {
-        if (self.scopes.items.len > n) {
-            self.scopes.shrinkRetainingCapacity(n);
+        while (self.scopes.items.len > n) {
+            if (self.scopes.pop()) |scope| self.recycle(scope);
         }
     }
 
@@ -65,7 +78,9 @@ pub const Environment = struct {
                 self.defineIn(base, b.name, b.val);
             }
         }
-        self.scopes.shrinkRetainingCapacity(base + 1);
+        while (self.scopes.items.len > base + 1) {
+            if (self.scopes.pop()) |scope| self.recycle(scope);
+        }
     }
 
     /// Define (or update) a variable in the current scope.
@@ -218,6 +233,34 @@ test "collapseTo keeps the visible bindings in one scope" {
     try std.testing.expectEqual(base, env.depth());
     try std.testing.expect(env.lookup("x") == null);
     try std.testing.expect(env.lookup("g") != null);
+}
+
+test "a pushed and popped scope costs nothing the second time" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const val = try alloc.create(Value);
+    val.* = Value{ .integer = 1 };
+
+    // Let the scope stack and the first binding list reach their size.
+    for (0..64) |_| {
+        env.pushScope();
+        env.define("x", val);
+        env.popScope();
+    }
+    const settled = arena.queryCapacity();
+
+    for (0..10_000) |_| {
+        env.pushScope();
+        env.define("x", val);
+        env.popScope();
+    }
+
+    // Every call pushes a scope.  If popping dropped the binding list, this
+    // loop would leave 10_000 of them in the arena.
+    try std.testing.expectEqual(settled, arena.queryCapacity());
 }
 
 test "inner scope shadows outer" {
