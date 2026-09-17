@@ -847,7 +847,8 @@ fn builtinAbs(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .integer => |n| result.* = Value{ .integer = if (n < 0) -n else n },
+        // abs(minInt) has no i64 answer; wrap to minInt, as the operators do.
+        .integer => |n| result.* = Value{ .integer = if (n < 0) 0 -% n else n },
         .float => |f| result.* = Value{ .float = if (f < 0) -f else f },
         else => return error.TypeError,
     }
@@ -1028,7 +1029,7 @@ fn builtinSum(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     var total: i64 = 0;
     for (args[0].list) |item| {
-        if (item.* == .integer) total += item.integer;
+        if (item.* == .integer) total +%= item.integer;
     }
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .integer = total };
@@ -2913,4 +2914,51 @@ test "view_diff detects tag change as replace" {
             try std.testing.expectEqualStrings("replace", entry.val.string);
         }
     }
+}
+
+test "builtin abs wraps minInt to itself instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = std.math.minInt(i64) };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = n;
+    const result = try builtinAbs(alloc, args);
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "builtin abs is unchanged for ordinary values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = -7 };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = n;
+    const result = try builtinAbs(alloc, args);
+    try std.testing.expect(result.eql(Value{ .integer = 7 }));
+}
+
+test "builtin sum wraps past maxInt instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const a = try alloc.create(Value);
+    a.* = Value{ .integer = std.math.maxInt(i64) };
+    const b = try alloc.create(Value);
+    b.* = Value{ .integer = 1 };
+    const items = try alloc.alloc(*const Value, 2);
+    items[0] = a;
+    items[1] = b;
+    const list_val = try alloc.create(Value);
+    list_val.* = Value{ .list = items };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = list_val;
+
+    const result = try builtinSum(alloc, args);
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
 }
