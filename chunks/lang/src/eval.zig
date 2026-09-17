@@ -124,7 +124,11 @@ pub const Evaluator = struct {
         var ticks: u32 = 0;
         while (ticks < max_ticks) : (ticks += 1) {
             var processed_any = false;
-            for (self.registry.instances.items) |*entry| {
+            // Re-read `items` each step: handling a message can spawn, and
+            // that append may move the list out from under a held slice.
+            var i: usize = 0;
+            while (i < self.registry.instances.items.len) : (i += 1) {
+                const entry = self.registry.instances.items[i];
                 if (!entry.mailbox.isEmpty()) {
                     _ = self.processMailboxMessage(entry.ref);
                     processed_any = true;
@@ -3357,4 +3361,44 @@ test "spawn template not found error" {
     var evaluator = Evaluator.init(alloc);
     const result = evalStmt(alloc, &evaluator, "c = spawn Nonexistent");
     try std.testing.expectError(error.UndefinedVariable, result);
+}
+
+test "a spawn inside a handler does not invalidate the receiver's entry" {
+    // The receiver's registry entry is held for the whole handler body, so
+    // anything the body evaluates that spawns -- an argument, a become
+    // right-hand side -- must not move it.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\actor Inner do
+        \\  on :hi do reply 1 end
+        \\end
+        \\actor Outer do
+        \\  state child: Any :: nil
+        \\  on :set(c: Any) do
+        \\    become child: c
+        \\    reply nil
+        \\  end
+        \\  on :make do
+        \\    become child: spawn Inner
+        \\    reply nil
+        \\  end
+        \\  on :child do reply child end
+        \\end
+    );
+
+    // spawn in an argument position
+    _ = try evalStmt(alloc, &evaluator, "o = spawn Outer");
+    _ = try evalStmt(alloc, &evaluator, "o <- :set(spawn Inner)");
+    const via_arg = try evalStmt(alloc, &evaluator, "(o <- :child) <- :hi");
+    try std.testing.expect(via_arg.eql(Value{ .integer = 1 }));
+
+    // spawn on the right-hand side of a become
+    _ = try evalStmt(alloc, &evaluator, "p = spawn Outer");
+    _ = try evalStmt(alloc, &evaluator, "p <- :make");
+    const via_become = try evalStmt(alloc, &evaluator, "(p <- :child) <- :hi");
+    try std.testing.expect(via_become.eql(Value{ .integer = 1 }));
 }

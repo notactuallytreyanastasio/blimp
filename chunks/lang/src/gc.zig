@@ -182,18 +182,24 @@ const Copier = struct {
         return out;
     }
 
-    fn instances(self: *Copier, old: []const registry_mod.ActorEntry) CompactError!std.ArrayList(registry_mod.ActorEntry) {
-        var out: std.ArrayList(registry_mod.ActorEntry) = .{ .items = &.{}, .capacity = 0 };
+    // Entries are boxed so the evaluator's `*ActorEntry` survives a spawn;
+    // a compaction moves them to a fresh box in the new heap.  Nothing may
+    // be holding one of those pointers when this runs -- see the module
+    // comment.
+    fn instances(self: *Copier, old: []const *registry_mod.ActorEntry) CompactError!std.ArrayList(*registry_mod.ActorEntry) {
+        var out: std.ArrayList(*registry_mod.ActorEntry) = .{ .items = &.{}, .capacity = 0 };
         try out.ensureTotalCapacity(self.to, old.len);
         for (old) |e| {
-            out.appendAssumeCapacity(.{
+            const ne = try self.to.create(registry_mod.ActorEntry);
+            ne.* = .{
                 .ref = .{ .id = e.ref.id, .type_name = try self.str(e.ref.type_name) },
                 .state_fields = try self.mapEntries(e.state_fields),
                 .handlers = try self.handlerDefs(e.handlers),
                 .status = e.status,
                 .mailbox = try self.mailbox(e.mailbox),
                 .reductions = e.reductions,
-            });
+            };
+            out.appendAssumeCapacity(ne);
         }
         return out;
     }

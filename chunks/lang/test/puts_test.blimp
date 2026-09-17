@@ -1,0 +1,24 @@
+# puts -- raw stdout, no quoting, no truncation.
+# Run: ./blimp test/puts_test.blimp --test
+
+actor PutsTests do
+  test "puts returns its argument" do
+    assert_eq(puts(""), "")
+  end
+
+  test "puts returns long strings unchanged" do
+    long = build_long(5000, "")
+    assert_eq(length(puts(long)), 5000)
+  end
+
+  test "puts accepts non-string values" do
+    assert_eq(puts(42), 42)
+  end
+end
+
+def build_long(n: Int, acc: String) -> String do
+  case n <= 0 do
+    true -> acc
+    _ -> build_long(n - 1, concat(acc, "x"))
+  end
+end

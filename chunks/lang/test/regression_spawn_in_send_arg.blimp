@@ -1,0 +1,30 @@
+# Regression: an actor spawned directly into a message-send argument is not
+# rooted, so storing it in the receiver's state leaves a dangling reference.
+#
+#   blimp test/regression_spawn_in_send_arg.blimp
+#
+# Crashes with "Segmentation fault at address 0xaaaaaaaaaaaaaaaa" -- Zig's
+# undefined-memory fill -- inside Evaluator.evalMessageSend.
+#
+# Binding the spawn to a local first works, which is the whole difference:
+#
+#   i = spawn Inner
+#   o <- :set(i)          # fine
+#   o <- :set(spawn Inner) # crashes on later use
+
+actor Inner do
+  on :hi do reply 1 end
+end
+
+actor Outer do
+  state child: Any :: nil
+  on :set(c: Any) do
+    become child: c
+    reply nil
+  end
+  on :child do reply child end
+end
+
+o = spawn Outer
+o <- :set(spawn Inner)
+puts(to_string((o <- :child) <- :hi))

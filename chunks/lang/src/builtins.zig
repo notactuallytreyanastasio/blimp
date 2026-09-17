@@ -72,6 +72,7 @@ pub const BuiltinRegistry = struct {
         reg.register("values", &builtinValues);
         reg.register("type_of", &builtinTypeOf);
         reg.register("print", &builtinPrint);
+        reg.register("puts", &builtinPuts);
         // Test assertions
         reg.register("assert", &builtinAssert);
         // Generators for property-based testing
@@ -748,6 +749,30 @@ fn builtinPrint(_: std.mem.Allocator, args: []const *const Value) EvalError!*con
         stdout.writeAll("\n") catch {};
     }
     return args[0]; // return the value (identity)
+}
+
+/// puts(value) -- write to stdout raw, then a newline.
+///
+/// Unlike `print`, a string is written as its own bytes rather than through
+/// `Value.format`, so it arrives unquoted and unescaped, and there is no fixed
+/// buffer to truncate it. Non-string values still format the usual way, but
+/// stream straight out instead of landing in a 4096-byte buffer first.
+fn builtinPuts(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    if (is_wasm) return args[0];
+
+    const stdout = std.fs.File.stdout();
+    switch (args[0].*) {
+        .string => |text| stdout.writeAll(text) catch {},
+        else => {
+            var buf: [4096]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&buf);
+            args[0].format(fbs.writer());
+            stdout.writeAll(fbs.getWritten()) catch {};
+        },
+    }
+    stdout.writeAll("\n") catch {};
+    return args[0]; // return the value (identity), like print
 }
 
 // ── Test assertion builtins ─────────────────────────────
