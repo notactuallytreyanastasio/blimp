@@ -10,10 +10,12 @@ echo "  Blimp Benchmark Suite"
 echo "========================================"
 echo ""
 
-# Build Blimp
-echo "Building Blimp..."
+# Build Blimp.  ReleaseFast, because the rows below it are rustc -O and a JIT:
+# the default Debug build of the interpreter runs fib(35) in 21s where this one
+# takes 2.6s, and comparing that against optimised anything says nothing.
+echo "Building Blimp (ReleaseFast)..."
 cd ..
-zig build 2>/dev/null
+zig build interp -Doptimize=ReleaseFast 2>/dev/null
 cd benchmarks
 
 # Build Rust benchmarks
