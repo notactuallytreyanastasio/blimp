@@ -20,7 +20,31 @@ pub const Environment = struct {
 
     pub const Scope = struct {
         bindings: std.ArrayList(Binding),
+        /// One bit per name in this scope, by hash, maintained by `defineIn`.
+        /// A lookup whose bit is clear skips the scope without comparing a
+        /// single string.
+        ///
+        /// This is not a micro-optimisation.  A Blimp closure sees its
+        /// caller's locals, so resolving a global from N frames deep walks
+        /// all N scopes, and a recursion N deep does that N times: finding
+        /// `fib` was a quarter of the time in fib(35).  A false positive
+        /// costs a search that would have happened anyway; there are no
+        /// false negatives, so what the walk finds does not change.
+        names: u64 = 0,
     };
+
+    /// The bit this name claims in a scope's `names`.  Public because anything
+    /// that builds a Scope without going through `define` has to rebuild the
+    /// mask itself — gc.zig does, and the gc tests fail loudly if it stops.  Two loads and three
+    /// arithmetic ops: a real hash costs more than the string comparisons it
+    /// saves, because most lookups hit the innermost scope on the first try.
+    pub fn nameBit(name: []const u8) u64 {
+        if (name.len == 0) return 1;
+        const first: u64 = name[0];
+        const last: u64 = name[name.len - 1];
+        const h = first ^ (last << 2) ^ (@as(u64, name.len) << 4);
+        return @as(u64, 1) << @as(u6, @truncate(h));
+    }
 
     pub fn init(allocator: std.mem.Allocator) Environment {
         var env = Environment{
@@ -49,6 +73,7 @@ pub const Environment = struct {
     /// Keep a popped scope's binding buffer for the next push.  Dropping it
     /// instead is what made a deep recursion grow without bound.
     fn recycle(self: *Environment, scope: Scope) void {
+        // `names` belongs to the scope, not to the buffer being kept.
         var bindings = scope.bindings;
         bindings.clearRetainingCapacity();
         self.free_scopes.append(self.allocator, bindings) catch {};
@@ -91,6 +116,7 @@ pub const Environment = struct {
 
     fn defineIn(self: *Environment, index: usize, name: []const u8, value: *const Value) void {
         const scope = &self.scopes.items[index];
+        scope.names |= nameBit(name);
         // Check for existing binding to update
         for (scope.bindings.items) |*binding| {
             if (std.mem.eql(u8, binding.name, name)) {
@@ -129,10 +155,12 @@ pub const Environment = struct {
 
     /// Look up a variable, searching from innermost to outermost scope.
     pub fn lookup(self: *const Environment, name: []const u8) ?*const Value {
+        const bit = nameBit(name);
         var i: usize = self.scopes.items.len;
         while (i > 0) {
             i -= 1;
             const scope = self.scopes.items[i];
+            if (scope.names & bit == 0) continue;
             // Search backwards for most recent binding
             var j: usize = scope.bindings.items.len;
             while (j > 0) {
@@ -261,6 +289,36 @@ test "a pushed and popped scope costs nothing the second time" {
     // Every call pushes a scope.  If popping dropped the binding list, this
     // loop would leave 10_000 of them in the arena.
     try std.testing.expectEqual(settled, arena.queryCapacity());
+}
+
+test "a name in an outer scope is found through many inner ones" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const target = try alloc.create(Value);
+    target.* = Value{ .integer = 99 };
+    const noise = try alloc.create(Value);
+    noise.* = Value{ .integer = 1 };
+
+    env.define("target", target);
+    for (0..64) |i| {
+        env.pushScope();
+        // Names chosen to land on assorted bits, including whatever `target`
+        // hashes to: a scope that claims the bit must still be searched, and
+        // one that does not must still be skipped correctly.
+        const name = try std.fmt.allocPrint(alloc, "n{d}", .{i});
+        env.define(name, noise);
+    }
+
+    try std.testing.expectEqual(@as(i64, 99), env.lookup("target").?.integer);
+    try std.testing.expect(env.lookup("absent") == null);
+
+    // And still after the frames above it are collapsed into one.
+    env.collapseTo(1);
+    try std.testing.expectEqual(@as(i64, 99), env.lookup("target").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), env.lookup("n7").?.integer);
 }
 
 test "inner scope shadows outer" {

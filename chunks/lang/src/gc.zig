@@ -178,10 +178,15 @@ const Copier = struct {
         for (old) |scope| {
             var bindings: std.ArrayList(Environment.Binding) = .{ .items = &.{}, .capacity = 0 };
             try bindings.ensureTotalCapacity(self.to, scope.bindings.items.len);
+            // The scope's name mask is rebuilt from what lands here rather
+            // than copied: a stale mask hides bindings from every lookup.
+            var names: u64 = 0;
             for (scope.bindings.items) |b| {
-                bindings.appendAssumeCapacity(.{ .name = try self.str(b.name), .val = try self.value(b.val) });
+                const name = try self.str(b.name);
+                names |= Environment.nameBit(name);
+                bindings.appendAssumeCapacity(.{ .name = name, .val = try self.value(b.val) });
             }
-            out.appendAssumeCapacity(.{ .bindings = bindings });
+            out.appendAssumeCapacity(.{ .bindings = bindings, .names = names });
         }
         return out;
     }
