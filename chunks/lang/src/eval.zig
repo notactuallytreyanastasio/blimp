@@ -1028,14 +1028,17 @@ pub const Evaluator = struct {
 
                     // Evaluate the guard if present
                     if (handler.guard) |guard| {
-                        // Push a scope for guard evaluation with params and state
+                        // Arguments first, then the scope. See the comment on
+                        // the body below for what binding them one at a time
+                        // did.
+                        var guard_slot: ArgSlot = .{};
+                        const guard_args = try self.evalArgs(ms.args, &guard_slot, false);
                         self.env.pushScope();
                         defer self.env.popScope();
 
                         // Bind handler params
                         for (handler.params, 0..) |param, i| {
-                            const arg_val = self.eval(ms.args[i]) catch |err| return err;
-                            self.env.define(param.name, arg_val);
+                            self.env.define(param.name, guard_args[i]);
                         }
 
                         // Bind state fields
@@ -1047,23 +1050,23 @@ pub const Evaluator = struct {
                         if (!guard_val.truthy()) continue; // Guard failed, try next handler
                     }
 
+                    // Every argument is evaluated before the handler's scope
+                    // exists.  Evaluating them inside it, one at a time, let a
+                    // later argument see an earlier parameter: in
+                    // `a <- :set(0, i + 1)` against `on :set(i: Int, v: Any)`,
+                    // `i + 1` resolved `i` to the parameter just bound to 0
+                    // rather than to the caller's `i`, so `v` was 1 whatever
+                    // the caller held.  The piped form of the same dispatch,
+                    // `val |> a <- :set(...)`, already had the order right.
+                    var arg_slot: ArgSlot = .{};
+                    const arg_vals = try self.evalArgs(ms.args, &arg_slot, log_idx != null);
+
                     // Execute the handler body
                     self.env.pushScope();
-
-                    // Bind handler params, keeping the values for the log
-                    const logged_args: []*const Value = if (log_idx != null and handler.params.len > 0)
-                        self.allocator.alloc(*const Value, handler.params.len) catch return error.OutOfMemory
-                    else
-                        &.{};
                     for (handler.params, 0..) |param, i| {
-                        const arg_val = self.eval(ms.args[i]) catch |err| {
-                            self.env.popScope();
-                            return err;
-                        };
-                        self.env.define(param.name, arg_val);
-                        if (log_idx != null) logged_args[i] = arg_val;
+                        self.env.define(param.name, arg_vals[i]);
                     }
-                    if (log_idx) |li| self.msg_log[li].args = logged_args;
+                    if (log_idx) |li| self.msg_log[li].args = arg_vals;
 
                     // Bind state fields as variables
                     for (entry.state_fields) |field| {
@@ -1114,6 +1117,28 @@ pub const Evaluator = struct {
                 return error.TypeError;
             },
         }
+    }
+
+    /// Evaluate a send's arguments in the caller's scope, into `slot`.
+    ///
+    /// `slot` lives on the caller's Zig frame, so the usual case costs no
+    /// allocation.  When the message log is on it keeps the array for the rest
+    /// of the run, so that case has to have the heap.
+    fn evalArgs(
+        self: *Evaluator,
+        args: []const ast.Node,
+        slot: *ArgSlot,
+        keep: bool,
+    ) EvalError![]*const Value {
+        if (args.len == 0) return &.{};
+        const out = if (keep)
+            self.allocator.alloc(*const Value, args.len) catch return error.OutOfMemory
+        else
+            try slot.take(self, args.len);
+        for (args, 0..) |arg, i| {
+            out[i] = try self.eval(arg);
+        }
+        return out;
     }
 
     fn evalBecomeStmt(self: *Evaluator, bs: ast.Node.BecomeStmt) EvalError!*const Value {
