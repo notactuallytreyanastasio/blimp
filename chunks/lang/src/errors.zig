@@ -3,6 +3,42 @@ const Value = @import("value.zig").Value;
 const Environment = @import("env.zig").Environment;
 
 /// A rich, Elm-style error with source context, explanation, and hints.
+/// The text of one line of `source`, 1-based, for an error that knows where it
+/// happened. An error with no line prints the whole file, which for translated
+/// code is a thousand lines of prelude and no answer.
+pub fn lineAt(source: []const u8, line: u32) []const u8 {
+    if (line == 0) return source;
+    var current: u32 = 1;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < source.len) : (i += 1) {
+        if (source[i] != '\n') continue;
+        if (current == line) return source[start..i];
+        current += 1;
+        start = i + 1;
+    }
+    if (current == line) return source[start..];
+    return source;
+}
+
+/// A located error for a failure that never built a richer one.
+///
+/// `error.TypeError` on its own used to reach the top as
+/// `Runtime error: error.TypeError`, with no line and nothing to look at.
+pub fn runtimeError(err: anyerror, source: []const u8, line: u32, col: u32) BlimpError {
+    return .{
+        .title = "RUNTIME ERROR",
+        .message = std.fmt.allocPrint(
+            std.heap.page_allocator,
+            "{s} while evaluating this.",
+            .{@errorName(err)},
+        ) catch @errorName(err),
+        .source_line = lineAt(source, line),
+        .line = line,
+        .col = col,
+    };
+}
+
 pub const BlimpError = struct {
     title: []const u8,
     source_line: ?[]const u8 = null,

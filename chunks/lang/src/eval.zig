@@ -343,6 +343,35 @@ pub const Evaluator = struct {
 
     /// Evaluate a single AST node to a runtime Value.
     pub fn eval(self: *Evaluator, node: ast.Node) EvalError!*const Value {
+        return self.evalNode(node) catch |err| {
+            self.locate(node, err);
+            return err;
+        };
+    }
+
+    /// Give a failing error the line of the innermost node that failed.
+    ///
+    /// Errors were built with the whole file as their source line and no line
+    /// number, so a type mismatch in a thousand-line program printed the
+    /// program. Worse, a bare `return error.TypeError` -- which most of the
+    /// arithmetic paths do -- reached the top as `Runtime error:
+    /// error.TypeError` with nothing at all. The innermost node wins because
+    /// only the first location to be filled in sticks.
+    fn locate(self: *Evaluator, node: ast.Node, err: EvalError) void {
+        // A bubble is Temper-style control flow on its way to a handler, not
+        // a fault, and it carries its own reason.
+        if (err == error.Bubble) return;
+        if (self.last_error) |*existing| {
+            if (existing.line != null) return;
+            existing.line = node.loc.line;
+            existing.col = node.loc.col;
+            existing.source_line = errors.lineAt(self.source, node.loc.line);
+            return;
+        }
+        self.last_error = errors.runtimeError(err, self.source, node.loc.line, node.loc.col);
+    }
+
+    fn evalNode(self: *Evaluator, node: ast.Node) EvalError!*const Value {
         // Reduction counting + auto-schedule: after async sends queue up,
         // drain mailboxes periodically without explicit schedule() calls
         self.reductions -= 1;
@@ -3481,4 +3510,46 @@ test "in-range integer arithmetic is unchanged at the boundaries" {
 
     const min_div_two = try evalExpr(alloc, min_i64_src ++ " / 2");
     try std.testing.expect(min_div_two.eql(Value{ .integer = -4611686018427387904 }));
+}
+
+test "a runtime error carries the line that failed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const source =
+        \\def apply(a: Any, b: Any) -> Any do
+        \\  a + b
+        \\end
+        \\
+        \\apply("x", 3)
+    ;
+    // What `blimp file.blimp` does before it evaluates anything; without it
+    // there is no text to quote, only a line number.
+    evaluator.setSource(source);
+    const result = evalProgram(alloc, &evaluator, source);
+    try std.testing.expectError(error.TypeError, result);
+
+    const err = evaluator.last_error.?;
+    // The innermost node that failed, not the call that reached it.
+    try std.testing.expectEqual(@as(u32, 2), err.line.?);
+    try std.testing.expectEqualStrings("  a + b", err.source_line.?);
+}
+
+test "an error nothing described still says where it happened" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    // concat wants two arguments and returns a bare error.TypeError, with no
+    // BlimpError behind it: that used to reach the top as
+    // `Runtime error: error.TypeError`.
+    const result = evalProgram(alloc, &evaluator, "x = 1\nconcat(\"a\")");
+    try std.testing.expectError(error.TypeError, result);
+
+    const err = evaluator.last_error.?;
+    try std.testing.expectEqualStrings("RUNTIME ERROR", err.title);
+    try std.testing.expectEqual(@as(u32, 2), err.line.?);
 }
