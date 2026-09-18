@@ -29,6 +29,10 @@ pub const Evaluator = struct {
     msg_log: [msg_log_cap]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
     bubble_reason: ?*const Value = null,
+    /// Where the innermost `bubble` of the one currently in flight was, so an
+    /// uncaught one can say where it started. Zero means none in flight.
+    bubble_line: u32 = 0,
+    bubble_col: u32 = 0,
     /// How deep the call stack is, and how deep it may go.  A non-tail call
     /// costs a few kilobytes of native stack; past this the process dies with
     /// a signal and no message, which is worse than any error.  `main` runs
@@ -359,8 +363,16 @@ pub const Evaluator = struct {
     /// only the first location to be filled in sticks.
     fn locate(self: *Evaluator, node: ast.Node, err: EvalError) void {
         // A bubble is Temper-style control flow on its way to a handler, not
-        // a fault, and it carries its own reason.
-        if (err == error.Bubble) return;
+        // a fault -- until nothing handles it, and it reaches the top with
+        // only its reason. The innermost node gets there first and is the one
+        // worth keeping; `bubble_line` is cleared wherever a bubble is caught.
+        if (err == error.Bubble) {
+            if (self.bubble_line == 0) {
+                self.bubble_line = node.loc.line;
+                self.bubble_col = node.loc.col;
+            }
+            return;
+        }
         if (self.last_error) |*existing| {
             if (existing.line != null) return;
             existing.line = node.loc.line;
@@ -843,6 +855,7 @@ pub const Evaluator = struct {
         for (tc.try_body) |stmt| {
             last_val = self.eval(stmt) catch |err| {
                 // Caught an error - run the catch body
+                self.bubble_line = 0;
                 self.env.pushScope();
                 if (tc.catch_var) |var_name| {
                     // Bind the error reason if we have one
@@ -2118,6 +2131,7 @@ pub const Evaluator = struct {
         const try_val = self.eval(oe.try_expr.*) catch |err| {
             if (err == error.Bubble) {
                 // Bubble caught by orelse - execute fallback
+                self.bubble_line = 0;
                 return self.eval(oe.fallback.*);
             }
             return err;

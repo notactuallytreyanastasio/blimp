@@ -21,6 +21,29 @@ pub fn lineAt(source: []const u8, line: u32) []const u8 {
     return source;
 }
 
+/// A bubble nothing caught, named where it started.
+///
+/// `bubble` is how Temper-translated code raises, and one that reaches the top
+/// used to print `Runtime error: error.Bubble` -- no reason, no line.
+pub fn uncaughtBubble(reason: ?*const Value, source: []const u8, line: u32, col: u32) BlimpError {
+    var text: []const u8 = "A bubble reached the top of the program.";
+    if (reason) |r| {
+        var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+        const alloc = std.heap.page_allocator;
+        buf.appendSlice(alloc, "A bubble reached the top of the program: ") catch {};
+        r.format(buf.writer(alloc));
+        text = buf.items;
+    }
+    return .{
+        .title = "UNCAUGHT BUBBLE",
+        .message = text,
+        .source_line = if (line == 0) null else lineAt(source, line),
+        .line = if (line == 0) null else line,
+        .col = if (line == 0) null else col,
+        .hint = "Handle it with `try ... catch` or `orelse`.",
+    };
+}
+
 /// A located error for a failure that never built a richer one.
 ///
 /// `error.TypeError` on its own used to reach the top as

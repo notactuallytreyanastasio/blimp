@@ -159,6 +159,14 @@ fn run() !void {
                 heap_limit.report();
                 std.process.exit(1);
             }
+            if (err == error.Bubble and evaluator.last_error == null) {
+                evaluator.last_error = errors.uncaughtBubble(
+                    evaluator.bubble_reason,
+                    source,
+                    evaluator.bubble_line,
+                    evaluator.bubble_col,
+                );
+            }
             if (evaluator.last_error) |blimp_err| {
                 var buf: [2048]u8 = undefined;
                 var fbs = std.io.fixedBufferStream(&buf);
