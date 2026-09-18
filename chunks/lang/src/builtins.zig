@@ -142,6 +142,7 @@ pub const BuiltinRegistry = struct {
         // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
         reg.register("to_html", &builtinToHtml_impl);
         reg.register("tcp_listen", &builtinTcpListen_impl);
+        reg.register("tcp_connect", &builtinTcpConnectNative);
         reg.register("tcp_accept", &builtinTcpAccept_impl);
         reg.register("tcp_read", &builtinTcpRead_impl);
         reg.register("tcp_write", &builtinTcpWrite_impl);
@@ -2350,6 +2351,48 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
     if (std.c.listen(sock, 128) < 0) return error.NotSupported;
 
     return make(allocator, .{ .integer = @intCast(sock) });
+}
+
+/// tcp_connect(host: String, port: Int) -> Int | nil  (connected socket fd)
+///
+/// Blimp could listen and accept but not dial, so nothing written in it could
+/// be an HTTP client. `getaddrinfo` does the resolving, which is what makes
+/// "localhost" and a dotted quad the same amount of work here.
+fn builtinTcpConnectNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .integer) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+
+    var host_buf: [256]u8 = undefined;
+    if (args[0].string.len >= host_buf.len) return error.NotSupported;
+    @memcpy(host_buf[0..args[0].string.len], args[0].string);
+    host_buf[args[0].string.len] = 0;
+    const host: [*:0]const u8 = @ptrCast(&host_buf);
+
+    var port_buf: [8]u8 = undefined;
+    const port_text = std.fmt.bufPrint(&port_buf, "{d}\x00", .{@as(u16, @intCast(@max(0, @min(65535, args[1].integer))))}) catch return error.NotSupported;
+    const port: [*:0]const u8 = @ptrCast(port_text.ptr);
+
+    var hints = std.mem.zeroes(std.c.addrinfo);
+    hints.family = std.posix.AF.UNSPEC;
+    hints.socktype = std.posix.SOCK.STREAM;
+
+    var res: ?*std.c.addrinfo = null;
+    if (std.c.getaddrinfo(host, port, &hints, &res) != @as(std.c.EAI, @enumFromInt(0))) return make(allocator, .nil);
+    defer if (res) |r| std.c.freeaddrinfo(r);
+
+    // The first address that both opens and connects wins; the rest are the
+    // other families the name resolved to.
+    var it = res;
+    while (it) |info| : (it = info.next) {
+        const addr = info.addr orelse continue;
+        const fd = std.c.socket(@intCast(info.family), @intCast(info.socktype), @intCast(info.protocol));
+        if (fd < 0) continue;
+        if (std.c.connect(fd, addr, info.addrlen) == 0) {
+            return make(allocator, .{ .integer = @intCast(fd) });
+        }
+        _ = std.c.close(fd);
+    }
+    return make(allocator, .nil);
 }
 
 /// tcp_accept(server_fd: Int) -> Int | nil
