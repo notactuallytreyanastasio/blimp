@@ -1314,11 +1314,14 @@ fn builtinWriteBytes(allocator: std.mem.Allocator, args: []const *const Value) E
     return result;
 }
 
-/// read_file(path: String) -> String
 /// write_file("out.txt", "text") => true, or false if it could not be written.
 ///
 /// `read_file` has been here on its own, and `write_bytes` wants a list of
 /// integers, so writing a string meant converting it a character at a time.
+///
+/// The three file builtins have three answers for failure: this one is false,
+/// `read_file` is nil, and `write_bytes` raises. Matching one of them would
+/// have meant mismatching the others.
 fn builtinWriteFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
     if (is_wasm) return error.NotSupported;
@@ -1332,6 +1335,7 @@ fn builtinWriteFile(allocator: std.mem.Allocator, args: []const *const Value) Ev
     return make(allocator, .{ .boolean = true });
 }
 
+/// read_file(path: String) -> String, or nil when it cannot be read.
 fn builtinReadFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     if (is_wasm) return error.NotSupported;
@@ -3136,9 +3140,9 @@ test "the transcendental functions agree with their identities" {
 
     inline for (float_fns) |entry| {
         const result = try unaryFloat(entry[1])(alloc, args);
-        // Every one of these is defined at 1.0, which the table's own
-        // registration would not catch if an entry were wired to the wrong
-        // function.
+        // Every one of these is defined at 1.0. That is all this asserts:
+        // sin wired to cos would pass it. The identity below is the check
+        // with teeth.
         try std.testing.expect(result.* == .float);
         try std.testing.expect(!std.math.isNan(result.float));
     }
