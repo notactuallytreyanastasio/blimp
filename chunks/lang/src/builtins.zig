@@ -137,6 +137,7 @@ pub const BuiltinRegistry = struct {
         reg.register("to_atom", &builtinToAtom);
         reg.register("write_bytes", &builtinWriteBytes);
         reg.register("read_file", &builtinReadFile);
+        reg.register("write_file", &builtinWriteFile);
         // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
         reg.register("to_html", &builtinToHtml_impl);
         reg.register("tcp_listen", &builtinTcpListen_impl);
@@ -1314,6 +1315,23 @@ fn builtinWriteBytes(allocator: std.mem.Allocator, args: []const *const Value) E
 }
 
 /// read_file(path: String) -> String
+/// write_file("out.txt", "text") => true, or false if it could not be written.
+///
+/// `read_file` has been here on its own, and `write_bytes` wants a list of
+/// integers, so writing a string meant converting it a character at a time.
+fn builtinWriteFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    const file = std.fs.cwd().createFile(args[0].string, .{}) catch {
+        return make(allocator, .{ .boolean = false });
+    };
+    defer file.close();
+    file.writeAll(args[1].string) catch {
+        return make(allocator, .{ .boolean = false });
+    };
+    return make(allocator, .{ .boolean = true });
+}
+
 fn builtinReadFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     if (is_wasm) return error.NotSupported;
@@ -3138,4 +3156,33 @@ test "the transcendental functions agree with their identities" {
         }
     }.f)(alloc, args);
     try std.testing.expectEqual(@as(f64, 1.0), back.float);
+}
+
+test "write_file writes a string and read_file reads it back" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const path = try alloc.create(Value);
+    path.* = Value{ .string = "zig-cache-write-file-test.txt" };
+    const text = try alloc.create(Value);
+    text.* = Value{ .string = "<testsuites/>" };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = path;
+    args[1] = text;
+
+    const wrote = try builtinWriteFile(alloc, args);
+    try std.testing.expect(wrote.boolean);
+    defer std.fs.cwd().deleteFile(path.string) catch {};
+
+    const back = try builtinReadFile(alloc, args[0..1]);
+    try std.testing.expectEqualStrings(text.string, back.string);
+
+    // A directory that is not there is a false, not a crash: the caller
+    // decides whether that matters.
+    const bad = try alloc.create(Value);
+    bad.* = Value{ .string = "no-such-directory/out.txt" };
+    args[0] = bad;
+    const failed = try builtinWriteFile(alloc, args);
+    try std.testing.expect(!failed.boolean);
 }
