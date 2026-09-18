@@ -2362,14 +2362,23 @@ fn builtinTcpConnectNative(allocator: std.mem.Allocator, args: []const *const Va
     if (args.len != 2 or args[0].* != .string or args[1].* != .integer) return error.TypeError;
     if (is_wasm) return error.NotSupported;
 
+    // An empty host is not a default. macOS `getaddrinfo` resolves an empty
+    // node to loopback, so `tcp_connect("", 80)` quietly connected to this
+    // machine -- the one answer a caller who passed nothing cannot check.
+    if (args[0].string.len == 0) return make(allocator, .nil);
+
     var host_buf: [256]u8 = undefined;
-    if (args[0].string.len >= host_buf.len) return error.NotSupported;
+    if (args[0].string.len >= host_buf.len) return make(allocator, .nil);
     @memcpy(host_buf[0..args[0].string.len], args[0].string);
     host_buf[args[0].string.len] = 0;
     const host: [*:0]const u8 = @ptrCast(&host_buf);
 
+    // Clamping is what made 99999 and 131071 both connect to a listener on
+    // 65535. A port that is not a port is a connection that cannot be made.
+    if (args[1].integer < 0 or args[1].integer > 65535) return make(allocator, .nil);
+
     var port_buf: [8]u8 = undefined;
-    const port_text = std.fmt.bufPrint(&port_buf, "{d}\x00", .{@as(u16, @intCast(@max(0, @min(65535, args[1].integer))))}) catch return error.NotSupported;
+    const port_text = std.fmt.bufPrint(&port_buf, "{d}\x00", .{@as(u16, @intCast(args[1].integer))}) catch return make(allocator, .nil);
     const port: [*:0]const u8 = @ptrCast(port_text.ptr);
 
     var hints = std.mem.zeroes(std.c.addrinfo);
@@ -2424,6 +2433,13 @@ fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value
         if (err == error.WouldBlock) {
             // Non-blocking mode: no data available, return nil
             return make(allocator, .nil);
+        }
+        // A peer that resets the connection has ended the stream, which is
+        // what a reader wants to hear. Reporting it as a failed builtin
+        // stopped the program instead -- an HTTP client reading from a server
+        // that hung up rudely died rather than finishing its response.
+        if (err == error.ConnectionResetByPeer) {
+            return make(allocator, .{ .string = "" });
         }
         return error.NotSupported;
     };
