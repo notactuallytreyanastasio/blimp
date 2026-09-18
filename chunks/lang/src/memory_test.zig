@@ -12,22 +12,30 @@ const std = @import("std");
 const Parser = @import("parser.zig").Parser;
 const Evaluator = @import("eval.zig").Evaluator;
 const Value = @import("value.zig").Value;
+const HeapLimit = @import("heap_limit.zig").HeapLimit;
 
 /// Bytes of evaluator heap that running `source` costs.  The AST gets its own
 /// allocator so only the evaluator's own appetite is measured.
+///
+/// The count sits between the evaluator and the arena rather than reading the
+/// arena's capacity: an arena hands out one big chunk and a whole fib(24) can
+/// disappear inside it, which is a measurement that reports zero however much
+/// the interpreter allocates.  The arena is still underneath so the test frees
+/// everything at the end.
 fn heapCost(source: []const u8) !usize {
     var code = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer code.deinit();
-    var heap = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer heap.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var counted = HeapLimit{ .child = arena.allocator(), .limit = 0 };
 
     var parser = Parser.init(code.allocator(), source);
     const nodes = try parser.parseFile();
 
-    var eval = Evaluator.init(heap.allocator());
-    const before = heap.queryCapacity();
+    var eval = Evaluator.init(counted.allocator());
+    const before = counted.used;
     for (nodes) |node| _ = try eval.eval(node);
-    return heap.queryCapacity() - before;
+    return counted.used - before;
 }
 
 const spin =

@@ -93,6 +93,9 @@ pub const BuiltinRegistry = struct {
         reg.register("floor", &builtinFloor);
         reg.register("ceil", &builtinCeil);
         reg.register("round", &builtinRound);
+        inline for (float_fns) |entry| reg.register(entry[0], unaryFloat(entry[1]));
+        reg.register("pow", &builtinPow);
+        reg.register("atan2", &builtinAtan2);
         reg.register("not", &builtinNot);
         reg.register("random", &builtinRandom);
         reg.register("seed", &builtinSeed);
@@ -890,6 +893,133 @@ fn builtinElem(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
         },
         else => return error.TypeError,
     }
+}
+
+// ── Float maths ──────────────────────────────────────
+
+/// The float functions Blimp did not have.
+///
+/// The numeric builtins stopped at floor, ceil, round and abs, so anything
+/// that wanted a square root had to fake one. temper-core, the Temper
+/// backend's runtime, spelled `**` as repeated multiplication and gave up on a
+/// fractional exponent: `4.0 ** -0.5` raised instead of answering 0.5.
+///
+/// Each takes a Float or an Int -- an Int answer would be wrong for all of
+/// them anyway -- and returns a Float.
+fn floatArg(v: *const Value) EvalError!f64 {
+    return switch (v.*) {
+        .float => |f| f,
+        .integer => |n| @floatFromInt(n),
+        else => error.TypeError,
+    };
+}
+
+fn unaryFloat(comptime f: fn (f64) f64) BuiltinFn {
+    return &struct {
+        fn call(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+            if (args.len != 1) return error.TypeError;
+            return make(allocator, .{ .float = f(try floatArg(args[0])) });
+        }
+    }.call;
+}
+
+const float_fns = .{
+    .{ "sqrt", struct {
+        fn f(x: f64) f64 {
+            return @sqrt(x);
+        }
+    }.f },
+    .{ "exp", struct {
+        fn f(x: f64) f64 {
+            return @exp(x);
+        }
+    }.f },
+    .{ "expm1", struct {
+        fn f(x: f64) f64 {
+            return std.math.expm1(x);
+        }
+    }.f },
+    .{ "log", struct {
+        fn f(x: f64) f64 {
+            return @log(x);
+        }
+    }.f },
+    .{ "log1p", struct {
+        fn f(x: f64) f64 {
+            return std.math.log1p(x);
+        }
+    }.f },
+    .{ "log2", struct {
+        fn f(x: f64) f64 {
+            return @log2(x);
+        }
+    }.f },
+    .{ "log10", struct {
+        fn f(x: f64) f64 {
+            return @log10(x);
+        }
+    }.f },
+    .{ "sin", struct {
+        fn f(x: f64) f64 {
+            return @sin(x);
+        }
+    }.f },
+    .{ "cos", struct {
+        fn f(x: f64) f64 {
+            return @cos(x);
+        }
+    }.f },
+    .{ "tan", struct {
+        fn f(x: f64) f64 {
+            return @tan(x);
+        }
+    }.f },
+    .{ "asin", struct {
+        fn f(x: f64) f64 {
+            return std.math.asin(x);
+        }
+    }.f },
+    .{ "acos", struct {
+        fn f(x: f64) f64 {
+            return std.math.acos(x);
+        }
+    }.f },
+    .{ "atan", struct {
+        fn f(x: f64) f64 {
+            return std.math.atan(x);
+        }
+    }.f },
+    .{ "sinh", struct {
+        fn f(x: f64) f64 {
+            return std.math.sinh(x);
+        }
+    }.f },
+    .{ "cosh", struct {
+        fn f(x: f64) f64 {
+            return std.math.cosh(x);
+        }
+    }.f },
+    .{ "tanh", struct {
+        fn f(x: f64) f64 {
+            return std.math.tanh(x);
+        }
+    }.f },
+};
+
+/// pow(2.0, 10.0) => 1024.0.  Whole or fractional, positive or negative.
+fn builtinPow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    const base = try floatArg(args[0]);
+    const exponent = try floatArg(args[1]);
+    return make(allocator, .{ .float = std.math.pow(f64, base, exponent) });
+}
+
+/// atan2(y, x), the angle of the point (x, y) with the sign of both.
+fn builtinAtan2(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    const y = try floatArg(args[0]);
+    const x = try floatArg(args[1]);
+    return make(allocator, .{ .float = std.math.atan2(y, x) });
 }
 
 /// floor(3.7) => 3
@@ -2932,4 +3062,80 @@ test "builtin sum wraps past maxInt instead of panicking" {
 
     const result = try builtinSum(alloc, args);
     try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "pow answers a fractional exponent, which repeated multiplication cannot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const base = try alloc.create(Value);
+    base.* = Value{ .float = 4.0 };
+    const exponent = try alloc.create(Value);
+    exponent.* = Value{ .float = -0.5 };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = base;
+    args[1] = exponent;
+
+    const result = try builtinPow(alloc, args);
+    try std.testing.expectEqual(@as(f64, 0.5), result.float);
+}
+
+test "a float function takes an Int and answers a Float" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = 16 };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = n;
+
+    const sqrt = unaryFloat(struct {
+        fn f(x: f64) f64 {
+            return @sqrt(x);
+        }
+    }.f);
+    const result = try sqrt(alloc, args);
+    try std.testing.expectEqual(@as(f64, 4.0), result.float);
+
+    // A string has no square root, and says so rather than answering one.
+    const text = try alloc.create(Value);
+    text.* = Value{ .string = "16" };
+    args[0] = text;
+    try std.testing.expectError(error.TypeError, sqrt(alloc, args));
+}
+
+test "the transcendental functions agree with their identities" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const x = try alloc.create(Value);
+    x.* = Value{ .float = 1.0 };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = x;
+
+    inline for (float_fns) |entry| {
+        const result = try unaryFloat(entry[1])(alloc, args);
+        // Every one of these is defined at 1.0, which the table's own
+        // registration would not catch if an entry were wired to the wrong
+        // function.
+        try std.testing.expect(result.* == .float);
+        try std.testing.expect(!std.math.isNan(result.float));
+    }
+
+    // log(e) is 1, and e is exp(1): the two entries are each other's inverse.
+    const e = try unaryFloat(struct {
+        fn f(v: f64) f64 {
+            return @exp(v);
+        }
+    }.f)(alloc, args);
+    args[0] = e;
+    const back = try unaryFloat(struct {
+        fn f(v: f64) f64 {
+            return @log(v);
+        }
+    }.f)(alloc, args);
+    try std.testing.expectEqual(@as(f64, 1.0), back.float);
 }
