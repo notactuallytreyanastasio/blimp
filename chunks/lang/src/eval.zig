@@ -854,8 +854,12 @@ pub const Evaluator = struct {
         var has_val = false;
         for (tc.try_body) |stmt| {
             last_val = self.eval(stmt) catch |err| {
-                // Caught an error - run the catch body
+                // Caught an error - run the catch body. The error is handled
+                // now, so its details go with it: a stale one left here is
+                // what the top level would report instead of whatever
+                // actually stopped the program later.
                 self.bubble_line = 0;
+                self.last_error = null;
                 self.env.pushScope();
                 if (tc.catch_var) |var_name| {
                     // Bind the error reason if we have one
@@ -2132,6 +2136,7 @@ pub const Evaluator = struct {
             if (err == error.Bubble) {
                 // Bubble caught by orelse - execute fallback
                 self.bubble_line = 0;
+                self.last_error = null;
                 return self.eval(oe.fallback.*);
             }
             return err;

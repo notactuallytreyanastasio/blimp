@@ -486,7 +486,6 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
     };
 }
 
-/// Build a rich error when trying to call a non-callable value.
 /// Build a rich error when a recursion runs past the depth the stack can hold.
 pub fn recursionTooDeep(depth: u32, source: []const u8) BlimpError {
     return .{
@@ -497,6 +496,7 @@ pub fn recursionTooDeep(depth: u32, source: []const u8) BlimpError {
     };
 }
 
+/// Build a rich error when trying to call a non-callable value.
 pub fn notCallable(source: []const u8) BlimpError {
     return .{
         .title = "NOT CALLABLE",
