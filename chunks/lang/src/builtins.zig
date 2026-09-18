@@ -12,6 +12,7 @@ pub const EvalError = error{
     NotSupported,
     OutOfMemory,
     Bubble, // Actor failure propagation
+    RecursionTooDeep,
 };
 
 pub const BuiltinFn = *const fn (allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value;

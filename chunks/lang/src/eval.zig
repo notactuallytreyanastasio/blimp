@@ -29,6 +29,13 @@ pub const Evaluator = struct {
     msg_log: [msg_log_cap]MsgLogEntry = undefined,
     msg_log_count: u32 = 0,
     bubble_reason: ?*const Value = null,
+    /// How deep the call stack is, and how deep it may go.  A non-tail call
+    /// costs a few kilobytes of native stack; past this the process dies with
+    /// a signal and no message, which is worse than any error.  `main` runs
+    /// the evaluator on a stack sized to hold this many.
+    call_depth: u32 = 0,
+    max_call_depth: u32 = default_max_call_depth,
+
     /// Reduction counter: decremented on each eval. Yield when 0.
     reductions: i32 = 4_000_000, // high default for non-scheduled mode
     /// Scheduler instance (null in non-scheduled mode)
@@ -37,6 +44,8 @@ pub const Evaluator = struct {
     // Message log for canvas rays. Each send records its target and, when it
     // happens inside a handler, the actor that sent it. Cleared by the host
     // after every read (wasm_api state JSON).
+    pub const default_max_call_depth: u32 = 10_000;
+
     pub const msg_log_cap = 256;
     pub const MsgLogEntry = struct {
         target_id: u64,
@@ -1573,6 +1582,13 @@ pub const Evaluator = struct {
     /// on top. The callee sees exactly what it would have seen without the
     /// elimination, and the scope stack stays flat.
     fn callClosureWithValues(self: *Evaluator, callee_val: *const Value, args_in: []const *const Value) EvalError!*const Value {
+        if (self.call_depth >= self.max_call_depth) {
+            self.last_error = errors.recursionTooDeep(self.call_depth, self.source);
+            return error.RecursionTooDeep;
+        }
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+
         var callee = callee_val;
         var args = args_in;
         var slot: ArgSlot = .{};

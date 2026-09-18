@@ -428,6 +428,16 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
 }
 
 /// Build a rich error when trying to call a non-callable value.
+/// Build a rich error when a recursion runs past the depth the stack can hold.
+pub fn recursionTooDeep(depth: u32, source: []const u8) BlimpError {
+    return .{
+        .title = "RECURSION TOO DEEP",
+        .source_line = source,
+        .message = std.fmt.allocPrint(std.heap.page_allocator, "A call nested {d} deep. The native stack cannot hold more.", .{depth}) catch "Recursion too deep.",
+        .hint = "A call in tail position runs in constant stack:\n      _ -> go(n - 1, acc + n)   # tail call, no growth\n      _ -> n + go(n - 1)        # not a tail call, one frame per step",
+    };
+}
+
 pub fn notCallable(source: []const u8) BlimpError {
     return .{
         .title = "NOT CALLABLE",

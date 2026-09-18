@@ -5,7 +5,8 @@
 //! is what turned `fib(30)` into 832 MB and `fib(40)` into roughly 100 GB.
 //!
 //! These tests measure the arena, not the process: they say how many bytes a
-//! program costs, which is the thing that has to stay flat.
+//! program costs, which is the thing that has to stay flat.  The native stack
+//! is a cost too, and the last test here covers it.
 
 const std = @import("std");
 const Parser = @import("parser.zig").Parser;
@@ -80,4 +81,42 @@ test "a value is at most four words" {
     // `view_node` are boxed to keep it here; putting either back inline made
     // an integer 72 bytes and a million-iteration loop 293 MB.
     try std.testing.expect(@sizeOf(Value) <= 4 * @sizeOf(usize));
+}
+
+const deep =
+    \\def deep(n: Int) do
+    \\  situation n do
+    \\    0 -> 0
+    \\    _ -> 1 + deep(n - 1)
+    \\  end
+    \\end
+    \\
+;
+
+test "a recursion past its ceiling says so rather than dying on a signal" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap.deinit();
+
+    var parser = Parser.init(code.allocator(), deep ++ "deep(500)");
+    const nodes = try parser.parseFile();
+
+    var eval = Evaluator.init(heap.allocator());
+    // A test thread gets an ordinary stack, so this ceiling is far below the
+    // one `main` sets itself; what matters is which side of it a program lands.
+    eval.max_call_depth = 100;
+
+    var caught: ?anyerror = null;
+    for (nodes) |node| {
+        _ = eval.eval(node) catch |err| {
+            caught = err;
+            break;
+        };
+    }
+
+    try std.testing.expectEqual(@as(?anyerror, error.RecursionTooDeep), caught);
+    try std.testing.expect(eval.last_error != null);
+    // The counter unwinds with the frames it counted.
+    try std.testing.expectEqual(@as(u32, 0), eval.call_depth);
 }

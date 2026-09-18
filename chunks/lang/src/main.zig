@@ -10,7 +10,28 @@ const errors = @import("errors.zig");
 const gc = @import("gc.zig");
 const HeapLimit = @import("heap_limit.zig").HeapLimit;
 
+/// The evaluator recurses natively: one Blimp call costs about 16 KB of Zig
+/// frames, and `Evaluator.default_max_call_depth` of them do not fit in the
+/// 8 MB the main thread gets.  Everything therefore runs on a thread sized to
+/// hold them three times over, so the depth ceiling is what stops a runaway
+/// recursion — with a message and a source line — rather than SIGSEGV.  The
+/// reservation is address space; only the frames a program really uses are
+/// ever touched.
+const eval_stack_bytes = 512 * 1024 * 1024;
+
 pub fn main() !void {
+    var thread = try std.Thread.spawn(.{ .stack_size = eval_stack_bytes }, runOnBigStack, .{});
+    thread.join();
+}
+
+fn runOnBigStack() void {
+    run() catch |err| {
+        std.debug.print("Error: {}\n", .{err});
+        std.process.exit(1);
+    };
+}
+
+fn run() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
