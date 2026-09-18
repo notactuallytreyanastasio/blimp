@@ -128,6 +128,21 @@ pub const Lexer = struct {
                 self.advance();
             }
         }
+        // An exponent -- `1e25`, `9.5E-3` -- makes it a float whether or not a
+        // decimal point turned up.  Without this, `1.0E25` lexes as the float
+        // 1.0 followed by an identifier `E25`, which is a name nothing binds.
+        if (!self.isAtEnd() and (self.peek() == 'e' or self.peek() == 'E')) {
+            var ahead = self.pos + 1;
+            if (ahead < self.source.len and (self.source[ahead] == '+' or self.source[ahead] == '-')) ahead += 1;
+            // Only when a digit follows: `1e` stays the integer 1 and a name.
+            if (ahead < self.source.len and isDigit(self.source[ahead])) {
+                is_float = true;
+                while (self.pos < ahead) self.advance();
+                while (!self.isAtEnd() and isDigit(self.peek())) {
+                    self.advance();
+                }
+            }
+        }
         return .{
             .kind = if (is_float) .float else .integer,
             .lexeme = self.source[start..self.pos],
@@ -511,4 +526,31 @@ test "lex case keyword" {
     try std.testing.expectEqual(Token.Kind.kw_do, lexer.next().kind);
     try std.testing.expectEqual(Token.Kind.kw_end, lexer.next().kind);
     try std.testing.expectEqual(Token.Kind.eof, lexer.next().kind);
+}
+
+test "a float may carry an exponent" {
+    const cases = .{
+        .{ "1e25", @as(f64, 1e25) },
+        .{ "1.0E25", @as(f64, 1.0E25) },
+        .{ "5e-1", @as(f64, 0.5) },
+        .{ "9.5E+3", @as(f64, 9500.0) },
+    };
+    inline for (cases) |case| {
+        var lexer = Lexer.init(case[0]);
+        const tok = lexer.next();
+        try std.testing.expectEqual(Token.Kind.float, tok.kind);
+        try std.testing.expectEqualStrings(case[0], tok.lexeme);
+        try std.testing.expectEqual(case[1], try std.fmt.parseFloat(f64, tok.lexeme));
+    }
+}
+
+test "an e with no digits after it is not an exponent" {
+    // `1e` is the integer 1 and a name, not half a float.
+    var lexer = Lexer.init("1e");
+    const number = lexer.next();
+    try std.testing.expectEqual(Token.Kind.integer, number.kind);
+    try std.testing.expectEqualStrings("1", number.lexeme);
+    const name = lexer.next();
+    try std.testing.expectEqual(Token.Kind.identifier, name.kind);
+    try std.testing.expectEqualStrings("e", name.lexeme);
 }
