@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Value = @import("value.zig").Value;
+const interned = @import("value.zig").interned;
 const is_wasm = builtin.target.cpu.arch == .wasm32;
 
 pub const EvalError = error{
@@ -11,6 +12,7 @@ pub const EvalError = error{
     NotSupported,
     OutOfMemory,
     Bubble, // Actor failure propagation
+    RecursionTooDeep,
 };
 
 pub const BuiltinFn = *const fn (allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value;
@@ -91,6 +93,9 @@ pub const BuiltinRegistry = struct {
         reg.register("floor", &builtinFloor);
         reg.register("ceil", &builtinCeil);
         reg.register("round", &builtinRound);
+        inline for (float_fns) |entry| reg.register(entry[0], unaryFloat(entry[1]));
+        reg.register("pow", &builtinPow);
+        reg.register("atan2", &builtinAtan2);
         reg.register("not", &builtinNot);
         reg.register("random", &builtinRandom);
         reg.register("seed", &builtinSeed);
@@ -167,24 +172,28 @@ pub const BuiltinRegistry = struct {
 // Built-in function implementations
 // ============================================================
 
+/// Hand back a value, sharing the small immutable ones (see `value.interned`).
+/// Builtins allocate from the same never-reclaimed heap as the evaluator, so a
+/// `length` or `abs` in a loop is a value retained per iteration.
+fn make(allocator: std.mem.Allocator, v: Value) EvalError!*const Value {
+    if (interned.get(v)) |shared| return shared;
+    const p = allocator.create(Value) catch return error.OutOfMemory;
+    p.* = v;
+    return p;
+}
+
 fn builtinLength(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     const arg = args[0];
     switch (arg.*) {
         .list => |items| {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = Value{ .integer = @intCast(items.len) };
-            return result;
+            return make(allocator, .{ .integer = @intCast(items.len) });
         },
         .string => |s| {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = Value{ .integer = @intCast(s.len) };
-            return result;
+            return make(allocator, .{ .integer = @intCast(s.len) });
         },
         .map => |entries| {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = Value{ .integer = @intCast(entries.len) };
-            return result;
+            return make(allocator, .{ .integer = @intCast(entries.len) });
         },
         else => return error.TypeError,
     }
@@ -195,9 +204,7 @@ fn builtinMax(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     switch (args[0].*) {
         .integer => |a| switch (args[1].*) {
             .integer => |b| {
-                const result = allocator.create(Value) catch return error.OutOfMemory;
-                result.* = Value{ .integer = @max(a, b) };
-                return result;
+                return make(allocator, .{ .integer = @max(a, b) });
             },
             else => return error.TypeError,
         },
@@ -210,9 +217,7 @@ fn builtinMin(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     switch (args[0].*) {
         .integer => |a| switch (args[1].*) {
             .integer => |b| {
-                const result = allocator.create(Value) catch return error.OutOfMemory;
-                result.* = Value{ .integer = @min(a, b) };
-                return result;
+                return make(allocator, .{ .integer = @min(a, b) });
             },
             else => return error.TypeError,
         },
@@ -266,9 +271,7 @@ fn builtinLookup(allocator: std.mem.Allocator, args: []const *const Value) EvalE
                 }
             }
             // Key not found, return nil
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         },
         else => return error.TypeError,
     }
@@ -332,9 +335,7 @@ fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
         0 // TODO: import JS Date.now() via extern
     else
         std.time.timestamp();
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = timestamp };
-    return result;
+    return make(allocator, .{ .integer = timestamp });
 }
 
 // ── String builtins ─────────────────────────────────────
@@ -414,9 +415,7 @@ fn builtinContains(allocator: std.mem.Allocator, args: []const *const Value) Eva
     if (args.len != 2) return error.TypeError;
     if (args[0].* != .string or args[1].* != .string) return error.TypeError;
     const found = std.mem.indexOf(u8, args[0].string, args[1].string) != null;
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .boolean = found };
-    return result;
+    return make(allocator, .{ .boolean = found });
 }
 
 /// to_string(42) => "42", to_string(:ok) => "ok"
@@ -486,9 +485,7 @@ fn builtinCharAt(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     const s = args[0].string;
     const idx: usize = @intCast(@max(0, args[1].integer));
     if (idx >= s.len) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     }
     const ch = allocator.alloc(u8, 1) catch return error.OutOfMemory;
     ch[0] = s[idx];
@@ -503,9 +500,7 @@ fn builtinCharCode(allocator: std.mem.Allocator, args: []const *const Value) Eva
     if (args.len < 1 or args.len > 2) return error.TypeError;
     // Return nil for nil input (char_at past end returns nil)
     if (args[0].* == .nil) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     }
     if (args[0].* != .string) return error.TypeError;
     const s = args[0].string;
@@ -514,13 +509,9 @@ fn builtinCharCode(allocator: std.mem.Allocator, args: []const *const Value) Eva
     else
         0;
     if (s.len == 0 or idx >= s.len) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     }
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = @intCast(s[idx]) };
-    return result;
+    return make(allocator, .{ .integer = @intCast(s[idx]) });
 }
 
 /// from_char_code(65) => "A" -- integer to single-byte string
@@ -607,9 +598,7 @@ fn builtinRange(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
 fn builtinHead(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     if (args[0].list.len == 0) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     }
     return args[0].list[0];
 }
@@ -862,9 +851,7 @@ fn builtinRem(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     if (args.len != 2) return error.TypeError;
     if (args[0].* != .integer or args[1].* != .integer) return error.TypeError;
     if (args[1].integer == 0) return error.DivisionByZero;
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = @rem(args[0].integer, args[1].integer) };
-    return result;
+    return make(allocator, .{ .integer = @rem(args[0].integer, args[1].integer) });
 }
 
 /// abs(-5) => 5
@@ -872,7 +859,8 @@ fn builtinAbs(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .integer => |n| result.* = Value{ .integer = if (n < 0) -n else n },
+        // abs(minInt) has no i64 answer; wrap to minInt, as the operators do.
+        .integer => |n| result.* = Value{ .integer = if (n < 0) 0 -% n else n },
         .float => |f| result.* = Value{ .float = if (f < 0) -f else f },
         else => return error.TypeError,
     }
@@ -882,9 +870,7 @@ fn builtinAbs(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
 /// nil?(nil) => true, nil?(42) => false
 fn builtinIsNil(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .boolean = args[0].* == .nil };
-    return result;
+    return make(allocator, .{ .boolean = args[0].* == .nil });
 }
 
 /// elem({10, 20, 30}, 1) => 20 (0-indexed tuple access)
@@ -895,22 +881,145 @@ fn builtinElem(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     switch (args[0].*) {
         .tuple => |items| {
             if (idx >= items.len) {
-                const result = allocator.create(Value) catch return error.OutOfMemory;
-                result.* = .nil;
-                return result;
+                return make(allocator, .nil);
             }
             return items[idx];
         },
         .list => |items| {
             if (idx >= items.len) {
-                const result = allocator.create(Value) catch return error.OutOfMemory;
-                result.* = .nil;
-                return result;
+                return make(allocator, .nil);
             }
             return items[idx];
         },
         else => return error.TypeError,
     }
+}
+
+// ── Float maths ──────────────────────────────────────
+
+/// The float functions Blimp did not have.
+///
+/// The numeric builtins stopped at floor, ceil, round and abs, so anything
+/// that wanted a square root had to fake one. temper-core, the Temper
+/// backend's runtime, spelled `**` as repeated multiplication and gave up on a
+/// fractional exponent: `4.0 ** -0.5` raised instead of answering 0.5.
+///
+/// Each takes a Float or an Int -- an Int answer would be wrong for all of
+/// them anyway -- and returns a Float.
+fn floatArg(v: *const Value) EvalError!f64 {
+    return switch (v.*) {
+        .float => |f| f,
+        .integer => |n| @floatFromInt(n),
+        else => error.TypeError,
+    };
+}
+
+fn unaryFloat(comptime f: fn (f64) f64) BuiltinFn {
+    return &struct {
+        fn call(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+            if (args.len != 1) return error.TypeError;
+            return make(allocator, .{ .float = f(try floatArg(args[0])) });
+        }
+    }.call;
+}
+
+const float_fns = .{
+    .{ "sqrt", struct {
+        fn f(x: f64) f64 {
+            return @sqrt(x);
+        }
+    }.f },
+    .{ "exp", struct {
+        fn f(x: f64) f64 {
+            return @exp(x);
+        }
+    }.f },
+    .{ "expm1", struct {
+        fn f(x: f64) f64 {
+            return std.math.expm1(x);
+        }
+    }.f },
+    .{ "log", struct {
+        fn f(x: f64) f64 {
+            return @log(x);
+        }
+    }.f },
+    .{ "log1p", struct {
+        fn f(x: f64) f64 {
+            return std.math.log1p(x);
+        }
+    }.f },
+    .{ "log2", struct {
+        fn f(x: f64) f64 {
+            return @log2(x);
+        }
+    }.f },
+    .{ "log10", struct {
+        fn f(x: f64) f64 {
+            return @log10(x);
+        }
+    }.f },
+    .{ "sin", struct {
+        fn f(x: f64) f64 {
+            return @sin(x);
+        }
+    }.f },
+    .{ "cos", struct {
+        fn f(x: f64) f64 {
+            return @cos(x);
+        }
+    }.f },
+    .{ "tan", struct {
+        fn f(x: f64) f64 {
+            return @tan(x);
+        }
+    }.f },
+    .{ "asin", struct {
+        fn f(x: f64) f64 {
+            return std.math.asin(x);
+        }
+    }.f },
+    .{ "acos", struct {
+        fn f(x: f64) f64 {
+            return std.math.acos(x);
+        }
+    }.f },
+    .{ "atan", struct {
+        fn f(x: f64) f64 {
+            return std.math.atan(x);
+        }
+    }.f },
+    .{ "sinh", struct {
+        fn f(x: f64) f64 {
+            return std.math.sinh(x);
+        }
+    }.f },
+    .{ "cosh", struct {
+        fn f(x: f64) f64 {
+            return std.math.cosh(x);
+        }
+    }.f },
+    .{ "tanh", struct {
+        fn f(x: f64) f64 {
+            return std.math.tanh(x);
+        }
+    }.f },
+};
+
+/// pow(2.0, 10.0) => 1024.0.  Whole or fractional, positive or negative.
+fn builtinPow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    const base = try floatArg(args[0]);
+    const exponent = try floatArg(args[1]);
+    return make(allocator, .{ .float = std.math.pow(f64, base, exponent) });
+}
+
+/// atan2(y, x), the angle of the point (x, y) with the sign of both.
+fn builtinAtan2(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    const y = try floatArg(args[0]);
+    const x = try floatArg(args[1]);
+    return make(allocator, .{ .float = std.math.atan2(y, x) });
 }
 
 /// floor(3.7) => 3
@@ -954,9 +1063,7 @@ fn builtinRound(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
 /// not(true) => false
 fn builtinNot(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .boolean = !args[0].truthy() };
-    return result;
+    return make(allocator, .{ .boolean = !args[0].truthy() });
 }
 
 /// size(collection) => length (alias for length)
@@ -1053,11 +1160,9 @@ fn builtinSum(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     var total: i64 = 0;
     for (args[0].list) |item| {
-        if (item.* == .integer) total += item.integer;
+        if (item.* == .integer) total +%= item.integer;
     }
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = total };
-    return result;
+    return make(allocator, .{ .integer = total });
 }
 
 /// random(min, max) => random integer in [min, max] inclusive
@@ -1078,9 +1183,7 @@ fn builtinRandom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     const range: u64 = @intCast(max_val - min_val + 1);
     const val = min_val + @as(i64, @intCast(random_state % range));
 
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = val };
-    return result;
+    return make(allocator, .{ .integer = val });
 }
 
 /// seed(n: Int) -> :ok
@@ -1216,9 +1319,7 @@ fn builtinReadFile(allocator: std.mem.Allocator, args: []const *const Value) Eva
     if (is_wasm) return error.NotSupported;
     const path = args[0].string;
     const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     };
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .string = content };
@@ -1243,9 +1344,7 @@ fn builtinGenInteger(allocator: std.mem.Allocator, args: []const *const Value) E
     const hi = args[1].integer;
     const range: u64 = @intCast(@max(hi - lo + 1, 1));
     const val = lo + @as(i64, @intCast(nextRandom() % range));
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = val };
-    return result;
+    return make(allocator, .{ .integer = val });
 }
 
 /// gen_string(max_len) -> random String of printable ASCII
@@ -1265,9 +1364,7 @@ fn builtinGenString(allocator: std.mem.Allocator, args: []const *const Value) Ev
 /// gen_boolean() -> random true or false
 fn builtinGenBoolean(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .boolean = nextRandom() % 2 == 0 };
-    return result;
+    return make(allocator, .{ .boolean = nextRandom() % 2 == 0 });
 }
 
 /// gen_list(gen_fn_name_not_used, max_len) -> random list of integers
@@ -1296,9 +1393,7 @@ fn builtinGenOneOf(allocator: std.mem.Allocator, args: []const *const Value) Eva
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     const items = args[0].list;
     if (items.len == 0) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     }
     const idx: usize = @intCast(nextRandom() % items.len);
     return items[idx];
@@ -1344,9 +1439,9 @@ fn makeViewNode(allocator: std.mem.Allocator, tag: []const u8, attrs: []const Vi
             },
         }
     }
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .view_node = .{ .tag = tag, .attrs = node_attrs, .children = node_children } };
-    return result;
+    const node = allocator.create(Value.ViewNode) catch return error.OutOfMemory;
+    node.* = .{ .tag = tag, .attrs = node_attrs, .children = node_children };
+    return make(allocator, .{ .view_node = node });
 }
 
 /// stack(child, child, ...) — vertical flex container, variadic children
@@ -1830,11 +1925,15 @@ test "view stack variadic children" {
     const c1 = try alloc.create(Value);
     const c1_str = try alloc.create(Value);
     c1_str.* = Value{ .string = "a" };
-    c1.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{c1_str} } };
+    const c1_view = try alloc.create(Value.ViewNode);
+    c1_view.* = .{ .tag = "text", .attrs = &.{}, .children = &.{c1_str} };
+    c1.* = Value{ .view_node = c1_view };
     const c2 = try alloc.create(Value);
     const c2_str = try alloc.create(Value);
     c2_str.* = Value{ .string = "b" };
-    c2.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{c2_str} } };
+    const c2_view = try alloc.create(Value.ViewNode);
+    c2_view.* = .{ .tag = "text", .attrs = &.{}, .children = &.{c2_str} };
+    c2.* = Value{ .view_node = c2_view };
 
     const args = try alloc.alloc(*const Value, 2);
     args[0] = c1;
@@ -2206,9 +2305,7 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
     std.posix.bind(sock, &addr.any, addr.getOsSockLen()) catch return error.NotSupported;
     std.posix.listen(sock, 128) catch return error.NotSupported;
 
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = @intCast(sock) };
-    return result;
+    return make(allocator, .{ .integer = @intCast(sock) });
 }
 
 /// tcp_accept(server_fd: Int) -> Int | nil
@@ -2222,15 +2319,11 @@ fn builtinTcpAcceptNative(allocator: std.mem.Allocator, args: []const *const Val
     const client_fd = std.posix.accept(server_fd, &client_addr, &addr_len, 0) catch |err| {
         if (err == error.WouldBlock) {
             // Non-blocking mode: no connection pending, return nil
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         }
         return error.NotSupported;
     };
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .integer = @intCast(client_fd) };
-    return result;
+    return make(allocator, .{ .integer = @intCast(client_fd) });
 }
 
 /// tcp_read(fd: Int) -> String | nil
@@ -2243,9 +2336,7 @@ fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value
     const n = std.posix.read(fd, &buf) catch |err| {
         if (err == error.WouldBlock) {
             // Non-blocking mode: no data available, return nil
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         }
         return error.NotSupported;
     };
@@ -2274,9 +2365,7 @@ fn builtinTcpCloseNative(allocator: std.mem.Allocator, args: []const *const Valu
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     std.posix.close(fd);
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = .nil;
-    return result;
+    return make(allocator, .nil);
 }
 
 // ============================================================
@@ -2329,14 +2418,10 @@ fn builtinWsReadFrameNative(allocator: std.mem.Allocator, args: []const *const V
     // Read first 2 bytes (frame header)
     var header: [2]u8 = undefined;
     const h_n = std.posix.read(fd, &header) catch {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     };
     if (h_n < 2) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     }
 
     const opcode = header[0] & 0x0F;
@@ -2347,27 +2432,19 @@ fn builtinWsReadFrameNative(allocator: std.mem.Allocator, args: []const *const V
     if (payload_len == 126) {
         var ext: [2]u8 = undefined;
         const ext_n = std.posix.read(fd, &ext) catch {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         };
         if (ext_n < 2) {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         }
         payload_len = @as(u64, ext[0]) << 8 | @as(u64, ext[1]);
     } else if (payload_len == 127) {
         var ext: [8]u8 = undefined;
         const ext_n = std.posix.read(fd, &ext) catch {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         };
         if (ext_n < 8) {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         }
         payload_len = 0;
         for (ext) |b| {
@@ -2379,22 +2456,16 @@ fn builtinWsReadFrameNative(allocator: std.mem.Allocator, args: []const *const V
     var mask_key: [4]u8 = .{ 0, 0, 0, 0 };
     if (masked) {
         const m_n = std.posix.read(fd, &mask_key) catch {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         };
         if (m_n < 4) {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         }
     }
 
     // Limit payload to 1MB to prevent DOS
     if (payload_len > 1048576) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = .nil;
-        return result;
+        return make(allocator, .nil);
     }
 
     // Read payload
@@ -2403,14 +2474,10 @@ fn builtinWsReadFrameNative(allocator: std.mem.Allocator, args: []const *const V
     var total_read: usize = 0;
     while (total_read < plen) {
         const n = std.posix.read(fd, payload[total_read..]) catch {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         };
         if (n == 0) {
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         }
         total_read += n;
     }
@@ -2432,9 +2499,7 @@ fn builtinWsReadFrameNative(allocator: std.mem.Allocator, args: []const *const V
         },
         0x8 => {
             // Close frame -- return nil
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         },
         0x9 => {
             // Ping -- send Pong with same payload, then read next frame
@@ -2447,9 +2512,7 @@ fn builtinWsReadFrameNative(allocator: std.mem.Allocator, args: []const *const V
         },
         else => {
             // Unsupported opcode -- return nil
-            const result = allocator.create(Value) catch return error.OutOfMemory;
-            result.* = .nil;
-            return result;
+            return make(allocator, .nil);
         },
     }
 }
@@ -2789,7 +2852,9 @@ test "type_of view_node returns :view_node" {
     const alloc = arena.allocator();
 
     const node = try alloc.create(Value);
-    node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{} } };
+    const node_view = try alloc.create(Value.ViewNode);
+    node_view.* = .{ .tag = "text", .attrs = &.{}, .children = &.{} };
+    node.* = Value{ .view_node = node_view };
     const args = try alloc.alloc(*const Value, 1);
     args[0] = node;
     const result = try builtinTypeOf(alloc, args);
@@ -2847,7 +2912,9 @@ test "view_diff identical trees returns empty list" {
     children1[0] = child1;
 
     const node1 = try alloc.create(Value);
-    node1.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = children1 } };
+    const node1_view = try alloc.create(Value.ViewNode);
+    node1_view.* = .{ .tag = "text", .attrs = &.{}, .children = children1 };
+    node1.* = Value{ .view_node = node1_view };
 
     const child2 = try alloc.create(Value);
     child2.* = Value{ .string = "hello" };
@@ -2855,7 +2922,9 @@ test "view_diff identical trees returns empty list" {
     children2[0] = child2;
 
     const node2 = try alloc.create(Value);
-    node2.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = children2 } };
+    const node2_view = try alloc.create(Value.ViewNode);
+    node2_view.* = .{ .tag = "text", .attrs = &.{}, .children = children2 };
+    node2.* = Value{ .view_node = node2_view };
 
     const args = try alloc.alloc(*const Value, 2);
     args[0] = node1;
@@ -2877,7 +2946,9 @@ test "view_diff detects text change in child" {
     const old_children = try alloc.alloc(*const Value, 1);
     old_children[0] = old_child;
     const old_node = try alloc.create(Value);
-    old_node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = old_children } };
+    const old_node_view = try alloc.create(Value.ViewNode);
+    old_node_view.* = .{ .tag = "text", .attrs = &.{}, .children = old_children };
+    old_node.* = Value{ .view_node = old_node_view };
 
     // New: text("Count: 5")
     const new_child = try alloc.create(Value);
@@ -2885,7 +2956,9 @@ test "view_diff detects text change in child" {
     const new_children = try alloc.alloc(*const Value, 1);
     new_children[0] = new_child;
     const new_node = try alloc.create(Value);
-    new_node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = new_children } };
+    const new_node_view = try alloc.create(Value.ViewNode);
+    new_node_view.* = .{ .tag = "text", .attrs = &.{}, .children = new_children };
+    new_node.* = Value{ .view_node = new_node_view };
 
     const args = try alloc.alloc(*const Value, 2);
     args[0] = old_node;
@@ -2917,11 +2990,15 @@ test "view_diff detects tag change as replace" {
 
     // Old: a "text" node
     const old_node = try alloc.create(Value);
-    old_node.* = Value{ .view_node = .{ .tag = "text", .attrs = &.{}, .children = &.{} } };
+    const old_node_view = try alloc.create(Value.ViewNode);
+    old_node_view.* = .{ .tag = "text", .attrs = &.{}, .children = &.{} };
+    old_node.* = Value{ .view_node = old_node_view };
 
     // New: a "heading" node
     const new_node = try alloc.create(Value);
-    new_node.* = Value{ .view_node = .{ .tag = "heading", .attrs = &.{}, .children = &.{} } };
+    const new_node_view = try alloc.create(Value.ViewNode);
+    new_node_view.* = .{ .tag = "heading", .attrs = &.{}, .children = &.{} };
+    new_node.* = Value{ .view_node = new_node_view };
 
     const args = try alloc.alloc(*const Value, 2);
     args[0] = old_node;
@@ -2938,4 +3015,127 @@ test "view_diff detects tag change as replace" {
             try std.testing.expectEqualStrings("replace", entry.val.string);
         }
     }
+}
+
+test "builtin abs wraps minInt to itself instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = std.math.minInt(i64) };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = n;
+    const result = try builtinAbs(alloc, args);
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "builtin abs is unchanged for ordinary values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = -7 };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = n;
+    const result = try builtinAbs(alloc, args);
+    try std.testing.expect(result.eql(Value{ .integer = 7 }));
+}
+
+test "builtin sum wraps past maxInt instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const a = try alloc.create(Value);
+    a.* = Value{ .integer = std.math.maxInt(i64) };
+    const b = try alloc.create(Value);
+    b.* = Value{ .integer = 1 };
+    const items = try alloc.alloc(*const Value, 2);
+    items[0] = a;
+    items[1] = b;
+    const list_val = try alloc.create(Value);
+    list_val.* = Value{ .list = items };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = list_val;
+
+    const result = try builtinSum(alloc, args);
+    try std.testing.expect(result.eql(Value{ .integer = std.math.minInt(i64) }));
+}
+
+test "pow answers a fractional exponent, which repeated multiplication cannot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const base = try alloc.create(Value);
+    base.* = Value{ .float = 4.0 };
+    const exponent = try alloc.create(Value);
+    exponent.* = Value{ .float = -0.5 };
+    const args = try alloc.alloc(*const Value, 2);
+    args[0] = base;
+    args[1] = exponent;
+
+    const result = try builtinPow(alloc, args);
+    try std.testing.expectEqual(@as(f64, 0.5), result.float);
+}
+
+test "a float function takes an Int and answers a Float" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = try alloc.create(Value);
+    n.* = Value{ .integer = 16 };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = n;
+
+    const sqrt = unaryFloat(struct {
+        fn f(x: f64) f64 {
+            return @sqrt(x);
+        }
+    }.f);
+    const result = try sqrt(alloc, args);
+    try std.testing.expectEqual(@as(f64, 4.0), result.float);
+
+    // A string has no square root, and says so rather than answering one.
+    const text = try alloc.create(Value);
+    text.* = Value{ .string = "16" };
+    args[0] = text;
+    try std.testing.expectError(error.TypeError, sqrt(alloc, args));
+}
+
+test "the transcendental functions agree with their identities" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const x = try alloc.create(Value);
+    x.* = Value{ .float = 1.0 };
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = x;
+
+    inline for (float_fns) |entry| {
+        const result = try unaryFloat(entry[1])(alloc, args);
+        // Every one of these is defined at 1.0, which the table's own
+        // registration would not catch if an entry were wired to the wrong
+        // function.
+        try std.testing.expect(result.* == .float);
+        try std.testing.expect(!std.math.isNan(result.float));
+    }
+
+    // log(e) is 1, and e is exp(1): the two entries are each other's inverse.
+    const e = try unaryFloat(struct {
+        fn f(v: f64) f64 {
+            return @exp(v);
+        }
+    }.f)(alloc, args);
+    args[0] = e;
+    const back = try unaryFloat(struct {
+        fn f(v: f64) f64 {
+            return @log(v);
+        }
+    }.f)(alloc, args);
+    try std.testing.expectEqual(@as(f64, 1.0), back.float);
 }

@@ -18,8 +18,10 @@ pub const errors = @import("errors.zig");
 pub const Registry = @import("registry.zig").Registry;
 pub const CompletionEngine = @import("complete.zig").CompletionEngine;
 pub const gc = @import("gc.zig");
+pub const HeapLimit = @import("heap_limit.zig").HeapLimit;
 
 test {
     // Pull in tests from all modules
     @import("std").testing.refAllDecls(@This());
+    _ = @import("memory_test.zig");
 }

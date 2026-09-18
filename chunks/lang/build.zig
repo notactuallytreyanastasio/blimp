@@ -42,6 +42,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
 
+    // -- Interpreter only --
+    // The default step also builds blimp-compile, which needs LLVM 20 on the
+    // machine.  The benchmarks, the REPL and the test suite do not, so they
+    // ask for this instead of failing on a dependency they never use.
+    const interp_step = b.step("interp", "Build just the interpreter (no LLVM needed)");
+    interp_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+
     // -- Compiler executable (blimp-compile, links LLVM) --
     const compile_exe = b.addExecutable(.{
         .name = "blimp-compile",

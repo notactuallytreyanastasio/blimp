@@ -51,7 +51,10 @@ pub fn compact(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocat
     const templates = try copier.templates(eval.registry.templates.items);
     const instances = try copier.instances(eval.registry.instances.items);
     const bubble_reason: ?*const Value = if (eval.bubble_reason) |r| try copier.value(r) else null;
-    var msg_log: [64]Evaluator.MsgLogEntry = undefined;
+    // One slot per entry the evaluator can hold.  The WASM host drains the
+    // log after every eval so 64 was enough there; a REPL that never reads it
+    // fills all 256 and used to walk off the end of this buffer.
+    var msg_log: [Evaluator.msg_log_cap]Evaluator.MsgLogEntry = undefined;
     for (0..eval.msg_log_count) |i| {
         const e = eval.msg_log[i];
         msg_log[i] = .{
@@ -62,6 +65,8 @@ pub fn compact(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocat
     }
 
     eval.env.scopes = scopes;
+    // The recycled binding lists belong to the allocator being dropped.
+    eval.env.free_scopes = .{ .items = &.{}, .capacity = 0 };
     eval.env.allocator = to;
     eval.registry.templates = templates;
     eval.registry.instances = instances;
@@ -99,19 +104,31 @@ const Copier = struct {
             .tuple => |items| .{ .tuple = try self.valueList(items) },
             .map => |entries| .{ .map = try self.mapEntries(entries) },
             .actor_ref => |r| .{ .actor_ref = .{ .id = r.id, .type_name = try self.str(r.type_name) } },
-            .closure => |c| .{ .closure = .{
-                .params = c.params,
-                .body = c.body,
-                .env = try self.captured(c.env),
-                .return_type = try self.optStr(c.return_type),
-            } },
-            .view_node => |n| .{ .view_node = .{
-                .tag = try self.str(n.tag),
-                .attrs = try self.attrs(n.attrs),
-                .children = try self.valueList(n.children),
-            } },
+            .closure => |c| .{ .closure = try self.closure(c) },
+            .view_node => |n| .{ .view_node = try self.viewNode(n) },
         };
         return nv;
+    }
+
+    fn viewNode(self: *Copier, n: *const Value.ViewNode) CompactError!*const Value.ViewNode {
+        const out = try self.to.create(Value.ViewNode);
+        out.* = .{
+            .tag = try self.str(n.tag),
+            .attrs = try self.attrs(n.attrs),
+            .children = try self.valueList(n.children),
+        };
+        return out;
+    }
+
+    fn closure(self: *Copier, c: *const Value.Closure) CompactError!*const Value.Closure {
+        const out = try self.to.create(Value.Closure);
+        out.* = .{
+            .params = c.params,
+            .body = c.body,
+            .env = try self.captured(c.env),
+            .return_type = try self.optStr(c.return_type),
+        };
+        return out;
     }
 
     fn valueList(self: *Copier, items: []const *const Value) CompactError![]const *const Value {
@@ -161,10 +178,15 @@ const Copier = struct {
         for (old) |scope| {
             var bindings: std.ArrayList(Environment.Binding) = .{ .items = &.{}, .capacity = 0 };
             try bindings.ensureTotalCapacity(self.to, scope.bindings.items.len);
+            // The scope's name mask is rebuilt from what lands here rather
+            // than copied: a stale mask hides bindings from every lookup.
+            var names: u64 = 0;
             for (scope.bindings.items) |b| {
-                bindings.appendAssumeCapacity(.{ .name = try self.str(b.name), .val = try self.value(b.val) });
+                const name = try self.str(b.name);
+                names |= Environment.nameBit(name);
+                bindings.appendAssumeCapacity(.{ .name = name, .val = try self.value(b.val) });
             }
-            out.appendAssumeCapacity(.{ .bindings = bindings });
+            out.appendAssumeCapacity(.{ .bindings = bindings, .names = names });
         }
         return out;
     }
@@ -335,4 +357,26 @@ test "compact preserves sharing between references to one value" {
 
     const pair = try run(code.allocator(), &eval, "pair");
     try std.testing.expect(pair.tuple[0] == pair.tuple[1]);
+}
+
+test "compact copies a full message log" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    _ = try run(code.allocator(), &eval, program);
+
+    // Nothing reads the log in a REPL session, so it fills to its cap.
+    while (eval.msg_log_count < Evaluator.msg_log_cap) {
+        _ = try run(code.allocator(), &eval, "c <- :count");
+    }
+
+    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    _ = heap_a.reset(.free_all);
+
+    try std.testing.expectEqual(@as(i64, 5), (try run(code.allocator(), &eval, "c <- :count")).integer);
 }
