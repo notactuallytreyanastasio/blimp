@@ -490,9 +490,9 @@ fn parseSource(allocator: std.mem.Allocator, source: []const u8) []const Node {
 
 fn collectJsonOutput(alloc: std.mem.Allocator, source: []const u8) []const u8 {
     const nodes = parseSource(alloc, source);
-    var output: std.ArrayList(u8) = .empty;
-    writeJson(output.writer(alloc), nodes, source, alloc);
-    return output.items;
+    var output = std.Io.Writer.Allocating.init(alloc);
+    writeJson(&output.writer, nodes, source, alloc);
+    return output.written();
 }
 
 test "introspect simple actor with state and handler" {
@@ -685,9 +685,9 @@ test "writeJsonString escapes special characters" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var output: std.ArrayList(u8) = .empty;
-    writeJsonString(output.writer(alloc), "hello \"world\"\nline2");
-    const result = output.items;
+    var output = std.Io.Writer.Allocating.init(alloc);
+    writeJsonString(&output.writer, "hello \"world\"\nline2");
+    const result = output.written();
 
     try std.testing.expectEqualStrings("\"hello \\\"world\\\"\\nline2\"", result);
 }

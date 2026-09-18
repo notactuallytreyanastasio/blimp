@@ -134,9 +134,9 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
         last_value = eval.eval(node) catch {
             // Eval error
             if (eval.last_error) |err| {
-                var fbs = std.io.fixedBufferStream(&error_buf);
-                err.formatPlain(fbs.writer());
-                error_len = @intCast(fbs.pos);
+                var fbs = std.Io.Writer.fixed(&error_buf);
+                err.formatPlain(&fbs);
+                error_len = @intCast(fbs.buffered().len);
             } else {
                 const msg = std.fmt.bufPrint(&error_buf, "Evaluation error", .{}) catch "Evaluation error";
                 error_len = @intCast(msg.len);
@@ -153,19 +153,19 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
         // Check if result is a view_node -- serialize as JSON for DOM rendering
         if (val.* == .view_node) {
             has_view = true;
-            var vfbs = std.io.fixedBufferStream(&view_buf);
-            writeViewJson(vfbs.writer(), val);
-            view_len = @intCast(vfbs.pos);
+            var vfbs = std.Io.Writer.fixed(&view_buf);
+            writeViewJson(&vfbs, val);
+            view_len = @intCast(vfbs.buffered().len);
             // Also set text result for REPL display
-            var fbs = std.io.fixedBufferStream(&result_buf);
-            val.format(fbs.writer());
-            result_len = @intCast(fbs.pos);
+            var fbs = std.Io.Writer.fixed(&result_buf);
+            val.format(&fbs);
+            result_len = @intCast(fbs.buffered().len);
         } else {
             has_view = false;
             view_len = 0;
-            var fbs = std.io.fixedBufferStream(&result_buf);
-            val.format(fbs.writer());
-            result_len = @intCast(fbs.pos);
+            var fbs = std.Io.Writer.fixed(&result_buf);
+            val.format(&fbs);
+            result_len = @intCast(fbs.buffered().len);
         }
     } else {
         has_view = false;
@@ -191,11 +191,11 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
 const value_string_cap = 80;
 fn writeValueJsonString(w: anytype, val: *const Value) void {
     var buf: [value_string_cap]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    writeJsonEscaped(fbs.writer(), val);
-    const truncated = fbs.pos == value_string_cap;
+    var fbs = std.Io.Writer.fixed(&buf);
+    writeJsonEscaped(&fbs, val);
+    const truncated = fbs.buffered().len == value_string_cap;
     w.writeAll("\"") catch {};
-    for (buf[0..fbs.pos]) |c| {
+    for (buf[0..fbs.buffered().len]) |c| {
         switch (c) {
             '"' => w.writeAll("\\\"") catch {},
             '\\' => w.writeAll("\\\\") catch {},
@@ -276,8 +276,8 @@ fn writeJsonEscaped(w: anytype, val: *const Value) void {
 
 fn updateStateJson() void {
     var eval = &(evaluator orelse return);
-    var fbs = std.io.fixedBufferStream(&state_buf);
-    const w = fbs.writer();
+    var fbs = std.Io.Writer.fixed(&state_buf);
+    const w = &fbs;
 
     w.writeAll("{\"vars\":[") catch {};
     const bindings = eval.env.allBindings(allocator);
@@ -324,14 +324,14 @@ fn updateStateJson() void {
 
     eval.msg_log_count = 0;
 
-    state_len = @intCast(fbs.pos);
+    state_len = @intCast(fbs.buffered().len);
 }
 
 fn appendMessagesJson(eval: *Evaluator) void {
-    var fbs = std.io.fixedBufferStream(messages_buf[messages_len..]);
-    const w = fbs.writer();
+    var fbs = std.Io.Writer.fixed(messages_buf[messages_len..]);
+    const w = &fbs;
     for (0..eval.msg_log_count) |mi| {
-        const start = fbs.pos;
+        const start = fbs.buffered().len;
         const msg = eval.msg_log[mi];
         if (messages_len > 0 or mi > 0) w.writeAll(",") catch {};
         w.writeAll("{\"target\":\"ref<") catch {};
@@ -363,15 +363,15 @@ fn appendMessagesJson(eval: *Evaluator) void {
         }
         w.writeAll("}") catch {
             // out of room: drop this partial entry, keep what fit
-            fbs.pos = start;
+            fbs.end = start;
             break;
         };
-        if (fbs.pos >= fbs.buffer.len - 1) {
-            fbs.pos = start;
+        if (fbs.buffered().len >= fbs.buffer.len - 1) {
+            fbs.end = start;
             break;
         }
     }
-    messages_len += @intCast(fbs.pos);
+    messages_len += @intCast(fbs.buffered().len);
 }
 
 /// Serialize a view_node tree as JSON for the JS renderer.
@@ -508,8 +508,8 @@ export fn blimp_complete(prefix_ptr: [*]const u8, prefix_len: u32) u32 {
     var engine = CompletionEngine.init(allocator);
     const completions = engine.complete(prefix, eval);
 
-    var fbs = std.io.fixedBufferStream(&complete_buf);
-    const w = fbs.writer();
+    var fbs = std.Io.Writer.fixed(&complete_buf);
+    const w = &fbs;
     w.writeAll("[") catch {};
     const max_results = @min(completions.len, 10);
     for (completions[0..max_results], 0..) |comp, i| {
@@ -532,7 +532,7 @@ export fn blimp_complete(prefix_ptr: [*]const u8, prefix_len: u32) u32 {
     }
     w.writeAll("]") catch {};
 
-    complete_len = @intCast(fbs.pos);
+    complete_len = @intCast(fbs.buffered().len);
     return complete_len;
 }
 
@@ -588,14 +588,14 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
 
     var parser = Parser.init(allocator, source);
     const nodes = parser.parseFile() catch {
-        var fbs = std.io.fixedBufferStream(&test_report_buf);
-        const w = fbs.writer();
+        var fbs = std.Io.Writer.fixed(&test_report_buf);
+        const w = &fbs;
         w.writeAll("{\"error\":\"parse error at line ") catch {};
         w.print("{d}", .{parser.current.line}) catch {};
         w.writeAll(", col ") catch {};
         w.print("{d}", .{parser.current.col}) catch {};
         w.writeAll("\",\"total\":0,\"passed\":0,\"failed\":0,\"tests\":[]}") catch {};
-        test_report_len = @intCast(fbs.pos);
+        test_report_len = @intCast(fbs.buffered().len);
         return 2;
     };
 
@@ -604,8 +604,8 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
         _ = eval.eval(node) catch {};
     }
 
-    var fbs = std.io.fixedBufferStream(&test_report_buf);
-    const w = fbs.writer();
+    var fbs = std.Io.Writer.fixed(&test_report_buf);
+    const w = &fbs;
     var total: u32 = 0;
     var passed: u32 = 0;
     var first_test = true;
@@ -682,7 +682,7 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
     w.print("{d}", .{total - passed}) catch {};
     w.writeAll("}") catch {};
 
-    test_report_len = @intCast(fbs.pos);
+    test_report_len = @intCast(fbs.buffered().len);
     return if (passed == total) 0 else 1;
 }
 

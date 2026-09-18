@@ -3243,9 +3243,18 @@ test "write_file writes a string and read_file reads it back" {
     args[0] = path;
     args[1] = text;
 
+    // A builtin that touches a file needs an `Io`, and a unit test does not go
+    // through `main`, so nothing has installed one. `ioenv.io` defaults to
+    // `failing` rather than `undefined` -- this is the test that would
+    // otherwise have segfaulted inside libc -- so the test installs a real one.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+
     const wrote = try builtinWriteFile(alloc, args);
     try std.testing.expect(wrote.boolean);
-    defer std.Io.Dir.cwd().deleteFile(path.string) catch {};
+    defer std.Io.Dir.cwd().deleteFile(ioenv.io, path.string) catch {};
 
     const back = try builtinReadFile(alloc, args[0..1]);
     try std.testing.expectEqualStrings(text.string, back.string);

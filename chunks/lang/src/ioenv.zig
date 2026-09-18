@@ -8,8 +8,14 @@ const std = @import("std");
 /// through every one of them -- most of which never touch I/O -- would say
 /// less than this does.
 ///
-/// Undefined until `install` runs. Nothing can call a builtin before then.
-pub var io: std.Io = undefined;
+/// `std.Io.failing` until `install` runs, rather than `undefined`.
+///
+/// A unit test calls a builtin without going through `main`, so nothing
+/// installs anything, and an undefined vtable is a segfault in libc rather
+/// than a message: `zig build test` crashed inside `dirCreateFile` reading a
+/// function pointer at address 0xd0. Failing answers an error instead, which
+/// is what a builtin already knows how to report.
+pub var io: std.Io = .failing;
 
 pub fn install(value: std.Io) void {
     io = value;
