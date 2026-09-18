@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const ioenv = @import("ioenv.zig");
 const value_mod = @import("value.zig");
 const Value = value_mod.Value;
 const Environment = @import("env.zig").Environment;
@@ -158,7 +159,7 @@ pub const Evaluator = struct {
     ///   3. Report pass/fail with colored output
     /// Returns true if all tests passed.
     pub fn runTests(self: *Evaluator, nodes: []const ast.Node) bool {
-        const stderr = std.fs.File.stderr();
+        const stderr = std.Io.File.stderr();
         var total: u32 = 0;
         var passed: u32 = 0;
         var failed: u32 = 0;
@@ -169,14 +170,14 @@ pub const Evaluator = struct {
         // so actors and functions are registered before tests run
         for (nodes) |node| {
             _ = self.eval(node) catch {
-                stderr.writeAll("\x1b[33mwarning: first-pass eval failed: ") catch {};
+                stderr.writeStreamingAll(ioenv.io, "\x1b[33mwarning: first-pass eval failed: ") catch {};
                 if (self.last_error) |blimp_err| {
                     var errbuf: [512]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&errbuf);
-                    blimp_err.formatPlain(fbs.writer());
-                    stderr.writeAll(fbs.getWritten()) catch {};
+                    var fbs = std.Io.Writer.fixed(&errbuf);
+                    blimp_err.formatPlain(&fbs);
+                    stderr.writeStreamingAll(ioenv.io, fbs.buffered()) catch {};
                 }
-                stderr.writeAll("\x1b[0m\n") catch {};
+                stderr.writeStreamingAll(ioenv.io, "\x1b[0m\n") catch {};
             };
         }
 
@@ -224,10 +225,10 @@ pub const Evaluator = struct {
                 self.actor_ctx = null;
 
                 if (test_passed) {
-                    stderr.writeAll("\x1b[32m.\x1b[0m") catch {};
+                    stderr.writeStreamingAll(ioenv.io, "\x1b[32m.\x1b[0m") catch {};
                     passed += 1;
                 } else {
-                    stderr.writeAll("\x1b[31mF\x1b[0m") catch {};
+                    stderr.writeStreamingAll(ioenv.io, "\x1b[31mF\x1b[0m") catch {};
                     failed += 1;
                     if (failure_count < 256) {
                         failure_details[failure_count] = .{
@@ -280,10 +281,10 @@ pub const Evaluator = struct {
                 }
 
                 if (prop_passed) {
-                    stderr.writeAll("\x1b[32m.\x1b[0m") catch {};
+                    stderr.writeStreamingAll(ioenv.io, "\x1b[32m.\x1b[0m") catch {};
                     passed += 1;
                 } else {
-                    stderr.writeAll("\x1b[31mF\x1b[0m") catch {};
+                    stderr.writeStreamingAll(ioenv.io, "\x1b[31mF\x1b[0m") catch {};
                     failed += 1;
                     if (failure_count < 256) {
                         failure_details[failure_count] = .{
@@ -298,25 +299,25 @@ pub const Evaluator = struct {
         }
 
         // Summary
-        stderr.writeAll("\n\n") catch {};
+        stderr.writeStreamingAll(ioenv.io, "\n\n") catch {};
         if (failed == 0) {
             var buf: [128]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "\x1b[32m{d} test{s} passed\x1b[0m\n", .{ passed, if (passed != 1) "s" else "" }) catch "tests done\n";
-            stderr.writeAll(msg) catch {};
+            stderr.writeStreamingAll(ioenv.io, msg) catch {};
         } else {
             // Print failure details
             for (failure_details[0..failure_count]) |detail| {
-                stderr.writeAll("\n\x1b[31m  FAIL\x1b[0m ") catch {};
-                stderr.writeAll(detail.actor_name) catch {};
-                stderr.writeAll(" > ") catch {};
-                stderr.writeAll(detail.test_name) catch {};
-                stderr.writeAll("\n    ") catch {};
-                stderr.writeAll(detail.error_msg) catch {};
-                stderr.writeAll("\n") catch {};
+                stderr.writeStreamingAll(ioenv.io, "\n\x1b[31m  FAIL\x1b[0m ") catch {};
+                stderr.writeStreamingAll(ioenv.io, detail.actor_name) catch {};
+                stderr.writeStreamingAll(ioenv.io, " > ") catch {};
+                stderr.writeStreamingAll(ioenv.io, detail.test_name) catch {};
+                stderr.writeStreamingAll(ioenv.io, "\n    ") catch {};
+                stderr.writeStreamingAll(ioenv.io, detail.error_msg) catch {};
+                stderr.writeStreamingAll(ioenv.io, "\n") catch {};
             }
             var buf: [128]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "\n\x1b[31m{d} failed\x1b[0m, \x1b[32m{d} passed\x1b[0m, {d} total\n", .{ failed, passed, total }) catch "tests done\n";
-            stderr.writeAll(msg) catch {};
+            stderr.writeStreamingAll(ioenv.io, msg) catch {};
         }
 
         return failed == 0;
@@ -414,7 +415,7 @@ pub const Evaluator = struct {
                 }
                 // Process escape sequences if any backslashes present
                 if (std.mem.indexOf(u8, s, "\\") != null) {
-                    var buf: std.ArrayListUnmanaged(u8) = .{};
+                    var buf: std.ArrayListUnmanaged(u8) = .empty;
                     var i: usize = 0;
                     while (i < s.len) {
                         if (s[i] == '\\' and i + 1 < s.len) {
@@ -611,8 +612,8 @@ pub const Evaluator = struct {
 
     fn evalActorDef(self: *Evaluator, def: ast.Node.ActorDef) EvalError!*const Value {
         // Collect state fields and handlers from the body
-        var state_fields_list = std.ArrayList(Value.MapEntry){ .items = &.{}, .capacity = 0 };
-        var handlers_list = std.ArrayList(Value.HandlerDef){ .items = &.{}, .capacity = 0 };
+        var state_fields_list = std.ArrayList(Value.MapEntry).empty;
+        var handlers_list = std.ArrayList(Value.HandlerDef).empty;
 
         for (def.body) |body_node| {
             switch (body_node.kind) {
@@ -664,7 +665,7 @@ pub const Evaluator = struct {
         };
 
         // Evaluate override values
-        var overrides_list = std.ArrayList(Value.MapEntry){ .items = &.{}, .capacity = 0 };
+        var overrides_list = std.ArrayList(Value.MapEntry).empty;
         for (se.overrides) |ov| {
             const val = try self.eval(ov.value);
             overrides_list.append(self.allocator, .{
@@ -805,9 +806,9 @@ pub const Evaluator = struct {
 
                 // Format the value into the string
                 var buf: [4096]u8 = undefined;
-                var fbs = std.io.fixedBufferStream(&buf);
-                val.format(fbs.writer());
-                const formatted = fbs.getWritten();
+                var fbs = std.Io.Writer.fixed(&buf);
+                val.format(&fbs);
+                const formatted = fbs.buffered();
                 // Strip quotes from string values
                 if (formatted.len >= 2 and formatted[0] == '"' and formatted[formatted.len - 1] == '"') {
                     result.appendSlice(self.allocator, formatted[1 .. formatted.len - 1]) catch return error.OutOfMemory;
@@ -904,7 +905,7 @@ pub const Evaluator = struct {
             return error.UndefinedVariable;
         };
 
-        var overrides_list = std.ArrayList(Value.MapEntry){ .items = &.{}, .capacity = 0 };
+        var overrides_list = std.ArrayList(Value.MapEntry).empty;
         for (sl.fields) |field| {
             const val = try self.eval(field.value);
             overrides_list.append(self.allocator, .{
@@ -2239,7 +2240,7 @@ pub const Evaluator = struct {
             return self.make(.nil);
         }
         // Build context string: directive + subject value + visible bindings
-        var ctx_buf: std.ArrayListUnmanaged(u8) = .{};
+        var ctx_buf: std.ArrayListUnmanaged(u8) = .empty;
         defer ctx_buf.deinit(self.allocator);
 
         ctx_buf.appendSlice(self.allocator, "You are filling in a Hole inside a Blimp actor message handler.\n" ++
@@ -2279,10 +2280,10 @@ pub const Evaluator = struct {
         // Subject value
         {
             var val_buf: [512]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&val_buf);
-            subject.format(fbs.writer());
+            var fbs = std.Io.Writer.fixed(&val_buf);
+            subject.format(&fbs);
             ctx_buf.appendSlice(self.allocator, "Subject value: ") catch return error.OutOfMemory;
-            ctx_buf.appendSlice(self.allocator, fbs.getWritten()) catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, fbs.buffered()) catch return error.OutOfMemory;
             ctx_buf.appendSlice(self.allocator, "\n\n") catch return error.OutOfMemory;
         }
 
@@ -2291,12 +2292,12 @@ pub const Evaluator = struct {
         const bindings = self.env.allBindings(self.allocator);
         for (bindings) |b| {
             var val_buf: [256]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&val_buf);
-            b.val.format(fbs.writer());
+            var fbs = std.Io.Writer.fixed(&val_buf);
+            b.val.format(&fbs);
             ctx_buf.appendSlice(self.allocator, "  ") catch return error.OutOfMemory;
             ctx_buf.appendSlice(self.allocator, b.name) catch return error.OutOfMemory;
             ctx_buf.appendSlice(self.allocator, " = ") catch return error.OutOfMemory;
-            ctx_buf.appendSlice(self.allocator, fbs.getWritten()) catch return error.OutOfMemory;
+            ctx_buf.appendSlice(self.allocator, fbs.buffered()) catch return error.OutOfMemory;
             ctx_buf.appendSlice(self.allocator, "\n") catch return error.OutOfMemory;
         }
 
@@ -2319,26 +2320,31 @@ pub const Evaluator = struct {
         std.debug.print("\n[Hole] Calling Claude to fill in: {s}\n", .{if (hole.directive) |d| d else "(no directive)"});
 
         // Shell out: claude -p "<prompt>"
-        var argv = [_][]const u8{ "claude", "-p", prompt };
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch {
+        //
+        // zig 0.16 moved spawning onto the `Io` capability: there is no
+        // `Child.init`/`child.spawn()` any more, and the allocator the old API
+        // took is gone with it.
+        const argv = [_][]const u8{ "claude", "-p", prompt };
+        var child = std.process.spawn(ioenv.io, .{
+            .argv = &argv,
+            .stdout = .pipe,
+            .stderr = .ignore,
+        }) catch {
             std.debug.print("[Hole] claude not found — returning nil\n", .{});
             return self.make(.nil);
         };
 
         // Read stdout
-        var response_buf: std.ArrayListUnmanaged(u8) = .{};
+        var response_buf: std.ArrayListUnmanaged(u8) = .empty;
         if (child.stdout) |out| {
             var read_buf: [4096]u8 = undefined;
             while (true) {
-                const n = out.read(&read_buf) catch break;
+                const n = out.readStreaming(ioenv.io, &.{read_buf[0..]}) catch break;
                 if (n == 0) break;
                 response_buf.appendSlice(self.allocator, read_buf[0..n]) catch break;
             }
         }
-        _ = child.wait() catch {};
+        _ = child.wait(ioenv.io) catch {};
 
         var response = std.mem.trim(u8, response_buf.items, &std.ascii.whitespace);
         // Strip markdown code fences if Claude wrapped the response
@@ -2401,11 +2407,11 @@ pub const Evaluator = struct {
     /// Preserves the indentation of the original hole line.
     fn patchHole(self: *Evaluator, file_path: []const u8, hole_line: u32, generated: []const u8, directive: []const u8) !void {
         // Read the file
-        const file_source = try std.fs.cwd().readFileAlloc(self.allocator, file_path, 4 * 1024 * 1024);
+        const file_source = try std.Io.Dir.cwd().readFileAlloc(ioenv.io, file_path, self.allocator, .limited(4 * 1024 * 1024));
         defer self.allocator.free(file_source);
 
         // Split into lines, find the hole line (1-indexed)
-        var lines: std.ArrayListUnmanaged([]const u8) = .{};
+        var lines: std.ArrayListUnmanaged([]const u8) = .empty;
         var iter = std.mem.splitScalar(u8, file_source, '\n');
         while (iter.next()) |line| {
             try lines.append(self.allocator, line);
@@ -2427,7 +2433,7 @@ pub const Evaluator = struct {
 
         // Build the replacement: `_ ->\n` followed by each generated line
         // at one extra indent level (2 more spaces than the original hole).
-        var replacement: std.ArrayListUnmanaged(u8) = .{};
+        var replacement: std.ArrayListUnmanaged(u8) = .empty;
         // First line: wildcard arrow at the original indentation
         try replacement.appendSlice(self.allocator, indent);
         try replacement.appendSlice(self.allocator, "_ ->");
@@ -2445,16 +2451,16 @@ pub const Evaluator = struct {
         lines.items[line_idx] = replacement.items;
 
         // Reconstruct the file
-        var out: std.ArrayListUnmanaged(u8) = .{};
+        var out: std.ArrayListUnmanaged(u8) = .empty;
         for (lines.items, 0..) |line, i| {
             if (i > 0) try out.append(self.allocator, '\n');
             try out.appendSlice(self.allocator, line);
         }
 
         // Write back
-        const file = try std.fs.cwd().createFile(file_path, .{});
-        defer file.close();
-        try file.writeAll(out.items);
+        const file = try std.Io.Dir.cwd().createFile(ioenv.io, file_path, .{});
+        defer file.close(ioenv.io);
+        try file.writeStreamingAll(ioenv.io, out.items);
 
         // Print a diff-style view of what changed
         std.debug.print("\n╔═══ Hole filled: {s}:{d} ══════════════════\n", .{ file_path, hole_line });
@@ -2470,11 +2476,15 @@ pub const Evaluator = struct {
         // The OS starts us over from scratch with the updated source.
         if (self.restart_argv) |argv| {
             std.debug.print("[Hole] Re-running {s}...\n\n", .{file_path});
-            // Convert [:0]const u8 slice to []const u8 slice for execve
-            var plain_argv = self.allocator.alloc([]const u8, argv.len) catch return;
-            for (argv, 0..) |a, i| plain_argv[i] = a;
-            const exec_err = std.process.execv(self.allocator, plain_argv);
-            std.debug.print("[Hole] Re-exec failed: {} — continuing with current run\n", .{exec_err});
+            // `std.process.execv` is gone in zig 0.16, and `std.c` exposes only
+            // `execve`, so the environment has to be handed over explicitly.
+            // The argv this keeps is already null-terminated per string; what
+            // it needs is a null terminator on the vector.
+            var c_argv = self.allocator.allocSentinel(?[*:0]const u8, argv.len, null) catch return;
+            for (argv, 0..) |a, i| c_argv[i] = a.ptr;
+            const empty_env = [_:null]?[*:0]const u8{};
+            _ = std.c.execve(argv[0].ptr, c_argv.ptr, &empty_env);
+            std.debug.print("[Hole] Re-exec failed — continuing with current run\n", .{});
         }
     }
 

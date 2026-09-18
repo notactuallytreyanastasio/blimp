@@ -9,6 +9,7 @@ const Value = @import("value.zig").Value;
 const errors = @import("errors.zig");
 const gc = @import("gc.zig");
 const HeapLimit = @import("heap_limit.zig").HeapLimit;
+const ioenv = @import("ioenv.zig");
 
 /// The evaluator recurses natively: one Blimp call costs about 16 KB of Zig
 /// frames, and `Evaluator.default_max_call_depth` of them do not fit in the
@@ -31,6 +32,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     thread.join();
 }
 
+/// Milliseconds since the epoch. zig 0.16 removed `std.time.milliTimestamp`.
+fn nowMillis() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+}
+
 fn runOnBigStack(args: std.process.Args, environ: std.process.Environ) void {
     run(args, environ) catch |err| {
         std.debug.print("Error: {}\n", .{err});
@@ -46,6 +54,17 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     var args_arena = std.heap.ArenaAllocator.init(allocator);
     defer args_arena.deinit();
     const args = try argv.toSlice(args_arena.allocator());
+
+    // zig 0.16 made I/O a capability. `main` is the only place that can build
+    // one, and a builtin is a `fn (Allocator, []const *const Value)`, so it is
+    // parked where the builtins can reach it rather than threaded through
+    // every one of them.
+    var threaded: std.Io.Threaded = .init(allocator, .{
+        .argv0 = .init(argv),
+        .environ = environ,
+    });
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
 
     // Everything a Blimp program allocates comes through here.  Reading the
     // source, the argv and the ASTs do not: the ceiling is about the program's
@@ -84,7 +103,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         return;
     }
 
-    const source = std.fs.cwd().readFileAlloc(allocator, args[1], 1024 * 1024) catch |err| {
+    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, args[1], allocator, .limited(1024 * 1024)) catch |err| {
         std.debug.print("Error reading '{s}': {}\n", .{ args[1], err });
         std.process.exit(1);
     };
@@ -117,7 +136,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     // Check for --introspect flag
     if (args.len >= 3 and std.mem.eql(u8, args[2], "--introspect")) {
         var stdout_buf: [16384]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+        var stdout_writer = std.Io.File.stdout().writer(ioenv.io, &stdout_buf);
         introspect.writeJson(&stdout_writer.interface, nodes, source, arena.allocator());
         stdout_writer.interface.writeAll("\n") catch {};
         stdout_writer.interface.flush() catch {};
@@ -127,7 +146,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     // Check for --ast flag (print AST without evaluating)
     if (args.len >= 3 and std.mem.eql(u8, args[2], "--ast")) {
         var stdout_buf: [4096]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+        var stdout_writer = std.Io.File.stdout().writer(ioenv.io, &stdout_buf);
         printNodes(&stdout_writer.interface, nodes, 0);
         stdout_writer.interface.flush() catch {};
         return;
@@ -143,12 +162,12 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     if (args.len >= 3 and std.mem.eql(u8, args[2], "--test")) {
         var evaluator = Evaluator.init(arena.allocator());
         evaluator.setSource(source);
-        const start = std.time.milliTimestamp();
+        const start = nowMillis();
         const all_passed = evaluator.runTests(nodes);
-        const elapsed = std.time.milliTimestamp() - start;
+        const elapsed = nowMillis() - start;
         var tbuf: [64]u8 = undefined;
         const timing = std.fmt.bufPrint(&tbuf, "\nFinished in {d}ms\n", .{elapsed}) catch "\n";
-        std.fs.File.stderr().writeAll(timing) catch {};
+        std.Io.File.stderr().writeStreamingAll(ioenv.io, timing) catch {};
         if (!all_passed) std.process.exit(1);
         return;
     }
@@ -157,7 +176,15 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     var evaluator = Evaluator.init(arena.allocator());
     evaluator.setSource(source);
     // Store the absolute path so the Hole operator can patch the source file
-    const abs_path = std.fs.cwd().realpathAlloc(arena.allocator(), args[1]) catch args[1];
+    // `realpathAlloc` is gone from the Dir API; libc's realpath still answers
+    // the same question, and the Hole operator only needs something it can
+    // reopen for writing.
+    const abs_path = blk: {
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const c_path = arena.allocator().dupeZ(u8, args[1]) catch break :blk args[1];
+        const resolved = std.c.realpath(c_path, &path_buf) orelse break :blk args[1];
+        break :blk arena.allocator().dupe(u8, std.mem.span(resolved)) catch args[1];
+    };
     evaluator.source_path = abs_path;
     // Build null-terminated argv for re-exec after Hole patching
     var restart_argv = try arena.allocator().alloc([:0]const u8, args.len);
@@ -179,9 +206,9 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
             }
             if (evaluator.last_error) |blimp_err| {
                 var buf: [2048]u8 = undefined;
-                var fbs = std.io.fixedBufferStream(&buf);
-                blimp_err.format(fbs.writer());
-                std.debug.print("{s}\n", .{fbs.getWritten()});
+                var fbs = std.Io.Writer.fixed(&buf);
+                blimp_err.format(&fbs);
+                std.debug.print("{s}\n", .{fbs.buffered()});
             } else {
                 std.debug.print("Runtime error: {}\n", .{err});
             }
@@ -190,13 +217,13 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     }
 }
 
-fn printNodes(writer: *std.io.Writer, nodes: []const ast.Node, indent: u32) void {
+fn printNodes(writer: *std.Io.Writer, nodes: []const ast.Node, indent: u32) void {
     for (nodes) |node| {
         printNode(writer, node, indent);
     }
 }
 
-fn printNode(writer: *std.io.Writer, node: ast.Node, indent: u32) void {
+fn printNode(writer: *std.Io.Writer, node: ast.Node, indent: u32) void {
     const pad = "                                        ";
     const prefix = pad[0..@min(indent * 2, pad.len)];
 
@@ -292,7 +319,7 @@ fn printNode(writer: *std.io.Writer, node: ast.Node, indent: u32) void {
     }
 }
 
-fn printInline(writer: *std.io.Writer, node: ast.Node) void {
+fn printInline(writer: *std.Io.Writer, node: ast.Node) void {
     switch (node.kind) {
         .integer_lit => |i| writer.print(" {d}", .{i.value}) catch {},
         .float_lit => |f| writer.print(" {d}", .{f.value}) catch {},
@@ -513,9 +540,9 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
     var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
-    var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+    var stdin_reader = std.Io.File.stdin().reader(ioenv.io, &stdin_buf);
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(ioenv.io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     stdout.writeAll("Blimp REPL (type expressions, Ctrl-D to exit)\n") catch {};
@@ -693,7 +720,7 @@ const HistoryEntry = struct {
 /// then calls blimp_self_eval(user_source) to execute user code
 /// through the Blimp-written pipeline.
 fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast.Node, arena_alloc: std.mem.Allocator) void {
-    const stderr = std.fs.File.stderr();
+    const stderr = std.Io.File.stderr();
     var evaluator = Evaluator.init(arena_alloc);
 
     // Load self-hosted compiler components in order
@@ -707,17 +734,17 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
     };
 
     for (lib_files) |lib_path| {
-        const lib_source = std.fs.cwd().readFileAlloc(gpa, lib_path, 1024 * 1024) catch {
-            stderr.writeAll("Failed to load: ") catch {};
-            stderr.writeAll(lib_path) catch {};
-            stderr.writeAll("\n") catch {};
+        const lib_source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, lib_path, gpa, .limited(1024 * 1024)) catch {
+            stderr.writeStreamingAll(ioenv.io, "Failed to load: ") catch {};
+            stderr.writeStreamingAll(ioenv.io, lib_path) catch {};
+            stderr.writeStreamingAll(ioenv.io, "\n") catch {};
             std.process.exit(1);
         };
         var parser = Parser.init(arena_alloc, lib_source);
         const lib_nodes = parser.parseFile() catch {
-            stderr.writeAll("Parse error in ") catch {};
-            stderr.writeAll(lib_path) catch {};
-            stderr.writeAll("\n") catch {};
+            stderr.writeStreamingAll(ioenv.io, "Parse error in ") catch {};
+            stderr.writeStreamingAll(ioenv.io, lib_path) catch {};
+            stderr.writeStreamingAll(ioenv.io, "\n") catch {};
             std.process.exit(1);
         };
         for (lib_nodes) |node| {
@@ -725,7 +752,7 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
         }
     }
 
-    stderr.writeAll("\x1b[33mself-hosted compiler loaded\x1b[0m\n") catch {};
+    stderr.writeStreamingAll(ioenv.io, "\x1b[33mself-hosted compiler loaded\x1b[0m\n") catch {};
 
     // Now call blimp_self_eval with the user's source code
     // We need to pass the source as a string value
@@ -747,12 +774,12 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
     const result = evaluator.eval(call_node) catch |err| {
         if (evaluator.last_error) |blimp_err| {
             var buf: [2048]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
-            blimp_err.format(fbs.writer());
-            stderr.writeAll(fbs.getWritten()) catch {};
-            stderr.writeAll("\n") catch {};
+            var fbs = std.Io.Writer.fixed(&buf);
+            blimp_err.format(&fbs);
+            stderr.writeStreamingAll(ioenv.io, fbs.buffered()) catch {};
+            stderr.writeStreamingAll(ioenv.io, "\n") catch {};
         } else {
-            stderr.writeAll("Self-hosted eval error: ") catch {};
+            stderr.writeStreamingAll(ioenv.io, "Self-hosted eval error: ") catch {};
             std.debug.print("{}\n", .{err});
         }
         std.process.exit(1);
@@ -760,29 +787,29 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
 
     // Print the result
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    result.format(fbs.writer());
-    const stdout = std.fs.File.stdout();
-    stdout.writeAll(fbs.getWritten()) catch {};
-    stdout.writeAll("\n") catch {};
+    var fbs = std.Io.Writer.fixed(&buf);
+    result.format(&fbs);
+    const stdout = std.Io.File.stdout();
+    stdout.writeStreamingAll(ioenv.io, fbs.buffered()) catch {};
+    stdout.writeStreamingAll(ioenv.io, "\n") catch {};
 }
 
 fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
     var test_arena = std.heap.ArenaAllocator.init(gpa);
     defer test_arena.deinit();
     const allocator = test_arena.allocator();
-    const stderr = std.fs.File.stderr();
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
-        stderr.writeAll("Could not open test directory: ") catch {};
-        stderr.writeAll(dir_path) catch {};
-        stderr.writeAll("\n") catch {};
+    const stderr = std.Io.File.stderr();
+    var dir = std.Io.Dir.cwd().openDir(ioenv.io, dir_path, .{ .iterate = true }) catch {
+        stderr.writeStreamingAll(ioenv.io, "Could not open test directory: ") catch {};
+        stderr.writeStreamingAll(ioenv.io, dir_path) catch {};
+        stderr.writeStreamingAll(ioenv.io, "\n") catch {};
         std.process.exit(1);
     };
-    defer dir.close();
+    defer dir.close(ioenv.io);
 
     var files: std.ArrayList([]const u8) = .empty;
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(ioenv.io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.endsWith(u8, entry.name, "_test.blimp")) {
             const name = allocator.dupe(u8, entry.name) catch continue;
@@ -791,9 +818,9 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
     }
 
     if (files.items.len == 0) {
-        stderr.writeAll("No *_test.blimp files found in ") catch {};
-        stderr.writeAll(dir_path) catch {};
-        stderr.writeAll("/\n") catch {};
+        stderr.writeStreamingAll(ioenv.io, "No *_test.blimp files found in ") catch {};
+        stderr.writeStreamingAll(ioenv.io, dir_path) catch {};
+        stderr.writeStreamingAll(ioenv.io, "/\n") catch {};
         return;
     }
 
@@ -804,20 +831,20 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
         }
     }.cmp);
 
-    stderr.writeAll("\n") catch {};
+    stderr.writeStreamingAll(ioenv.io, "\n") catch {};
     var any_failed = false;
-    const start_time = std.time.milliTimestamp();
+    const start_time = nowMillis();
 
     for (files.items) |filename| {
         // Build full path
         const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, filename }) catch continue;
 
-        stderr.writeAll("\x1b[1m") catch {};
-        stderr.writeAll(filename) catch {};
-        stderr.writeAll("\x1b[0m\n") catch {};
+        stderr.writeStreamingAll(ioenv.io, "\x1b[1m") catch {};
+        stderr.writeStreamingAll(ioenv.io, filename) catch {};
+        stderr.writeStreamingAll(ioenv.io, "\x1b[0m\n") catch {};
 
-        const source = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch {
-            stderr.writeAll("  \x1b[31mfailed to read file\x1b[0m\n") catch {};
+        const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, full_path, allocator, .limited(1024 * 1024)) catch {
+            stderr.writeStreamingAll(ioenv.io, "  \x1b[31mfailed to read file\x1b[0m\n") catch {};
             any_failed = true;
             continue;
         };
@@ -827,7 +854,7 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
 
         var parser = Parser.init(arena.allocator(), source);
         const nodes = parser.parseFile() catch {
-            stderr.writeAll("  \x1b[31mparse error\x1b[0m\n") catch {};
+            stderr.writeStreamingAll(ioenv.io, "  \x1b[31mparse error\x1b[0m\n") catch {};
             any_failed = true;
             continue;
         };
@@ -842,10 +869,10 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
         }
     }
 
-    const elapsed = std.time.milliTimestamp() - start_time;
+    const elapsed = nowMillis() - start_time;
     var buf: [64]u8 = undefined;
     const timing = std.fmt.bufPrint(&buf, "\nFinished in {d}ms\n", .{elapsed}) catch "\n";
-    stderr.writeAll(timing) catch {};
+    stderr.writeStreamingAll(ioenv.io, timing) catch {};
 
     if (any_failed) std.process.exit(1);
 }
@@ -867,9 +894,9 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
     var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
-    var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+    var stdin_reader = std.Io.File.stdin().reader(ioenv.io, &stdin_buf);
     var stdout_buf: [8192]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(ioenv.io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     var history = std.ArrayList(HistoryEntry){ .items = &.{}, .capacity = 0 };
@@ -1013,9 +1040,9 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
 }
 
 fn formatValue(val: *const @import("value.zig").Value, alloc: std.mem.Allocator) []const u8 {
-    var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
-    val.format(buf.writer(alloc));
-    return buf.items;
+    var aw = std.Io.Writer.Allocating.init(alloc);
+    val.format(&aw.writer);
+    return aw.written();
 }
 
 fn getTerminalSize() struct { rows: u32, cols: u32 } {

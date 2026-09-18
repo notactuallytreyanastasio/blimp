@@ -261,7 +261,7 @@ pub fn parseTypeName(allocator: std.mem.Allocator, type_str: []const u8) error{O
             return Type{ .map = .{ .key = k, .value = v } };
         } else {
             // %{key1: Type1, key2: Type2, ...} — record type
-            var fields: std.ArrayListUnmanaged(Type.RecordField) = .{};
+            var fields: std.ArrayListUnmanaged(Type.RecordField) = .empty;
             // Split on commas at depth 0
             var start: usize = 0;
             var depth: usize = 0;

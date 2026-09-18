@@ -276,18 +276,18 @@ pub const Value = union(enum) {
 
 test "format integer" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .integer = 42 };
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings("42", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings("42", stream.buffered());
 }
 
 test "format float" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .float = 3.14 };
-    v.format(stream.writer());
-    const written = stream.getWritten();
+    v.format(&stream);
+    const written = stream.buffered();
     // Float formatting may vary; check it starts with "3.14"
     try std.testing.expect(written.len > 0);
     try std.testing.expect(written[0] == '3');
@@ -295,34 +295,34 @@ test "format float" {
 
 test "format string" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .string = "hello" };
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings("\"hello\"", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings("\"hello\"", stream.buffered());
 }
 
 test "format atom" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .atom = "ok" };
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings(":ok", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings(":ok", stream.buffered());
 }
 
 test "format boolean" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .boolean = true };
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings("true", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings("true", stream.buffered());
 }
 
 test "format nil" {
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v: Value = .nil;
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings("nil", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings("nil", stream.buffered());
 }
 
 test "format list" {
@@ -339,10 +339,10 @@ test "format list" {
     items[1] = v2;
 
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .list = items };
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings("[1, 2]", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings("[1, 2]", stream.buffered());
 }
 
 test "format tuple" {
@@ -359,10 +359,10 @@ test "format tuple" {
     items[1] = v2;
 
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .tuple = items };
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings("{:ok, 42}", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings("{:ok, 42}", stream.buffered());
 }
 
 test "format map" {
@@ -376,10 +376,10 @@ test "format map" {
     entries[0] = .{ .key = "name", .val = v1 };
 
     var buf: [64]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const v = Value{ .map = entries };
-    v.format(stream.writer());
-    try std.testing.expectEqualStrings("%{name: \"bob\"}", stream.getWritten());
+    v.format(&stream);
+    try std.testing.expectEqualStrings("%{name: \"bob\"}", stream.buffered());
 }
 
 test "eql matching integers" {

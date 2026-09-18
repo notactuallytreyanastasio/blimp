@@ -585,7 +585,7 @@ pub const Parser = struct {
     /// Parse multiple handler-body statements (allows become, reply, situation, etc).
     /// Used by evalHole to parse Claude-generated handler code.
     pub fn parseHandlerBodyPublic(self: *Parser) ParseError![]const Node {
-        var stmts: std.ArrayListUnmanaged(Node) = .{};
+        var stmts: std.ArrayListUnmanaged(Node) = .empty;
         self.skipNewlines();
         while (self.current.kind != .eof) {
             const stmt = try self.parseHandlerBody();

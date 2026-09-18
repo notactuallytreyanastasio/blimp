@@ -1,4 +1,5 @@
 const std = @import("std");
+const ioenv = @import("ioenv.zig");
 const builtin = @import("builtin");
 const Value = @import("value.zig").Value;
 const interned = @import("value.zig").interned;
@@ -24,9 +25,9 @@ pub var last_assertion_detail: [512]u8 = undefined;
 pub var last_assertion_detail_len: u32 = 0;
 
 fn recordAssertionDetail(comptime fmt: []const u8, args: anytype) void {
-    var fbs = std.io.fixedBufferStream(&last_assertion_detail);
-    fbs.writer().print(fmt, args) catch {};
-    last_assertion_detail_len = @intCast(fbs.pos);
+    var fbs = std.Io.Writer.fixed(&last_assertion_detail);
+    fbs.print(fmt, args) catch {};
+    last_assertion_detail_len = @intCast(fbs.buffered().len);
 }
 
 /// Registry entry for a built-in function.
@@ -332,10 +333,15 @@ fn builtinKeys(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
 
 fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
+    // zig 0.16 removed `std.time.timestamp`; libc still has the call it was.
     const timestamp: i64 = if (is_wasm)
         0 // TODO: import JS Date.now() via extern
     else
-        std.time.timestamp();
+        blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(.REALTIME, &ts);
+            break :blk @intCast(ts.sec);
+        };
     return make(allocator, .{ .integer = timestamp });
 }
 
@@ -726,17 +732,29 @@ fn builtinActorName(allocator: std.mem.Allocator, args: []const *const Value) Ev
     }
 }
 
+/// Write to stdout, ignoring a failure, because a builtin has nowhere to put
+/// one: `print` answers its argument and `puts` answers nil.
+fn outWrite(bytes: []const u8) void {
+    if (is_wasm) return;
+    std.Io.File.stdout().writeStreamingAll(ioenv.io, bytes) catch {};
+}
+
+/// Same for stderr, which is where a failed assertion goes.
+fn errWrite(bytes: []const u8) void {
+    if (is_wasm) return;
+    std.Io.File.stderr().writeStreamingAll(ioenv.io, bytes) catch {};
+}
+
 /// print(value) => prints to stdout, returns the value (identity)
 fn builtinPrint(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     // Write to a buffer and print
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    args[0].format(fbs.writer());
+    var fbs = std.Io.Writer.fixed(&buf);
+    args[0].format(&fbs);
     if (!is_wasm) {
-        const stdout = std.fs.File.stdout();
-        stdout.writeAll(fbs.getWritten()) catch {};
-        stdout.writeAll("\n") catch {};
+                outWrite(fbs.buffered());
+        outWrite("\n");
     }
     return args[0]; // return the value (identity)
 }
@@ -751,17 +769,16 @@ fn builtinPuts(_: std.mem.Allocator, args: []const *const Value) EvalError!*cons
     if (args.len != 1) return error.TypeError;
     if (is_wasm) return args[0];
 
-    const stdout = std.fs.File.stdout();
-    switch (args[0].*) {
-        .string => |text| stdout.writeAll(text) catch {},
+        switch (args[0].*) {
+        .string => |text| outWrite(text),
         else => {
             var buf: [4096]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
-            args[0].format(fbs.writer());
-            stdout.writeAll(fbs.getWritten()) catch {};
+            var fbs = std.Io.Writer.fixed(&buf);
+            args[0].format(&fbs);
+            outWrite(fbs.buffered());
         },
     }
-    stdout.writeAll("\n") catch {};
+    outWrite("\n");
     return args[0]; // return the value (identity), like print
 }
 
@@ -771,15 +788,14 @@ fn builtinPuts(_: std.mem.Allocator, args: []const *const Value) EvalError!*cons
 fn builtinAssert(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     if (!args[0].truthy()) {
-        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
-        stderr.writeAll("\x1b[31mAssertion failed: value is falsy\x1b[0m\n") catch {};
+                errWrite("\x1b[31mAssertion failed: value is falsy\x1b[0m\n");
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        args[0].format(fbs.writer());
-        stderr.writeAll("  got: ") catch {};
-        stderr.writeAll(fbs.getWritten()) catch {};
-        stderr.writeAll("\n") catch {};
-        recordAssertionDetail("expected truthy, got {s}", .{fbs.getWritten()});
+        var fbs = std.Io.Writer.fixed(&buf);
+        args[0].format(&fbs);
+        errWrite("  got: ");
+        errWrite(fbs.buffered());
+        errWrite("\n");
+        recordAssertionDetail("expected truthy, got {s}", .{fbs.buffered()});
         return error.TypeError; // assertion failure
     }
     return args[0];
@@ -789,21 +805,20 @@ fn builtinAssert(_: std.mem.Allocator, args: []const *const Value) EvalError!*co
 fn builtinAssertEq(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
     if (!args[0].eql(args[1].*)) {
-        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
-        stderr.writeAll("\x1b[31mAssertion failed: values not equal\x1b[0m\n") catch {};
+                errWrite("\x1b[31mAssertion failed: values not equal\x1b[0m\n");
         var left_buf: [256]u8 = undefined;
-        var left_fbs = std.io.fixedBufferStream(&left_buf);
-        args[0].format(left_fbs.writer());
-        stderr.writeAll("  left:  ") catch {};
-        stderr.writeAll(left_fbs.getWritten()) catch {};
-        stderr.writeAll("\n") catch {};
+        var left_fbs = std.Io.Writer.fixed(&left_buf);
+        args[0].format(&left_fbs);
+        errWrite("  left:  ");
+        errWrite(left_fbs.buffered());
+        errWrite("\n");
         var right_buf: [256]u8 = undefined;
-        var right_fbs = std.io.fixedBufferStream(&right_buf);
-        args[1].format(right_fbs.writer());
-        stderr.writeAll("  right: ") catch {};
-        stderr.writeAll(right_fbs.getWritten()) catch {};
-        stderr.writeAll("\n") catch {};
-        recordAssertionDetail("expected {s}, got {s}", .{ right_fbs.getWritten(), left_fbs.getWritten() });
+        var right_fbs = std.Io.Writer.fixed(&right_buf);
+        args[1].format(&right_fbs);
+        errWrite("  right: ");
+        errWrite(right_fbs.buffered());
+        errWrite("\n");
+        recordAssertionDetail("expected {s}, got {s}", .{ right_fbs.buffered(), left_fbs.buffered() });
         return error.TypeError; // assertion failure
     }
     return args[0];
@@ -813,15 +828,14 @@ fn builtinAssertEq(_: std.mem.Allocator, args: []const *const Value) EvalError!*
 fn builtinAssertNe(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
     if (args[0].eql(args[1].*)) {
-        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
-        stderr.writeAll("\x1b[31mAssertion failed: values should not be equal\x1b[0m\n") catch {};
+                errWrite("\x1b[31mAssertion failed: values should not be equal\x1b[0m\n");
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        args[0].format(fbs.writer());
-        stderr.writeAll("  both: ") catch {};
-        stderr.writeAll(fbs.getWritten()) catch {};
-        stderr.writeAll("\n") catch {};
-        recordAssertionDetail("both sides equal to {s}", .{fbs.getWritten()});
+        var fbs = std.Io.Writer.fixed(&buf);
+        args[0].format(&fbs);
+        errWrite("  both: ");
+        errWrite(fbs.buffered());
+        errWrite("\n");
+        recordAssertionDetail("both sides equal to {s}", .{fbs.buffered()});
         return error.TypeError; // assertion failure
     }
     return args[0];
@@ -831,15 +845,14 @@ fn builtinAssertNe(_: std.mem.Allocator, args: []const *const Value) EvalError!*
 fn builtinRefute(_: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     if (args[0].truthy()) {
-        const stderr = if (is_wasm) std.io.null_writer else std.fs.File.stderr();
-        stderr.writeAll("\x1b[31mRefute failed: value is truthy\x1b[0m\n") catch {};
+                errWrite("\x1b[31mRefute failed: value is truthy\x1b[0m\n");
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        args[0].format(fbs.writer());
-        stderr.writeAll("  got: ") catch {};
-        stderr.writeAll(fbs.getWritten()) catch {};
-        stderr.writeAll("\n") catch {};
-        recordAssertionDetail("expected falsy, got {s}", .{fbs.getWritten()});
+        var fbs = std.Io.Writer.fixed(&buf);
+        args[0].format(&fbs);
+        errWrite("  got: ");
+        errWrite(fbs.buffered());
+        errWrite("\n");
+        recordAssertionDetail("expected falsy, got {s}", .{fbs.buffered()});
         return error.TypeError; // assertion failure
     }
     return args[0];
@@ -1305,9 +1318,9 @@ fn builtinWriteBytes(allocator: std.mem.Allocator, args: []const *const Value) E
     if (is_wasm) {
         return error.NotSupported;
     }
-    const file = std.fs.cwd().createFile(path, .{}) catch return error.NotSupported;
-    defer file.close();
-    file.writeAll(buf) catch return error.NotSupported;
+    const file = std.Io.Dir.cwd().createFile(ioenv.io, path, .{}) catch return error.NotSupported;
+    defer file.close(ioenv.io);
+    file.writeStreamingAll(ioenv.io, buf) catch return error.NotSupported;
 
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .atom = "ok" };
@@ -1325,11 +1338,11 @@ fn builtinWriteBytes(allocator: std.mem.Allocator, args: []const *const Value) E
 fn builtinWriteFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
     if (is_wasm) return error.NotSupported;
-    const file = std.fs.cwd().createFile(args[0].string, .{}) catch {
+    const file = std.Io.Dir.cwd().createFile(ioenv.io, args[0].string, .{}) catch {
         return make(allocator, .{ .boolean = false });
     };
-    defer file.close();
-    file.writeAll(args[1].string) catch {
+    defer file.close(ioenv.io);
+    file.writeStreamingAll(ioenv.io, args[1].string) catch {
         return make(allocator, .{ .boolean = false });
     };
     return make(allocator, .{ .boolean = true });
@@ -1340,7 +1353,7 @@ fn builtinReadFile(allocator: std.mem.Allocator, args: []const *const Value) Eva
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     if (is_wasm) return error.NotSupported;
     const path = args[0].string;
-    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch {
+    const content = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, allocator, .limited(1024 * 1024)) catch {
         return make(allocator, .nil);
     };
     const result = allocator.create(Value) catch return error.OutOfMemory;
@@ -2149,7 +2162,7 @@ const builtinTcpPoll_impl = if (is_wasm) native_stub.stub else builtinTcpPollNat
 /// Renders a view_node tree to an HTML string.
 fn builtinToHtmlNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     renderHtml(allocator, args[0], &buf) catch return error.OutOfMemory;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .string = buf.toOwnedSlice(allocator) catch return error.OutOfMemory };
@@ -2173,27 +2186,27 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
             for (node.attrs) |attr| {
                 if (std.mem.eql(u8, attr.key, "href")) {
                     var val_buf: [512]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&val_buf);
-                    attr.val.format(fbs.writer());
-                    const raw = fbs.getWritten();
+                    var fbs = std.Io.Writer.fixed(&val_buf);
+                    attr.val.format(&fbs);
+                    const raw = fbs.buffered();
                     const href = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
                     try buf.appendSlice(allocator, " href=\"");
                     try buf.appendSlice(allocator, href);
                     try buf.appendSlice(allocator, "\"");
                 } else if (std.mem.eql(u8, attr.key, "src")) {
                     var val_buf: [512]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&val_buf);
-                    attr.val.format(fbs.writer());
-                    const raw = fbs.getWritten();
+                    var fbs = std.Io.Writer.fixed(&val_buf);
+                    attr.val.format(&fbs);
+                    const raw = fbs.buffered();
                     const src = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
                     try buf.appendSlice(allocator, " src=\"");
                     try buf.appendSlice(allocator, src);
                     try buf.appendSlice(allocator, "\"");
                 } else if (std.mem.eql(u8, attr.key, "sends")) {
                     var val_buf: [256]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&val_buf);
-                    attr.val.format(fbs.writer());
-                    const raw = fbs.getWritten();
+                    var fbs = std.Io.Writer.fixed(&val_buf);
+                    attr.val.format(&fbs);
+                    const raw = fbs.buffered();
                     const msg = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
                     try buf.appendSlice(allocator, " data-sends=\"");
                     try buf.appendSlice(allocator, msg);
@@ -2202,18 +2215,18 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
                     // heading level - handled in tag mapping
                 } else if (std.mem.eql(u8, attr.key, "lang")) {
                     var val_buf: [64]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&val_buf);
-                    attr.val.format(fbs.writer());
-                    const raw = fbs.getWritten();
+                    var fbs = std.Io.Writer.fixed(&val_buf);
+                    attr.val.format(&fbs);
+                    const raw = fbs.buffered();
                     const lang = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
                     try buf.appendSlice(allocator, " data-lang=\"");
                     try buf.appendSlice(allocator, lang);
                     try buf.appendSlice(allocator, "\"");
                 } else if (std.mem.eql(u8, attr.key, "data-actor")) {
                     var val_buf: [256]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&val_buf);
-                    attr.val.format(fbs.writer());
-                    const raw = fbs.getWritten();
+                    var fbs = std.Io.Writer.fixed(&val_buf);
+                    attr.val.format(&fbs);
+                    const raw = fbs.buffered();
                     const name = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
                     try buf.appendSlice(allocator, " data-actor=\"");
                     try buf.appendSlice(allocator, name);
@@ -2223,9 +2236,9 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
                     std.mem.eql(u8, attr.key, "value"))
                 {
                     var val_buf: [512]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&val_buf);
-                    attr.val.format(fbs.writer());
-                    const raw = fbs.getWritten();
+                    var fbs = std.Io.Writer.fixed(&val_buf);
+                    attr.val.format(&fbs);
+                    const raw = fbs.buffered();
                     const clean = if (raw.len >= 2 and raw[0] == '"') raw[1 .. raw.len - 1] else raw;
                     try buf.appendSlice(allocator, " ");
                     try buf.appendSlice(allocator, attr.key);
@@ -2234,9 +2247,9 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
                     try buf.appendSlice(allocator, "\"");
                 } else if (std.mem.eql(u8, attr.key, "type")) {
                     var val_buf: [64]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&val_buf);
-                    attr.val.format(fbs.writer());
-                    const raw = fbs.getWritten();
+                    var fbs = std.Io.Writer.fixed(&val_buf);
+                    attr.val.format(&fbs);
+                    const raw = fbs.buffered();
                     const type_name = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
                     try buf.appendSlice(allocator, " type=\"");
                     try buf.appendSlice(allocator, type_name);
@@ -2280,9 +2293,9 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
         .nil => {},
         else => {
             var tmp: [256]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&tmp);
-            val.format(fbs.writer());
-            try buf.appendSlice(allocator, fbs.getWritten());
+            var fbs = std.Io.Writer.fixed(&tmp);
+            val.format(&fbs);
+            try buf.appendSlice(allocator, fbs.buffered());
         },
     }
 }
@@ -2319,13 +2332,22 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const port: u16 = @intCast(@max(0, @min(65535, args[0].integer)));
 
-    const sock = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return error.NotSupported;
+    // zig 0.16 took the thin syscall wrappers out of `std.posix`; libc still
+    // has them, and a `-1` with errno is the whole of their error handling.
+    const sock_fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    if (sock_fd < 0) return error.NotSupported;
+    const sock: std.posix.socket_t = sock_fd;
     // Allow port reuse so we can restart quickly
     const one: c_int = 1;
     _ = std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
-    const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-    std.posix.bind(sock, &addr.any, addr.getOsSockLen()) catch return error.NotSupported;
-    std.posix.listen(sock, 128) catch return error.NotSupported;
+    // `std.net` moved under `std.Io`, and all this ever wanted was
+    // 0.0.0.0:port, which is a sockaddr.in written out. Port is network order.
+    var addr = std.mem.zeroes(std.posix.sockaddr.in);
+    addr.family = std.posix.AF.INET;
+    addr.port = std.mem.nativeToBig(u16, port);
+    addr.addr = 0;
+    if (std.c.bind(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0) return error.NotSupported;
+    if (std.c.listen(sock, 128) < 0) return error.NotSupported;
 
     return make(allocator, .{ .integer = @intCast(sock) });
 }
@@ -2338,13 +2360,13 @@ fn builtinTcpAcceptNative(allocator: std.mem.Allocator, args: []const *const Val
     const server_fd: std.posix.socket_t = @intCast(args[0].integer);
     var client_addr: std.posix.sockaddr = undefined;
     var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-    const client_fd = std.posix.accept(server_fd, &client_addr, &addr_len, 0) catch |err| {
-        if (err == error.WouldBlock) {
-            // Non-blocking mode: no connection pending, return nil
-            return make(allocator, .nil);
-        }
+    const accepted = std.c.accept(server_fd, &client_addr, &addr_len);
+    if (accepted < 0) {
+        // Non-blocking mode: no connection pending, return nil
+        if (std.c._errno().* == @intFromEnum(std.c.E.AGAIN)) return make(allocator, .nil);
         return error.NotSupported;
-    };
+    }
+    const client_fd: std.posix.socket_t = accepted;
     return make(allocator, .{ .integer = @intCast(client_fd) });
 }
 
@@ -2372,11 +2394,11 @@ fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value
 fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
-    _ = std.posix.write(fd, args[1].string) catch {
+    if (std.c.write(fd, args[1].string.ptr, args[1].string.len) < 0) {
         const result = allocator.create(Value) catch return error.OutOfMemory;
         result.* = Value{ .atom = "error" };
         return result;
-    };
+    }
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .atom = "ok" };
     return result;
@@ -2386,7 +2408,7 @@ fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Valu
 fn builtinTcpCloseNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
-    std.posix.close(fd);
+    _ = std.c.close(fd);
     return make(allocator, .nil);
 }
 
@@ -2580,10 +2602,10 @@ fn wsWriteFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) !void {
     }
 
     // Write header
-    _ = try std.posix.write(fd, header_buf[0..header_len]);
+    if (std.c.write(fd, &header_buf, header_len) < 0) return error.NotSupported;
     // Write payload
     if (payload.len > 0) {
-        _ = try std.posix.write(fd, payload);
+        if (std.c.write(fd, payload.ptr, payload.len) < 0) return error.NotSupported;
     }
 }
 
@@ -2597,7 +2619,7 @@ fn wsWriteFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) !void {
 fn builtinViewDiffNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
 
-    var patches: std.ArrayListUnmanaged(*const Value) = .{};
+    var patches: std.ArrayListUnmanaged(*const Value) = .empty;
     diffViewNodes(allocator, args[0], args[1], "", &patches) catch return error.OutOfMemory;
 
     const result = allocator.create(Value) catch return error.OutOfMemory;
@@ -2692,7 +2714,7 @@ fn appendReplacePatch(
     node: *const Value,
 ) !void {
     // Render the new node to HTML
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     renderHtml(allocator, node, &buf) catch return;
     const html = buf.toOwnedSlice(allocator) catch return;
 
@@ -2717,15 +2739,15 @@ fn appendAttrsPatch(
     attrs: []const Value.ViewNode.ViewAttr,
 ) !void {
     // Serialize attrs as a simple string for now: "key=val,key2=val2"
-    var attr_buf: std.ArrayListUnmanaged(u8) = .{};
+    var attr_buf: std.ArrayListUnmanaged(u8) = .empty;
     for (attrs, 0..) |attr, i| {
         if (i > 0) attr_buf.appendSlice(allocator, ",") catch return;
         attr_buf.appendSlice(allocator, attr.key) catch return;
         attr_buf.appendSlice(allocator, "=") catch return;
         var val_buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&val_buf);
-        attr.val.format(fbs.writer());
-        attr_buf.appendSlice(allocator, fbs.getWritten()) catch return;
+        var fbs = std.Io.Writer.fixed(&val_buf);
+        attr.val.format(&fbs);
+        attr_buf.appendSlice(allocator, fbs.buffered()) catch return;
     }
     const attr_str = attr_buf.toOwnedSlice(allocator) catch return;
     const patch = try makePatchMap(allocator, "attrs", path, attr_str);
@@ -2768,10 +2790,11 @@ fn makePatchMap(
 fn builtinForkNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
     const result_val = allocator.create(Value) catch return error.OutOfMemory;
-    const fork_result = std.posix.fork() catch {
+    const fork_result = std.c.fork();
+    if (fork_result < 0) {
         result_val.* = Value{ .integer = -1 };
         return result_val;
-    };
+    }
     if (fork_result == 0) {
         // Child process
         result_val.* = Value{ .integer = 0 };
@@ -2795,8 +2818,9 @@ fn builtinWaitpidNative(allocator: std.mem.Allocator, args: []const *const Value
 
     const flags: u32 = if (nohang) @as(u32, 1) else 0; // WNOHANG = 1 on macOS/Linux
     const result_val = allocator.create(Value) catch return error.OutOfMemory;
-    const wait_result = std.posix.waitpid(pid, flags);
-    result_val.* = Value{ .integer = @intCast(wait_result.pid) };
+    var status: c_int = undefined;
+    const waited = std.c.waitpid(pid, &status, @intCast(flags));
+    result_val.* = Value{ .integer = @intCast(waited) };
     return result_val;
 }
 
@@ -2820,9 +2844,10 @@ fn builtinTcpSetNonblockingNative(allocator: std.mem.Allocator, args: []const *c
     const fd: std.posix.fd_t = @intCast(args[0].integer);
 
     // Get current flags and add O_NONBLOCK (same pattern as Zig stdlib)
-    var fl_flags = std.posix.fcntl(fd, std.posix.F.GETFL, 0) catch return error.NotSupported;
-    fl_flags |= 1 << @bitOffsetOf(std.posix.O, "NONBLOCK");
-    _ = std.posix.fcntl(fd, std.posix.F.SETFL, fl_flags) catch return error.NotSupported;
+    const fl_flags = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (fl_flags < 0) return error.NotSupported;
+    const nonblock: c_int = @as(c_int, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK");
+    if (std.c.fcntl(fd, std.posix.F.SETFL, fl_flags | nonblock) < 0) return error.NotSupported;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .atom = "ok" };
     return result;
@@ -3177,7 +3202,7 @@ test "write_file writes a string and read_file reads it back" {
 
     const wrote = try builtinWriteFile(alloc, args);
     try std.testing.expect(wrote.boolean);
-    defer std.fs.cwd().deleteFile(path.string) catch {};
+    defer std.Io.Dir.cwd().deleteFile(path.string) catch {};
 
     const back = try builtinReadFile(alloc, args[0..1]);
     try std.testing.expectEqualStrings(text.string, back.string);

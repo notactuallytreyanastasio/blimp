@@ -31,7 +31,10 @@ pub fn uncaughtBubble(reason: ?*const Value, source: []const u8, line: u32, col:
         var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
         const alloc = std.heap.page_allocator;
         buf.appendSlice(alloc, "A bubble reached the top of the program: ") catch {};
-        r.format(buf.writer(alloc));
+        var r_buf: [512]u8 = undefined;
+        var r_w = std.Io.Writer.fixed(&r_buf);
+        r.format(&r_w);
+        buf.appendSlice(alloc, r_w.buffered()) catch {};
         text = buf.items;
     }
     return .{
@@ -297,7 +300,10 @@ pub fn undefinedVariable(name: []const u8, source: []const u8, env: *const Envir
             hint_buf.appendSlice(allocator, "      ") catch {};
             hint_buf.appendSlice(allocator, binding.name) catch {};
             hint_buf.appendSlice(allocator, " = ") catch {};
-            binding.val.format(hint_buf.writer(allocator));
+            var val_buf: [256]u8 = undefined;
+            var val_w = std.Io.Writer.fixed(&val_buf);
+            binding.val.format(&val_w);
+            hint_buf.appendSlice(allocator, val_w.buffered()) catch {};
             hint_buf.appendSlice(allocator, "\n") catch {};
         }
     } else {
