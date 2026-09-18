@@ -1404,8 +1404,12 @@ pub const Evaluator = struct {
             return error.UndefinedVariable;
         };
 
-        // Evaluate arguments
-        const args = self.allocator.alloc(*const Value, call.args.len) catch return error.OutOfMemory;
+        // Evaluate arguments.  A builtin reads its argument vector and never
+        // keeps it -- what it keeps are the values, which live on the heap --
+        // so the vector belongs on this frame, not in an allocator that hands
+        // nothing back.  `puts` in a loop used to cost one vector an iteration.
+        var slot: ArgSlot = .{};
+        const args = try slot.take(self, call.args.len);
         for (call.args, 0..) |arg, i| {
             args[i] = try self.eval(arg);
         }
@@ -1889,9 +1893,8 @@ pub const Evaluator = struct {
                     }
                 }
                 const func = self.builtins.get(id.name) orelse return error.UndefinedVariable;
-                const args = self.allocator.alloc(*const Value, 1) catch return error.OutOfMemory;
-                args[0] = left_val;
-                return func(self.allocator, args);
+                const args = [_]*const Value{left_val};
+                return func(self.allocator, &args);
             },
             .message_send => |ms| {
                 // Pipe into message send: val |> actor <- :msg(_)
