@@ -60,8 +60,8 @@ pub fn build(b: *std.Build) void {
     });
     compile_exe.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm@20/include" });
     compile_exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm@20/lib" });
-    compile_exe.linkSystemLibrary("LLVM");
-    compile_exe.linkLibC();
+    compile_exe.root_module.linkSystemLibrary("LLVM", .{});
+    compile_exe.root_module.link_libc = true;
 
     // Compile and install the C runtime as a static object
     // Use ReleaseSafe to avoid UBSan symbols that won't link with plain cc
@@ -73,8 +73,8 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
     });
-    runtime_obj.addCSourceFile(.{ .file = b.path("src/runtime.c") });
-    runtime_obj.linkLibC();
+    runtime_obj.root_module.addCSourceFile(.{ .file = b.path("src/runtime.c") });
+    runtime_obj.root_module.link_libc = true;
     b.installArtifact(compile_exe);
 
     // Install the runtime object file alongside the compiler

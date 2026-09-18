@@ -19,35 +19,45 @@ const HeapLimit = @import("heap_limit.zig").HeapLimit;
 /// ever touched.
 const eval_stack_bytes = 512 * 1024 * 1024;
 
-pub fn main() !void {
-    var thread = try std.Thread.spawn(.{ .stack_size = eval_stack_bytes }, runOnBigStack, .{});
+/// zig 0.16 stopped letting a program help itself to argv: `main` is handed a
+/// capability instead, and `std.process.argsAlloc` is gone.  The vector is
+/// passed down to the worker thread because it is the thread that reads it.
+pub fn main(init: std.process.Init.Minimal) !void {
+    var thread = try std.Thread.spawn(
+        .{ .stack_size = eval_stack_bytes },
+        runOnBigStack,
+        .{ init.args, init.environ },
+    );
     thread.join();
 }
 
-fn runOnBigStack() void {
-    run() catch |err| {
+fn runOnBigStack(args: std.process.Args, environ: std.process.Environ) void {
+    run(args, environ) catch |err| {
         std.debug.print("Error: {}\n", .{err});
         std.process.exit(1);
     };
 }
 
-fn run() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+fn run(argv: std.process.Args, environ: std.process.Environ) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_arena = std.heap.ArenaAllocator.init(allocator);
+    defer args_arena.deinit();
+    const args = try argv.toSlice(args_arena.allocator());
 
     // Everything a Blimp program allocates comes through here.  Reading the
     // source, the argv and the ASTs do not: the ceiling is about the program's
     // appetite, not the tool's.
-    var heap_limit = HeapLimit.fromEnv(allocator);
+    var heap_limit = HeapLimit.fromEnv(allocator, environ);
     const program_heap = heap_limit.allocator();
 
     // Check for --repl flag
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--repl")) {
-        const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+        // `std.posix.isatty` is gone and `Io.File.isTty` wants an Io, which
+        // nothing else here needs, so this asks libc the same question.
+        const is_tty = std.c.isatty(std.posix.STDOUT_FILENO) != 0;
         if (is_tty) {
             repl(allocator, &heap_limit);
         } else {

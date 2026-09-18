@@ -25,10 +25,11 @@ pub const HeapLimit = struct {
 
     /// The ceiling for this run: `BLIMP_HEAP_LIMIT` in bytes, or the default.
     /// `BLIMP_HEAP_LIMIT=0` lifts it.
-    pub fn fromEnv(child: std.mem.Allocator) HeapLimit {
-        var buf: [32]u8 = undefined;
-        var fba = std.heap.FixedBufferAllocator.init(&buf);
-        const text = std.process.getEnvVarOwned(fba.allocator(), "BLIMP_HEAP_LIMIT") catch
+    ///
+    /// The environment arrives as a capability rather than being read from a
+    /// global, because zig 0.16 removed `std.process.getEnvVarOwned`.
+    pub fn fromEnv(child: std.mem.Allocator, environ: std.process.Environ) HeapLimit {
+        const text = environ.getPosix("BLIMP_HEAP_LIMIT") orelse
             return .{ .child = child, .limit = default_bytes };
         const parsed = std.fmt.parseInt(usize, std.mem.trim(u8, text, " "), 10) catch
             return .{ .child = child, .limit = default_bytes };
