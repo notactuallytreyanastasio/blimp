@@ -75,7 +75,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
 
     if (args.len < 2) {
         // No arguments -- enter REPL mode
-        const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+        const is_tty = std.c.isatty(std.posix.STDOUT_FILENO) != 0;
         if (is_tty) {
             repl(allocator, &heap_limit);
         } else {

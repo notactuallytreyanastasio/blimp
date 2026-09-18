@@ -5,13 +5,14 @@ const Checker = @import("checker.zig").Checker;
 const Codegen = @import("codegen.zig").Codegen;
 const BlimpError = @import("errors.zig").BlimpError;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_arena = std.heap.ArenaAllocator.init(allocator);
+    defer args_arena.deinit();
+    const args = try init.args.toSlice(args_arena.allocator());
 
     if (args.len < 2) {
         std.debug.print("Usage: blimp-compile <file.blimp> [-o <output>] [--dump-ir] [--run]\n", .{});
