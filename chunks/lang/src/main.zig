@@ -74,13 +74,18 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
 
     // Check for --repl flag
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--repl")) {
+        // `blimp --repl foo.blimp` evaluates the file first. Blimp has no
+        // module system, so there is no `require` to type at the prompt: a
+        // REPL over a generated library could otherwise only be reached by
+        // pasting the whole file in.
+        const preload = if (args.len >= 3) args[2] else null;
         // `std.posix.isatty` is gone and `Io.File.isTty` wants an Io, which
         // nothing else here needs, so this asks libc the same question.
         const is_tty = std.c.isatty(std.posix.STDOUT_FILENO) != 0;
         if (is_tty) {
-            repl(allocator, &heap_limit);
+            repl(allocator, &heap_limit, preload);
         } else {
-            replPlain(allocator, &heap_limit);
+            replPlain(allocator, &heap_limit, preload);
         }
         return;
     }
@@ -96,9 +101,9 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         // No arguments -- enter REPL mode
         const is_tty = std.c.isatty(std.posix.STDOUT_FILENO) != 0;
         if (is_tty) {
-            repl(allocator, &heap_limit);
+            repl(allocator, &heap_limit, null);
         } else {
-            replPlain(allocator, &heap_limit);
+            replPlain(allocator, &heap_limit, null);
         }
         return;
     }
@@ -528,7 +533,79 @@ const ValueHeap = struct {
     }
 };
 
-fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
+/// Evaluate a file into a REPL's environment before the first prompt.
+///
+/// This runs the same three steps `blimp foo.blimp` runs -- read, parse,
+/// type-check, evaluate -- rather than the REPL's own read-eval, because a
+/// file that `blimp foo.blimp` rejects must not be accepted just because the
+/// prompt is going to follow it.
+///
+/// Anything that goes wrong exits instead of prompting. A `blimp>` that
+/// appears after a half-evaluated file looks exactly like one where the load
+/// worked, and the bindings that are missing are missing silently.
+fn preloadInto(
+    arena: std.mem.Allocator,
+    evaluator: *Evaluator,
+    writer: anytype,
+    path: []const u8,
+) void {
+    // Same ceiling as a file run directly, so the two entry points accept the
+    // same files.
+    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, arena, .limited(1024 * 1024)) catch |err| {
+        std.debug.print("Error reading '{s}': {}\n", .{ path, err });
+        std.process.exit(1);
+    };
+    preloadSource(arena, evaluator, writer, source) catch std.process.exit(1);
+}
+
+/// The part of a preload that has already read the file.
+///
+/// This is split out so it can be tested. The version that exits lives one
+/// frame up: a helper that calls `std.process.exit` cannot be run by the test
+/// runner, since it takes the test runner with it.
+fn preloadSource(
+    arena: std.mem.Allocator,
+    evaluator: *Evaluator,
+    writer: anytype,
+    source: []const u8,
+) error{PreloadFailed}!void {
+    var parser = Parser.init(arena, source);
+    const nodes = parser.parseFilePublic() catch {
+        errors.parseError(source).formatPlain(writer);
+        writer.flush() catch {};
+        return error.PreloadFailed;
+    };
+
+    var checker = Checker.init(arena);
+    const check_result = checker.checkFile(nodes);
+    if (check_result.errors.len > 0) {
+        for (check_result.errors) |type_err| {
+            writer.print("Type error at line {}, col {}: {s}\n", .{
+                type_err.loc.line,
+                type_err.loc.col,
+                type_err.message,
+            }) catch {};
+        }
+        writer.print("{d} type error(s) found.\n", .{check_result.errors.len}) catch {};
+        writer.flush() catch {};
+        return error.PreloadFailed;
+    }
+
+    evaluator.setSource(source);
+    for (nodes) |node| {
+        _ = evaluator.eval(node) catch {
+            if (evaluator.last_error) |rich_err| {
+                rich_err.formatPlain(writer);
+            } else {
+                writer.writeAll("Error: unknown\n") catch {};
+            }
+            writer.flush() catch {};
+            return error.PreloadFailed;
+        };
+    }
+}
+
+fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const u8) void {
     // Source text and the ASTs parsed from it outlive every compaction.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -544,6 +621,10 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(ioenv.io, &stdout_buf);
     const stdout = &stdout_writer.interface;
+
+    if (preload) |path| {
+        preloadInto(arena.allocator(), &evaluator, &stdout_writer.interface, path);
+    }
 
     stdout.writeAll("Blimp REPL (type expressions, Ctrl-D to exit)\n") catch {};
     stdout_writer.interface.flush() catch {};
@@ -877,7 +958,7 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
     if (any_failed) std.process.exit(1);
 }
 
-fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
+fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const u8) void {
     // Source text, ASTs and the history lines outlive every compaction.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -907,6 +988,12 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit) void {
     const total_rows = term_size.rows;
     const left_cols = (total_cols * 3) / 4;
     const right_cols = total_cols - left_cols - 1; // -1 for border
+
+    // Preload before the first draw, so the bindings a file brought in appear
+    // in the environment pane rather than only after the first input.
+    if (preload) |path| {
+        preloadInto(arena.allocator(), &evaluator, &stdout_writer.interface, path);
+    }
 
     // Initial draw
     drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
@@ -1168,4 +1255,59 @@ fn drawScreen(
             },
         }
     }
+}
+
+test "preloadSource puts a file's definitions in the environment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var evaluator = Evaluator.init(arena.allocator());
+    var buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    try std.testing.expect(evaluator.env.lookup("double") == null);
+    try preloadSource(
+        arena.allocator(),
+        &evaluator,
+        &writer,
+        "def double(n: Int) -> Int do\n  n * 2\nend\n",
+    );
+    try std.testing.expect(evaluator.env.lookup("double") != null);
+}
+
+test "preloadSource refuses a file that does not parse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var evaluator = Evaluator.init(arena.allocator());
+    var buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    try std.testing.expectError(
+        error.PreloadFailed,
+        preloadSource(arena.allocator(), &evaluator, &writer, "def f(n: Int) -> Int do\n  n\n"),
+    );
+}
+
+test "preloadSource refuses a file whose top level fails" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var evaluator = Evaluator.init(arena.allocator());
+    var buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+
+    // The definition that came before the failure is in the environment, which
+    // is exactly why the caller exits rather than prompting: a half-loaded
+    // environment is indistinguishable from a loaded one at the prompt.
+    try std.testing.expectError(
+        error.PreloadFailed,
+        preloadSource(
+            arena.allocator(),
+            &evaluator,
+            &writer,
+            "def f(n: Int) -> Int do\n  n\nend\nf(\"x\")\n",
+        ),
+    );
+    try std.testing.expect(evaluator.env.lookup("f") != null);
 }
