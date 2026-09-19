@@ -5,13 +5,14 @@ const Checker = @import("checker.zig").Checker;
 const Codegen = @import("codegen.zig").Codegen;
 const BlimpError = @import("errors.zig").BlimpError;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_arena = std.heap.ArenaAllocator.init(allocator);
+    defer args_arena.deinit();
+    const args = try init.args.toSlice(args_arena.allocator());
 
     if (args.len < 2) {
         std.debug.print("Usage: blimp-compile <file.blimp> [-o <output>] [--dump-ir] [--run]\n", .{});
@@ -43,7 +44,7 @@ pub fn main() !void {
     }
 
     // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, input_file, 1024 * 1024) catch |err| {
+    const source = std.Io.Dir.cwd().readFileAlloc(allocator, input_file, 1024 * 1024) catch |err| {
         std.debug.print("Error reading '{s}': {}\n", .{ input_file, err });
         std.process.exit(1);
     };
@@ -169,11 +170,11 @@ pub fn main() !void {
     }
 
     // Clean up object/bitcode file
-    std.fs.cwd().deleteFile(obj_path) catch {};
+    std.Io.Dir.cwd().deleteFile(obj_path) catch {};
 
     if (run_after) {
         // Execute the compiled binary (use absolute path)
-        const abs_output = try std.fs.cwd().realpathAlloc(allocator, output_name);
+        const abs_output = try std.Io.Dir.cwd().realpathAlloc(allocator, output_name);
         defer allocator.free(abs_output);
         const abs_z = try allocator.dupeZ(u8, abs_output);
         defer allocator.free(abs_z);
@@ -190,25 +191,25 @@ pub fn main() !void {
 
         // Print stdout/stderr
         if (run_result.stdout.len > 0) {
-            const stdout = std.fs.File.stdout();
+            const stdout = std.Io.File.stdout();
             stdout.writeAll(run_result.stdout) catch {};
         }
         if (run_result.stderr.len > 0) {
-            const stderr = std.fs.File.stderr();
+            const stderr = std.Io.File.stderr();
             stderr.writeAll(run_result.stderr) catch {};
         }
 
         // Clean up binary
-        std.fs.cwd().deleteFile(output_name) catch {};
+        std.Io.Dir.cwd().deleteFile(output_name) catch {};
 
         // Canvas mode: read JSON events and generate HTML
         if (canvas_mode) {
-            const json_data = std.fs.cwd().readFileAlloc(allocator, "blimp_canvas.json", 1024 * 1024) catch |err| {
+            const json_data = std.Io.Dir.cwd().readFileAlloc(allocator, "blimp_canvas.json", 1024 * 1024) catch |err| {
                 std.debug.print("Canvas: no events generated ({s})\n", .{@errorName(err)});
                 return;
             };
             defer allocator.free(json_data);
-            std.fs.cwd().deleteFile("blimp_canvas.json") catch {};
+            std.Io.Dir.cwd().deleteFile("blimp_canvas.json") catch {};
 
             // Derive html name from input file
             const html_name = try std.fmt.allocPrint(allocator, "{s}.html", .{
@@ -221,7 +222,7 @@ pub fn main() !void {
                 return;
             };
             defer allocator.free(html_content);
-            std.fs.cwd().writeFile(.{ .sub_path = html_name, .data = html_content }) catch |err| {
+            std.Io.Dir.cwd().writeFile(.{ .sub_path = html_name, .data = html_content }) catch |err| {
                 std.debug.print("Canvas: cannot write {s}: {s}\n", .{ html_name, @errorName(err) });
                 return;
             };

@@ -39,8 +39,32 @@ pub fn build(b: *std.Build) void {
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
+    // `lib.zig` does not reach `main.zig`, so for as long as the test step
+    // depended only on the library module, a `test` block written in main.zig
+    // was never compiled -- coverage that reads as coverage and runs nothing.
+    // The CLI dispatch and the REPL live there.
+    const main_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "blimp", .module = lib_mod },
+            },
+        }),
+    });
+    const run_main_tests = b.addRunArtifact(main_tests);
+
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
+    test_step.dependOn(&run_main_tests.step);
+
+    // -- Interpreter only --
+    // The default step also builds blimp-compile, which needs LLVM 20 on the
+    // machine.  The benchmarks, the REPL and the test suite do not, so they
+    // ask for this instead of failing on a dependency they never use.
+    const interp_step = b.step("interp", "Build just the interpreter (no LLVM needed)");
+    interp_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
 
     // -- Compiler executable (blimp-compile, links LLVM) --
     const compile_exe = b.addExecutable(.{
@@ -53,8 +77,8 @@ pub fn build(b: *std.Build) void {
     });
     compile_exe.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm@20/include" });
     compile_exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm@20/lib" });
-    compile_exe.linkSystemLibrary("LLVM");
-    compile_exe.linkLibC();
+    compile_exe.root_module.linkSystemLibrary("LLVM", .{});
+    compile_exe.root_module.link_libc = true;
 
     // Compile and install the C runtime as a static object
     // Use ReleaseSafe to avoid UBSan symbols that won't link with plain cc
@@ -66,8 +90,8 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
     });
-    runtime_obj.addCSourceFile(.{ .file = b.path("src/runtime.c") });
-    runtime_obj.linkLibC();
+    runtime_obj.root_module.addCSourceFile(.{ .file = b.path("src/runtime.c") });
+    runtime_obj.root_module.link_libc = true;
     b.installArtifact(compile_exe);
 
     // Install the runtime object file alongside the compiler

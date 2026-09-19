@@ -67,6 +67,13 @@ body {
 .bi-reply { color: #2a7f3f; }
 .bi-hint { color: #999; margin: 0; }
 @media (max-width: 900px) { .inspect { grid-template-columns: 1fr; } }
+
+/* receipt printer */
+.receipt { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 1rem; font-size: 0.85rem; color: #666; }
+.receipt button { font: inherit; border: 1px solid #bbb; background: #fff; border-radius: 3px; padding: 0.35rem 0.7rem; cursor: pointer; color: #222; }
+.receipt button:disabled { color: #999; cursor: default; }
+.receipt select { font: inherit; }
+.receipt .rstatus { color: #999; }
 @media (max-width: 900px) {
   .layout { flex-direction: column; }
   .layout > .viz { position: static; width: 100%; }
@@ -173,6 +180,12 @@ body {
       <div class="pane"><h3>actor</h3><div id="detail"></div></div>
       <div class="pane"><h3>ticker</h3><div id="ticker"></div></div>
     </div>
+    <div class="receipt">
+      <label><input type="checkbox" id="live"> 🧾 print live</label>
+      <button id="print10" type="button" title="posts one receipt to a nerves_receipts console on localhost:4090">print the next 10 seconds</button>
+      <select id="printmode"><option value="notable">moves, locks and clears</option><option value="everything">every tick</option></select>
+      <span class="rstatus" id="rstatus"></span>
+    </div>
   </div>
 </div>
 
@@ -180,6 +193,7 @@ body {
 <script src="repl/blimp-view.js"></script>
 <script src="repl/canvas.js?v=2026-09-04b"></script>
 <script src="repl/blimp-inspector.js?v=2026-09-04b"></script>
+<script src="repl/blimp-receipt.js?v=2026-09-04e"></script>
 <script>
 (async function () {
   var statusEl = document.getElementById('status');
@@ -199,6 +213,62 @@ body {
   });
   viz.onSelect = function (ref) { inspector.select(ref); };
   window.__inspector = inspector;
+
+  // "print the next 10 seconds": one receipt to a receipts console on this
+  // machine. ?receipt=file:/tmp/x.bin writes ESC/POS bytes instead (tests).
+  var rstatus = document.getElementById('rstatus');
+  var printBtn = document.getElementById('print10');
+  var q = /[?&]receipt=([^&]+)/.exec(location.search);
+  var backend = { backend: 'usb' };
+  if (q) {
+    var spec = decodeURIComponent(q[1]).split(':');
+    backend = spec[0] === 'file' ? { backend: 'file', path: spec.slice(1).join(':') } : { backend: spec[0] };
+  }
+  var sender = BlimpReceipt.postToConsole('http://localhost:4090/api/print', backend);
+  var recorder = new BlimpReceipt.Recorder({
+    seconds: 10,
+    title: 'BLIMP TRACE: tetris',
+    sender: function (md, frames) {
+      sender(md).then(function () { rstatus.textContent = 'sent ' + frames + ' frame(s) to the printer'; })
+                .catch(function (e) { rstatus.textContent = 'no console on localhost:4090 (' + e.message + ')'; });
+    },
+    onChange: function (r) {
+      printBtn.disabled = r.active;
+      if (r.active) rstatus.textContent = 'recording, ' + r.remaining() + 's left, ' + r.frames.length + ' frame(s)';
+    }
+  });
+  window.__recorder = recorder;
+  printBtn.addEventListener('click', function () {
+    recorder.mode = document.getElementById('printmode').value;
+    rstatus.textContent = 'recording';
+    recorder.start();
+  });
+
+  // live: a WebSocket to the console (one print against its rate limit),
+  // then every frame goes straight to the paper; unticking closes the
+  // socket and the console feeds and cuts.
+  var liveBox = document.getElementById('live');
+  var live = new BlimpReceipt.LivePrinter({
+    title: 'BLIMP TRACE live: tetris',
+    socket: BlimpReceipt.liveSocket('ws://localhost:4090/api/live/ws', backend),
+    onChange: function (l) {
+      if (l.status === 'connecting') rstatus.textContent = 'connecting to the printer console...';
+      else if (l.status === 'live') rstatus.textContent = 'live, ' + l.sentLines + ' line(s) on paper';
+      else if (l.status === 'error') { rstatus.textContent = 'printer console refused or dropped the socket (localhost:4090, rate limit is 5 a minute)'; liveBox.checked = false; }
+      else if (l.status === 'closed') { rstatus.textContent = 'stopped after ' + l.sentLines + ' line(s)'; liveBox.checked = false; }
+    }
+  });
+  window.__live = live;
+  liveBox.addEventListener('change', function () {
+    live.mode = document.getElementById('printmode').value;
+    if (liveBox.checked) live.start(); else live.stop();
+  });
+  window.addEventListener('pagehide', function () { live.stop(); });
+  liveBox.addEventListener('change', function () {
+    live.mode = document.getElementById('printmode').value;
+    if (liveBox.checked) live.start(); else live.stop();
+  });
+  window.addEventListener('pagehide', function () { live.stop(); });
 
   var blimp = new Blimp();
   blimp.onPrint(function () {});
@@ -231,6 +301,8 @@ body {
       var st = blimp.getState();
       viz.feed(st, null);
       inspector.feed(st);
+      recorder.feed(st);
+      live.feed(st);
       if (!inspector.selected) {
         var game = ledger.actors().filter(function (a) { return a.type === 'Tetris.Game'; })[0];
         if (game) inspector.select(game.ref);

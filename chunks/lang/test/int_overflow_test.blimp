@@ -1,0 +1,52 @@
+# Regression test for issue #27: arithmetic that leaves signed 64-bit range
+# used to panic the interpreter with a Zig stack trace. It now wraps.
+#
+# 9223372036854775808 does not lex, so minInt is written 0 - maxInt - 1.
+
+actor IntOverflowTests do
+  test "add wraps past maxInt" do
+    assert_eq(9223372036854775807 + 1, 0 - 9223372036854775807 - 1)
+  end
+
+  test "add wraps past minInt" do
+    assert_eq((0 - 9223372036854775807 - 1) + -1, 9223372036854775807)
+  end
+
+  test "subtract wraps past minInt" do
+    assert_eq((0 - 9223372036854775807 - 1) - 1, 9223372036854775807)
+  end
+
+  test "subtract wraps past maxInt" do
+    assert_eq(9223372036854775807 - -1, 0 - 9223372036854775807 - 1)
+  end
+
+  test "multiply wraps past maxInt" do
+    assert_eq(9223372036854775807 * 2, 0 - 2)
+  end
+
+  test "divide minInt by -1 wraps to minInt" do
+    assert_eq((0 - 9223372036854775807 - 1) / -1, 0 - 9223372036854775807 - 1)
+  end
+
+  test "negate minInt wraps to minInt" do
+    assert_eq(-(0 - 9223372036854775807 - 1), 0 - 9223372036854775807 - 1)
+  end
+
+  test "abs of minInt wraps to minInt" do
+    assert_eq(abs(0 - 9223372036854775807 - 1), 0 - 9223372036854775807 - 1)
+  end
+
+  test "sum wraps past maxInt" do
+    assert_eq(sum([9223372036854775807, 1]), 0 - 9223372036854775807 - 1)
+  end
+
+  test "rem of minInt by -1 is still zero" do
+    assert_eq(rem(0 - 9223372036854775807 - 1, -1), 0)
+  end
+
+  test "in-range arithmetic is unchanged" do
+    assert_eq(9223372036854775807 + 0, 9223372036854775807)
+    assert_eq((0 - 9223372036854775807 - 1) + 9223372036854775807, 0 - 1)
+    assert_eq((0 - 9223372036854775807 - 1) / 2, 0 - 4611686018427387904)
+  end
+end

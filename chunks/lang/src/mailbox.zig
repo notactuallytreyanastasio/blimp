@@ -13,7 +13,7 @@ pub const Mailbox = struct {
     messages: std.ArrayListUnmanaged(Message),
 
     pub fn init() Mailbox {
-        return .{ .messages = .{} };
+        return .{ .messages = .empty };
     }
 
     pub fn enqueue(self: *Mailbox, allocator: std.mem.Allocator, msg: Message) void {
