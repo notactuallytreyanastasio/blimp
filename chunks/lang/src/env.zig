@@ -20,6 +20,41 @@ pub const Environment = struct {
 
     pub const Scope = struct {
         bindings: std.ArrayList(Binding),
+        /// What a closure captured, borrowed from the closure rather than
+        /// copied into `bindings`.
+        ///
+        /// Copying them in cost a `defineIn` each, and `defineIn` scans the
+        /// scope for an existing name, so installing a closure's captures was
+        /// quadratic in how many there were. Every translated Temper program
+        /// carries the ~400-definition prelude, every one of those definitions
+        /// captures every other, and so every call bound 400 names at a cost
+        /// of 80,000 string comparisons. A bare 1600-iteration loop took 1ms
+        /// on its own and 2409ms with the prelude in the file.
+        ///
+        /// Borrowing is safe because the closure outlives the call -- it is
+        /// the callee -- and `gc.compact` runs only between REPL evaluations,
+        /// when the only scope is the global one and it has no captures.
+        captured: []const Value.CapturedBinding = &.{},
+        /// The `names` mask for [captured], computed once when the closure was
+        /// built rather than per call.
+        captured_names: u64 = 0,
+        /// Where the current callee's own bindings start.
+        ///
+        /// A tail call reuses its frame, so `bindings` below this index belong
+        /// to a callee that has already returned. Those are the caller's
+        /// locals, which a Blimp closure can see -- but they must not shadow
+        /// the *current* callee's captures, which is what copying the captures
+        /// in used to prevent: `defineIn` overwrote the stale entry.
+        ///
+        /// Dropping that gave the regex matcher a continuation from the wrong
+        /// frame. `temper_rx_seq_at` ran off the end of its node list and kept
+        /// going, because the `k` it called was a stale `k` rather than the
+        /// one it had captured:
+        ///
+        ///     seq_at idx=2 pos=2 n=2
+        ///     seq_at idx=3 pos=2 n=2
+        ///     seq_at idx=4 pos=2 n=2
+        own_base: usize = 0,
         /// One bit per name in this scope, by hash, maintained by `defineIn`.
         /// A lookup whose bit is clear skips the scope without comparing a
         /// single string.
@@ -65,6 +100,64 @@ pub const Environment = struct {
         self.scopes.append(self.allocator, .{ .bindings = bindings }) catch {};
     }
 
+    /// Lend the current scope a closure's captured bindings.
+    ///
+    /// They are visible to lookup but are not in `bindings`, so a parameter or
+    /// a local defined afterwards shadows a capture of the same name, which is
+    /// the order `define` gave before.
+    pub fn lendCaptured(self: *Environment, captured: []const Value.CapturedBinding, names: u64) void {
+        if (self.scopes.items.len == 0) return;
+        const index = self.scopes.items.len - 1;
+        const existing = self.scopes.items[index].captured;
+        // A tail call reuses the frame, so the scope may already have been
+        // lent the previous callee's captures. A Blimp closure sees its
+        // caller's frame, so those cannot simply be dropped: they are folded
+        // into the scope's own bindings first, where a name the scope already
+        // binds wins. Self-recursion lends the same slice every time and skips
+        // all of this.
+        if (existing.ptr == captured.ptr and existing.len == captured.len) {
+            // The same closure re-entering its own frame, which is what every
+            // tail-recursive loop does. Its previous parameters and locals are
+            // about to be replaced, so the region is reused rather than a
+            // second copy appended -- otherwise a loop grows its frame once
+            // per iteration, which `memory_test` measures and rejects.
+            const scope = &self.scopes.items[index];
+            scope.bindings.shrinkRetainingCapacity(scope.own_base);
+            return;
+        }
+        if (existing.len != 0) {
+            // A different callee taking over the frame. What the last one
+            // captured becomes part of what it leaves behind, since a Blimp
+            // closure can see the frame it was called from. Dropping these
+            // gets a continuation from the wrong closure, which the regex
+            // engine reports as
+            //
+            //     Handler :fn expects 4 argument(s), got 2.
+            //
+            // Only the outgoing callee's *own* region is checked for a name
+            // that would shadow one of these: names within `existing` are
+            // unique, and anything below that region is older still, so a
+            // capture appended here is right to win over it. Checking all of
+            // `bindings` made this quadratic, which is the cost the rest of
+            // this commit is about removing.
+            const own_len = self.scopes.items[index].bindings.items.len;
+            const own_base = self.scopes.items[index].own_base;
+            outer: for (existing) |b| {
+                for (self.scopes.items[index].bindings.items[own_base..own_len]) |binding| {
+                    if (std.mem.eql(u8, binding.name, b.name)) continue :outer;
+                }
+                const sc = &self.scopes.items[index];
+                sc.names |= nameBit(b.name);
+                sc.bindings.append(self.allocator, .{ .name = b.name, .val = b.val }) catch {};
+            }
+        }
+        const scope = &self.scopes.items[index];
+        scope.captured = captured;
+        scope.captured_names = names;
+        // Everything already in the frame belongs to whoever ran here before.
+        scope.own_base = scope.bindings.items.len;
+    }
+
     /// Pop the current scope (leaving a block).
     pub fn popScope(self: *Environment) void {
         if (self.scopes.pop()) |scope| self.recycle(scope);
@@ -99,7 +192,15 @@ pub const Environment = struct {
         if (base + 1 >= self.scopes.items.len) return;
         var i: usize = base + 1;
         while (i < self.scopes.items.len) : (i += 1) {
-            for (self.scopes.items[i].bindings.items) |b| {
+            // A collapsed scope's captures are copied in, because the scope
+            // they were lent to is about to go and `base` may have captures of
+            // its own. This is the one place that still pays the old cost, and
+            // it is per tail call rather than per call.
+            const scope = self.scopes.items[i];
+            for (scope.captured) |b| {
+                self.defineIn(base, b.name, b.val);
+            }
+            for (scope.bindings.items) |b| {
                 self.defineIn(base, b.name, b.val);
             }
         }
@@ -117,8 +218,12 @@ pub const Environment = struct {
     fn defineIn(self: *Environment, index: usize, name: []const u8, value: *const Value) void {
         const scope = &self.scopes.items[index];
         scope.names |= nameBit(name);
-        // Check for existing binding to update
-        for (scope.bindings.items) |*binding| {
+        // Only the current callee's own region is searched for an existing
+        // binding. Reaching below `own_base` would update an entry a previous
+        // callee left in this frame, and it would stay at that low index --
+        // where `lookup` reads it only *after* the captures, so the callee's
+        // own parameter would lose to something it captured.
+        for (scope.bindings.items[scope.own_base..]) |*binding| {
             if (std.mem.eql(u8, binding.name, name)) {
                 binding.val = value;
                 return;
@@ -128,24 +233,38 @@ pub const Environment = struct {
     }
 
     /// Return all bindings visible from the current scope (innermost wins).
+    /// `seen` is a hash set rather than a list that is searched.
+    ///
+    /// Every `def` and every `fn` literal snapshots the visible environment
+    /// through here, and with the ~400-definition prelude in the file the
+    /// linear search made one `fn(x) do x end` cost 3ms.
     pub fn allBindings(self: *const Environment, allocator: std.mem.Allocator) []const Binding {
-        var seen = std.ArrayList([]const u8){ .items = &.{}, .capacity = 0 };
+        var seen: std.StringHashMapUnmanaged(void) = .{};
         var result = std.ArrayList(Binding){ .items = &.{}, .capacity = 0 };
 
         // Walk from innermost to outermost
         var i: usize = self.scopes.items.len;
         while (i > 0) {
             i -= 1;
-            for (self.scopes.items[i].bindings.items) |binding| {
-                var already = false;
-                for (seen.items) |s| {
-                    if (std.mem.eql(u8, s, binding.name)) {
-                        already = true;
-                        break;
-                    }
+            const scope = self.scopes.items[i];
+            // `seen` keeps the first of a name, so these are walked in the
+            // order `lookup` resolves them: the callee's own bindings, then
+            // what it captured, then what an earlier callee left behind.
+            for (scope.bindings.items[scope.own_base..]) |binding| {
+                const got = seen.getOrPut(allocator, binding.name) catch continue;
+                if (!got.found_existing) {
+                    result.append(allocator, binding) catch {};
                 }
-                if (!already) {
-                    seen.append(allocator, binding.name) catch {};
+            }
+            for (scope.captured) |binding| {
+                const got = seen.getOrPut(allocator, binding.name) catch continue;
+                if (!got.found_existing) {
+                    result.append(allocator, .{ .name = binding.name, .val = binding.val }) catch {};
+                }
+            }
+            for (scope.bindings.items[0..scope.own_base]) |binding| {
+                const got = seen.getOrPut(allocator, binding.name) catch continue;
+                if (!got.found_existing) {
                     result.append(allocator, binding) catch {};
                 }
             }
@@ -160,13 +279,34 @@ pub const Environment = struct {
         while (i > 0) {
             i -= 1;
             const scope = self.scopes.items[i];
-            if (scope.names & bit == 0) continue;
-            // Search backwards for most recent binding
-            var j: usize = scope.bindings.items.len;
-            while (j > 0) {
-                j -= 1;
-                if (std.mem.eql(u8, scope.bindings.items[j].name, name)) {
-                    return scope.bindings.items[j].val;
+            // Three tiers, in the order copying the captures in used to
+            // produce: what the current callee bound, then what it captured,
+            // then what an earlier callee left in a reused frame.
+            if (scope.names & bit != 0) {
+                var j: usize = scope.bindings.items.len;
+                while (j > scope.own_base) {
+                    j -= 1;
+                    if (std.mem.eql(u8, scope.bindings.items[j].name, name)) {
+                        return scope.bindings.items[j].val;
+                    }
+                }
+            }
+            if (scope.captured_names & bit != 0) {
+                var k: usize = scope.captured.len;
+                while (k > 0) {
+                    k -= 1;
+                    if (std.mem.eql(u8, scope.captured[k].name, name)) {
+                        return scope.captured[k].val;
+                    }
+                }
+            }
+            if (scope.names & bit != 0) {
+                var j: usize = scope.own_base;
+                while (j > 0) {
+                    j -= 1;
+                    if (std.mem.eql(u8, scope.bindings.items[j].name, name)) {
+                        return scope.bindings.items[j].val;
+                    }
                 }
             }
         }
@@ -339,4 +479,134 @@ test "inner scope shadows outer" {
 
     env.popScope();
     try std.testing.expect(env.lookup("x").?.eql(Value{ .integer = 1 }));
+}
+
+test "a call does not pay for what the closure captured" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const val = try alloc.create(Value);
+    val.* = Value{ .integer = 7 };
+
+    // A closure that captured four hundred names, which is the shape every
+    // translated Temper program has: the prelude defines that many and each
+    // definition captures all of them.
+    var captured = try alloc.alloc(Value.CapturedBinding, 400);
+    var names: u64 = 0;
+    for (0..400) |i| {
+        const name = try std.fmt.allocPrint(alloc, "prelude_helper_{d}", .{i});
+        captured[i] = .{ .name = name, .val = val };
+        names |= Environment.nameBit(name);
+    }
+
+    env.pushScope();
+    env.lendCaptured(captured, names);
+    // Lending is what a call does. Nothing was written into the scope, so the
+    // cost does not grow with how much was captured.
+    try std.testing.expectEqual(@as(usize, 0), env.scopes.items[env.scopes.items.len - 1].bindings.items.len);
+    try std.testing.expect(env.lookup("prelude_helper_399") != null);
+    try std.testing.expect(env.lookup("prelude_helper_0") != null);
+    try std.testing.expect(env.lookup("never_defined") == null);
+}
+
+test "a parameter shadows a capture of the same name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const captured_val = try alloc.create(Value);
+    captured_val.* = Value{ .integer = 1 };
+    const param_val = try alloc.create(Value);
+    param_val.* = Value{ .integer = 2 };
+
+    const captured = try alloc.alloc(Value.CapturedBinding, 1);
+    captured[0] = .{ .name = "x", .val = captured_val };
+
+    env.pushScope();
+    env.lendCaptured(captured, Environment.nameBit("x"));
+    try std.testing.expect(env.lookup("x").?.eql(Value{ .integer = 1 }));
+    // A call lends the captures and then binds its parameters, so the
+    // parameter has to win -- which it does because lookup reads `bindings`
+    // before `captured`.
+    env.define("x", param_val);
+    try std.testing.expect(env.lookup("x").?.eql(Value{ .integer = 2 }));
+}
+
+test "collapsing a scope keeps what it was lent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const val = try alloc.create(Value);
+    val.* = Value{ .integer = 42 };
+    const captured = try alloc.alloc(Value.CapturedBinding, 1);
+    captured[0] = .{ .name = "helper", .val = val };
+
+    const base = env.depth();
+    env.pushScope();
+    env.lendCaptured(captured, Environment.nameBit("helper"));
+    env.pushScope();
+    // A tail call collapses the frames it is leaving. A capture that only the
+    // collapsed scope was lent has to survive, or the callee cannot see what
+    // its caller could.
+    env.collapseTo(base);
+    try std.testing.expect(env.lookup("helper") != null);
+}
+
+test "a callee's capture beats what an earlier callee left in the frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const stale = try alloc.create(Value);
+    stale.* = Value{ .integer = 1 };
+    const mine = try alloc.create(Value);
+    mine.* = Value{ .integer = 2 };
+
+    const first = try alloc.alloc(Value.CapturedBinding, 1);
+    first[0] = .{ .name = "other", .val = stale };
+    const second = try alloc.alloc(Value.CapturedBinding, 1);
+    second[0] = .{ .name = "k", .val = mine };
+
+    env.pushScope();
+    // One callee runs in the frame and binds `k`...
+    env.lendCaptured(first, Environment.nameBit("other"));
+    env.define("k", stale);
+    // ...then tail-calls another, which captured its own `k`. The one left
+    // behind must not shadow it. This is the regex engine's continuation:
+    // when it did, `temper_rx_seq_at` ran off the end of its node list and
+    // kept calling itself, because the `k` it reached was the wrong one.
+    env.lendCaptured(second, Environment.nameBit("k"));
+    try std.testing.expect(env.lookup("k").?.eql(Value{ .integer = 2 }));
+    // What the outgoing callee captured is still reachable, below both.
+    try std.testing.expect(env.lookup("other") != null);
+}
+
+test "the same closure re-entering its frame does not grow it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const val = try alloc.create(Value);
+    val.* = Value{ .integer = 5 };
+    const captured = try alloc.alloc(Value.CapturedBinding, 1);
+    captured[0] = .{ .name = "g", .val = val };
+
+    env.pushScope();
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        // What a tail-recursive loop does: lend the same captures, bind the
+        // same parameter names again.
+        env.lendCaptured(captured, Environment.nameBit("g"));
+        env.define("n", val);
+        env.define("acc", val);
+    }
+    const scope = env.scopes.items[env.scopes.items.len - 1];
+    try std.testing.expectEqual(@as(usize, 2), scope.bindings.items.len);
 }

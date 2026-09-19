@@ -831,8 +831,10 @@ pub const Evaluator = struct {
         // def is sugar for: name = fn(params) do body end
         const bindings = self.env.allBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
+        var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
             captured[i] = .{ .name = b.name, .val = b.val };
+            captured_names |= Environment.nameBit(b.name);
         }
 
         const c = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
@@ -840,6 +842,7 @@ pub const Evaluator = struct {
             .params = ds.params,
             .body = ds.body,
             .env = captured,
+            .env_names = captured_names,
             .return_type = ds.return_type,
         };
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -924,8 +927,10 @@ pub const Evaluator = struct {
     fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {
         const bindings = self.env.allBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
+        var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
             captured[i] = .{ .name = b.name, .val = b.val };
+            captured_names |= Environment.nameBit(b.name);
         }
 
         const c = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
@@ -933,6 +938,7 @@ pub const Evaluator = struct {
             .params = fe.params,
             .body = fe.body,
             .env = captured,
+            .env_names = captured_names,
             .return_type = fe.return_type,
         };
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -1685,10 +1691,8 @@ pub const Evaluator = struct {
                 return error.TypeError;
             }
 
-            // Bind captured variables
-            for (c.env) |binding| {
-                self.env.define(binding.name, binding.val);
-            }
+            // Lent, not copied. See Environment.Scope.captured.
+            self.env.lendCaptured(c.env, c.env_names);
 
             // Bind parameters with runtime type checking
             for (c.params, 0..) |param, i| {

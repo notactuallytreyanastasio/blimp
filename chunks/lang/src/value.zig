@@ -78,6 +78,10 @@ pub const Value = union(enum) {
         params: []const @import("ast.zig").Node.HandlerParam, // typed params
         body: []const @import("ast.zig").Node,
         env: []const CapturedBinding,
+        /// The `Environment.nameBit` mask of every name in [env], built once
+        /// when the closure is, so a call can lend the captures to a scope
+        /// without walking them.
+        env_names: u64 = 0,
         return_type: ?[]const u8 = null,
     };
 
