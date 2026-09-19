@@ -2331,7 +2331,12 @@ fn blimpTagToHtml(tag: []const u8) []const u8 {
 /// tcp_listen(port: Int) -> Int  (server socket fd)
 fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
-    const port: u16 = @intCast(@max(0, @min(65535, args[0].integer)));
+    // Not clamped. `tcp_connect` stopped clamping and this did not, so
+    // `tcp_listen(99999)` still bound 65535 -- a program that asked for a port
+    // that does not exist got a working listener on a different one, and
+    // nothing said which.
+    if (args[0].integer < 0 or args[0].integer > 65535) return make(allocator, .nil);
+    const port: u16 = @intCast(args[0].integer);
 
     // zig 0.16 took the thin syscall wrappers out of `std.posix`; libc still
     // has them, and a `-1` with errno is the whole of their error handling.
