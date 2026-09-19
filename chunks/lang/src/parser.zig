@@ -2426,9 +2426,15 @@ test "parse situation with hole comment directive" {
     // First branch: :ok -> reply 1
     try std.testing.expectEqualStrings("ok", sit.branches[0].pattern.?.kind.atom_lit.name);
 
-    // Second branch: _ (hole, no arrow, no body)
+    // Second branch: `_` with no arrow. Its body is the hole itself, which is
+    // what `evalHole` looks for -- a body-less hole with nowhere to put its
+    // directive would be a hole nothing could fill. The comment above this
+    // assertion used to say "no body" and the assertion used to check for
+    // one; the parser has answered a one-element body since this file's first
+    // commit, and nothing noticed because `zig build test` did not compile.
     try std.testing.expect(sit.branches[1].pattern == null);
-    try std.testing.expectEqual(@as(usize, 0), sit.branches[1].body.len);
+    try std.testing.expectEqual(@as(usize, 1), sit.branches[1].body.len);
+    try std.testing.expect(sit.branches[1].body[0].kind == .hole);
 }
 
 test "parse dotted actor name in message send" {
