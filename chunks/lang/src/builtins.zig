@@ -3021,9 +3021,22 @@ fn builtinTcpPollNative(allocator: std.mem.Allocator, args: []const *const Value
     _ = std.posix.poll(pollfds, timeout_ms) catch return error.NotSupported;
 
     // Collect ready fds
+    const ready_events = std.posix.POLL.IN | std.posix.POLL.HUP |
+        std.posix.POLL.ERR | std.posix.POLL.NVAL;
     var ready_list: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
     for (pollfds) |pfd| {
-        if (pfd.revents & std.posix.POLL.IN != 0) {
+        // Not `POLL.IN` alone. An fd that has hung up, errored, or was never
+        // valid is one a read will not block on -- it returns 0 or fails --
+        // and reporting it as not ready leaves the caller with nothing to
+        // wait for and nothing to do, which is a spin.
+        //
+        // On macOS a `poll` of /dev/null answers at once with none of these
+        // bits, so `blimp prog.blimp < /dev/null` burned a core: the async
+        // scheduler asked for a 1000ms wait, got an immediate answer with
+        // nothing ready, and went round again. Callers that watch sockets
+        // gain from it too -- a peer that hung up now shows up as readable,
+        // gets read to end of stream and closed, instead of never appearing.
+        if (pfd.revents & ready_events != 0) {
             const fd_val = allocator.create(Value) catch return error.OutOfMemory;
             fd_val.* = Value{ .integer = @intCast(pfd.fd) };
             ready_list.append(allocator, fd_val) catch return error.OutOfMemory;
@@ -3404,4 +3417,61 @@ test "now_ms goes forwards and has more than second resolution" {
     const second = try builtinNowMs(a, &.{});
     // 5ms is unmeasurable with `now()`, which is the reason this exists.
     try std.testing.expect(second.integer > first.integer);
+}
+
+test "poll reports a hung-up fd as ready" {
+    if (is_wasm) return;
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A pipe whose write end is closed. A read on it will not block -- it
+    // answers end of stream -- so a poll that called it "not ready" would
+    // leave a caller with nothing to wait for and nothing to do.
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.SkipZigTest;
+    _ = std.c.close(fds[1]);
+    defer _ = std.c.close(fds[0]);
+
+    const fd = try make(a, .{ .integer = @intCast(fds[0]) });
+    const list = try a.alloc(*const Value, 1);
+    list[0] = fd;
+    const fd_list = try make(a, .{ .list = list });
+    // A timeout long enough that returning it would be obvious.
+    const timeout = try make(a, .{ .integer = 5000 });
+
+    const before = try builtinNowMs(a, &.{});
+    const ready = try builtinTcpPollNative(a, &.{ fd_list, timeout });
+    const after = try builtinNowMs(a, &.{});
+
+    try std.testing.expectEqual(@as(usize, 1), ready.list.len);
+    try std.testing.expect(after.integer - before.integer < 1000);
+}
+
+test "poll waits when nothing is ready" {
+    if (is_wasm) return;
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Both ends open and nothing written: the one case that must block.
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.SkipZigTest;
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    const fd = try make(a, .{ .integer = @intCast(fds[0]) });
+    const list = try a.alloc(*const Value, 1);
+    list[0] = fd;
+    const fd_list = try make(a, .{ .list = list });
+    const timeout = try make(a, .{ .integer = 60 });
+
+    const before = try builtinNowMs(a, &.{});
+    const ready = try builtinTcpPollNative(a, &.{ fd_list, timeout });
+    const after = try builtinNowMs(a, &.{});
+
+    try std.testing.expectEqual(@as(usize, 0), ready.list.len);
+    try std.testing.expect(after.integer - before.integer >= 60);
 }
