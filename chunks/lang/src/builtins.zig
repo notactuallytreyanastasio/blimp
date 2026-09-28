@@ -420,14 +420,20 @@ fn builtinSplit(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     var parts: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
     var start: usize = 0;
     var i: usize = 0;
-    while (i + sep.len <= str.len) : (i += 1) {
+    // No continue-expression: after a match `i` must land exactly on the byte
+    // following the separator, or a separator that starts there is skipped
+    // and "a,,b" splits into two fields instead of three. An empty separator
+    // matches at every byte, so it still has to step one to make progress.
+    while (i + sep.len <= str.len) {
         if (std.mem.eql(u8, str[i .. i + sep.len], sep)) {
             const part = allocator.create(Value) catch return error.OutOfMemory;
             part.* = Value{ .string = str[start..i] };
             parts.append(allocator, part) catch return error.OutOfMemory;
             i += sep.len;
             start = i;
-            continue;
+            if (sep.len == 0) i += 1;
+        } else {
+            i += 1;
         }
     }
     // Last segment
