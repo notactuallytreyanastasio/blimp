@@ -416,44 +416,7 @@ pub const Evaluator = struct {
                 // Process escape sequences if any backslashes present
                 if (std.mem.indexOf(u8, s, "\\") != null) {
                     var buf: std.ArrayListUnmanaged(u8) = .empty;
-                    var i: usize = 0;
-                    while (i < s.len) {
-                        if (s[i] == '\\' and i + 1 < s.len) {
-                            switch (s[i + 1]) {
-                                'n' => {
-                                    buf.append(self.allocator, '\n') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                'r' => {
-                                    buf.append(self.allocator, '\r') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                't' => {
-                                    buf.append(self.allocator, '\t') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                'e' => {
-                                    buf.append(self.allocator, 0x1b) catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                '\\' => {
-                                    buf.append(self.allocator, '\\') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                '"' => {
-                                    buf.append(self.allocator, '"') catch return error.OutOfMemory;
-                                    i += 2;
-                                },
-                                else => {
-                                    buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
-                                    i += 1;
-                                },
-                            }
-                        } else {
-                            buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
-                            i += 1;
-                        }
-                    }
+                    try self.appendUnescaped(&buf, s);
                     const v = self.allocator.create(Value) catch return error.OutOfMemory;
                     v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
                     return v;
@@ -781,6 +744,32 @@ pub const Evaluator = struct {
         return error.Bubble;
     }
 
+    /// Append `s` to `buf`, turning \\n \\r \\t \\e \\\\ and \\" into the bytes they
+    /// name. Any other backslash is kept as written.
+    fn appendUnescaped(self: *Evaluator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) EvalError!void {
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len) {
+                const byte: ?u8 = switch (s[i + 1]) {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'e' => 0x1b,
+                    '\\' => '\\',
+                    '"' => '"',
+                    else => null,
+                };
+                if (byte) |b| {
+                    buf.append(self.allocator, b) catch return error.OutOfMemory;
+                    i += 2;
+                    continue;
+                }
+            }
+            buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
+            i += 1;
+        }
+    }
+
     fn evalStringInterp(self: *Evaluator, s: []const u8) EvalError!*const Value {
         var result: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
@@ -804,22 +793,25 @@ pub const Evaluator = struct {
                 const expr_node = parser.parseExpressionPublic() catch return error.UnsupportedOperation;
                 const val = try self.eval(expr_node);
 
-                // Format the value into the string
-                var buf: [4096]u8 = undefined;
-                var fbs = std.Io.Writer.fixed(&buf);
-                val.format(&fbs);
-                const formatted = fbs.buffered();
-                // Strip quotes from string values
-                if (formatted.len >= 2 and formatted[0] == '"' and formatted[formatted.len - 1] == '"') {
-                    result.appendSlice(self.allocator, formatted[1 .. formatted.len - 1]) catch return error.OutOfMemory;
-                } else {
-                    result.appendSlice(self.allocator, formatted) catch return error.OutOfMemory;
+                // A string goes in as it is. Anything else is formatted, into
+                // a buffer that grows: a fixed one cut every value at 4096
+                // bytes without a word, which a rendered page passes easily.
+                switch (val.*) {
+                    .string => |str| result.appendSlice(self.allocator, str) catch return error.OutOfMemory,
+                    else => {
+                        var aw = std.Io.Writer.Allocating.init(self.allocator);
+                        val.format(&aw.writer);
+                        result.appendSlice(self.allocator, aw.written()) catch return error.OutOfMemory;
+                    },
                 }
 
                 i = j + 1; // skip past }
             } else {
-                result.append(self.allocator, s[i]) catch return error.OutOfMemory;
-                i += 1;
+                // The literal text up to the next #{ gets the same escapes as
+                // a string with no interpolation in it.
+                const next = std.mem.indexOfPos(u8, s, i, "#{") orelse s.len;
+                try self.appendUnescaped(&result, s[i..next]);
+                i = next;
             }
         }
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
