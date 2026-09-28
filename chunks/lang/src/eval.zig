@@ -1209,6 +1209,21 @@ pub const Evaluator = struct {
 
     fn evalBinaryOp(self: *Evaluator, op: ast.Node.BinaryOp) EvalError!*const Value {
         const left = try self.eval(op.left.*);
+
+        // `and` and `or` stop at the left side when it decides the answer,
+        // so `i < length(s) and char_at(s, i) == " "` never reads past the end.
+        switch (op.op) {
+            .and_op => {
+                if (!left.truthy()) return self.make(.{ .boolean = false });
+                return self.make(.{ .boolean = (try self.eval(op.right.*)).truthy() });
+            },
+            .or_op => {
+                if (left.truthy()) return self.make(.{ .boolean = true });
+                return self.make(.{ .boolean = (try self.eval(op.right.*)).truthy() });
+            },
+            else => {},
+        }
+
         const right = try self.eval(op.right.*);
 
         switch (op.op) {
@@ -1301,12 +1316,7 @@ pub const Evaluator = struct {
                 }
                 return self.evalCompareOp(left.*, right.*, .gte);
             },
-            .and_op => {
-                return self.make(.{ .boolean = left.truthy() and right.truthy() });
-            },
-            .or_op => {
-                return self.make(.{ .boolean = left.truthy() or right.truthy() });
-            },
+            .and_op, .or_op => unreachable,
         }
     }
 
