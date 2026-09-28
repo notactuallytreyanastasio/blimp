@@ -59,6 +59,7 @@ pub const BuiltinRegistry = struct {
         reg.register("now_ms", &builtinNowMs);
         reg.register("concat", &builtinConcat);
         reg.register("split", &builtinSplit);
+        reg.register("join", &builtinJoin);
         reg.register("contains", &builtinContains);
         reg.register("to_string", &builtinToString);
         reg.register("to_int", &builtinToInt);
@@ -443,6 +444,39 @@ fn builtinSplit(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
 
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .list = parts.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+/// join(["a", "b"], ", ") => "a, b"
+/// The inverse of split. It sizes the result once and copies each part once;
+/// building the same string with `concat` in a loop copies everything built
+/// so far on every step, and the evaluator frees none of those copies.
+fn builtinJoin(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    if (args[0].* != .list or args[1].* != .string) return error.TypeError;
+    const parts = args[0].list;
+    const sep = args[1].string;
+
+    var total: usize = 0;
+    for (parts, 0..) |part, i| {
+        if (part.* != .string) return error.TypeError;
+        total += part.string.len;
+        if (i > 0) total += sep.len;
+    }
+
+    const buf = allocator.alloc(u8, total) catch return error.OutOfMemory;
+    var pos: usize = 0;
+    for (parts, 0..) |part, i| {
+        if (i > 0) {
+            @memcpy(buf[pos .. pos + sep.len], sep);
+            pos += sep.len;
+        }
+        @memcpy(buf[pos .. pos + part.string.len], part.string);
+        pos += part.string.len;
+    }
+
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .string = buf };
     return result;
 }
 

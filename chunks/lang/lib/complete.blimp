@@ -14,7 +14,7 @@ end
 
 def builtin_names() do
   ["length", "max", "min", "append", "reverse", "lookup", "put",
-   "keys", "values", "now", "concat", "split", "contains",
+   "keys", "values", "now", "concat", "split", "join", "contains",
    "to_string", "to_int", "slice", "upcase", "downcase", "range",
    "head", "tail", "sort", "merge", "type_of", "print", "rem",
    "abs", "nil?", "elem", "floor", "ceil", "round", "not", "size",

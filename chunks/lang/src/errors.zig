@@ -456,7 +456,7 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
     const builtins = [_][]const u8{
         "length",  "max",     "min",      "append",  "reverse",
         "lookup",  "put",     "keys",     "now",     "concat",
-        "split",   "contains", "to_string", "to_int", "slice",
+        "split",   "join",    "contains", "to_string", "to_int", "slice",
         "upcase",  "downcase", "range",    "head",    "tail",
         "sort",    "merge",   "values",   "type_of",  "print",
         "rem",     "abs",     "nil?",     "elem",    "floor",
