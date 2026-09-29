@@ -298,10 +298,19 @@
         return el;
       case 'el':
         var etag = attrVal(attrs['@tag']);
-        el = SVG_TAGS[etag] ? document.createElementNS(SVGNS, etag) : document.createElement(etag);
+        // inside an <svg> everything is SVG, as an HTML parser has it: a
+        // <title> there is a tooltip, not the document's title
+        var svg = SVG_TAGS[etag] || this._inSvg;
+        el = svg ? document.createElementNS(SVGNS, etag) : document.createElement(etag);
         setAttrs(el, attrs, null);
         this._listen(el, attrs);
-        if (attrs.inner_html === undefined) children.forEach(function (c) { el.appendChild(self.renderView(c)); });
+        var outer = this._inSvg;
+        this._inSvg = !!svg;
+        try {
+          if (attrs.inner_html === undefined) children.forEach(function (c) { el.appendChild(self.renderView(c)); });
+        } finally {
+          this._inSvg = outer;
+        }
         applyInstructions(el, attrs, null);
         if (etag === 'select' && attrs.value !== undefined) el.value = String(attrVal(attrs.value));
         return el;
@@ -425,6 +434,13 @@
 
   // -- patching ---------------------------------------------------------------
 
+  // A new element for `b` in the place of `el`, in el's namespace.
+  BlimpView.prototype._rebuild = function (el, b) {
+    var outer = this._inSvg;
+    this._inSvg = el.namespaceURI === SVGNS;
+    try { return this.renderView(b); } finally { this._inSvg = outer; }
+  };
+
   // Make `el`, which shows node `a`, show node `b`; answer the element that
   // does (el itself, unless it had to be replaced).
   BlimpView.prototype._patch = function (el, a, b) {
@@ -456,12 +472,18 @@
         applyInstructions(el, b.attrs, a.attrs);
       }
       if (b.attrs.inner_html !== undefined) return el;
-      if (ac.length !== bc.length) return this.renderView(b);
+      if (ac.length !== bc.length) return this._rebuild(el, b);
       var nodes = el.childNodes;
-      for (var j = 0; j < bc.length; j++) {
-        var c = nodes[j];
-        var n = this._patch(c, ac[j], bc[j]);
-        if (n !== c) el.replaceChild(n, c);
+      var outerNs = this._inSvg;
+      this._inSvg = el.namespaceURI === SVGNS;
+      try {
+        for (var j = 0; j < bc.length; j++) {
+          var c = nodes[j];
+          var n = this._patch(c, ac[j], bc[j]);
+          if (n !== c) el.replaceChild(n, c);
+        }
+      } finally {
+        this._inSvg = outerNs;
       }
       return el;
     }
