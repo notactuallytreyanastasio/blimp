@@ -26,7 +26,8 @@ def builtin_names() do
    "stack", "row", "grid", "text", "heading", "bold", "italic",
    "code", "code_block", "blockquote", "divider", "list", "link",
    "image", "button", "input", "textarea", "select", "form",
-   "mount_root"]
+   "mount_root",
+   "json_encode", "json_decode"]
 end
 
 def starts_with(str: String, prefix: String) -> Bool do

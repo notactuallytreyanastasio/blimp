@@ -109,6 +109,8 @@ pub const BuiltinRegistry = struct {
         reg.register("uniq", &builtinUniq);
         reg.register("sum", &builtinSum);
         reg.register("set_at", &builtinSetAt);
+        reg.register("json_encode", &builtinJsonEncode);
+        reg.register("json_decode", &builtinJsonDecode);
         // View primitives
         reg.register("stack", &viewStack);
         reg.register("row", &viewRow);
@@ -796,6 +798,193 @@ fn builtinActorName(allocator: std.mem.Allocator, args: []const *const Value) Ev
             return result;
         },
         else => return error.TypeError,
+    }
+}
+
+// ── JSON ────────────────────────────────────────────────
+
+/// How deep an array or object may nest, in either direction. Both walks
+/// below recurse on the native stack, and a request body of 100k `[` is a
+/// few hundred bytes; past this depth json_decode answers an error tuple and
+/// json_encode raises.
+const json_max_depth = 512;
+
+/// {tag, payload} -- the shape json_decode answers in.
+fn tagged(allocator: std.mem.Allocator, tag: []const u8, payload: *const Value) EvalError!*const Value {
+    const items = allocator.alloc(*const Value, 2) catch return error.OutOfMemory;
+    items[0] = try make(allocator, .{ .atom = tag });
+    items[1] = payload;
+    return make(allocator, .{ .tuple = items });
+}
+
+/// json_encode(value) -> String, compact (no whitespace).
+///
+/// Int and Float are numbers, String and Atom are strings, true/false/nil are
+/// true/false/null, List and Tuple are arrays, Map is an object in the map's
+/// own key order.
+///
+/// A Float always keeps a `.` or an exponent, so 2.0 encodes as `2.0` and
+/// decodes back as a Float; `{d}` alone writes `2`, which comes back as Int 2
+/// and compares unequal to what went in. Magnitudes at or past 1e21, or under
+/// 1e-6, use an exponent, as JavaScript does, instead of 300 digits.
+///
+/// Raises TypeError for: NaN and infinity (JSON has no spelling for them),
+/// a string or atom that is not valid UTF-8 (JSON text is UTF-8), closures,
+/// actor refs, view nodes and holes, and nesting deeper than json_max_depth.
+fn builtinJsonEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    var out: std.ArrayList(u8) = .empty;
+    try jsonWrite(allocator, &out, args[0], 0);
+    return make(allocator, .{ .string = out.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
+
+fn jsonWrite(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: *const Value, depth: usize) EvalError!void {
+    if (depth > json_max_depth) return error.TypeError;
+    const oom = error.OutOfMemory;
+    switch (v.*) {
+        .integer => |n| out.print(allocator, "{d}", .{n}) catch return oom,
+        .float => |f| {
+            if (!std.math.isFinite(f)) return error.TypeError;
+            const mag = @abs(f);
+            if (mag != 0 and (mag >= 1e21 or mag < 1e-6)) {
+                out.print(allocator, "{e}", .{f}) catch return oom;
+            } else {
+                const start = out.items.len;
+                out.print(allocator, "{d}", .{f}) catch return oom;
+                if (std.mem.indexOfAny(u8, out.items[start..], ".e") == null)
+                    out.appendSlice(allocator, ".0") catch return oom;
+            }
+        },
+        .string => |s| try jsonWriteString(allocator, out, s),
+        .atom => |a| try jsonWriteString(allocator, out, a),
+        .boolean => |b| out.appendSlice(allocator, if (b) "true" else "false") catch return oom,
+        .nil => out.appendSlice(allocator, "null") catch return oom,
+        .list, .tuple => |items| {
+            out.append(allocator, '[') catch return oom;
+            for (items, 0..) |item, i| {
+                if (i > 0) out.append(allocator, ',') catch return oom;
+                try jsonWrite(allocator, out, item, depth + 1);
+            }
+            out.append(allocator, ']') catch return oom;
+        },
+        .map => |entries| {
+            out.append(allocator, '{') catch return oom;
+            for (entries, 0..) |entry, i| {
+                if (i > 0) out.append(allocator, ',') catch return oom;
+                try jsonWriteString(allocator, out, entry.key);
+                out.append(allocator, ':') catch return oom;
+                try jsonWrite(allocator, out, entry.val, depth + 1);
+            }
+            out.append(allocator, '}') catch return oom;
+        },
+        .hole, .actor_ref, .closure, .view_node => return error.TypeError,
+    }
+}
+
+/// A JSON string per RFC 8259 section 7: `"` and `\` escaped, control
+/// characters below 0x20 escaped (the short forms where JSON has one), and
+/// everything else -- `/`, DEL, multi-byte UTF-8 -- written as it is.
+fn jsonWriteString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) EvalError!void {
+    if (!std.unicode.utf8ValidateSlice(s)) return error.TypeError;
+    const oom = error.OutOfMemory;
+    out.append(allocator, '"') catch return oom;
+    for (s) |c| {
+        switch (c) {
+            '"' => out.appendSlice(allocator, "\\\"") catch return oom,
+            '\\' => out.appendSlice(allocator, "\\\\") catch return oom,
+            '\n' => out.appendSlice(allocator, "\\n") catch return oom,
+            '\r' => out.appendSlice(allocator, "\\r") catch return oom,
+            '\t' => out.appendSlice(allocator, "\\t") catch return oom,
+            0x08 => out.appendSlice(allocator, "\\b") catch return oom,
+            0x0c => out.appendSlice(allocator, "\\f") catch return oom,
+            0...0x07, 0x0b, 0x0e...0x1f => out.print(allocator, "\\u{x:0>4}", .{c}) catch return oom,
+            else => out.append(allocator, c) catch return oom,
+        }
+    }
+    out.append(allocator, '"') catch return oom;
+}
+
+/// json_decode(text) -> {:ok, value} or {:error, reason}.
+///
+/// Objects become maps with String keys in document order (a repeated key
+/// keeps its last value, as JSON.parse does), arrays become lists, null is
+/// nil. A number written as an integer that fits an i64 is an Int; any other
+/// number is a Float, so 9223372036854775808 and 1e2 are both Floats.
+///
+/// An error tuple rather than a raise, unlike every other builtin here: JSON
+/// arrives from outside -- a request body, a file someone edited -- and Blimp
+/// has no rescue, so a raise would let any client stop the handler reading
+/// it. The reason names the error and where it was found, e.g.
+/// "SyntaxError at line 2, column 3". A number too large for a Float and
+/// nesting deeper than json_max_depth are errors too.
+///
+/// Raises TypeError only when handed something that is not a String.
+fn builtinJsonDecode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    // The parse tree (hash maps, array lists, unescaped strings) is thrown
+    // away as soon as it is converted, so it lives in its own arena and not in
+    // the evaluator's heap, which would keep it for the rest of the run.
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+    var scanner = std.json.Scanner.initCompleteInput(sa, args[0].string);
+    var diag: std.json.Diagnostics = .{};
+    scanner.enableDiagnostics(&diag);
+    const tree = std.json.parseFromTokenSourceLeaky(std.json.Value, sa, &scanner, .{
+        .duplicate_field_behavior = .use_last,
+        .parse_numbers = true,
+    }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        const msg = std.fmt.allocPrint(allocator, "{s} at line {d}, column {d}", .{
+            @errorName(err), diag.getLine(), diag.getColumn(),
+        }) catch return error.OutOfMemory;
+        return tagged(allocator, "error", try make(allocator, .{ .string = msg }));
+    };
+    const v = jsonToValue(allocator, tree, 0) catch |err| {
+        const msg: []const u8 = switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TooDeep => std.fmt.comptimePrint("nested deeper than {d} levels", .{json_max_depth}),
+            error.NumberOutOfRange => "number out of range for a Float",
+        };
+        return tagged(allocator, "error", try make(allocator, .{ .string = msg }));
+    };
+    return tagged(allocator, "ok", v);
+}
+
+fn jsonToValue(allocator: std.mem.Allocator, j: std.json.Value, depth: usize) error{ OutOfMemory, TooDeep, NumberOutOfRange }!*const Value {
+    if (depth > json_max_depth) return error.TooDeep;
+    switch (j) {
+        .null => return make(allocator, .nil) catch error.OutOfMemory,
+        .bool => |b| return make(allocator, .{ .boolean = b }) catch error.OutOfMemory,
+        .integer => |n| return make(allocator, .{ .integer = n }) catch error.OutOfMemory,
+        .float => |f| return make(allocator, .{ .float = f }) catch error.OutOfMemory,
+        // An integer past i64, or a float past f64 (1e400).
+        .number_string => |s| {
+            const f = std.fmt.parseFloat(f64, s) catch return error.NumberOutOfRange;
+            if (!std.math.isFinite(f)) return error.NumberOutOfRange;
+            return make(allocator, .{ .float = f }) catch error.OutOfMemory;
+        },
+        .string => |s| {
+            const owned = try allocator.dupe(u8, s);
+            return make(allocator, .{ .string = owned }) catch error.OutOfMemory;
+        },
+        .array => |arr| {
+            const items = try allocator.alloc(*const Value, arr.items.len);
+            for (arr.items, 0..) |item, i| items[i] = try jsonToValue(allocator, item, depth + 1);
+            return make(allocator, .{ .list = items }) catch error.OutOfMemory;
+        },
+        .object => |obj| {
+            const entries = try allocator.alloc(Value.MapEntry, obj.count());
+            var it = obj.iterator();
+            var i: usize = 0;
+            while (it.next()) |kv| : (i += 1) {
+                entries[i] = .{
+                    .key = try allocator.dupe(u8, kv.key_ptr.*),
+                    .val = try jsonToValue(allocator, kv.value_ptr.*, depth + 1),
+                };
+            }
+            return make(allocator, .{ .map = entries }) catch error.OutOfMemory;
+        },
     }
 }
 

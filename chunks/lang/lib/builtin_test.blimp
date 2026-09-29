@@ -1227,3 +1227,167 @@ actor AssertionDetailTests do
     assert_ne(nil, 0)
   end
 end
+
+# ============================================================
+# JSON
+# ============================================================
+
+# True when `code` fails at runtime. blimp_eval answers a map with
+# error: "runtime error" instead of stopping the test run, which is the only
+# way a Blimp test can watch a builtin refuse its arguments.
+def raises(code: String) -> Bool do
+  r = blimp_eval(code)
+  case type_of(r) == :map do
+    true -> lookup(r, "error") == "runtime error"
+    false -> false
+  end
+end
+
+actor JsonTests do
+  # -- json_encode --
+  test "json_encode scalars" do
+    assert_eq(json_encode(42), "42")
+    assert_eq(json_encode(-7), "-7")
+    assert_eq(json_encode(true), "true")
+    assert_eq(json_encode(false), "false")
+    assert_eq(json_encode(nil), "null")
+    assert_eq(json_encode("hi"), "\"hi\"")
+  end
+
+  test "json_encode atom is a string" do
+    assert_eq(json_encode(:ok), "\"ok\"")
+  end
+
+  test "json_encode floats keep a decimal point" do
+    assert_eq(json_encode(1.5), "1.5")
+    assert_eq(json_encode(2.0), "2.0")
+    assert_eq(json_encode(-0.25), "-0.25")
+  end
+
+  test "json_encode huge float uses an exponent" do
+    assert_eq(json_encode(1.0e300), "1e300")
+  end
+
+  test "json_encode non-finite float raises" do
+    assert_eq(json_encode(0.5), "0.5")
+    assert(raises("json_encode(1.0e300 * 1.0e300)"))
+    assert(raises("json_encode(sqrt(-1.0))"))
+  end
+
+  test "json_encode escapes per RFC 8259" do
+    assert_eq(json_encode("a\"b\\c"), "\"a\\\"b\\\\c\"")
+    assert_eq(json_encode("line\nnext\ttab\r"), "\"line\\nnext\\ttab\\r\"")
+    assert_eq(json_encode(from_char_code(1)), "\"\\u0001\"")
+    assert_eq(json_encode(from_char_code(31)), "\"\\u001f\"")
+  end
+
+  test "json_encode leaves UTF-8 and slashes alone" do
+    assert_eq(json_encode("café / ok"), "\"café / ok\"")
+  end
+
+  test "json_encode rejects invalid UTF-8" do
+    assert_eq(json_encode(from_char_code(127)), concat("\"", from_char_code(127), "\""))
+    assert(raises("json_encode(from_char_code(255))"))
+  end
+
+  test "json_encode lists and tuples are arrays" do
+    assert_eq(json_encode([1, "a", nil]), "[1,\"a\",null]")
+    assert_eq(json_encode({:ok, 1}), "[\"ok\",1]")
+    assert_eq(json_encode([]), "[]")
+  end
+
+  test "json_encode maps are objects in their own order" do
+    assert_eq(json_encode(%{b: 1, a: [true]}), "{\"b\":1,\"a\":[true]}")
+    assert_eq(json_encode(%{}), "{}")
+  end
+
+  test "json_encode escapes map keys" do
+    assert_eq(json_encode(put(%{}, "q\"k", 1)), "{\"q\\\"k\":1}")
+  end
+
+  test "json_encode rejects closures" do
+    assert_eq(json_encode([1]), "[1]")
+    assert(raises("json_encode(fn(x: Int) do x end)"))
+    assert(raises("json_encode([1, fn(x: Int) do x end])"))
+  end
+
+  test "json_encode rejects view nodes" do
+    assert_eq(json_encode("hi"), "\"hi\"")
+    assert(raises("json_encode(text(\"hi\"))"))
+  end
+
+  # -- json_decode --
+  test "json_decode scalars" do
+    assert_eq(json_decode("42"), {:ok, 42})
+    assert_eq(json_decode("-3"), {:ok, -3})
+    assert_eq(json_decode("1.5"), {:ok, 1.5})
+    assert_eq(json_decode("true"), {:ok, true})
+    assert_eq(json_decode("false"), {:ok, false})
+    assert_eq(json_decode("null"), {:ok, nil})
+    assert_eq(json_decode("\"hi\""), {:ok, "hi"})
+  end
+
+  test "json_decode integer too big for Int is a Float" do
+    assert_eq(json_decode("9223372036854775807"), {:ok, 9223372036854775807})
+    assert_eq(json_decode("9223372036854775808"), {:ok, 9223372036854775808.0})
+  end
+
+  test "json_decode exponent is a Float" do
+    assert_eq(json_decode("1e2"), {:ok, 100.0})
+  end
+
+  test "json_decode unescapes strings" do
+    assert_eq(json_decode("\"a\\nb\\u00e9\\\"\""), {:ok, "a\nbé\""})
+  end
+
+  test "json_decode arrays are lists" do
+    assert_eq(json_decode("[1, [2, 3], \"x\"]"), {:ok, [1, [2, 3], "x"]})
+  end
+
+  test "json_decode objects are maps with string keys" do
+    case json_decode("{\"name\": \"bob\", \"tags\": [\"a\"], \"n\": {\"x\": null}}") do
+      {:ok, m} ->
+        assert_eq(lookup(m, "name"), "bob")
+        assert_eq(lookup(m, "tags"), ["a"])
+        assert_eq(lookup(lookup(m, "n"), "x"), nil)
+        assert_eq(keys(m), ["name", "tags", "n"])
+      other -> assert_eq(other, :decoded)
+    end
+  end
+
+  test "json_decode duplicate key keeps the last" do
+    case json_decode("{\"a\": 1, \"a\": 2}") do
+      {:ok, m} -> assert_eq(lookup(m, "a"), 2)
+      other -> assert_eq(other, :decoded)
+    end
+  end
+
+  test "json_decode invalid JSON is an error tuple" do
+    assert_eq(elem(json_decode("{"), 0), :error)
+    assert_eq(elem(json_decode(""), 0), :error)
+    assert_eq(elem(json_decode("[1,]"), 0), :error)
+    assert_eq(elem(json_decode("nul"), 0), :error)
+    assert_eq(elem(json_decode("1 2"), 0), :error)
+    assert_eq(elem(json_decode("'a'"), 0), :error)
+  end
+
+  test "json_decode error says where" do
+    assert_eq(json_decode("[1,\n  x]"), {:error, "SyntaxError at line 2, column 3"})
+  end
+
+  test "json_decode rejects a non-string" do
+    assert_eq(json_decode("42"), {:ok, 42})
+    assert(raises("json_decode(42)"))
+  end
+
+  test "json round trip" do
+    v = %{name: "a\"b", n: [1, 2.5, true, nil], nested: %{k: "v"}}
+    assert_eq(json_decode(json_encode(v)), {:ok, v})
+  end
+
+  test "json_decode deep nesting is an error, not a crash" do
+    opens = join(map(range(1, 5000), fn(i: Int) do "[" end), "")
+    closes = join(map(range(1, 5000), fn(i: Int) do "]" end), "")
+    assert_eq(elem(json_decode(concat(opens, closes)), 0), :error)
+  end
+end
