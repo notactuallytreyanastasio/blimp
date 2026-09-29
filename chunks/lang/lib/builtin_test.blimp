@@ -70,6 +70,18 @@ actor StringTests do
     assert_eq(head(result), "a")
   end
 
+  test "split keeps the empty field between adjacent separators" do
+    assert_eq(split("a,,b", ","), ["a", "", "b"])
+  end
+
+  test "split keeps blank lines" do
+    assert_eq(split("a\n\n\nb", "\n"), ["a", "", "", "b"])
+  end
+
+  test "split adjacent multi-char separators" do
+    assert_eq(split("a::::b", "::"), ["a", "", "b"])
+  end
+
   # -- contains --
   test "contains finds substring" do
     assert(contains("hello world", "world"))
