@@ -1,0 +1,40 @@
+# Answers every request with a 2.9MB body on a non-blocking socket, the case
+# where one write() takes only what fits in the socket buffer.
+def body() -> String do
+  join(map(range(1, 30000), fn(i: Int) -> String do "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456\n" end), "")
+end
+
+BODY = body()
+
+actor Server do
+  state fd: Int :: -1
+  on :start(port: Int) do
+    s = tcp_listen(port)
+    tcp_set_nonblocking(s)
+    become fd: s
+    reply s
+  end
+  on :tick do
+    ready = tcp_poll([fd], 50)
+    case length(ready) > 0 do
+      true -> self <- :accept
+      false -> :idle
+    end
+  end
+  on :accept do
+    c = tcp_accept(fd)
+    case c do
+      nil -> :none
+      _ ->
+        tcp_set_nonblocking(c)
+        raw = tcp_read(c)
+        head = concat("HTTP/1.1 200 OK\r\nContent-Length: ", to_string(length(BODY)), "\r\nConnection: close\r\n\r\n")
+        result = tcp_write(c, concat(head, BODY))
+        tcp_close(c)
+        reply result
+    end
+  end
+end
+
+server = spawn Server
+server <- :start(__PORT__)

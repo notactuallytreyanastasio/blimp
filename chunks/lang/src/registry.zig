@@ -56,12 +56,45 @@ pub const Registry = struct {
     }
 
     /// Register an actor template (from an actor definition).
+    ///
+    /// Defining an actor that already exists replaces it, and every running
+    /// instance of it is moved onto the new definition: its handlers become
+    /// the new ones, a state field both versions have keeps the instance's
+    /// value, a field only the new one has starts at its default, and a
+    /// field the new one dropped is gone. This used to append a second
+    /// template that `lookupTemplate`, returning the first match, never
+    /// found, and instances kept the handler table they were spawned with:
+    /// a redefinition in a running program was silently ignored.
     pub fn registerTemplate(self: *Registry, name: []const u8, default_state: []const Value.MapEntry, handlers: []const Value.HandlerDef) void {
+        for (self.templates.items) |*tmpl| {
+            if (!std.mem.eql(u8, tmpl.name, name)) continue;
+            tmpl.default_state = default_state;
+            tmpl.handlers = handlers;
+            for (self.instances.items) |entry| {
+                if (std.mem.eql(u8, entry.ref.type_name, name)) self.migrate(entry, tmpl);
+            }
+            return;
+        }
         self.templates.append(self.allocator, .{
             .name = name,
             .default_state = default_state,
             .handlers = handlers,
         }) catch {};
+    }
+
+    fn migrate(self: *Registry, entry: *ActorEntry, template: *const ActorTemplate) void {
+        const state = self.allocator.alloc(Value.MapEntry, template.default_state.len) catch return;
+        for (template.default_state, 0..) |field, i| {
+            state[i] = field;
+            for (entry.state_fields) |old| {
+                if (std.mem.eql(u8, old.key, field.key)) {
+                    state[i] = .{ .key = field.key, .val = old.val };
+                    break;
+                }
+            }
+        }
+        entry.state_fields = state;
+        entry.handlers = template.handlers;
     }
 
     /// Look up a template by name.

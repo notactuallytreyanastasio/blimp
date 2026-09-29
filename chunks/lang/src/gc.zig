@@ -130,6 +130,7 @@ const Copier = struct {
             // default of 0 it says the closure captured nothing, and every
             // captured name falls through to whatever the caller has bound.
             .env_names = c.env_names,
+            .top_level = c.top_level,
             .return_type = try self.optStr(c.return_type),
         };
         return out;
@@ -383,4 +384,135 @@ test "compact copies a full message log" {
     _ = heap_a.reset(.free_all);
 
     try std.testing.expectEqual(@as(i64, 5), (try run(code.allocator(), &eval, "c <- :count")).integer);
+}
+
+test "an actor defined by blimp_eval survives compaction" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+    var live: usize = 0;
+
+    var eval = Evaluator.init(heaps[live].allocator());
+    eval.code_allocator = code.allocator();
+    _ = try run(code.allocator(), &eval,
+        \\blimp_eval("actor Hot do\n  on :hi(who: String) do\n    reply concat(\"yo \", who)\n  end\nend")
+        \\h = spawn Hot
+    );
+
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const next = 1 - live;
+        try compact(&eval, heaps[next].allocator(), std.testing.allocator);
+        // free_all hands the pages back; the testing allocator poisons them,
+        // so a handler still pointing into the old heap reads garbage
+        _ = heaps[live].reset(.free_all);
+        live = next;
+        try std.testing.expectEqualStrings("yo there", (try run(code.allocator(), &eval, "h <- :hi(\"there\")")).string);
+    }
+}
+
+test "a top-level def sees the current definition of the defs it calls" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+
+    var eval = Evaluator.init(heaps[0].allocator());
+    eval.code_allocator = code.allocator();
+    _ = try run(code.allocator(), &eval,
+        \\def greet(who: String) -> String do concat("hello ", who) end
+        \\def page(who: String) -> String do concat("<p>", greet(who), "</p>") end
+        \\def loop(n: Int, acc: String) -> String do
+        \\  case n do
+        \\    0 -> acc
+        \\    _ -> loop(n - 1, concat(acc, greet("x")))
+        \\  end
+        \\end
+    );
+    try std.testing.expectEqualStrings("<p>hello b</p>", (try run(code.allocator(), &eval, "page(\"b\")")).string);
+
+    // redefined the way the control socket does it: another top-level def
+    _ = try run(code.allocator(), &eval, "def greet(who: String) -> String do concat(\"howdy \", who) end");
+    try compact(&eval, heaps[1].allocator(), std.testing.allocator);
+    _ = heaps[0].reset(.free_all);
+
+    try std.testing.expectEqualStrings("<p>howdy b</p>", (try run(code.allocator(), &eval, "page(\"b\")")).string);
+    // through a tail call, whose frame is collapsed
+    try std.testing.expectEqualStrings("howdy xhowdy x", (try run(code.allocator(), &eval, "loop(2, \"\")")).string);
+}
+
+test "a def inside a function still keeps what it captured" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap.deinit();
+    var eval = Evaluator.init(heap.allocator());
+    _ = try run(code.allocator(), &eval,
+        \\k = 1
+        \\def make() -> Any do
+        \\  k = 5
+        \\  fn(x: Int) -> Int do x + k end
+        \\end
+        \\f = make()
+        \\k = 100
+    );
+    try std.testing.expectEqual(@as(i64, 6), (try run(code.allocator(), &eval, "f(1)")).integer);
+}
+
+test "redefining an actor updates its running instances and keeps their state" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+
+    var eval = Evaluator.init(heaps[0].allocator());
+    eval.code_allocator = code.allocator();
+    _ = try run(code.allocator(), &eval,
+        \\actor Tally do
+        \\  state n: Int :: 0
+        \\  state old: String :: "gone soon"
+        \\  on :add(k: Int) do
+        \\    become n: n + k
+        \\    reply n + k
+        \\  end
+        \\  on :show do reply "n=#{n}" end
+        \\end
+        \\t = spawn Tally
+        \\t <- :add(5)
+        \\t <- :add(2)
+    );
+    try std.testing.expectEqualStrings("n=7", (try run(code.allocator(), &eval, "t <- :show")).string);
+
+    _ = try run(code.allocator(), &eval,
+        \\actor Tally do
+        \\  state n: Int :: 0
+        \\  state label: String :: "total"
+        \\  on :add(k: Int) do
+        \\    become n: n + k * 10
+        \\    reply n + k * 10
+        \\  end
+        \\  on :show do reply "#{label}: #{n}" end
+        \\end
+    );
+    try compact(&eval, heaps[1].allocator(), std.testing.allocator);
+    _ = heaps[0].reset(.free_all);
+
+    // the running instance: new handlers, its n kept, the new field defaulted
+    try std.testing.expectEqualStrings("total: 7", (try run(code.allocator(), &eval, "t <- :show")).string);
+    try std.testing.expectEqual(@as(i64, 17), (try run(code.allocator(), &eval, "t <- :add(1)")).integer);
+    // a new instance gets the new definition too
+    try std.testing.expectEqualStrings("total: 0", (try run(code.allocator(), &eval, "u = spawn Tally\nu <- :show")).string);
 }

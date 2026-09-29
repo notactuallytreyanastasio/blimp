@@ -45,6 +45,13 @@ fn nextInterpOrEscapedHash(s: []const u8, from: usize) usize {
 
 pub const Evaluator = struct {
     allocator: std.mem.Allocator,
+    /// Where code parsed while the program runs goes: blimp_eval, blimp_test
+    /// and a filled Hole. The ASTs that come out of those are pointed at by
+    /// handlers and closures for as long as they exist, and a host that
+    /// compacts (the REPL, the WASM build, a long-lived server) frees
+    /// `allocator` from under them. Such a host points this at an arena that
+    /// outlives every compaction; otherwise it is `allocator`.
+    code_allocator: std.mem.Allocator,
     env: Environment,
     builtins: BuiltinRegistry,
     registry: Registry,
@@ -101,6 +108,7 @@ pub const Evaluator = struct {
     pub fn init(allocator: std.mem.Allocator) Evaluator {
         return .{
             .allocator = allocator,
+            .code_allocator = allocator,
             .env = Environment.init(allocator),
             .builtins = BuiltinRegistry.init(allocator),
             .registry = Registry.init(allocator),
@@ -853,6 +861,22 @@ pub const Evaluator = struct {
     }
 
     fn evalDefStmt(self: *Evaluator, ds: ast.Node.DefStmt) EvalError!*const Value {
+        // A def at top level captures nothing; see Closure.top_level.
+        if (self.env.depth() == 1 and self.actor_ctx == null) {
+            const tc = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
+            tc.* = .{
+                .params = ds.params,
+                .body = ds.body,
+                .env = &.{},
+                .top_level = true,
+                .return_type = ds.return_type,
+            };
+            const tv = self.allocator.create(Value) catch return error.OutOfMemory;
+            tv.* = Value{ .closure = tc };
+            self.env.define(ds.name, tv);
+            return tv;
+        }
+
         // def is sugar for: name = fn(params) do body end
         const bindings = self.env.allBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
@@ -1727,7 +1751,7 @@ pub const Evaluator = struct {
             }
 
             // Lent, not copied. See Environment.Scope.captured.
-            self.env.lendCaptured(c.env, c.env_names);
+            self.env.lendCaptured(c.env, c.env_names, @intFromPtr(c), c.top_level);
 
             // Bind parameters with runtime type checking
             for (c.params, 0..) |param, i| {
@@ -1815,9 +1839,11 @@ pub const Evaluator = struct {
         if (arg_nodes.len != 1) return error.TypeError;
         const code_val = try self.eval(arg_nodes[0]);
         if (code_val.* != .string) return error.TypeError;
-        const code = code_val.string;
+        // The AST points into its source, and both have to outlive the next
+        // compaction: a handler defined here keeps pointing at them.
+        const code = self.code_allocator.dupe(u8, code_val.string) catch return error.OutOfMemory;
 
-        var parser = Parser.init(self.allocator, code);
+        var parser = Parser.init(self.code_allocator, code);
         const nodes = parser.parseFile() catch {
             // Parse error -- return error map
             const entries = self.allocator.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
@@ -1861,9 +1887,9 @@ pub const Evaluator = struct {
         if (arg_nodes.len != 1) return error.TypeError;
         const code_val = try self.eval(arg_nodes[0]);
         if (code_val.* != .string) return error.TypeError;
-        const code = code_val.string;
+        const code = self.code_allocator.dupe(u8, code_val.string) catch return error.OutOfMemory;
 
-        var parser = Parser.init(self.allocator, code);
+        var parser = Parser.init(self.code_allocator, code);
         const nodes = parser.parseFile() catch {
             return self.makeTestResult(false, 0, 0, "parse error");
         };
@@ -2402,8 +2428,8 @@ pub const Evaluator = struct {
         }
 
         // Parse and evaluate the response as Blimp statements
-        const src_copy = self.allocator.dupe(u8, response) catch return error.OutOfMemory;
-        var hole_parser = Parser.init(self.allocator, src_copy);
+        const src_copy = self.code_allocator.dupe(u8, response) catch return error.OutOfMemory;
+        var hole_parser = Parser.init(self.code_allocator, src_copy);
         const nodes = hole_parser.parseHandlerBodyPublic() catch {
             std.debug.print("[Hole] Failed to parse Claude response as Blimp\n", .{});
             return self.make(.nil);

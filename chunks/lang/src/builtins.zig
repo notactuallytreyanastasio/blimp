@@ -2474,8 +2474,14 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
     addr.family = std.posix.AF.INET;
     addr.port = std.mem.nativeToBig(u16, port);
     addr.addr = 0;
-    if (std.c.bind(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0) return error.NotSupported;
-    if (std.c.listen(sock, 128) < 0) return error.NotSupported;
+    // A port that is taken used to fail as a bare "NotSupported", which is
+    // what a missing feature looks like. Say which port and why.
+    if (std.c.bind(sock, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0 or std.c.listen(sock, 128) < 0) {
+        const e: std.posix.E = @enumFromInt(std.c._errno().*);
+        std.debug.print("tcp_listen({d}): {s}\n", .{ port, if (e == .ADDRINUSE) "the port is already in use" else @tagName(e) });
+        _ = std.c.close(sock);
+        return error.NotSupported;
+    }
 
     return make(allocator, .{ .integer = @intCast(sock) });
 }
@@ -2580,13 +2586,34 @@ fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value
 fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
-    if (std.c.write(fd, args[1].string.ptr, args[1].string.len) < 0) {
-        const result = allocator.create(Value) catch return error.OutOfMemory;
-        result.* = Value{ .atom = "error" };
-        return result;
+    // All of it, or :error. One write() on a non-blocking socket takes what
+    // fits in the socket buffer and says how much; this used to ignore that
+    // number and answer :ok, so a page bigger than the buffer arrived cut
+    // off (327KB of a 900KB body, measured) and nothing said so. A full
+    // buffer is waited on, up to 10 seconds in all, for a reader that is
+    // slow; a reader that has gone is :error.
+    const bytes = args[1].string;
+    var off: usize = 0;
+    var waited_ms: i32 = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
+        if (n > 0) {
+            off += @intCast(n);
+            continue;
+        }
+        const e = std.c._errno().*;
+        if (n < 0 and e == @intFromEnum(std.posix.E.INTR)) continue;
+        if (n < 0 and e == @intFromEnum(std.posix.E.AGAIN)) { // EWOULDBLOCK is the same number
+            if (waited_ms >= 10_000) break;
+            var pfd = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+            _ = std.posix.poll(&pfd, 100) catch break;
+            waited_ms += 100;
+            continue;
+        }
+        break;
     }
     const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .atom = "ok" };
+    result.* = Value{ .atom = if (off == bytes.len) "ok" else "error" };
     return result;
 }
 
