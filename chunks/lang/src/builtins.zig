@@ -2433,6 +2433,7 @@ fn viewTimer(allocator: std.mem.Allocator, args: []const *const Value) EvalError
 }
 
 /// key("ArrowLeft", sends_atom) — effect node: while mounted, that KeyboardEvent.key sends the atom
+/// key("*", :msg) — every key the page gets, as :msg("a"), :msg("Enter"), ...
 /// key("ArrowUp", :down_atom, :up_atom) — a key that is held: the first atom
 /// when it goes down (the keyboard's auto-repeat is not sent again), the
 /// second when it comes up. A paddle moves while the key is held.
