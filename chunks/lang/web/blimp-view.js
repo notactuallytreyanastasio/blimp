@@ -11,6 +11,7 @@
 // .blimp-* class names) plus two effect nodes that render nothing:
 //   timer(ms, :msg)   -> {"tag":"timer","attrs":{"ms":{"text":"500"},"sends":"msg"}}
 //   key("ArrowLeft", :msg) -> {"tag":"key","attrs":{"code":{"text":"ArrowLeft"},"sends":"msg"}}
+//   key("*", :msg)              -> every key: :msg("a"), :msg("Enter"), ...
 //   key("ArrowUp", :down, :up) -> the same with "up":"up": a held key, sent
 //                                 once when it goes down and once when it
 //                                 comes up; auto-repeat is not sent
@@ -283,6 +284,10 @@
       var on = el._blimpOn;
       if (!on.click) return;
       e.preventDefault();
+      // the innermost element with a click is the one clicked, as with
+      // LiveView's phx-click: a Close button inside a clickable backdrop
+      // closes it once, not twice
+      if (e.stopPropagation) e.stopPropagation();
       self.send(on.click, on['with']);
     });
     if (el._blimpOn.input) el.addEventListener('input', function () {
@@ -500,6 +505,12 @@
     var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     var spec = this.keys[e.key];
+    if (!spec && this.keys['*']) {
+      // key("*", :msg): every key, as :msg("a"), :msg("Enter"), ... and
+      // not prevented, so the page scrolls and shortcuts work as before
+      this.send(this.keys['*'].down, literal(e.key));
+      return;
+    }
     if (!spec) return;
     e.preventDefault();
     if (spec.up) {

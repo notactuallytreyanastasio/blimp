@@ -278,3 +278,42 @@ test('el: a swipe sends its direction as an atom, and a new id is a new element'
   assert.strictEqual(textOf(wrap.children[1]), 'down,left');
   view.unmount();
 });
+
+const TYPER = `
+actor Typer do
+  state text: String :: ""
+  state open: Bool :: true
+  on :typed(k: String) do
+    become text: concat(text, k)
+  end
+  on :toggle do
+    become open: not(open)
+  end
+  on :view do
+    modal = case open do
+      true -> [el("div", %{class: "backdrop", click: :toggle}, el("button", %{click: :toggle}, "Close"))]
+      false -> []
+    end
+    reply el("div", %{}, el("pre", %{}, text), modal, key("*", :typed))
+  end
+end
+typer = spawn Typer
+typer <- :view`;
+
+test('key("*") sends every key as a string; a nested click fires only the innermost', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(TYPER, 'typer').ok);
+  for (const key of ['h', 'i', '"', '#', '{']) document.fire('keydown', { key });
+  assert.strictEqual(textOf(container.children[0].children[0]), 'hi"#{');
+  const backdrop = container.children[0].children[1];
+  const close = backdrop.children[0];
+  let stopped = false;
+  const ev = { preventDefault() {}, stopPropagation() { stopped = true } };
+  close.on.click(ev);
+  if (!stopped) backdrop.on.click(ev);   // what a real DOM would do next
+  assert.strictEqual(container.children[0].children.length, 2, 'the modal toggled twice and stayed open');
+  view.unmount();
+});
