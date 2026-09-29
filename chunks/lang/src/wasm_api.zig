@@ -449,6 +449,10 @@ fn writeViewJson(w: anytype, val: *const Value) void {
         .boolean => |b| {
             if (b) w.writeAll("true") catch {} else w.writeAll("false") catch {};
         },
+        // An attr that is nil is left off (el's contract; to_html does it).
+        // It used to fall through to the text "nil", and an attribute that
+        // is present at all -- data-full="nil" -- matches [data-full] in CSS.
+        .nil => w.writeAll("null") catch {},
         else => {
             w.writeAll("{\"text\":\"") catch {};
             val.format(w);

@@ -433,3 +433,23 @@ test('el: everything inside an <svg> is made in the SVG namespace, <title> inclu
   assert.strictEqual(title.namespaceURI, 'http://www.w3.org/2000/svg');
   assert.strictEqual(htmlTitle.namespaceURI, undefined);
 });
+
+test('el: an attr that is nil is left off, in the browser as in to_html', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(`
+actor Bars do
+  on :view do
+    reply el("div", %{}, el("button", %{"data-full": nil, title: "a"}), el("button", %{"data-full": true}))
+  end
+end
+bars = spawn Bars
+bars <- :view`, 'bars').ok);
+  const [a, bb] = container.children[0].children;
+  assert.strictEqual('data-full' in a.attrs, false);
+  assert.strictEqual(a.attrs.title, 'a');
+  assert.strictEqual(bb.attrs['data-full'], '');
+  view.unmount();
+});
