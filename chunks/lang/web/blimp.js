@@ -23,8 +23,11 @@ class Blimp {
       },
     };
 
-    const response = await fetch(wasmUrl);
-    const result = await WebAssembly.instantiateStreaming(response, importObject);
+    // A URL in a browser; the bytes themselves in Node, which has no fetch
+    // for a file path.
+    const result = typeof wasmUrl === 'string'
+      ? await WebAssembly.instantiateStreaming(fetch(wasmUrl), importObject)
+      : await WebAssembly.instantiate(wasmUrl, importObject);
     this.instance = result.instance;
     this.memory = this.instance.exports.memory;
 
@@ -60,6 +63,34 @@ class Blimp {
       const errLen = this.instance.exports.blimp_get_error_len();
       return { ok: false, error: this._readString(errPtr, errLen) };
     }
+  }
+
+  // Send one message to the actor bound to `target` and return its reply as
+  // a value: { ok: true, value } or { ok: false, error }. `args` is Blimp
+  // source for the arguments, comma-separated ("1, :x"), or omitted.
+  //
+  // Unlike eval("target <- :msg"), a send keeps nothing afterwards: eval
+  // holds on to its source and AST for good (about 390 bytes a call), which
+  // a page that sends on every tick and key press cannot afford. It also
+  // does not rebuild getState()'s actors and message log; a page that reads
+  // those should keep using eval.
+  send(target, message, args) {
+    const x = this.instance.exports;
+    if (!x.blimp_send) return { ok: false, error: 'this blimp.wasm has no blimp_send' };
+    const put = (s) => {
+      const bytes = new TextEncoder().encode(s || '');
+      if (bytes.length === 0) return [0, 0];
+      const p = x.blimp_alloc(bytes.length);
+      new Uint8Array(this.memory.buffer, p, bytes.length).set(bytes);
+      return [p, bytes.length];
+    };
+    const t = put(target), m = put(message), a = put(args);
+    const status = x.blimp_send(t[0], t[1], m[0], m[1], a[0], a[1]);
+    for (const [p, n] of [t, m, a]) if (n) x.blimp_free(p, n);
+    if (status !== 0) {
+      return { ok: false, error: this._readString(x.blimp_get_error_ptr(), x.blimp_get_error_len()) };
+    }
+    return { ok: true, value: JSON.parse(this._readString(x.blimp_get_reply_ptr(), x.blimp_get_reply_len())) };
   }
 
   getState() {
