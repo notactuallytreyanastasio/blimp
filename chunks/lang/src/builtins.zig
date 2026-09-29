@@ -57,10 +57,13 @@ pub const BuiltinRegistry = struct {
         reg.register("keys", &builtinKeys);
         reg.register("now", &builtinNow);
         reg.register("now_ms", &builtinNowMs);
+        reg.register("format_time", &builtinFormatTime);
         reg.register("concat", &builtinConcat);
         reg.register("split", &builtinSplit);
         reg.register("join", &builtinJoin);
         reg.register("contains", &builtinContains);
+        reg.register("index_of", &builtinIndexOf);
+        reg.register("replace", &builtinReplace);
         reg.register("to_string", &builtinToString);
         reg.register("to_int", &builtinToInt);
         reg.register("char_at", &builtinCharAt);
@@ -73,6 +76,7 @@ pub const BuiltinRegistry = struct {
         reg.register("head", &builtinHead);
         reg.register("tail", &builtinTail);
         reg.register("sort", &builtinSort);
+        reg.register("sort_by_keys", &builtinSortByKeys);
         reg.register("merge", &builtinMerge);
         reg.register("values", &builtinValues);
         reg.register("type_of", &builtinTypeOf);
@@ -109,6 +113,15 @@ pub const BuiltinRegistry = struct {
         reg.register("uniq", &builtinUniq);
         reg.register("sum", &builtinSum);
         reg.register("set_at", &builtinSetAt);
+        reg.register("json_encode", &builtinJsonEncode);
+        reg.register("json_decode", &builtinJsonDecode);
+        reg.register("sha256", &builtinSha256);
+        reg.register("hmac_sha256", &builtinHmacSha256);
+        reg.register("hex_encode", &builtinHexEncode);
+        reg.register("base64_encode", &builtinBase64Encode);
+        reg.register("base64_decode", &builtinBase64Decode);
+        reg.register("base64url_encode", &builtinBase64UrlEncode);
+        reg.register("base64url_decode", &builtinBase64UrlDecode);
         // View primitives
         reg.register("stack", &viewStack);
         reg.register("row", &viewRow);
@@ -141,6 +154,9 @@ pub const BuiltinRegistry = struct {
         reg.register("write_bytes", &builtinWriteBytes);
         reg.register("read_file", &builtinReadFile);
         reg.register("write_file", &builtinWriteFile);
+        reg.register("list_dir", &builtinListDir);
+        reg.register("file_exists?", &builtinFileExists);
+        reg.register("file_size", &builtinFileSize);
         // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
         reg.register("to_html", &builtinToHtml_impl);
         reg.register("tcp_listen", &builtinTcpListen_impl);
@@ -160,6 +176,10 @@ pub const BuiltinRegistry = struct {
         reg.register("tcp_poll", &builtinTcpPoll_impl);
         reg.register("sleep_ms", &builtinSleepMs_impl);
         reg.register("read_line", &builtinReadLine_impl);
+        reg.register("random_bytes", &builtinRandomBytes_impl);
+        reg.register("random_token", &builtinRandomToken_impl);
+        reg.register("getenv", &builtinGetenv_impl);
+        reg.register("argv", &builtinArgv_impl);
         return reg;
     }
 
@@ -369,6 +389,125 @@ fn builtinNowMs(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     return make(allocator, .{ .integer = ms });
 }
 
+const month_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+const day_names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+
+/// A moment in UTC, broken into the fields strftime prints.
+const CivilTime = struct {
+    year: i64,
+    month: u8, // 1..12
+    day: u8, // 1..31
+    yday: u16, // 1..366
+    wday: u8, // 0 = Sunday
+    hour: u8,
+    minute: u8,
+    second: u8,
+
+    /// Howard Hinnant's civil_from_days, on signed days, so it is right on
+    /// both sides of 1970 and through the Gregorian 100/400-year rules.
+    /// std.time.epoch would do the positive half; `-1` is 1969-12-31 and a
+    /// date format has no business refusing it.
+    fn fromEpoch(t: i64) CivilTime {
+        const days = @divFloor(t, 86400);
+        const secs: u32 = @intCast(@mod(t, 86400));
+        const z = days + 719468;
+        const era = @divFloor(z, 146097);
+        const doe: i64 = z - era * 146097; // [0, 146096]
+        const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365); // [0, 399]
+        const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100)); // [0, 365], March-based
+        const mp = @divFloor(5 * doy + 2, 153); // [0, 11], March = 0
+        const day: u8 = @intCast(doy - @divFloor(153 * mp + 2, 5) + 1);
+        const month: u8 = @intCast(if (mp < 10) mp + 3 else mp - 9);
+        const year = yoe + era * 400 + @as(i64, if (month <= 2) 1 else 0);
+
+        const leap = @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+        const before = [_]u16{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+        const yday = before[month - 1] + day + @as(u16, if (leap and month > 2) 1 else 0);
+
+        return .{
+            .year = year,
+            .month = month,
+            .day = day,
+            .yday = yday,
+            .wday = @intCast(@mod(days + 4, 7)), // 1970-01-01 was a Thursday
+            .hour = @intCast(secs / 3600),
+            .minute = @intCast(secs / 60 % 60),
+            .second = @intCast(secs % 60),
+        };
+    }
+};
+
+/// format_time(epoch_seconds, pattern) -> String, in UTC.
+///
+///   %Y year        %m month 01-12   %d day 01-31    %j day of year 001-366
+///   %H hour 00-23  %I hour 01-12    %p AM/PM        %M minute    %S second
+///   %B September   %b Sep           %A Tuesday      %a Tue
+///   %Z "UTC"       %% a literal %
+///
+/// `-` between the % and a numeric directive (d m j H I M S) drops its zero
+/// padding: "%B %-d" is "January 1", which is how a blog writes a date.
+///
+/// UTC only: there is no time zone database behind this, so %Z is always
+/// "UTC" rather than a guess at the reader's zone. Raises TypeError for an
+/// epoch that is not an Int (now() answers Ints), a pattern that is not a
+/// String, a directive not listed above, and a lone % at the end -- strftime
+/// would print those as they are, and a typo in a date format should not
+/// ship.
+fn builtinFormatTime(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
+    const t = CivilTime.fromEpoch(args[0].integer);
+    const pattern = args[1].string;
+    var out: std.ArrayList(u8) = .empty;
+    const oom = error.OutOfMemory;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (c != '%') {
+            out.append(allocator, c) catch return oom;
+            continue;
+        }
+        i += 1;
+        if (i >= pattern.len) return error.TypeError;
+        const no_pad = pattern[i] == '-';
+        if (no_pad) {
+            i += 1;
+            if (i >= pattern.len) return error.TypeError;
+        }
+        const d = pattern[i];
+        const num: ?i64 = switch (d) {
+            'd' => t.day,
+            'm' => t.month,
+            'j' => t.yday,
+            'H' => t.hour,
+            'I' => if (t.hour % 12 == 0) 12 else t.hour % 12,
+            'M' => t.minute,
+            'S' => t.second,
+            else => null,
+        };
+        if (num) |n| {
+            const width: usize = if (no_pad) 1 else if (d == 'j') 3 else 2;
+            out.print(allocator, "{d:0>[1]}", .{ @as(u64, @intCast(n)), width }) catch return oom;
+            continue;
+        }
+        if (no_pad) return error.TypeError;
+        switch (d) {
+            'Y' => if (t.year >= 0)
+                out.print(allocator, "{d:0>4}", .{@as(u64, @intCast(t.year))}) catch return oom
+            else
+                out.print(allocator, "{d}", .{t.year}) catch return oom,
+            'p' => out.appendSlice(allocator, if (t.hour < 12) "AM" else "PM") catch return oom,
+            'B' => out.appendSlice(allocator, month_names[t.month - 1]) catch return oom,
+            'b' => out.appendSlice(allocator, month_names[t.month - 1][0..3]) catch return oom,
+            'A' => out.appendSlice(allocator, day_names[t.wday]) catch return oom,
+            'a' => out.appendSlice(allocator, day_names[t.wday][0..3]) catch return oom,
+            'Z' => out.appendSlice(allocator, "UTC") catch return oom,
+            '%' => out.append(allocator, '%') catch return oom,
+            else => return error.TypeError,
+        }
+    }
+    return make(allocator, .{ .string = out.toOwnedSlice(allocator) catch return oom });
+}
+
 // ── String builtins ─────────────────────────────────────
 
 /// concat("hello", " ", "world") => "hello world"
@@ -486,6 +625,39 @@ fn builtinContains(allocator: std.mem.Allocator, args: []const *const Value) Eva
     if (args[0].* != .string or args[1].* != .string) return error.TypeError;
     const found = std.mem.indexOf(u8, args[0].string, args[1].string) != null;
     return make(allocator, .{ .boolean = found });
+}
+
+/// index_of("hello world", "world") => 6, or -1 when it is not there.
+///
+/// A byte offset, so it can go straight to `slice`. An empty needle is found
+/// at 0, as in every other language's indexOf. Strings only: TypeError for
+/// a list or an atom, rather than searching its formatted text.
+///
+/// A program's own `def index_of` still wins; user defs shadow builtins.
+fn builtinIndexOf(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const at: i64 = if (std.mem.indexOf(u8, args[0].string, args[1].string)) |i| @intCast(i) else -1;
+    return make(allocator, .{ .integer = at });
+}
+
+/// replace(s, find, with) => s with every occurrence of find replaced,
+/// scanning left to right without overlap ("aaa", "aa", "b" => "ba") and
+/// never rescanning what it inserted, so replacing "a" with "aa" terminates.
+///
+/// TypeError for an empty find -- it matches between every pair of bytes and
+/// there is no one answer to what replacing it means -- and for non-Strings.
+/// A string with no match comes back as the same value, not a copy.
+fn builtinReplace(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3 or args[0].* != .string or args[1].* != .string or args[2].* != .string) return error.TypeError;
+    const s = args[0].string;
+    const find = args[1].string;
+    const with = args[2].string;
+    if (find.len == 0) return error.TypeError;
+    const count = std.mem.count(u8, s, find);
+    if (count == 0) return args[0];
+    const out = allocator.alloc(u8, s.len - count * find.len + count * with.len) catch return error.OutOfMemory;
+    _ = std.mem.replace(u8, s, find, with, out);
+    return make(allocator, .{ .string = out });
 }
 
 /// to_string(42) => "42", to_string(:ok) => "ok"
@@ -686,28 +858,76 @@ fn builtinTail(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
 }
 
 /// sort([3, 1, 2]) => [1, 2, 3]
+///
+/// Numbers sort numerically (Ints and Floats together) and strings by their
+/// bytes. Anything else, a list that mixes the two, or a NaN is a TypeError.
+///
+/// pdqsort, so O(n log n) and not stable: 1 and 1.0 may come out in either
+/// order. It was insertion sort, and 100k descending Ints took 18 s.
 fn builtinSort(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     const src = args[0].list;
+    try checkSortKeys(src);
     const items = allocator.alloc(*const Value, src.len) catch return error.OutOfMemory;
     @memcpy(items, src);
+    std.sort.pdq(*const Value, items, {}, sortLessThan);
+    return make(allocator, .{ .list = items });
+}
 
-    // Numbers sort numerically and strings by their bytes. Anything else, or
-    // a list that mixes the two, is a TypeError: this used to read every
-    // non-integer as 0 and hand back a list of strings exactly as it came in.
-    const all_numbers = for (items) |item| {
-        if (item.* != .integer and item.* != .float) break false;
+/// The rule sort and sort_by_keys share: all numbers or all strings.
+///
+/// This used to read every non-integer as 0 and hand back a list of strings
+/// exactly as it came in. NaN is refused too: it is neither less than nor
+/// greater than anything, which breaks the ordering a sort relies on, and
+/// [1.0, NaN, 0.5] came back from the old sort unsorted and unremarked.
+fn checkSortKeys(keys: []const *const Value) EvalError!void {
+    const all_numbers = for (keys) |k| {
+        switch (k.*) {
+            .integer => {},
+            .float => |f| if (std.math.isNan(f)) return error.TypeError,
+            else => break false,
+        }
     } else true;
-    const all_strings = for (items) |item| {
-        if (item.* != .string) break false;
+    const all_strings = for (keys) |k| {
+        if (k.* != .string) break false;
     } else true;
     if (!all_numbers and !all_strings) return error.TypeError;
+}
 
-    std.sort.insertion(*const Value, items, {}, sortLessThan);
+/// sort_by_keys(items, keys) -> items reordered so their keys ascend.
+///
+/// keys[i] is the key of items[i]; the two lists must be the same length.
+/// Keys follow sort's rules (all numbers or all strings, no NaN), anything
+/// else is a TypeError. Stable: items with equal keys keep their order, so
+/// sorting by a second key and then a first gives a two-key sort.
+///
+/// It exists because a builtin cannot call a closure -- only the evaluator
+/// can, which is why map and filter live there -- so `sort_by(list, f)` is
+/// spelled `sort_by_keys(list, map(list, f))` for now. That also calls f once
+/// per item rather than twice per comparison.
+fn builtinSortByKeys(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .list or args[1].* != .list) return error.TypeError;
+    return sortByKeys(allocator, args[0].list, args[1].list);
+}
 
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .list = items };
-    return result;
+/// The body of sort_by_keys, public so that an evaluator-side
+/// `sort_by(list, f)` can compute the keys with the closure and hand them
+/// here.
+pub fn sortByKeys(allocator: std.mem.Allocator, items: []const *const Value, keys: []const *const Value) EvalError!*const Value {
+    if (items.len != keys.len) return error.TypeError;
+    try checkSortKeys(keys);
+    const order = allocator.alloc(usize, items.len) catch return error.OutOfMemory;
+    defer allocator.free(order);
+    for (order, 0..) |*o, i| o.* = i;
+    // Block sort is the stable one in std; pdq is not.
+    std.sort.block(usize, order, keys, struct {
+        fn lt(ks: []const *const Value, a: usize, b: usize) bool {
+            return sortLessThan({}, ks[a], ks[b]);
+        }
+    }.lt);
+    const out = allocator.alloc(*const Value, items.len) catch return error.OutOfMemory;
+    for (order, 0..) |o, i| out[i] = items[o];
+    return make(allocator, .{ .list = out });
 }
 
 fn sortLessThan(_: void, a: *const Value, b: *const Value) bool {
@@ -797,6 +1017,284 @@ fn builtinActorName(allocator: std.mem.Allocator, args: []const *const Value) Ev
         },
         else => return error.TypeError,
     }
+}
+
+// ── JSON ────────────────────────────────────────────────
+
+/// How deep an array or object may nest, in either direction. Both walks
+/// below recurse on the native stack, and a request body of 100k `[` is a
+/// few hundred bytes; past this depth json_decode answers an error tuple and
+/// json_encode raises.
+const json_max_depth = 512;
+
+/// {tag, payload} -- the shape json_decode answers in.
+fn tagged(allocator: std.mem.Allocator, tag: []const u8, payload: *const Value) EvalError!*const Value {
+    const items = allocator.alloc(*const Value, 2) catch return error.OutOfMemory;
+    items[0] = try make(allocator, .{ .atom = tag });
+    items[1] = payload;
+    return make(allocator, .{ .tuple = items });
+}
+
+/// json_encode(value) -> String, compact (no whitespace).
+///
+/// Int and Float are numbers, String and Atom are strings, true/false/nil are
+/// true/false/null, List and Tuple are arrays, Map is an object in the map's
+/// own key order.
+///
+/// A Float always keeps a `.` or an exponent, so 2.0 encodes as `2.0` and
+/// decodes back as a Float; `{d}` alone writes `2`, which comes back as Int 2
+/// and compares unequal to what went in. Magnitudes at or past 1e21, or under
+/// 1e-6, use an exponent, as JavaScript does, instead of 300 digits.
+///
+/// Raises TypeError for: NaN and infinity (JSON has no spelling for them),
+/// a string or atom that is not valid UTF-8 (JSON text is UTF-8), closures,
+/// actor refs, view nodes and holes, and nesting deeper than json_max_depth.
+fn builtinJsonEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    var out: std.ArrayList(u8) = .empty;
+    try jsonWrite(allocator, &out, args[0], 0);
+    return make(allocator, .{ .string = out.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
+
+fn jsonWrite(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: *const Value, depth: usize) EvalError!void {
+    if (depth > json_max_depth) return error.TypeError;
+    const oom = error.OutOfMemory;
+    switch (v.*) {
+        .integer => |n| out.print(allocator, "{d}", .{n}) catch return oom,
+        .float => |f| {
+            if (!std.math.isFinite(f)) return error.TypeError;
+            const mag = @abs(f);
+            if (mag != 0 and (mag >= 1e21 or mag < 1e-6)) {
+                out.print(allocator, "{e}", .{f}) catch return oom;
+            } else {
+                const start = out.items.len;
+                out.print(allocator, "{d}", .{f}) catch return oom;
+                if (std.mem.indexOfAny(u8, out.items[start..], ".e") == null)
+                    out.appendSlice(allocator, ".0") catch return oom;
+            }
+        },
+        .string => |s| try jsonWriteString(allocator, out, s),
+        .atom => |a| try jsonWriteString(allocator, out, a),
+        .boolean => |b| out.appendSlice(allocator, if (b) "true" else "false") catch return oom,
+        .nil => out.appendSlice(allocator, "null") catch return oom,
+        .list, .tuple => |items| {
+            out.append(allocator, '[') catch return oom;
+            for (items, 0..) |item, i| {
+                if (i > 0) out.append(allocator, ',') catch return oom;
+                try jsonWrite(allocator, out, item, depth + 1);
+            }
+            out.append(allocator, ']') catch return oom;
+        },
+        .map => |entries| {
+            out.append(allocator, '{') catch return oom;
+            for (entries, 0..) |entry, i| {
+                if (i > 0) out.append(allocator, ',') catch return oom;
+                try jsonWriteString(allocator, out, entry.key);
+                out.append(allocator, ':') catch return oom;
+                try jsonWrite(allocator, out, entry.val, depth + 1);
+            }
+            out.append(allocator, '}') catch return oom;
+        },
+        .hole, .actor_ref, .closure, .view_node => return error.TypeError,
+    }
+}
+
+/// A JSON string per RFC 8259 section 7: `"` and `\` escaped, control
+/// characters below 0x20 escaped (the short forms where JSON has one), and
+/// everything else -- `/`, DEL, multi-byte UTF-8 -- written as it is.
+fn jsonWriteString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) EvalError!void {
+    if (!std.unicode.utf8ValidateSlice(s)) return error.TypeError;
+    const oom = error.OutOfMemory;
+    out.append(allocator, '"') catch return oom;
+    for (s) |c| {
+        switch (c) {
+            '"' => out.appendSlice(allocator, "\\\"") catch return oom,
+            '\\' => out.appendSlice(allocator, "\\\\") catch return oom,
+            '\n' => out.appendSlice(allocator, "\\n") catch return oom,
+            '\r' => out.appendSlice(allocator, "\\r") catch return oom,
+            '\t' => out.appendSlice(allocator, "\\t") catch return oom,
+            0x08 => out.appendSlice(allocator, "\\b") catch return oom,
+            0x0c => out.appendSlice(allocator, "\\f") catch return oom,
+            0...0x07, 0x0b, 0x0e...0x1f => out.print(allocator, "\\u{x:0>4}", .{c}) catch return oom,
+            else => out.append(allocator, c) catch return oom,
+        }
+    }
+    out.append(allocator, '"') catch return oom;
+}
+
+/// json_decode(text) -> {:ok, value} or {:error, reason}.
+///
+/// Objects become maps with String keys in document order (a repeated key
+/// keeps its last value, as JSON.parse does), arrays become lists, null is
+/// nil. A number written as an integer that fits an i64 is an Int; any other
+/// number is a Float, so 9223372036854775808 and 1e2 are both Floats.
+///
+/// An error tuple rather than a raise, unlike every other builtin here: JSON
+/// arrives from outside -- a request body, a file someone edited -- and Blimp
+/// has no rescue, so a raise would let any client stop the handler reading
+/// it. The reason names the error and where it was found, e.g.
+/// "SyntaxError at line 2, column 3". A number too large for a Float and
+/// nesting deeper than json_max_depth are errors too.
+///
+/// Raises TypeError only when handed something that is not a String.
+fn builtinJsonDecode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    // The parse tree (hash maps, array lists, unescaped strings) is thrown
+    // away as soon as it is converted, so it lives in its own arena and not in
+    // the evaluator's heap, which would keep it for the rest of the run.
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+    var scanner = std.json.Scanner.initCompleteInput(sa, args[0].string);
+    var diag: std.json.Diagnostics = .{};
+    scanner.enableDiagnostics(&diag);
+    const tree = std.json.parseFromTokenSourceLeaky(std.json.Value, sa, &scanner, .{
+        .duplicate_field_behavior = .use_last,
+        .parse_numbers = true,
+    }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        const msg = std.fmt.allocPrint(allocator, "{s} at line {d}, column {d}", .{
+            @errorName(err), diag.getLine(), diag.getColumn(),
+        }) catch return error.OutOfMemory;
+        return tagged(allocator, "error", try make(allocator, .{ .string = msg }));
+    };
+    const v = jsonToValue(allocator, tree, 0) catch |err| {
+        const msg: []const u8 = switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TooDeep => std.fmt.comptimePrint("nested deeper than {d} levels", .{json_max_depth}),
+            error.NumberOutOfRange => "number out of range for a Float",
+        };
+        return tagged(allocator, "error", try make(allocator, .{ .string = msg }));
+    };
+    return tagged(allocator, "ok", v);
+}
+
+fn jsonToValue(allocator: std.mem.Allocator, j: std.json.Value, depth: usize) error{ OutOfMemory, TooDeep, NumberOutOfRange }!*const Value {
+    if (depth > json_max_depth) return error.TooDeep;
+    switch (j) {
+        .null => return make(allocator, .nil) catch error.OutOfMemory,
+        .bool => |b| return make(allocator, .{ .boolean = b }) catch error.OutOfMemory,
+        .integer => |n| return make(allocator, .{ .integer = n }) catch error.OutOfMemory,
+        .float => |f| return make(allocator, .{ .float = f }) catch error.OutOfMemory,
+        // An integer past i64, or a float past f64 (1e400).
+        .number_string => |s| {
+            const f = std.fmt.parseFloat(f64, s) catch return error.NumberOutOfRange;
+            if (!std.math.isFinite(f)) return error.NumberOutOfRange;
+            return make(allocator, .{ .float = f }) catch error.OutOfMemory;
+        },
+        .string => |s| {
+            const owned = try allocator.dupe(u8, s);
+            return make(allocator, .{ .string = owned }) catch error.OutOfMemory;
+        },
+        .array => |arr| {
+            const items = try allocator.alloc(*const Value, arr.items.len);
+            for (arr.items, 0..) |item, i| items[i] = try jsonToValue(allocator, item, depth + 1);
+            return make(allocator, .{ .list = items }) catch error.OutOfMemory;
+        },
+        .object => |obj| {
+            const entries = try allocator.alloc(Value.MapEntry, obj.count());
+            var it = obj.iterator();
+            var i: usize = 0;
+            while (it.next()) |kv| : (i += 1) {
+                entries[i] = .{
+                    .key = try allocator.dupe(u8, kv.key_ptr.*),
+                    .val = try jsonToValue(allocator, kv.value_ptr.*, depth + 1),
+                };
+            }
+            return make(allocator, .{ .map = entries }) catch error.OutOfMemory;
+        },
+    }
+}
+
+// ── Hashing and encoding ────────────────────────────────
+//
+// A Blimp String is a byte string, so these take and answer Strings of
+// arbitrary bytes: sha256 of a UTF-8 string hashes its UTF-8 bytes, and
+// base64_decode can answer bytes that are not text at all.
+
+fn stringArg(v: *const Value) EvalError![]const u8 {
+    return if (v.* == .string) v.string else error.TypeError;
+}
+
+fn hexLower(allocator: std.mem.Allocator, bytes: []const u8) EvalError!*const Value {
+    const digits = "0123456789abcdef";
+    const out = allocator.alloc(u8, bytes.len * 2) catch return error.OutOfMemory;
+    for (bytes, 0..) |b, i| {
+        out[2 * i] = digits[b >> 4];
+        out[2 * i + 1] = digits[b & 0x0f];
+    }
+    return make(allocator, .{ .string = out });
+}
+
+/// sha256(s) -> the SHA-256 digest of s's bytes, as 64 lowercase hex digits.
+/// Raises TypeError for anything but a String; an atom is not hashed as its
+/// name.
+fn builtinSha256(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(try stringArg(args[0]), &digest, .{});
+    return hexLower(allocator, &digest);
+}
+
+/// hmac_sha256(key, message) -> HMAC-SHA256 as 64 lowercase hex digits
+/// (RFC 2104). A key longer than the 64-byte block is hashed first, as the
+/// RFC says. Raises TypeError unless both are Strings.
+fn builtinHmacSha256(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+    var mac: [Hmac.mac_length]u8 = undefined;
+    Hmac.create(&mac, try stringArg(args[1]), try stringArg(args[0]));
+    return hexLower(allocator, &mac);
+}
+
+/// hex_encode(bytes) -> two lowercase hex digits per byte. TypeError unless
+/// a String.
+fn builtinHexEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    return hexLower(allocator, try stringArg(args[0]));
+}
+
+fn base64Encode(allocator: std.mem.Allocator, codecs: std.base64.Codecs, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const src = try stringArg(args[0]);
+    const out = allocator.alloc(u8, codecs.Encoder.calcSize(src.len)) catch return error.OutOfMemory;
+    _ = codecs.Encoder.encode(out, src);
+    return make(allocator, .{ .string = out });
+}
+
+fn base64Decode(allocator: std.mem.Allocator, codecs: std.base64.Codecs, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const src = try stringArg(args[0]);
+    const len = codecs.Decoder.calcSizeForSlice(src) catch return error.TypeError;
+    const out = allocator.alloc(u8, len) catch return error.OutOfMemory;
+    codecs.Decoder.decode(out, src) catch return error.TypeError;
+    return make(allocator, .{ .string = out });
+}
+
+/// base64_encode(bytes) -> RFC 4648 base64, `+` and `/`, padded with `=`.
+fn builtinBase64Encode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Encode(allocator, std.base64.standard, args);
+}
+
+/// base64_decode(text) -> the bytes. Strict: the length must be a multiple
+/// of 4 with its `=` padding, only the standard alphabet, no whitespace, and
+/// no stray bits in the last character. Anything else is a TypeError, not a
+/// best guess at what was meant.
+fn builtinBase64Decode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Decode(allocator, std.base64.standard, args);
+}
+
+/// base64url_encode(bytes) -> RFC 4648 section 5: `-` and `_`, no padding.
+/// The form JWTs, cookies and URLs want.
+fn builtinBase64UrlEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Encode(allocator, std.base64.url_safe_no_pad, args);
+}
+
+/// base64url_decode(text) -> the bytes. As strict as base64_decode: `=`
+/// padding, `+` or `/`, or a length that leaves one dangling character is a
+/// TypeError.
+fn builtinBase64UrlDecode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Decode(allocator, std.base64.url_safe_no_pad, args);
 }
 
 /// Write to stdout, ignoring a failure, because a builtin has nowhere to put
@@ -1415,17 +1913,87 @@ fn builtinWriteFile(allocator: std.mem.Allocator, args: []const *const Value) Ev
     return make(allocator, .{ .boolean = true });
 }
 
+/// The largest file read_file will hold in memory.
+const read_file_limit = 64 * 1024 * 1024;
+
 /// read_file(path: String) -> String, or nil when it cannot be read.
+///
+/// A file larger than read_file_limit (64 MiB) raises NotSupported instead.
+/// The limit was 1 MiB and a file past it answered nil, the same nil as a
+/// missing file, so a 1.1 MiB image or JSON dump looked like it was not
+/// there at all.
 fn builtinReadFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     if (is_wasm) return error.NotSupported;
     const path = args[0].string;
-    const content = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, allocator, .limited(1024 * 1024)) catch {
+    const content = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, allocator, .limited(read_file_limit)) catch |err| {
+        if (err == error.StreamTooLong) return error.NotSupported;
+        if (err == error.OutOfMemory) return error.OutOfMemory;
         return make(allocator, .nil);
     };
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .string = content };
     return result;
+}
+
+/// list_dir(path) -> the names in a directory, sorted by their bytes, without
+/// "." and "..", or nil when it cannot be opened (missing, not a directory,
+/// no permission) -- the same nil read_file answers.
+///
+/// Sorted because the OS order is whatever the file system keeps: APFS and
+/// ext4 answer the same directory in different orders, and a site that
+/// builds its post list from list_dir would reorder itself between laptop
+/// and server. Names only, not paths; kinds are not reported.
+fn builtinListDir(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    var dir = std.Io.Dir.cwd().openDir(ioenv.io, args[0].string, .{ .iterate = true }) catch {
+        return make(allocator, .nil);
+    };
+    defer dir.close(ioenv.io);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(ioenv.io) catch return make(allocator, .nil)) |entry| {
+        if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+        // `entry.name` points into the iterator's buffer and is gone at the
+        // next call, so it is copied before the loop moves on.
+        const owned = allocator.dupe(u8, entry.name) catch return error.OutOfMemory;
+        names.append(allocator, owned) catch return error.OutOfMemory;
+    }
+    std.sort.pdq([]const u8, names.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    const items = allocator.alloc(*const Value, names.items.len) catch return error.OutOfMemory;
+    for (names.items, 0..) |name, i| items[i] = try make(allocator, .{ .string = name });
+    return make(allocator, .{ .list = items });
+}
+
+/// file_exists?(path) -> true when something is there to stat: a file, a
+/// directory, or a symlink that resolves. A dangling symlink, or a path the
+/// process may not look into, is false.
+fn builtinFileExists(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    _ = std.Io.Dir.cwd().statFile(ioenv.io, args[0].string, .{}) catch {
+        return make(allocator, .{ .boolean = false });
+    };
+    return make(allocator, .{ .boolean = true });
+}
+
+/// file_size(path) -> the size in bytes of the regular file at path
+/// (following symlinks), or nil when there is none. A directory is nil too:
+/// its "size" is a file-system detail, not the size of anything a program
+/// could read.
+fn builtinFileSize(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    const st = std.Io.Dir.cwd().statFile(ioenv.io, args[0].string, .{}) catch {
+        return make(allocator, .nil);
+    };
+    if (st.kind != .file) return make(allocator, .nil);
+    return make(allocator, .{ .integer = @intCast(st.size) });
 }
 
 // ============================================================
@@ -2226,6 +2794,98 @@ const builtinTcpSetNonblocking_impl = if (is_wasm) native_stub.stub else builtin
 const builtinTcpPoll_impl = if (is_wasm) native_stub.stub else builtinTcpPollNative;
 const builtinSleepMs_impl = if (is_wasm) native_stub.stub else builtinSleepMsNative;
 const builtinReadLine_impl = if (is_wasm) native_stub.stub else builtinReadLineNative;
+const builtinRandomBytes_impl = if (is_wasm) native_stub.stub else builtinRandomBytesNative;
+const builtinRandomToken_impl = if (is_wasm) native_stub.stub else builtinRandomTokenNative;
+const builtinGetenv_impl = if (is_wasm) native_stub.stub else builtinGetenvNative;
+const builtinArgv_impl = if (is_wasm) native_stub.stub else builtinArgvNative;
+
+/// getenv(name) -> the variable's value as a String, or nil when it is not
+/// set. A set-but-empty variable is "", not nil.
+///
+/// Raises TypeError for a non-String name, and for a name with a NUL byte in
+/// it: C would read the name only up to the NUL and answer for a different
+/// variable than the one asked about.
+fn builtinGetenvNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const name = args[0].string;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return error.TypeError;
+    const z = allocator.dupeZ(u8, name) catch return error.OutOfMemory;
+    const val = std.c.getenv(z) orelse return make(allocator, .nil);
+    const owned = allocator.dupe(u8, std.mem.span(val)) catch return error.OutOfMemory;
+    return make(allocator, .{ .string = owned });
+}
+
+/// argv() -> the whole command line as a List of Strings, exactly as the
+/// process got it: argv()[0] is the blimp binary, argv()[1] the script, and
+/// anything after that is the script's (including flags blimp itself read,
+/// like --test).
+///
+/// `main` takes its arguments as a zig 0.16 capability and does not publish
+/// them, so this asks the OS for them instead: _NSGetArgv on macOS,
+/// /proc/self/cmdline on Linux. Anywhere else it is NotSupported.
+fn builtinArgvNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    var list: std.ArrayList(*const Value) = .empty;
+    switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => {
+            const darwin = struct {
+                extern "c" fn _NSGetArgc() *c_int;
+                extern "c" fn _NSGetArgv() *[*][*:0]u8;
+            };
+            const argc: usize = @intCast(darwin._NSGetArgc().*);
+            const argv = darwin._NSGetArgv().*;
+            for (argv[0..argc]) |arg| {
+                const owned = allocator.dupe(u8, std.mem.span(arg)) catch return error.OutOfMemory;
+                list.append(allocator, try make(allocator, .{ .string = owned })) catch return error.OutOfMemory;
+            }
+        },
+        .linux => {
+            const raw = std.Io.Dir.cwd().readFileAlloc(ioenv.io, "/proc/self/cmdline", allocator, .limited(1024 * 1024)) catch {
+                return error.NotSupported;
+            };
+            // NUL-terminated arguments laid end to end; the last NUL ends the
+            // last argument rather than starting an empty one.
+            const body = if (raw.len > 0 and raw[raw.len - 1] == 0) raw[0 .. raw.len - 1] else raw;
+            var parts = std.mem.splitScalar(u8, body, 0);
+            while (parts.next()) |arg| {
+                list.append(allocator, try make(allocator, .{ .string = arg })) catch return error.OutOfMemory;
+            }
+        },
+        else => return error.NotSupported,
+    }
+    return make(allocator, .{ .list = list.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
+
+/// n bytes from the operating system's CSPRNG (getentropy/getrandom through
+/// `Io.randomSecure`), or TypeError for a count that is not a non-negative
+/// Int. NotSupported if the OS will not give entropy -- there is no fallback
+/// to something weaker.
+fn secureBytes(allocator: std.mem.Allocator, args: []const *const Value) EvalError![]u8 {
+    if (args.len != 1 or args[0].* != .integer or args[0].integer < 0) return error.TypeError;
+    const buf = allocator.alloc(u8, @intCast(args[0].integer)) catch return error.OutOfMemory;
+    ioenv.io.randomSecure(buf) catch return error.NotSupported;
+    return buf;
+}
+
+/// random_bytes(n) -> a String of n bytes from the OS CSPRNG.
+///
+/// Not `random`: that is xorshift with a fixed seed, which is what a test or
+/// a game replay wants and exactly what a session id must not be. This one
+/// leaves the xorshift state alone, so a seeded sequence is not disturbed by
+/// a token minted in the middle of it. Native only; NotSupported on WASM.
+fn builtinRandomBytesNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return make(allocator, .{ .string = try secureBytes(allocator, args) });
+}
+
+/// random_token(n) -> base64url (no padding) of n CSPRNG bytes: 32 bytes is
+/// a 43-character token that can go in a cookie or a URL unescaped.
+fn builtinRandomTokenNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    const raw = try secureBytes(allocator, args);
+    const enc = std.base64.url_safe_no_pad.Encoder;
+    const out = allocator.alloc(u8, enc.calcSize(raw.len)) catch return error.OutOfMemory;
+    _ = enc.encode(out, raw);
+    return make(allocator, .{ .string = out });
+}
 
 /// sleep_ms(n: Int) -> :ok
 ///

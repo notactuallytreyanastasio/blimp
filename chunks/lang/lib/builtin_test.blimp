@@ -1227,3 +1227,636 @@ actor AssertionDetailTests do
     assert_ne(nil, 0)
   end
 end
+
+# ============================================================
+# JSON
+# ============================================================
+
+# True when `code` fails at runtime. blimp_eval answers a map with
+# error: "runtime error" instead of stopping the test run, which is the only
+# way a Blimp test can watch a builtin refuse its arguments.
+def raises(code: String) -> Bool do
+  r = blimp_eval(code)
+  case type_of(r) == :map do
+    true -> lookup(r, "error") == "runtime error"
+    false -> false
+  end
+end
+
+actor JsonTests do
+  # -- json_encode --
+  test "json_encode scalars" do
+    assert_eq(json_encode(42), "42")
+    assert_eq(json_encode(-7), "-7")
+    assert_eq(json_encode(true), "true")
+    assert_eq(json_encode(false), "false")
+    assert_eq(json_encode(nil), "null")
+    assert_eq(json_encode("hi"), "\"hi\"")
+  end
+
+  test "json_encode atom is a string" do
+    assert_eq(json_encode(:ok), "\"ok\"")
+  end
+
+  test "json_encode floats keep a decimal point" do
+    assert_eq(json_encode(1.5), "1.5")
+    assert_eq(json_encode(2.0), "2.0")
+    assert_eq(json_encode(-0.25), "-0.25")
+  end
+
+  test "json_encode huge float uses an exponent" do
+    assert_eq(json_encode(1.0e300), "1e300")
+  end
+
+  test "json_encode non-finite float raises" do
+    assert_eq(json_encode(0.5), "0.5")
+    assert(raises("json_encode(1.0e300 * 1.0e300)"))
+    assert(raises("json_encode(sqrt(-1.0))"))
+  end
+
+  test "json_encode escapes per RFC 8259" do
+    assert_eq(json_encode("a\"b\\c"), "\"a\\\"b\\\\c\"")
+    assert_eq(json_encode("line\nnext\ttab\r"), "\"line\\nnext\\ttab\\r\"")
+    assert_eq(json_encode(from_char_code(1)), "\"\\u0001\"")
+    assert_eq(json_encode(from_char_code(31)), "\"\\u001f\"")
+  end
+
+  test "json_encode leaves UTF-8 and slashes alone" do
+    assert_eq(json_encode("café / ok"), "\"café / ok\"")
+  end
+
+  test "json_encode rejects invalid UTF-8" do
+    assert_eq(json_encode(from_char_code(127)), concat("\"", from_char_code(127), "\""))
+    assert(raises("json_encode(from_char_code(255))"))
+  end
+
+  test "json_encode lists and tuples are arrays" do
+    assert_eq(json_encode([1, "a", nil]), "[1,\"a\",null]")
+    assert_eq(json_encode({:ok, 1}), "[\"ok\",1]")
+    assert_eq(json_encode([]), "[]")
+  end
+
+  test "json_encode maps are objects in their own order" do
+    assert_eq(json_encode(%{b: 1, a: [true]}), "{\"b\":1,\"a\":[true]}")
+    assert_eq(json_encode(%{}), "{}")
+  end
+
+  test "json_encode escapes map keys" do
+    assert_eq(json_encode(put(%{}, "q\"k", 1)), "{\"q\\\"k\":1}")
+  end
+
+  test "json_encode rejects closures" do
+    assert_eq(json_encode([1]), "[1]")
+    assert(raises("json_encode(fn(x: Int) do x end)"))
+    assert(raises("json_encode([1, fn(x: Int) do x end])"))
+  end
+
+  test "json_encode rejects view nodes" do
+    assert_eq(json_encode("hi"), "\"hi\"")
+    assert(raises("json_encode(text(\"hi\"))"))
+  end
+
+  # -- json_decode --
+  test "json_decode scalars" do
+    assert_eq(json_decode("42"), {:ok, 42})
+    assert_eq(json_decode("-3"), {:ok, -3})
+    assert_eq(json_decode("1.5"), {:ok, 1.5})
+    assert_eq(json_decode("true"), {:ok, true})
+    assert_eq(json_decode("false"), {:ok, false})
+    assert_eq(json_decode("null"), {:ok, nil})
+    assert_eq(json_decode("\"hi\""), {:ok, "hi"})
+  end
+
+  test "json_decode integer too big for Int is a Float" do
+    assert_eq(json_decode("9223372036854775807"), {:ok, 9223372036854775807})
+    assert_eq(json_decode("9223372036854775808"), {:ok, 9223372036854775808.0})
+  end
+
+  test "json_decode exponent is a Float" do
+    assert_eq(json_decode("1e2"), {:ok, 100.0})
+  end
+
+  test "json_decode unescapes strings" do
+    assert_eq(json_decode("\"a\\nb\\u00e9\\\"\""), {:ok, "a\nbé\""})
+  end
+
+  test "json_decode arrays are lists" do
+    assert_eq(json_decode("[1, [2, 3], \"x\"]"), {:ok, [1, [2, 3], "x"]})
+  end
+
+  test "json_decode objects are maps with string keys" do
+    case json_decode("{\"name\": \"bob\", \"tags\": [\"a\"], \"n\": {\"x\": null}}") do
+      {:ok, m} ->
+        assert_eq(lookup(m, "name"), "bob")
+        assert_eq(lookup(m, "tags"), ["a"])
+        assert_eq(lookup(lookup(m, "n"), "x"), nil)
+        assert_eq(keys(m), ["name", "tags", "n"])
+      other -> assert_eq(other, :decoded)
+    end
+  end
+
+  test "json_decode duplicate key keeps the last" do
+    case json_decode("{\"a\": 1, \"a\": 2}") do
+      {:ok, m} -> assert_eq(lookup(m, "a"), 2)
+      other -> assert_eq(other, :decoded)
+    end
+  end
+
+  test "json_decode invalid JSON is an error tuple" do
+    assert_eq(elem(json_decode("{"), 0), :error)
+    assert_eq(elem(json_decode(""), 0), :error)
+    assert_eq(elem(json_decode("[1,]"), 0), :error)
+    assert_eq(elem(json_decode("nul"), 0), :error)
+    assert_eq(elem(json_decode("1 2"), 0), :error)
+    assert_eq(elem(json_decode("'a'"), 0), :error)
+  end
+
+  test "json_decode error says where" do
+    assert_eq(json_decode("[1,\n  x]"), {:error, "SyntaxError at line 2, column 3"})
+  end
+
+  test "json_decode rejects a non-string" do
+    assert_eq(json_decode("42"), {:ok, 42})
+    assert(raises("json_decode(42)"))
+  end
+
+  test "json round trip" do
+    v = %{name: "a\"b", n: [1, 2.5, true, nil], nested: %{k: "v"}}
+    assert_eq(json_decode(json_encode(v)), {:ok, v})
+  end
+
+  test "json_decode deep nesting is an error, not a crash" do
+    opens = join(map(range(1, 5000), fn(i: Int) do "[" end), "")
+    closes = join(map(range(1, 5000), fn(i: Int) do "]" end), "")
+    assert_eq(elem(json_decode(concat(opens, closes)), 0), :error)
+  end
+end
+
+# ============================================================
+# Hashing, encoding, randomness
+# ============================================================
+
+actor CryptoTests do
+  # -- sha256 --
+  test "sha256 of empty string" do
+    assert_eq(sha256(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+  end
+
+  test "sha256 of abc" do
+    assert_eq(sha256("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+  end
+
+  test "sha256 rejects a non-string" do
+    assert_eq(length(sha256("x")), 64)
+    assert(raises("sha256(42)"))
+    assert(raises("sha256(:abc)"))
+  end
+
+  # -- hmac_sha256 --
+  test "hmac_sha256 known vector" do
+    assert_eq(hmac_sha256("key", "The quick brown fox jumps over the lazy dog"), "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+  end
+
+  test "hmac_sha256 key longer than a block is hashed first" do
+    long_key = join(map(range(1, 100), fn(i: Int) do "k" end), "")
+    assert_eq(hmac_sha256(long_key, "m"), "0482265a92ce176b0374f2192380b21e2d40126432c52f865cc0957053ae7a14")
+  end
+
+  test "hmac_sha256 rejects non-strings" do
+    assert_eq(length(hmac_sha256("k", "m")), 64)
+    assert(raises("hmac_sha256(\"k\", 1)"))
+    assert(raises("hmac_sha256(nil, \"m\")"))
+  end
+
+  # -- base64 --
+  test "base64_encode pads" do
+    assert_eq(base64_encode(""), "")
+    assert_eq(base64_encode("f"), "Zg==")
+    assert_eq(base64_encode("fo"), "Zm8=")
+    assert_eq(base64_encode("foo"), "Zm9v")
+    assert_eq(base64_encode("hello"), "aGVsbG8=")
+  end
+
+  test "base64_encode uses + and /" do
+    assert_eq(base64_encode(concat(from_char_code(251), from_char_code(255))), "+/8=")
+  end
+
+  test "base64_decode round trips" do
+    assert_eq(base64_decode("aGVsbG8="), "hello")
+    assert_eq(base64_decode(""), "")
+    assert_eq(base64_decode("+/8="), concat(from_char_code(251), from_char_code(255)))
+  end
+
+  test "base64_decode rejects invalid input" do
+    assert_eq(base64_decode("Zg=="), "f")
+    assert(raises("base64_decode(\"Zg\")"))
+    assert(raises("base64_decode(\"Z!==\")"))
+    assert(raises("base64_decode(\"-_8=\")"))
+    assert(raises("base64_decode(42)"))
+  end
+
+  # -- base64url --
+  test "base64url_encode has no padding and uses - and _" do
+    assert_eq(base64url_encode(concat(from_char_code(251), from_char_code(255))), "-_8")
+    assert_eq(base64url_encode("f"), "Zg")
+    assert_eq(base64url_encode(""), "")
+  end
+
+  test "base64url_decode round trips" do
+    assert_eq(base64url_decode("-_8"), concat(from_char_code(251), from_char_code(255)))
+    assert_eq(base64url_decode("aGVsbG8"), "hello")
+  end
+
+  test "base64url_decode rejects padding and the standard alphabet" do
+    assert_eq(base64url_decode("Zg"), "f")
+    assert(raises("base64url_decode(\"Zg==\")"))
+    assert(raises("base64url_decode(\"+/8\")"))
+    assert(raises("base64url_decode(\"Z\")"))
+  end
+
+  # -- hex_encode --
+  test "hex_encode lowercase" do
+    assert_eq(hex_encode(concat(from_char_code(0), from_char_code(255), "A")), "00ff41")
+    assert_eq(hex_encode(""), "")
+  end
+
+  test "hex_encode rejects a non-string" do
+    assert_eq(hex_encode("a"), "61")
+    assert(raises("hex_encode([1, 2])"))
+  end
+
+  # -- random_bytes / random_token --
+  test "random_bytes answers n bytes" do
+    assert_eq(length(random_bytes(16)), 16)
+    assert_eq(random_bytes(0), "")
+  end
+
+  test "random_bytes differ between calls" do
+    assert_ne(random_bytes(32), random_bytes(32))
+  end
+
+  test "random_bytes does not move the seeded random" do
+    seed(7)
+    a = random(1, 1000000)
+    seed(7)
+    random_bytes(8)
+    assert_eq(random(1, 1000000), a)
+  end
+
+  test "random_bytes rejects a negative or non-integer count" do
+    assert_eq(length(random_bytes(1)), 1)
+    assert(raises("random_bytes(-1)"))
+    assert(raises("random_bytes(\"4\")"))
+  end
+
+  test "random_token is url-safe base64 of n bytes" do
+    t = random_token(32)
+    assert_eq(length(t), 43)
+    assert_eq(length(base64url_decode(t)), 32)
+    refute(contains(t, "="))
+    refute(contains(t, "+"))
+    refute(contains(t, "/"))
+  end
+
+  test "random_token rejects a negative count" do
+    assert_eq(length(random_token(3)), 4)
+    assert(raises("random_token(-1)"))
+  end
+end
+
+# ============================================================
+# Environment and file system
+# (paths are relative to chunks/lang, where the suite is run from)
+# ============================================================
+
+def repeat(s: String, n: Int) -> String do
+  join(map(range(1, n), fn(i: Int) do s end), "")
+end
+
+actor SystemTests do
+  # -- getenv --
+  test "getenv reads a set variable" do
+    home = getenv("PATH")
+    assert_eq(type_of(home), :string)
+    assert(length(home) > 0)
+  end
+
+  test "getenv of an unset variable is nil" do
+    assert_eq(getenv("BLIMP_TEST_SURELY_NOT_SET_7F3A"), nil)
+  end
+
+  test "getenv rejects a non-string and an embedded NUL" do
+    assert_eq(getenv("BLIMP_TEST_SURELY_NOT_SET_7F3A"), nil)
+    assert(raises("getenv(:PATH)"))
+    assert(raises("getenv(concat(\"PA\", from_char_code(0), \"TH\"))"))
+  end
+
+  # -- argv --
+  test "argv is the process's arguments as strings" do
+    args = argv()
+    assert(length(args) >= 3)
+    assert(contains(elem(args, 1), "builtin_test.blimp"))
+    assert_eq(elem(args, 2), "--test")
+  end
+
+  test "argv takes no arguments" do
+    assert_eq(type_of(argv()), :list)
+    assert(raises("argv(1)"))
+  end
+
+  # -- list_dir --
+  test "list_dir answers entry names" do
+    names = list_dir("lib")
+    assert(length(filter(names, fn(n: String) do n == "builtin_test.blimp" end)) == 1)
+    assert_eq(length(filter(names, fn(n: String) do n == "." or n == ".." end)), 0)
+  end
+
+  test "list_dir is sorted by bytes" do
+    names = list_dir("lib")
+    assert(length(names) > 3)
+    assert_eq(names, sort(names))
+  end
+
+  test "list_dir of a missing directory or a file is nil" do
+    assert_eq(type_of(list_dir("lib")), :list)
+    assert_eq(list_dir("lib/no_such_dir_here"), nil)
+    assert_eq(list_dir("lib/builtin_test.blimp"), nil)
+  end
+
+  test "list_dir rejects a non-string" do
+    assert_eq(type_of(list_dir(".")), :list)
+    assert(raises("list_dir(nil)"))
+  end
+
+  # -- file_exists? --
+  test "file_exists? for a file, a directory and nothing" do
+    assert_eq(file_exists?("lib/builtin_test.blimp"), true)
+    assert_eq(file_exists?("lib"), true)
+    assert_eq(file_exists?("lib/no_such_file_here"), false)
+    assert(raises("file_exists?(1)"))
+  end
+
+  # -- file_size --
+  test "file_size of a file just written" do
+    assert(write_file("/tmp/blimp_file_size_test.txt", "hello, size"))
+    assert_eq(file_size("/tmp/blimp_file_size_test.txt"), 11)
+  end
+
+  test "file_size of a missing file or a directory is nil" do
+    assert_eq(file_size("lib/no_such_file_here"), nil)
+    assert_eq(file_size("lib"), nil)
+    assert(raises("file_size(1)"))
+  end
+
+  # -- read_file --
+  test "read_file reads more than 1 MiB" do
+    kib = repeat("abcdefgh", 128)
+    big = repeat(kib, 2048)
+    assert_eq(length(big), 2097152)
+    assert(write_file("/tmp/blimp_read_file_big_test.txt", big))
+    got = read_file("/tmp/blimp_read_file_big_test.txt")
+    assert_eq(length(got), 2097152)
+    assert(got == big)
+  end
+end
+
+# ============================================================
+# format_time (UTC). Expected values from Python's
+# datetime.fromtimestamp(t, timezone.utc).strftime(...)
+# ============================================================
+
+actor TimeTests do
+  test "format_time epoch zero" do
+    assert_eq(format_time(0, "%Y-%m-%d %H:%M:%S"), "1970-01-01 00:00:00")
+    assert_eq(format_time(0, "%A %a %B %b %j"), "Thursday Thu January Jan 001")
+  end
+
+  test "format_time a known afternoon" do
+    assert_eq(format_time(1790699821, "%Y-%m-%d %H:%M:%S %Z"), "2026-09-29 16:37:01 UTC")
+    assert_eq(format_time(1790699821, "%a, %d %b %Y %H:%M:%S GMT"), "Tue, 29 Sep 2026 16:37:01 GMT")
+    assert_eq(format_time(1790699821, "%I:%M %p, %A %B %d (day %j)"), "04:37 PM, Tuesday September 29 (day 272)")
+  end
+
+  test "format_time leap days" do
+    assert_eq(format_time(1709164800, "%Y-%m-%d %A %j"), "2024-02-29 Thursday 060")
+    assert_eq(format_time(951782400, "%Y-%m-%d %A %j"), "2000-02-29 Tuesday 060")
+    assert_eq(format_time(1735603200, "%Y-%m-%d %j"), "2024-12-31 366")
+  end
+
+  test "format_time 1900 was not a leap year" do
+    assert_eq(format_time(-2203891200, "%Y-%m-%d %A %j"), "1900-03-01 Thursday 060")
+  end
+
+  test "format_time before the epoch" do
+    assert_eq(format_time(-1, "%Y-%m-%d %H:%M:%S %I %p %A %j"), "1969-12-31 23:59:59 11 PM Wednesday 365")
+  end
+
+  test "format_time far future" do
+    assert_eq(format_time(253402300799, "%Y-%m-%d %H:%M:%S %A"), "9999-12-31 23:59:59 Friday")
+  end
+
+  test "format_time 12-hour clock at midnight and noon" do
+    assert_eq(format_time(0, "%I %p"), "12 AM")
+    assert_eq(format_time(43200, "%I %p"), "12 PM")
+    assert_eq(format_time(46800, "%I %p"), "01 PM")
+  end
+
+  test "format_time minus flag drops the zero padding" do
+    assert_eq(format_time(1704067200, "%B %-d, %Y"), "January 1, 2024")
+    assert_eq(format_time(1704067200, "%-m/%-d %-I%p %-j"), "1/1 12AM 1")
+  end
+
+  test "format_time percent literal and plain text" do
+    assert_eq(format_time(0, "100%% at %Y"), "100% at 1970")
+    assert_eq(format_time(0, ""), "")
+    assert_eq(format_time(0, "no directives"), "no directives")
+  end
+
+  test "format_time rejects unknown directives" do
+    assert_eq(format_time(0, "%Y"), "1970")
+    assert(raises("format_time(0, \"%Q\")"))
+    assert(raises("format_time(0, \"trailing %\")"))
+    assert(raises("format_time(0, \"%-Y\")"))
+  end
+
+  test "format_time rejects bad arguments" do
+    assert_eq(format_time(0, "%Y"), "1970")
+    assert(raises("format_time(1.5, \"%Y\")"))
+    assert(raises("format_time(\"0\", \"%Y\")"))
+    assert(raises("format_time(0, :iso)"))
+  end
+
+  test "format_time of now() is this century" do
+    assert_eq(slice(format_time(now(), "%Y"), 0, 2), "20")
+  end
+end
+
+# ============================================================
+# sort at scale, and sorting by a key
+# ============================================================
+
+# What sort_by(list, f) is until the evaluator can call a closure from a
+# builtin: the keys are computed by map, which can, and sorted by the
+# builtin, which is stable.
+def sort_by(xs: List, f: Function) -> List do
+  sort_by_keys(xs, map(xs, f))
+end
+
+actor SortTests do
+  test "sort 100k descending ints in well under a second" do
+    xs = reverse(range(1, 100000))
+    t0 = now_ms()
+    ys = sort(xs)
+    elapsed = now_ms() - t0
+    assert_eq(head(ys), 1)
+    assert_eq(elem(ys, 99999), 100000)
+    assert(elapsed < 2000)
+  end
+
+  test "sort 100k strings" do
+    xs = reverse(map(range(100000, 199999), fn(i: Int) do to_string(i) end))
+    t0 = now_ms()
+    ys = sort(xs)
+    assert(now_ms() - t0 < 2000)
+    assert_eq(head(ys), "100000")
+    assert_eq(elem(ys, 99999), "199999")
+  end
+
+  test "sort keeps duplicates" do
+    assert_eq(sort([3, 1, 3, 2, 1, 3]), [1, 1, 2, 3, 3, 3])
+  end
+
+  test "sort negative and float mix" do
+    assert_eq(sort([0.5, -2, 3, -2.5, 0]), [-2.5, -2, 0, 0.5, 3])
+  end
+
+  test "sort strings by bytes, uppercase first" do
+    assert_eq(sort(["b", "B", "a", "A", ""]), ["", "A", "B", "a", "b"])
+  end
+
+  test "sort rejects a mix and other types" do
+    assert_eq(sort([2, 1]), [1, 2])
+    assert(raises("sort([1, \"a\"])"))
+    assert(raises("sort([:b, :a])"))
+    assert(raises("sort([[2], [1]])"))
+    assert(raises("sort(\"ba\")"))
+  end
+
+  test "sort rejects NaN" do
+    assert_eq(sort([2.0, 1.0]), [1.0, 2.0])
+    assert(raises("sort([1.0, sqrt(-1.0), 0.5])"))
+  end
+
+  # -- sort_by_keys --
+  test "sort_by_keys orders items by their keys" do
+    assert_eq(sort_by_keys(["pear", "fig", "apple"], [4, 3, 5]), ["fig", "pear", "apple"])
+  end
+
+  test "sort_by_keys is stable" do
+    items = [{:a, 2}, {:b, 1}, {:c, 2}, {:d, 1}, {:e, 2}]
+    assert_eq(sort_by_keys(items, [2, 1, 2, 1, 2]), [{:b, 1}, {:d, 1}, {:a, 2}, {:c, 2}, {:e, 2}])
+  end
+
+  test "sort_by_keys with string keys" do
+    assert_eq(sort_by_keys([1, 2, 3], ["c", "a", "b"]), [2, 3, 1])
+  end
+
+  test "sort_by_keys rejects mismatched lengths and bad keys" do
+    assert_eq(sort_by_keys([1], [1]), [1])
+    assert(raises("sort_by_keys([1, 2], [1])"))
+    assert(raises("sort_by_keys([1, 2], [1, \"a\"])"))
+    assert(raises("sort_by_keys([1, 2], [nil, nil])"))
+    assert(raises("sort_by_keys([1, 2], [1.0, sqrt(-1.0)])"))
+  end
+
+  test "sort_by via a user def and map" do
+    posts = [%{title: "b", date: "2025-06-01"}, %{title: "a", date: "2024-01-09"}, %{title: "c", date: "2026-01-01"}]
+    sorted = sort_by(posts, fn(p: Map) do lookup(p, "date") end)
+    assert_eq(map(sorted, fn(p: Map) do lookup(p, "title") end), ["a", "b", "c"])
+  end
+
+  test "sort_by_keys 100k in well under a second" do
+    xs = range(1, 100000)
+    keys = map(xs, fn(i: Int) do 0 - i end)
+    t0 = now_ms()
+    ys = sort_by_keys(xs, keys)
+    assert(now_ms() - t0 < 2000)
+    assert_eq(head(ys), 100000)
+  end
+end
+
+# ============================================================
+# index_of / replace
+# (test/shadow_builtin_test.blimp checks a user def still wins)
+# ============================================================
+
+actor SearchReplaceTests do
+  # -- index_of --
+  test "index_of finds the first occurrence" do
+    assert_eq(index_of("hello world", "world"), 6)
+    assert_eq(index_of("hello", "h"), 0)
+    assert_eq(index_of("abcabc", "c"), 2)
+  end
+
+  test "index_of absent is -1" do
+    assert_eq(index_of("hello", "z"), -1)
+    assert_eq(index_of("", "a"), -1)
+    assert_eq(index_of("ab", "abc"), -1)
+  end
+
+  test "index_of empty needle is 0" do
+    assert_eq(index_of("abc", ""), 0)
+    assert_eq(index_of("", ""), 0)
+  end
+
+  test "index_of counts bytes, as slice does" do
+    s = "café!"
+    i = index_of(s, "!")
+    assert_eq(i, 5)
+    assert_eq(slice(s, i, 1), "!")
+  end
+
+  test "index_of rejects non-strings" do
+    assert_eq(index_of("a", "a"), 0)
+    assert(raises("index_of([1, 2], 2)"))
+    assert(raises("index_of(\"abc\", :b)"))
+  end
+
+  # -- replace --
+  test "replace replaces every occurrence" do
+    assert_eq(replace("a-b-c", "-", "+"), "a+b+c")
+    assert_eq(replace("one two two", "two", "2"), "one 2 2")
+  end
+
+  test "replace with no match answers the same string" do
+    assert_eq(replace("abc", "z", "y"), "abc")
+    assert_eq(replace("", "z", "y"), "")
+  end
+
+  test "replace scans left to right without overlap" do
+    assert_eq(replace("aaa", "aa", "b"), "ba")
+    assert_eq(replace("aaaa", "aa", "b"), "bb")
+  end
+
+  test "replace does not rescan what it inserted" do
+    assert_eq(replace("aXa", "a", "aa"), "aaXaa")
+    assert_eq(replace("<p>", "<", "&lt;"), "&lt;p>")
+  end
+
+  test "replace with empty replacement deletes" do
+    assert_eq(replace("a, b, c", ", ", ""), "abc")
+  end
+
+  test "replace escapes HTML in the usual order" do
+    s = "<a href=\"x\">&</a>"
+    out = replace(replace(replace(replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;")
+    assert_eq(out, "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;")
+  end
+
+  test "replace rejects an empty find and non-strings" do
+    assert_eq(replace("a", "a", "b"), "b")
+    assert(raises("replace(\"abc\", \"\", \"x\")"))
+    assert(raises("replace(\"abc\", \"b\", 1)"))
+    assert(raises("replace(:abc, \"b\", \"x\")"))
+  end
+end
