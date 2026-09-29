@@ -2561,7 +2561,17 @@ pub const Evaluator = struct {
                     raw[1 .. raw.len - 1]
                 else
                     raw;
-                if (subject.* == .string and std.mem.eql(u8, subject.string, s)) return &.{};
+                if (subject.* != .string) return null;
+                // The pattern is written the way a string expression is, so
+                // it gets the same escapes: "\n" is a newline here too.
+                // Comparing the raw lexeme meant "\n" matched the two
+                // characters backslash and n, which no string ever was.
+                if (std.mem.indexOfScalar(u8, s, '\\') == null) {
+                    return if (std.mem.eql(u8, subject.string, s)) &.{} else null;
+                }
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                self.appendUnescaped(&buf, s) catch return null;
+                if (std.mem.eql(u8, subject.string, buf.items)) return &.{};
                 return null;
             },
             .atom_lit => |lit| {
