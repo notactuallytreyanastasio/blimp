@@ -2,7 +2,31 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // ReleaseSafe, not Debug, which is what `standardOptimizeOption` defaults
+    // to when nothing asks otherwise.
+    //
+    // Everything anyone had ever measured of this interpreter was a Debug
+    // build, because `zig build` produces one and `zig-out/bin/blimp` is what
+    // goes on the PATH. A frame of snake took 379ms to render in Debug and
+    // 35ms here -- an order of magnitude, for a flag.
+    //
+    // ReleaseSafe rather than ReleaseFast: ReleaseFast is another 2.3x (15ms)
+    // and buys it by removing the overflow and bounds checks. An interpreter
+    // that silently computes the wrong Int is the failure mode this project
+    // has a rule against, and 35ms against a 200ms game tick is already five
+    // times the headroom needed. `-Doptimize=ReleaseFast` is still there for
+    // anyone who has measured and wants it.
+    //
+    // Not `standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe })`:
+    // that only takes effect when `--release` is passed, and it removes
+    // `-Doptimize` from the interface entirely. Declaring the option and
+    // choosing the fallback keeps `-Doptimize=Debug` for anyone stepping
+    // through the evaluator.
+    const optimize = b.option(
+        std.builtin.OptimizeMode,
+        "optimize",
+        "Prioritize performance, safety, or binary size",
+    ) orelse .ReleaseSafe;
 
     // -- Library module (lexer, parser, AST) --
     const lib_mod = b.addModule("blimp", .{
