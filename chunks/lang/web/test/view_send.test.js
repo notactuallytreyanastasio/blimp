@@ -31,7 +31,7 @@ function fakeDocument() {
   const text = (t) => ({ text: t, get nodeValue() { return this.text; }, set nodeValue(v) { this.text = v; } });
   return {
     createElement: el,
-    createElementNS: (_ns, tag) => el(tag),
+    createElementNS: (ns, tag) => Object.assign(el(tag), { namespaceURI: ns }),
     createTextNode: text,
     addEventListener(type, f) { listeners[type] = f; },
     removeEventListener(type) { delete listeners[type]; },
@@ -416,4 +416,20 @@ test('fetch() asks the host once while it is in the view; location_query() keeps
   assert.strictEqual(global.location.search, '?year=2016');
   view.unmount();
   delete global.fetch; delete global.location; delete global.history;
+});
+
+test('el: everything inside an <svg> is made in the SVG namespace, <title> included', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  view.render({ tag: 'el', attrs: { '@tag': { text: 'div' } }, children: [
+    { tag: 'el', attrs: { '@tag': { text: 'svg' } }, children: [
+      { tag: 'el', attrs: { '@tag': { text: 'rect' } }, children: [
+        { tag: 'el', attrs: { '@tag': { text: 'title' } }, children: [{ text: 'tip' }] }] }] },
+    { tag: 'el', attrs: { '@tag': { text: 'title' } }, children: [] }] });
+  const [svg, htmlTitle] = container.children[0].children;
+  const title = svg.children[0].children[0];
+  assert.strictEqual(title.namespaceURI, 'http://www.w3.org/2000/svg');
+  assert.strictEqual(htmlTitle.namespaceURI, undefined);
 });
