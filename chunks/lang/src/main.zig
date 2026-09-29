@@ -1420,6 +1420,13 @@ fn serve(allocator: std.mem.Allocator, heap_limit: *HeapLimit, opts: ServeOpts) 
         std.process.exit(2);
     };
 
+    // A browser that goes away while a page is being written turns the next
+    // write into SIGPIPE, whose default is to end the process: the whole
+    // site, for one closed tab. Ignored, the write returns an error instead,
+    // which tcp_write reports as :error.
+    const ignore = std.posix.Sigaction{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(std.posix.SIG.PIPE, &ignore, null);
+
     var stats = ServeStats{ .started_ms = nowMillis() };
     serveResetToTop(&evaluator);
     heap.compact(&evaluator);

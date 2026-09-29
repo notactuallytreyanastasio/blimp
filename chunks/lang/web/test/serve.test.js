@@ -37,10 +37,10 @@ function control(sock, src) {
   });
 }
 
-async function start(t) {
+async function start(t, program = PROGRAM) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bs-'));
   const port = 19000 + Math.floor(Math.random() * 2000);
-  fs.writeFileSync(path.join(dir, 'site.blimp'), fs.readFileSync(PROGRAM, 'utf8').replace('__PORT__', String(port)));
+  fs.writeFileSync(path.join(dir, 'site.blimp'), fs.readFileSync(program, 'utf8').replace('__PORT__', String(port)));
   const proc = spawn(BLIMP, ['--serve', 'site.blimp', '--tick', 'server <- :tick', '--control', 'c.sock'], { cwd: dir });
   let log = '';
   proc.stderr.on('data', (d) => (log += d));
@@ -96,4 +96,36 @@ test('memory comes back down while it serves', async (t) => {
   const compactions = Number(stats.match(/compactions (\d+)/)[1]);
   assert.ok(compactions >= 1, `no compaction after 15000 requests: ${stats}`);
   assert.strictEqual(await control(s.sock, 'server <- :served'), '=> 15000\n');
+});
+
+test('a large body reaches a slow reader whole, on a non-blocking socket', { timeout: 20000 }, async (t) => {
+  const s = await start(t, path.join(__dirname, '..', '..', 'test', 'serve', 'big.blimp'));
+  const got = await new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port: s.port, path: '/', agent: false }, (res) => {
+      let n = 0;
+      const expected = Number(res.headers['content-length']);
+      res.on('data', (d) => {
+        n += d.length;
+        // read slowly, so the server's socket buffer fills
+        res.pause();
+        setTimeout(() => res.resume(), 2);
+      });
+      res.on('end', () => resolve({ n, expected }));
+    }).on('error', reject);
+  });
+  assert.strictEqual(got.n, got.expected);
+  assert.strictEqual(got.n, 2940000); // 30,000 lines of 98 bytes
+});
+
+test('a reader that hangs up mid-body does not take the server down', { timeout: 20000 }, async (t) => {
+  const s = await start(t, path.join(__dirname, '..', '..', 'test', 'serve', 'big.blimp'));
+  await new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port: s.port, path: '/', agent: false }, (res) => {
+      res.once('data', () => { req.destroy(); resolve(); });
+    });
+    req.on('error', () => resolve());
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.strictEqual(s.proc.exitCode, null, 'the server exited: ' + s.log());
+  assert.match(await control(s.sock, ':stats'), /^ticks /);
 });
