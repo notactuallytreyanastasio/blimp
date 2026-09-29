@@ -2304,7 +2304,7 @@ const el_tags = [_][]const u8{
 };
 
 /// Attr keys el() takes as instructions for the host, not as HTML.
-const el_event_keys = [_][]const u8{ "click", "with", "input", "change", "submit", "swipe" };
+const el_event_keys = [_][]const u8{ "click", "with", "input", "change", "submit", "swipe", "select", "selection", "debounce", "shortcut", "shortcut_keys", "paste_image", "inner_html" };
 
 fn isElEventKey(key: []const u8) bool {
     for (el_event_keys) |k| if (std.mem.eql(u8, k, key)) return true;
@@ -2371,6 +2371,17 @@ fn blimpSource(allocator: std.mem.Allocator, v: *const Value) EvalError![]const 
 ///     submit: :msg       :msg(the form's fields as a JSON string)
 ///     swipe: :msg        a finger moved 12px one way: :msg(:left), :right, :up
 ///                        or :down, and the page does not scroll
+///     debounce: ms       input: waits until typing pauses this long
+///     select: :msg       a field's selection moved: :msg(start, end), in
+///                        bytes of its value, as Blimp's strings count
+///     selection: "s,e"   put the field's selection there (bytes), when this
+///                        attr changes, and focus it
+///     shortcut: :msg     Ctrl or Cmd plus one of shortcut_keys ("bik")
+///                        sends :msg("b"); other shortcuts are left alone
+///     paste_image: :msg  an image pasted or dropped: :msg(its data: URL)
+///     inner_html: html   the element's content, as markup (a rendered
+///                        preview); not escaped, so only for HTML the program
+///                        made itself
 ///
 /// An attr whose value is nil or false is left off; true is written bare.
 /// Refused with TypeError: a tag not in el_tags, an on* attr, and a URL
@@ -3212,7 +3223,11 @@ fn renderElHtml(allocator: std.mem.Allocator, node: *const Value.ViewNode, buf: 
     try buf.append(allocator, '>');
     const void_tags = [_][]const u8{ "img", "input", "hr", "br", "source" };
     for (void_tags) |v| if (std.mem.eql(u8, v, tag)) return;
-    for (node.children) |child| try renderHtml(allocator, child, buf);
+    var raw: ?[]const u8 = null;
+    for (node.attrs[1..]) |attr| {
+        if (std.mem.eql(u8, attr.key, "inner_html") and attr.val.* == .string) raw = attr.val.string;
+    }
+    if (raw) |markup| try buf.appendSlice(allocator, markup) else for (node.children) |child| try renderHtml(allocator, child, buf);
     try buf.appendSlice(allocator, "</");
     try buf.appendSlice(allocator, tag);
     try buf.append(allocator, '>');

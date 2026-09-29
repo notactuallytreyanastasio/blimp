@@ -53,7 +53,51 @@
   var SVGNS = 'http://www.w3.org/2000/svg';
   var SVG_TAGS = { svg: 1, g: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, text: 1, tspan: 1,
     defs: 1, linearGradient: 1, radialGradient: 1, stop: 1, ellipse: 1, title: 0 };
-  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1 };
+  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, select: 1, selection: 1,
+    debounce: 1, shortcut: 1, shortcut_keys: 1, paste_image: 1, inner_html: 1 };
+
+  // Blimp strings count bytes (UTF-8); a field's selection counts UTF-16
+  // units. These turn one into the other.
+  function utf8Len(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+      else n += 3;
+    }
+    return n;
+  }
+  function toBytes(s, i) { return utf8Len(s.slice(0, i)); }
+  function fromBytes(s, b) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      if (n >= b) return i;
+      var c = s.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+      else n += 3;
+    }
+    return s.length;
+  }
+
+  // What the host does with the attrs that are not HTML, after the
+  // element's attributes are set (render and patch alike).
+  function applyInstructions(el, attrs, old) {
+    if (attrs.inner_html !== undefined && (!old || JSON.stringify(old.inner_html) !== JSON.stringify(attrs.inner_html))) {
+      el.innerHTML = String(attrVal(attrs.inner_html));
+    }
+    if (attrs.selection !== undefined && (!old || JSON.stringify(old.selection) !== JSON.stringify(attrs.selection))) {
+      var parts = String(attrVal(attrs.selection)).split(',');
+      var v = el.value || '';
+      if (el.setSelectionRange) {
+        el.focus && el.focus();
+        el.setSelectionRange(fromBytes(v, +parts[0] || 0), fromBytes(v, +parts[1] || 0));
+      }
+    }
+  }
   var URL_ATTRS = { href: 1, src: 1, action: 1, formaction: 1, 'xlink:href': 1, poster: 1 };
 
   // A Blimp string literal holding `s`.
@@ -252,7 +296,8 @@
         el = SVG_TAGS[etag] ? document.createElementNS(SVGNS, etag) : document.createElement(etag);
         setAttrs(el, attrs, null);
         this._listen(el, attrs);
-        children.forEach(function (c) { el.appendChild(self.renderView(c)); });
+        if (attrs.inner_html === undefined) children.forEach(function (c) { el.appendChild(self.renderView(c)); });
+        applyInstructions(el, attrs, null);
         if (etag === 'select' && attrs.value !== undefined) el.value = String(attrVal(attrs.value));
         return el;
       case 'button':
@@ -291,8 +336,56 @@
       self.send(on.click, on['with']);
     });
     if (el._blimpOn.input) el.addEventListener('input', function () {
-      if (el._blimpOn.input) self.send(el._blimpOn.input, literal(el.value));
+      if (!el._blimpOn.input) return;
+      var ms = +el._blimpOn.debounce || 0;
+      if (!ms) return self.send(el._blimpOn.input, literal(el.value));
+      clearTimeout(el._blimpDebounce);
+      el._blimpDebounce = setTimeout(function () {
+        if (el._blimpOn.input) self.send(el._blimpOn.input, literal(el.value));
+      }, ms);
     });
+    if (el._blimpOn.select) {
+      var lastSel = null;
+      var report = function () {
+        if (!el._blimpOn.select || el.selectionStart === undefined) return;
+        var v = el.value || '';
+        var sel = toBytes(v, el.selectionStart) + ', ' + toBytes(v, el.selectionEnd);
+        if (sel === lastSel) return;
+        lastSel = sel;
+        self.send(el._blimpOn.select, sel);
+      };
+      ['select', 'keyup', 'mouseup', 'input', 'focus'].forEach(function (t) { el.addEventListener(t, report); });
+    }
+    if (el._blimpOn.shortcut) el.addEventListener('keydown', function (e) {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || !el._blimpOn.shortcut) return;
+      var k = String(e.key || '').toLowerCase();
+      if (k.length !== 1 || String(el._blimpOn.shortcut_keys || '').indexOf(k) < 0) return;
+      e.preventDefault();
+      self.send(el._blimpOn.shortcut, literal(k));
+    });
+    if (el._blimpOn.paste_image) {
+      var take = function (file) {
+        var r = new FileReader();
+        r.onload = function () { if (el._blimpOn.paste_image) self.send(el._blimpOn.paste_image, literal(r.result)); };
+        r.readAsDataURL(file);
+      };
+      var firstImage = function (list) {
+        for (var i = 0; list && i < list.length; i++) {
+          var f = list[i].getAsFile ? (list[i].type.indexOf('image') === 0 ? list[i].getAsFile() : null) : list[i];
+          if (f && String(f.type).indexOf('image') === 0) return f;
+        }
+        return null;
+      };
+      el.addEventListener('paste', function (e) {
+        var f = firstImage(e.clipboardData && e.clipboardData.items);
+        if (f) { e.preventDefault(); take(f); }
+      });
+      el.addEventListener('dragover', function (e) { e.preventDefault(); });
+      el.addEventListener('drop', function (e) {
+        var f = firstImage(e.dataTransfer && e.dataTransfer.files);
+        if (f) { e.preventDefault(); take(f); }
+      });
+    }
     if (el._blimpOn.change) el.addEventListener('change', function () {
       if (!el._blimpOn.change) return;
       self.send(el._blimpOn.change, el.type === 'checkbox' ? String(el.checked) : literal(el.value));
@@ -350,9 +443,12 @@
         var want = {};
         Object.keys(EL_EVENTS).forEach(function (k) { if (b.attrs[k] !== undefined) want[k] = attrVal(b.attrs[k]); });
         // a kind of event it had no listener for needs a new element
-        if (Object.keys(want).some(function (k) { return k !== 'with' && !had[k]; })) return this.renderView(b);
+        var passive = { 'with': 1, selection: 1, debounce: 1, shortcut_keys: 1, inner_html: 1 };
+        if (Object.keys(want).some(function (k) { return !passive[k] && !had[k]; })) return this.renderView(b);
         el._blimpOn = want;
+        applyInstructions(el, b.attrs, a.attrs);
       }
+      if (b.attrs.inner_html !== undefined) return el;
       if (ac.length !== bc.length) return this.renderView(b);
       var nodes = el.childNodes;
       for (var j = 0; j < bc.length; j++) {
