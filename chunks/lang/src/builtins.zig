@@ -150,6 +150,9 @@ pub const BuiltinRegistry = struct {
         reg.register("write_bytes", &builtinWriteBytes);
         reg.register("read_file", &builtinReadFile);
         reg.register("write_file", &builtinWriteFile);
+        reg.register("list_dir", &builtinListDir);
+        reg.register("file_exists?", &builtinFileExists);
+        reg.register("file_size", &builtinFileSize);
         // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
         reg.register("to_html", &builtinToHtml_impl);
         reg.register("tcp_listen", &builtinTcpListen_impl);
@@ -171,6 +174,8 @@ pub const BuiltinRegistry = struct {
         reg.register("read_line", &builtinReadLine_impl);
         reg.register("random_bytes", &builtinRandomBytes_impl);
         reg.register("random_token", &builtinRandomToken_impl);
+        reg.register("getenv", &builtinGetenv_impl);
+        reg.register("argv", &builtinArgv_impl);
         return reg;
     }
 
@@ -1704,17 +1709,87 @@ fn builtinWriteFile(allocator: std.mem.Allocator, args: []const *const Value) Ev
     return make(allocator, .{ .boolean = true });
 }
 
+/// The largest file read_file will hold in memory.
+const read_file_limit = 64 * 1024 * 1024;
+
 /// read_file(path: String) -> String, or nil when it cannot be read.
+///
+/// A file larger than read_file_limit (64 MiB) raises NotSupported instead.
+/// The limit was 1 MiB and a file past it answered nil, the same nil as a
+/// missing file, so a 1.1 MiB image or JSON dump looked like it was not
+/// there at all.
 fn builtinReadFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     if (is_wasm) return error.NotSupported;
     const path = args[0].string;
-    const content = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, allocator, .limited(1024 * 1024)) catch {
+    const content = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, allocator, .limited(read_file_limit)) catch |err| {
+        if (err == error.StreamTooLong) return error.NotSupported;
+        if (err == error.OutOfMemory) return error.OutOfMemory;
         return make(allocator, .nil);
     };
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .string = content };
     return result;
+}
+
+/// list_dir(path) -> the names in a directory, sorted by their bytes, without
+/// "." and "..", or nil when it cannot be opened (missing, not a directory,
+/// no permission) -- the same nil read_file answers.
+///
+/// Sorted because the OS order is whatever the file system keeps: APFS and
+/// ext4 answer the same directory in different orders, and a site that
+/// builds its post list from list_dir would reorder itself between laptop
+/// and server. Names only, not paths; kinds are not reported.
+fn builtinListDir(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    var dir = std.Io.Dir.cwd().openDir(ioenv.io, args[0].string, .{ .iterate = true }) catch {
+        return make(allocator, .nil);
+    };
+    defer dir.close(ioenv.io);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(ioenv.io) catch return make(allocator, .nil)) |entry| {
+        if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+        // `entry.name` points into the iterator's buffer and is gone at the
+        // next call, so it is copied before the loop moves on.
+        const owned = allocator.dupe(u8, entry.name) catch return error.OutOfMemory;
+        names.append(allocator, owned) catch return error.OutOfMemory;
+    }
+    std.sort.pdq([]const u8, names.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    const items = allocator.alloc(*const Value, names.items.len) catch return error.OutOfMemory;
+    for (names.items, 0..) |name, i| items[i] = try make(allocator, .{ .string = name });
+    return make(allocator, .{ .list = items });
+}
+
+/// file_exists?(path) -> true when something is there to stat: a file, a
+/// directory, or a symlink that resolves. A dangling symlink, or a path the
+/// process may not look into, is false.
+fn builtinFileExists(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    _ = std.Io.Dir.cwd().statFile(ioenv.io, args[0].string, .{}) catch {
+        return make(allocator, .{ .boolean = false });
+    };
+    return make(allocator, .{ .boolean = true });
+}
+
+/// file_size(path) -> the size in bytes of the regular file at path
+/// (following symlinks), or nil when there is none. A directory is nil too:
+/// its "size" is a file-system detail, not the size of anything a program
+/// could read.
+fn builtinFileSize(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    if (is_wasm) return error.NotSupported;
+    const st = std.Io.Dir.cwd().statFile(ioenv.io, args[0].string, .{}) catch {
+        return make(allocator, .nil);
+    };
+    if (st.kind != .file) return make(allocator, .nil);
+    return make(allocator, .{ .integer = @intCast(st.size) });
 }
 
 // ============================================================
@@ -2517,6 +2592,65 @@ const builtinSleepMs_impl = if (is_wasm) native_stub.stub else builtinSleepMsNat
 const builtinReadLine_impl = if (is_wasm) native_stub.stub else builtinReadLineNative;
 const builtinRandomBytes_impl = if (is_wasm) native_stub.stub else builtinRandomBytesNative;
 const builtinRandomToken_impl = if (is_wasm) native_stub.stub else builtinRandomTokenNative;
+const builtinGetenv_impl = if (is_wasm) native_stub.stub else builtinGetenvNative;
+const builtinArgv_impl = if (is_wasm) native_stub.stub else builtinArgvNative;
+
+/// getenv(name) -> the variable's value as a String, or nil when it is not
+/// set. A set-but-empty variable is "", not nil.
+///
+/// Raises TypeError for a non-String name, and for a name with a NUL byte in
+/// it: C would read the name only up to the NUL and answer for a different
+/// variable than the one asked about.
+fn builtinGetenvNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const name = args[0].string;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return error.TypeError;
+    const z = allocator.dupeZ(u8, name) catch return error.OutOfMemory;
+    const val = std.c.getenv(z) orelse return make(allocator, .nil);
+    const owned = allocator.dupe(u8, std.mem.span(val)) catch return error.OutOfMemory;
+    return make(allocator, .{ .string = owned });
+}
+
+/// argv() -> the whole command line as a List of Strings, exactly as the
+/// process got it: argv()[0] is the blimp binary, argv()[1] the script, and
+/// anything after that is the script's (including flags blimp itself read,
+/// like --test).
+///
+/// `main` takes its arguments as a zig 0.16 capability and does not publish
+/// them, so this asks the OS for them instead: _NSGetArgv on macOS,
+/// /proc/self/cmdline on Linux. Anywhere else it is NotSupported.
+fn builtinArgvNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    var list: std.ArrayList(*const Value) = .empty;
+    switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => {
+            const darwin = struct {
+                extern "c" fn _NSGetArgc() *c_int;
+                extern "c" fn _NSGetArgv() *[*][*:0]u8;
+            };
+            const argc: usize = @intCast(darwin._NSGetArgc().*);
+            const argv = darwin._NSGetArgv().*;
+            for (argv[0..argc]) |arg| {
+                const owned = allocator.dupe(u8, std.mem.span(arg)) catch return error.OutOfMemory;
+                list.append(allocator, try make(allocator, .{ .string = owned })) catch return error.OutOfMemory;
+            }
+        },
+        .linux => {
+            const raw = std.Io.Dir.cwd().readFileAlloc(ioenv.io, "/proc/self/cmdline", allocator, .limited(1024 * 1024)) catch {
+                return error.NotSupported;
+            };
+            // NUL-terminated arguments laid end to end; the last NUL ends the
+            // last argument rather than starting an empty one.
+            const body = if (raw.len > 0 and raw[raw.len - 1] == 0) raw[0 .. raw.len - 1] else raw;
+            var parts = std.mem.splitScalar(u8, body, 0);
+            while (parts.next()) |arg| {
+                list.append(allocator, try make(allocator, .{ .string = arg })) catch return error.OutOfMemory;
+            }
+        },
+        else => return error.NotSupported,
+    }
+    return make(allocator, .{ .list = list.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
 
 /// n bytes from the operating system's CSPRNG (getentropy/getrandom through
 /// `Io.randomSecure`), or TypeError for a count that is not a non-negative

@@ -1523,3 +1523,99 @@ actor CryptoTests do
     assert(raises("random_token(-1)"))
   end
 end
+
+# ============================================================
+# Environment and file system
+# (paths are relative to chunks/lang, where the suite is run from)
+# ============================================================
+
+def repeat(s: String, n: Int) -> String do
+  join(map(range(1, n), fn(i: Int) do s end), "")
+end
+
+actor SystemTests do
+  # -- getenv --
+  test "getenv reads a set variable" do
+    home = getenv("PATH")
+    assert_eq(type_of(home), :string)
+    assert(length(home) > 0)
+  end
+
+  test "getenv of an unset variable is nil" do
+    assert_eq(getenv("BLIMP_TEST_SURELY_NOT_SET_7F3A"), nil)
+  end
+
+  test "getenv rejects a non-string and an embedded NUL" do
+    assert_eq(getenv("BLIMP_TEST_SURELY_NOT_SET_7F3A"), nil)
+    assert(raises("getenv(:PATH)"))
+    assert(raises("getenv(concat(\"PA\", from_char_code(0), \"TH\"))"))
+  end
+
+  # -- argv --
+  test "argv is the process's arguments as strings" do
+    args = argv()
+    assert(length(args) >= 3)
+    assert(contains(elem(args, 1), "builtin_test.blimp"))
+    assert_eq(elem(args, 2), "--test")
+  end
+
+  test "argv takes no arguments" do
+    assert_eq(type_of(argv()), :list)
+    assert(raises("argv(1)"))
+  end
+
+  # -- list_dir --
+  test "list_dir answers entry names" do
+    names = list_dir("lib")
+    assert(length(filter(names, fn(n: String) do n == "builtin_test.blimp" end)) == 1)
+    assert_eq(length(filter(names, fn(n: String) do n == "." or n == ".." end)), 0)
+  end
+
+  test "list_dir is sorted by bytes" do
+    names = list_dir("lib")
+    assert(length(names) > 3)
+    assert_eq(names, sort(names))
+  end
+
+  test "list_dir of a missing directory or a file is nil" do
+    assert_eq(type_of(list_dir("lib")), :list)
+    assert_eq(list_dir("lib/no_such_dir_here"), nil)
+    assert_eq(list_dir("lib/builtin_test.blimp"), nil)
+  end
+
+  test "list_dir rejects a non-string" do
+    assert_eq(type_of(list_dir(".")), :list)
+    assert(raises("list_dir(nil)"))
+  end
+
+  # -- file_exists? --
+  test "file_exists? for a file, a directory and nothing" do
+    assert_eq(file_exists?("lib/builtin_test.blimp"), true)
+    assert_eq(file_exists?("lib"), true)
+    assert_eq(file_exists?("lib/no_such_file_here"), false)
+    assert(raises("file_exists?(1)"))
+  end
+
+  # -- file_size --
+  test "file_size of a file just written" do
+    assert(write_file("/tmp/blimp_file_size_test.txt", "hello, size"))
+    assert_eq(file_size("/tmp/blimp_file_size_test.txt"), 11)
+  end
+
+  test "file_size of a missing file or a directory is nil" do
+    assert_eq(file_size("lib/no_such_file_here"), nil)
+    assert_eq(file_size("lib"), nil)
+    assert(raises("file_size(1)"))
+  end
+
+  # -- read_file --
+  test "read_file reads more than 1 MiB" do
+    kib = repeat("abcdefgh", 128)
+    big = repeat(kib, 2048)
+    assert_eq(length(big), 2097152)
+    assert(write_file("/tmp/blimp_read_file_big_test.txt", big))
+    got = read_file("/tmp/blimp_read_file_big_test.txt")
+    assert_eq(length(got), 2097152)
+    assert(got == big)
+  end
+end
