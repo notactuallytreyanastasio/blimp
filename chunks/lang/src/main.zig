@@ -1632,8 +1632,12 @@ fn attach(allocator: std.mem.Allocator, path: []const u8) void {
     if (tty) std.debug.print("attached to {s}. :stats for numbers; Ctrl-D to leave.\n", .{path});
     while (true) {
         if (tty) std.debug.print("{s}", .{if (pending.items.len == 0) "site> " else "  ... "});
-        const line = stdin.interface.takeDelimiterExclusive('\n') catch break;
-        stdin.interface.toss(1);
+        // takeDelimiter consumes the newline itself, and answers a last line
+        // with no newline after it as a line. takeDelimiterExclusive plus a
+        // toss(1) of the newline panicked on exactly that line, since zig 0.16
+        // returns it too and there was no newline to toss: `printf ':stats' |
+        // blimp --attach` crashed instead of asking.
+        const line = (stdin.interface.takeDelimiter('\n') catch break) orelse break;
         const blank = std.mem.trim(u8, line, " \t\r").len == 0;
         if (blank and pending.items.len == 0) continue;
         if (!blank) {
