@@ -38,6 +38,18 @@ pub const Environment = struct {
         /// The `names` mask for [captured], computed once when the closure was
         /// built rather than per call.
         captured_names: u64 = 0,
+        /// Which closure this frame was last lent to (its address), so a
+        /// tail-recursive call can be told from a call to another closure.
+        /// It used to be told by the captured slice's address, but every
+        /// top-level def now captures the same empty slice.
+        lent_to: usize = 0,
+        /// The frame of a top-level def (Closure.top_level): after its own
+        /// bindings and captures, lookup reads the top-level scope as it is
+        /// now, then goes on to the caller's frames as usual. A top-level def
+        /// used to capture a snapshot of every top-level binding, which sat
+        /// in exactly that place in the order; reading the live scope instead
+        /// changes only how fresh the answer is.
+        globals_next: bool = false,
         /// Where the current callee's own bindings start.
         ///
         /// A tail call reuses its frame, so `bindings` below this index belong
@@ -105,17 +117,18 @@ pub const Environment = struct {
     /// They are visible to lookup but are not in `bindings`, so a parameter or
     /// a local defined afterwards shadows a capture of the same name, which is
     /// the order `define` gave before.
-    pub fn lendCaptured(self: *Environment, captured: []const Value.CapturedBinding, names: u64) void {
+    pub fn lendCaptured(self: *Environment, captured: []const Value.CapturedBinding, names: u64, closure_id: usize, top_level: bool) void {
         if (self.scopes.items.len == 0) return;
         const index = self.scopes.items.len - 1;
         const existing = self.scopes.items[index].captured;
+        self.scopes.items[index].globals_next = top_level;
         // A tail call reuses the frame, so the scope may already have been
         // lent the previous callee's captures. A Blimp closure sees its
         // caller's frame, so those cannot simply be dropped: they are folded
         // into the scope's own bindings first, where a name the scope already
         // binds wins. Self-recursion lends the same slice every time and skips
         // all of this.
-        if (existing.ptr == captured.ptr and existing.len == captured.len) {
+        if (self.scopes.items[index].lent_to == closure_id) {
             // The same closure re-entering its own frame, which is what every
             // tail-recursive loop does. Its previous parameters and locals are
             // about to be replaced, so the region is reused rather than a
@@ -154,8 +167,23 @@ pub const Environment = struct {
         const scope = &self.scopes.items[index];
         scope.captured = captured;
         scope.captured_names = names;
+        scope.lent_to = closure_id;
         // Everything already in the frame belongs to whoever ran here before.
         scope.own_base = scope.bindings.items.len;
+    }
+
+    /// The current top-level binding of `name`, the latest if it was defined
+    /// more than once.
+    pub fn lookupTop(self: *const Environment, name: []const u8) ?*const Value {
+        if (self.scopes.items.len == 0) return null;
+        const top = self.scopes.items[0];
+        if (top.names & nameBit(name) == 0) return null;
+        var j: usize = top.bindings.items.len;
+        while (j > 0) {
+            j -= 1;
+            if (std.mem.eql(u8, top.bindings.items[j].name, name)) return top.bindings.items[j].val;
+        }
+        return null;
     }
 
     /// Pop the current scope (leaving a block).
@@ -299,6 +327,9 @@ pub const Environment = struct {
                         return scope.captured[k].val;
                     }
                 }
+            }
+            if (scope.globals_next and i > 0) {
+                if (self.lookupTop(name)) |v| return v;
             }
             if (scope.names & bit != 0) {
                 var j: usize = scope.own_base;
@@ -502,7 +533,7 @@ test "a call does not pay for what the closure captured" {
     }
 
     env.pushScope();
-    env.lendCaptured(captured, names);
+    env.lendCaptured(captured, names, @intFromPtr(captured.ptr), false);
     // Lending is what a call does. Nothing was written into the scope, so the
     // cost does not grow with how much was captured.
     try std.testing.expectEqual(@as(usize, 0), env.scopes.items[env.scopes.items.len - 1].bindings.items.len);
@@ -526,7 +557,7 @@ test "a parameter shadows a capture of the same name" {
     captured[0] = .{ .name = "x", .val = captured_val };
 
     env.pushScope();
-    env.lendCaptured(captured, Environment.nameBit("x"));
+    env.lendCaptured(captured, Environment.nameBit("x"), @intFromPtr(captured.ptr), false);
     try std.testing.expect(env.lookup("x").?.eql(Value{ .integer = 1 }));
     // A call lends the captures and then binds its parameters, so the
     // parameter has to win -- which it does because lookup reads `bindings`
@@ -548,7 +579,7 @@ test "collapsing a scope keeps what it was lent" {
 
     const base = env.depth();
     env.pushScope();
-    env.lendCaptured(captured, Environment.nameBit("helper"));
+    env.lendCaptured(captured, Environment.nameBit("helper"), @intFromPtr(captured.ptr), false);
     env.pushScope();
     // A tail call collapses the frames it is leaving. A capture that only the
     // collapsed scope was lent has to survive, or the callee cannot see what
@@ -575,13 +606,13 @@ test "a callee's capture beats what an earlier callee left in the frame" {
 
     env.pushScope();
     // One callee runs in the frame and binds `k`...
-    env.lendCaptured(first, Environment.nameBit("other"));
+    env.lendCaptured(first, Environment.nameBit("other"), @intFromPtr(first.ptr), false);
     env.define("k", stale);
     // ...then tail-calls another, which captured its own `k`. The one left
     // behind must not shadow it. This is the regex engine's continuation:
     // when it did, `temper_rx_seq_at` ran off the end of its node list and
     // kept calling itself, because the `k` it reached was the wrong one.
-    env.lendCaptured(second, Environment.nameBit("k"));
+    env.lendCaptured(second, Environment.nameBit("k"), @intFromPtr(second.ptr), false);
     try std.testing.expect(env.lookup("k").?.eql(Value{ .integer = 2 }));
     // What the outgoing callee captured is still reachable, below both.
     try std.testing.expect(env.lookup("other") != null);
@@ -603,7 +634,7 @@ test "the same closure re-entering its frame does not grow it" {
     while (i < 50) : (i += 1) {
         // What a tail-recursive loop does: lend the same captures, bind the
         // same parameter names again.
-        env.lendCaptured(captured, Environment.nameBit("g"));
+        env.lendCaptured(captured, Environment.nameBit("g"), @intFromPtr(captured.ptr), false);
         env.define("n", val);
         env.define("acc", val);
     }

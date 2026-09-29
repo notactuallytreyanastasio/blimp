@@ -861,6 +861,22 @@ pub const Evaluator = struct {
     }
 
     fn evalDefStmt(self: *Evaluator, ds: ast.Node.DefStmt) EvalError!*const Value {
+        // A def at top level captures nothing; see Closure.top_level.
+        if (self.env.depth() == 1 and self.actor_ctx == null) {
+            const tc = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
+            tc.* = .{
+                .params = ds.params,
+                .body = ds.body,
+                .env = &.{},
+                .top_level = true,
+                .return_type = ds.return_type,
+            };
+            const tv = self.allocator.create(Value) catch return error.OutOfMemory;
+            tv.* = Value{ .closure = tc };
+            self.env.define(ds.name, tv);
+            return tv;
+        }
+
         // def is sugar for: name = fn(params) do body end
         const bindings = self.env.allBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
@@ -1735,7 +1751,7 @@ pub const Evaluator = struct {
             }
 
             // Lent, not copied. See Environment.Scope.captured.
-            self.env.lendCaptured(c.env, c.env_names);
+            self.env.lendCaptured(c.env, c.env_names, @intFromPtr(c), c.top_level);
 
             // Bind parameters with runtime type checking
             for (c.params, 0..) |param, i| {

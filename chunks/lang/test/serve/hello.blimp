@@ -2,6 +2,13 @@ def greeting(n: Int) -> String do
   "hello, request #{n}"
 end
 
+# The handler reaches greeting through page, a def calling a def: the case a
+# redefinition used to miss, because page kept the greeting it saw when it
+# was defined.
+def page(n: Int) -> String do
+  concat(greeting(n), "\n")
+end
+
 actor Server do
   state fd: Int :: -1
   state served: Int :: 0
@@ -27,7 +34,7 @@ actor Server do
       nil -> :none
       _ ->
         raw = tcp_read(c)
-        body = concat(greeting(served + 1), "\n")
+        body = page(served + 1)
         tcp_write(c, concat("HTTP/1.1 200 OK\r\nContent-Length: ", to_string(length(body)), "\r\nConnection: close\r\n\r\n", body))
         tcp_close(c)
         become served: served + 1

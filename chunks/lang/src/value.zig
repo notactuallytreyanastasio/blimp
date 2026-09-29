@@ -82,6 +82,13 @@ pub const Value = union(enum) {
         /// when the closure is, so a call can lend the captures to a scope
         /// without walking them.
         env_names: u64 = 0,
+        /// A def made at top level. It captures nothing: where it used to
+        /// read a snapshot of every top-level binding, its frame reads the
+        /// top-level scope as it is now (Environment.Scope.globals_next).
+        /// So it calls the current definition of the functions it names,
+        /// which is what redefining one in a running program needs, and it
+        /// no longer copies the whole top level every time one is defined.
+        top_level: bool = false,
         return_type: ?[]const u8 = null,
     };
 
