@@ -1531,6 +1531,10 @@ pub const Evaluator = struct {
 
         // Runtime eval/test -- needs evaluator context, can't be a plain builtin
         if (std.mem.eql(u8, call.name, "blimp_eval")) return self.runtimeEval(call.args);
+        if (std.mem.eql(u8, call.name, "runtime_snapshot")) {
+            if (call.args.len != 0) return error.TypeError;
+            return self.runtimeSnapshot();
+        }
         if (std.mem.eql(u8, call.name, "blimp_test")) return self.runtimeTest(call.args);
         if (std.mem.eql(u8, call.name, "schedule")) return self.builtinSchedule(call.args);
         // send_async removed: use <-- operator instead
@@ -1833,6 +1837,68 @@ pub const Evaluator = struct {
         }
         self.runScheduler(ticks);
         return self.make(.{ .atom = "ok" });
+    }
+
+    /// runtime_snapshot() -> %{actors: [...], messages: [...]}: the program as
+    /// Blimp's canvas draws it (the shape the WebAssembly build's state JSON
+    /// has), for a host that shows a running program to people who are not
+    /// its author -- the blog draws its own server on every page with it.
+    ///
+    /// So it says what is running and what it is saying, never what it
+    /// holds. Each actor is its ref, its type and its state fields, but a
+    /// field's value is kept only when it is a number, a boolean, an atom or
+    /// nil; a string, list, map or tuple becomes "String(n)" / "List(n)" /
+    /// "Map(n)" / "Tuple(n)", anything else its type. A message is its
+    /// target, its sender (nil from outside any actor) and its name: no
+    /// arguments, no reply. Messages are the ones logged since the host last
+    /// cleared the log (a --serve host clears it before every tick).
+    fn runtimeSnapshot(self: *Evaluator) EvalError!*const Value {
+        const a = self.allocator;
+        const actors = a.alloc(*const Value, self.registry.instances.items.len) catch return error.OutOfMemory;
+        for (self.registry.instances.items, 0..) |entry, i| {
+            const fields = a.alloc(Value.MapEntry, entry.state_fields.len) catch return error.OutOfMemory;
+            for (entry.state_fields, 0..) |f, fi| {
+                fields[fi] = .{ .key = f.key, .val = try self.summarize(f.val) };
+            }
+            const e = a.alloc(Value.MapEntry, 3) catch return error.OutOfMemory;
+            e[0] = .{ .key = "ref", .val = try self.makeRef(entry.ref.type_name, entry.ref.id) };
+            e[1] = .{ .key = "type", .val = try self.make(.{ .string = entry.ref.type_name }) };
+            e[2] = .{ .key = "state", .val = try self.make(.{ .map = fields }) };
+            actors[i] = try self.make(.{ .map = e });
+        }
+        const msgs = a.alloc(*const Value, self.msg_log_count) catch return error.OutOfMemory;
+        for (0..self.msg_log_count) |i| {
+            const m = self.msg_log[i];
+            const e = a.alloc(Value.MapEntry, 3) catch return error.OutOfMemory;
+            e[0] = .{ .key = "target", .val = try self.makeRef(m.target_type, m.target_id) };
+            e[1] = .{ .key = "from", .val = if (m.source_type) |st| try self.makeRef(st, m.source_id.?) else try self.make(.nil) };
+            e[2] = .{ .key = "message", .val = try self.make(.{ .string = m.message }) };
+            msgs[i] = try self.make(.{ .map = e });
+        }
+        const top = a.alloc(Value.MapEntry, 2) catch return error.OutOfMemory;
+        top[0] = .{ .key = "actors", .val = try self.make(.{ .list = actors }) };
+        top[1] = .{ .key = "messages", .val = try self.make(.{ .list = msgs }) };
+        return self.make(.{ .map = top });
+    }
+
+    fn makeRef(self: *Evaluator, type_name: []const u8, id: u64) EvalError!*const Value {
+        const text = std.fmt.allocPrint(self.allocator, "ref<{s}:{d}>", .{ type_name, id }) catch return error.OutOfMemory;
+        return self.make(.{ .string = text });
+    }
+
+    fn summarize(self: *Evaluator, v: *const Value) EvalError!*const Value {
+        const label: []const u8 = switch (v.*) {
+            .integer, .float, .boolean, .atom, .nil => return v,
+            .string => |x| std.fmt.allocPrint(self.allocator, "String({d})", .{x.len}) catch return error.OutOfMemory,
+            .list => |x| std.fmt.allocPrint(self.allocator, "List({d})", .{x.len}) catch return error.OutOfMemory,
+            .map => |x| std.fmt.allocPrint(self.allocator, "Map({d})", .{x.len}) catch return error.OutOfMemory,
+            .tuple => |x| std.fmt.allocPrint(self.allocator, "Tuple({d})", .{x.len}) catch return error.OutOfMemory,
+            .actor_ref => "ActorRef",
+            .closure => "Function",
+            .view_node => "View",
+            .hole => "Hole",
+        };
+        return self.make(.{ .string = label });
     }
 
     fn runtimeEval(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {

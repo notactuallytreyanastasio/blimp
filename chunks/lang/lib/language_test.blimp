@@ -692,6 +692,20 @@ actor MapLiteralTests do
     assert_eq(length(keys(m)), 0)
   end
 
+  test "runtime_snapshot shows actors and messages, never what a field holds" do
+    h = spawn Holder
+    h <- :set(%{password: "hunter2"})
+    snap = runtime_snapshot()
+    last = head(reverse(snap.messages))
+    assert_eq(last.message, "set")
+    assert_eq(last.from, nil)
+    holders = filter(snap.actors, fn(a: Map) -> Bool do a.ref == last.target end)
+    assert_eq(length(holders), 1)
+    assert_eq(head(holders).type, "Holder")
+    assert_eq(lookup(lookup(head(holders), "state"), "held"), "Map(1)")
+    refute(contains(json_encode(snap), "hunter2"))
+  end
+
   test "a quoted map key is the string inside the quotes" do
     m = %{"data-n": 3, "aria-label": "x", plain: 1}
     assert_eq(lookup(m, "data-n"), 3)
