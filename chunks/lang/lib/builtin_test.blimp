@@ -82,6 +82,24 @@ actor StringTests do
     assert_eq(split("a::::b", "::"), ["a", "", "b"])
   end
 
+  # -- join --
+  test "join strings with a separator" do
+    assert_eq(join(["a", "b", "c"], ", "), "a, b, c")
+  end
+
+  test "join is split's inverse" do
+    s = "one\n\ntwo\n"
+    assert_eq(join(split(s, "\n"), "\n"), s)
+  end
+
+  test "join an empty list" do
+    assert_eq(join([], ","), "")
+  end
+
+  test "join with an empty separator" do
+    assert_eq(join(["<p>", "hi", "</p>"], ""), "<p>hi</p>")
+  end
+
   # -- contains --
   test "contains finds substring" do
     assert(contains("hello world", "world"))
