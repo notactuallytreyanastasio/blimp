@@ -384,3 +384,33 @@ test "compact copies a full message log" {
 
     try std.testing.expectEqual(@as(i64, 5), (try run(code.allocator(), &eval, "c <- :count")).integer);
 }
+
+test "an actor defined by blimp_eval survives compaction" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+    var live: usize = 0;
+
+    var eval = Evaluator.init(heaps[live].allocator());
+    eval.code_allocator = code.allocator();
+    _ = try run(code.allocator(), &eval,
+        \\blimp_eval("actor Hot do\n  on :hi(who: String) do\n    reply concat(\"yo \", who)\n  end\nend")
+        \\h = spawn Hot
+    );
+
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const next = 1 - live;
+        try compact(&eval, heaps[next].allocator(), std.testing.allocator);
+        // free_all hands the pages back; the testing allocator poisons them,
+        // so a handler still pointing into the old heap reads garbage
+        _ = heaps[live].reset(.free_all);
+        live = next;
+        try std.testing.expectEqualStrings("yo there", (try run(code.allocator(), &eval, "h <- :hi(\"there\")")).string);
+    }
+}

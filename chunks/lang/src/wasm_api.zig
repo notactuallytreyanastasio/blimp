@@ -36,7 +36,10 @@ fn freshEvaluator() Evaluator {
     _ = heaps[0].reset(.free_all);
     _ = heaps[1].reset(.free_all);
     live_heap = 0;
-    return Evaluator.init(heap());
+    var eval = Evaluator.init(heap());
+    // Source and ASTs live on `allocator`, which compaction never frees.
+    eval.code_allocator = allocator;
+    return eval;
 }
 
 /// Copy the live evaluator data into the idle arena and free the busy one.

@@ -614,6 +614,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
     defer heap.deinit();
 
     var evaluator = Evaluator.init(heap.allocator());
+    evaluator.code_allocator = arena.allocator();
     var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
@@ -972,6 +973,7 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const 
     defer heap.deinit();
 
     var evaluator = Evaluator.init(heap.allocator());
+    evaluator.code_allocator = arena.allocator();
     var pending_garbage = false;
 
     var stdin_buf: [4096]u8 = undefined;
