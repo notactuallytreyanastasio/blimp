@@ -20,9 +20,12 @@ function fakeDocument() {
     replaceChild(n, o) { this.children[this.children.indexOf(o)] = n; return o; },
     setAttribute(k, v) { this.attrs[k] = v; },
     removeAttribute(k) { delete this.attrs[k]; },
-    addEventListener(type, f) { this.on[type] = f; },
+    // every listener of a type, as a real element keeps them
+    addEventListener(type, f) { const hs = (this.hs = this.hs || {}); (hs[type] = hs[type] || []).push(f); this.on[type] = (e) => hs[type].forEach((h) => h(e)); },
     getContext() { return this.ctx || (this.ctx = fakeContext()); },
-    set innerHTML(_) { this.children = []; },
+    setSelectionRange(a, b) { this.range = [a, b]; },
+    focus() {},
+    set innerHTML(v) { this.children = []; this.innerHTMLSet = v; },
     set textContent(t) { this.children = [{ text: t }]; },
   });
   const text = (t) => ({ text: t, get nodeValue() { return this.text; }, set nodeValue(v) { this.text = v; } });
@@ -315,5 +318,58 @@ test('key("*") sends every key as a string; a nested click fires only the innerm
   close.on.click(ev);
   if (!stopped) backdrop.on.click(ev);   // what a real DOM would do next
   assert.strictEqual(container.children[0].children.length, 2, 'the modal toggled twice and stayed open');
+  view.unmount();
+});
+
+const EDITOR = `
+actor Ed do
+  state text: String :: "é!"
+  state sel: String :: "0,0"
+  state got: List :: []
+  on :typed(s: String) do
+    become text: s
+  end
+  on :moved(a: Int, b: Int) do
+    become got: [a, b]
+  end
+  on :key(k: String) do
+    become text: concat(text, k), sel: "2,4"
+  end
+  on :view do
+    reply el("div", %{},
+      el("textarea", %{value: text, input: :typed, debounce: 30, select: :moved, selection: sel, shortcut: :key, shortcut_keys: "bi"}),
+      el("div", %{class: "preview", inner_html: "<p>hi</p>"}),
+      el("span", %{}, join(map(got, fn(n: Int) -> String do to_string(n) end), ",")))
+  end
+end
+ed = spawn Ed
+ed <- :view`;
+
+test('a field: selection in bytes both ways, shortcuts, debounced input, inner_html', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(EDITOR, 'ed').ok);
+  const [ta, preview, out] = container.children[0].children;
+  assert.strictEqual(preview.innerHTMLSet, '<p>hi</p>');
+  // the browser's selection is UTF-16: "é!" selecting "!" is 1..2, bytes 2..3
+  ta.value = 'é!'; ta.selectionStart = 1; ta.selectionEnd = 2;
+  ta.on.select();
+  assert.strictEqual(textOf(out), '2,3');
+  // a shortcut the program asked for is sent and prevented; others are not
+  let prevented = 0;
+  ta.on.keydown({ key: 'b', metaKey: true, preventDefault() { prevented++ } });
+  ta.on.keydown({ key: 'c', metaKey: true, preventDefault() { prevented++ } });
+  assert.strictEqual(prevented, 1);
+  // the program set selection "2,4" in bytes of "é!b": UTF-16 1..3
+  const t2 = container.children[0].children[0];
+  assert.deepStrictEqual(t2.range, [1, 3]);
+  // input waits for the pause
+  t2.value = 'typed';
+  t2.on.input(); t2.on.input();
+  assert.strictEqual(t2.attrs.value, 'é!b');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.strictEqual(container.children[0].children[0].attrs.value, 'typed');
   view.unmount();
 });
