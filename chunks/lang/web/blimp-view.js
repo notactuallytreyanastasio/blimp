@@ -73,6 +73,7 @@
     this._sending = true;
     try {
       if (this.opts.onSend) this.opts.onSend(msg);
+      if (this.opts.send) return this._sendDirect(msg);
       var r1 = this.blimp.eval(this.actorVar + ' <- :' + msg);
       if (!r1.ok) { this._fail(r1.error); return false; }
       var r2 = this.blimp.eval(this.actorVar + ' <- :view');
@@ -83,6 +84,19 @@
     } finally {
       this._sending = false;
     }
+  };
+
+  // { send: true }: the message and the view both go through blimp.send, so
+  // a game that runs for an hour does not keep an hour of evals. Opt-in,
+  // because a page that shows the message log (getState) needs eval's.
+  BlimpView.prototype._sendDirect = function (msg) {
+    var r1 = this.blimp.send(this.actorVar, msg);
+    if (!r1.ok) { this._fail(r1.error); return false; }
+    var r2 = this.blimp.send(this.actorVar, 'view');
+    if (!r2.ok) { this._fail(r2.error); return false; }
+    if (!r2.value || !r2.value.tag) { this._fail(this.actorVar + ' <- :view did not return a view'); return false; }
+    this.render(r2.value);
+    return true;
   };
 
   // Number of intervals currently running (pages and tests can poll this).
