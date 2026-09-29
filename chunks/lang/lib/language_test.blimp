@@ -775,6 +775,17 @@ actor StringInterpTests do
     assert_eq(result, concat("<a href=", "\"", "/blog", "\"", ">", "\t", "blog</a>"))
   end
 
+  test "a backslash before # writes a literal #{" do
+    x = 1
+    assert_eq(length("\#{"), 2)
+    assert_eq("\#{x} is #{x}", concat("#", "{x} is 1"))
+  end
+
+  test "an escaped backslash before #{ still interpolates" do
+    x = 1
+    assert_eq("\\#{x}", concat("\\", "1"))
+  end
+
   test "a string longer than 4096 bytes interpolates whole" do
     long = reduce(range(1, 1000), "", fn(acc: String, n: Int) -> String do concat(acc, "abcde") end)
     result = "[#{long}]"

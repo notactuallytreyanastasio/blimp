@@ -15,6 +15,34 @@ pub const BlimpError = errors.BlimpError;
 pub const EvalError = builtins_mod.EvalError;
 
 /// Tree-walking interpreter for Blimp expressions.
+/// True when `s` has a `#{` that is not written `\\#{`.
+fn hasInterpolation(s: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < s.len) : (i += 1) {
+        if (s[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (s[i] == '#' and s[i + 1] == '{') return true;
+    }
+    return false;
+}
+
+/// The first `#{` or `\\#` at or after `from`, or the end of `s`.
+fn nextInterpOrEscapedHash(s: []const u8, from: usize) usize {
+    var j = from;
+    while (j + 1 < s.len) {
+        if (s[j] == '\\') {
+            if (s[j + 1] == '#') return j;
+            j += 2; // an escape pair: `\\#{` is a backslash, then `#{`
+            continue;
+        }
+        if (s[j] == '#' and s[j + 1] == '{') return j;
+        j += 1;
+    }
+    return s.len;
+}
+
 pub const Evaluator = struct {
     allocator: std.mem.Allocator,
     env: Environment,
@@ -410,7 +438,7 @@ pub const Evaluator = struct {
                 else
                     raw;
                 // Check for interpolation: #{expr}
-                if (std.mem.indexOf(u8, s, "#{") != null) {
+                if (hasInterpolation(s)) {
                     return self.evalStringInterp(s);
                 }
                 // Process escape sequences if any backslashes present
@@ -744,7 +772,7 @@ pub const Evaluator = struct {
         return error.Bubble;
     }
 
-    /// Append `s` to `buf`, turning \\n \\r \\t \\e \\\\ and \\" into the bytes they
+    /// Append `s` to `buf`, turning \\n \\r \\t \\e \\\\ \\" and \\# into the bytes they
     /// name. Any other backslash is kept as written.
     fn appendUnescaped(self: *Evaluator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) EvalError!void {
         var i: usize = 0;
@@ -757,6 +785,7 @@ pub const Evaluator = struct {
                     'e' => 0x1b,
                     '\\' => '\\',
                     '"' => '"',
+                    '#' => '#',
                     else => null,
                 };
                 if (byte) |b| {
@@ -774,7 +803,11 @@ pub const Evaluator = struct {
         var result: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
         while (i < s.len) {
-            if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
+            if (i + 1 < s.len and s[i] == '\\' and s[i + 1] == '#') {
+                // `\#{` is the way to write a literal `#{`.
+                result.append(self.allocator, '#') catch return error.OutOfMemory;
+                i += 2;
+            } else if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
                 // Find the closing }
                 const start = i + 2;
                 var depth: u32 = 1;
@@ -809,7 +842,7 @@ pub const Evaluator = struct {
             } else {
                 // The literal text up to the next #{ gets the same escapes as
                 // a string with no interpolation in it.
-                const next = std.mem.indexOfPos(u8, s, i, "#{") orelse s.len;
+                const next = nextInterpOrEscapedHash(s, i);
                 try self.appendUnescaped(&result, s[i..next]);
                 i = next;
             }
