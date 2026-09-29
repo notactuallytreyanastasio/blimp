@@ -392,6 +392,18 @@ actor LogicalTests do
     refute(false && 42)
   end
 
+  test "and does not evaluate its right side when the left is false" do
+    s = "ab"
+    i = 5
+    refute(i < length(s) and upcase(char_at(s, i)) == "A")
+  end
+
+  test "or does not evaluate its right side when the left is true" do
+    s = "ab"
+    i = 5
+    assert(i >= length(s) or upcase(char_at(s, i)) == "A")
+  end
+
   # -- || --
   test "or both true" do
     assert(true || true)
