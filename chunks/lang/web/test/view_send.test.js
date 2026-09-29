@@ -10,20 +10,41 @@ const BlimpView = require('../blimp-view.js');
 const WASM = fs.readFileSync(path.join(__dirname, '..', 'blimp.wasm'));
 const TETRIS = fs.readFileSync(path.join(__dirname, '..', '..', 'examples', 'tetris.blimp'), 'utf8');
 
-// Just enough DOM for BlimpView to render into and count.
+// Just enough DOM for BlimpView to render into, patch, and count.
 function fakeDocument() {
+  const listeners = {};
   const el = (tag) => ({
-    tag, className: '', children: [], style: {}, attrs: {},
+    tag, className: '', children: [], style: {}, attrs: {}, on: {},
+    get childNodes() { return this.children; },
     appendChild(c) { this.children.push(c); return c; },
+    replaceChild(n, o) { this.children[this.children.indexOf(o)] = n; return o; },
     setAttribute(k, v) { this.attrs[k] = v; },
-    addEventListener() {},
+    addEventListener(type, f) { this.on[type] = f; },
+    getContext() { return this.ctx || (this.ctx = fakeContext()); },
     set innerHTML(_) { this.children = []; },
     set textContent(t) { this.children = [{ text: t }]; },
   });
+  const text = (t) => ({ text: t, get nodeValue() { return this.text; }, set nodeValue(v) { this.text = v; } });
   return {
     createElement: el,
-    createTextNode: (t) => ({ text: t }),
-    addEventListener() {}, removeEventListener() {},
+    createTextNode: text,
+    addEventListener(type, f) { listeners[type] = f; },
+    removeEventListener(type) { delete listeners[type]; },
+    fire(type, e) { listeners[type](Object.assign({ preventDefault() {} }, e)); },
+  };
+}
+
+// A 2D context that writes down what it was asked to paint.
+function fakeContext() {
+  const calls = [];
+  const rec = (name) => (...args) => calls.push([name, ...args]);
+  return {
+    calls,
+    setTransform() {}, clearRect: rec('clear'), fillRect: rec('fillRect'), beginPath() {},
+    arc: rec('arc'), fill: rec('fill'), moveTo: rec('moveTo'), lineTo: rec('lineTo'), stroke: rec('stroke'),
+    fillText: rec('fillText'),
+    createLinearGradient: (...args) => ({ gradient: args, stops: [], addColorStop(o, c) { this.stops.push([o, c]); } }),
+    set fillStyle(v) { calls.push(['fillStyle', v]); },
   };
 }
 
@@ -81,5 +102,90 @@ test('send mode holds memory flat over a long game', async () => {
   const before = b.memory.buffer.byteLength;
   for (let i = 0; i < 4000; i++) view.send(moves[i % moves.length]);
   assert.strictEqual(b.memory.buffer.byteLength, before);
+  view.unmount();
+});
+
+const PADDLE = `
+actor Pad do
+  state y: Int :: 100
+  state dir: Int :: 0
+  state ai: Bool :: true
+  on :up_down do
+    become dir: -1
+  end
+  on :up_up do
+    become dir: 0
+  end
+  on :tick do
+    become y: y + dir * 10
+  end
+  on :toggle do
+    become ai: not(ai)
+  end
+  on :view do
+    label = case ai do
+      true -> "AI"
+      false -> "you"
+    end
+    reply stack([
+      button(label, :toggle),
+      key("ArrowUp", :up_down, :up_up),
+      draw(200, 100, "rect 0 0 200 100 #111\ncircle 50 #{y} 5 v:#f0f,#0ff")
+    ])
+  end
+end
+pad = spawn Pad
+pad <- :view`;
+
+test('a render patches: the button and the canvas are the same elements after it', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(PADDLE, 'pad').ok);
+  const [button, , canvas] = container.children[0].children;
+  assert.strictEqual(canvas.tag, 'canvas');
+  assert.deepStrictEqual(canvas.ctx.calls.filter((c) => c[0] === 'arc')[0].slice(1, 3), [50, 100]);
+  view.send('toggle');
+  view.send('tick');
+  const [button2, , canvas2] = container.children[0].children;
+  assert.strictEqual(button2, button, 'the button was rebuilt');
+  assert.strictEqual(canvas2, canvas, 'the canvas was rebuilt');
+  assert.strictEqual(textOf(button2), 'you');
+  // the click handler reads what the button sends now
+  button2.on.click();
+  assert.strictEqual(textOf(container.children[0].children[0]), 'AI');
+  view.unmount();
+});
+
+test('draw paints gradients and fails, naming the line, on a shape it does not know', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  view.mount(PADDLE, 'pad');
+  const ctx = container.children[0].children[2].ctx;
+  const grad = ctx.calls.filter((c) => c[0] === 'fillStyle' && typeof c[1] === 'object')[0][1];
+  assert.deepStrictEqual(grad.gradient, [45, 95, 45, 105]);
+  assert.deepStrictEqual(grad.stops, [[0, '#f0f'], [1, '#0ff']]);
+  view.render({ tag: 'draw', attrs: { width: { text: '10' }, height: { text: '10' }, ops: { text: 'rect 0 0 1 1 red\ntriangle 1 2 3' } }, children: [] });
+  assert.match(view.error, /line 2 is not a shape draw knows.*triangle/);
+});
+
+test('a held key sends once down, not on auto-repeat, and once up', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const view = new BlimpView(b, document.createElement('div'), { send: true });
+  view.mount(PADDLE, 'pad');
+  const sent = [];
+  view.opts.onSend = (m) => sent.push(m);
+  document.fire('keydown', { key: 'ArrowUp' });
+  document.fire('keydown', { key: 'ArrowUp', repeat: true });
+  document.fire('keydown', { key: 'ArrowUp', repeat: true });
+  view.send('tick');
+  document.fire('keyup', { key: 'ArrowUp' });
+  view.send('tick');
+  assert.deepStrictEqual(sent, ['up_down', 'tick', 'up_up', 'tick']);
+  assert.deepStrictEqual(b.send('pad', 'view').ok, true);
   view.unmount();
 });

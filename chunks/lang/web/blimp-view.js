@@ -11,9 +11,20 @@
 // .blimp-* class names) plus two effect nodes that render nothing:
 //   timer(ms, :msg)   -> {"tag":"timer","attrs":{"ms":{"text":"500"},"sends":"msg"}}
 //   key("ArrowLeft", :msg) -> {"tag":"key","attrs":{"code":{"text":"ArrowLeft"},"sends":"msg"}}
+//   key("ArrowUp", :down, :up) -> the same with "up":"up": a held key, sent
+//                                 once when it goes down and once when it
+//                                 comes up; auto-repeat is not sent
 // After every render the effects are reconciled: intervals keyed by
-// `ms|sends` are started or cleared to match the tree, and one document
-// keydown listener maps KeyboardEvent.key to a message from the latest tree.
+// `ms|sends` are started or cleared to match the tree, and document keydown
+// and keyup listeners map KeyboardEvent.key to messages from the latest tree.
+//
+// A render patches the page it rendered last rather than rebuilding it: an
+// element whose node did not change is the same element afterwards. A game
+// renders thirty times a second, and a button that was replaced between
+// mousedown and mouseup never got its click.
+//
+// draw(w, h, ops) is a canvas painted from a display list, one shape per
+// line (see viewDraw in builtins.zig); the canvas is kept and repainted.
 //
 // Attr values arrive either as primitives or as {text: "..."} (strings and
 // ints both serialize that way), so every attr goes through attrVal().
@@ -46,10 +57,14 @@
     this.error = null;
     this.mounted = false;
     this.timers = {};   // "ms|sends" -> interval id
-    this.keys = {};     // KeyboardEvent.key -> message
+    this.keys = {};     // KeyboardEvent.key -> {down, up}
+    this._held = {};    // KeyboardEvent.key -> true while a held key is down
+    this._root = null;  // the element render() put in the container
     this._sending = false;
     var self = this;
     this._onKeydown = function (e) { self._handleKey(e); };
+    this._onKeyup = function (e) { self._handleKeyUp(e); };
+    this._onBlur = function () { self._releaseAll(); };
   }
 
   // -- public -------------------------------------------------------------
@@ -60,6 +75,8 @@
     this.error = null;
     this.mounted = true;
     document.addEventListener('keydown', this._onKeydown);
+    document.addEventListener('keyup', this._onKeyup);
+    if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('blur', this._onBlur);
     var r = this.blimp.eval(source);
     if (!r.ok) return this._fail(r.error);
     if (!r.view) return this._fail('mount: the last expression of the source did not produce a view (expected `' + actorVar + ' <- :view`)');
@@ -107,19 +124,35 @@
   BlimpView.prototype.unmount = function () {
     this._stopTimers();
     document.removeEventListener('keydown', this._onKeydown);
+    document.removeEventListener('keyup', this._onKeyup);
+    if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('blur', this._onBlur);
     this.keys = {};
+    this._held = {};
     this.mounted = false;
     this.view = null;
+    this._root = null;
     if (this.container) this.container.innerHTML = '';
   };
 
   // Render a view tree and reconcile its effects.
   // send() calls this; tests can call it directly with hand-written JSON.
   BlimpView.prototype.render = function (view) {
+    var old = this.view;
+    try {
+      if (this._root && old) {
+        var next = this._patch(this._root, old, view);
+        if (next !== this._root) this.container.replaceChild(next, this._root);
+        this._root = next;
+      } else {
+        this._root = this.renderView(view);
+        this.container.innerHTML = '';
+        this.container.appendChild(this._root);
+      }
+    } catch (e) {
+      this._root = null;
+      return this._fail(e.message || String(e));
+    }
     this.view = view;
-    var el = this.renderView(view);
-    this.container.innerHTML = '';
-    this.container.appendChild(el);
     var fx = { timers: {}, keys: {} };
     this._collectEffects(view, fx);
     this._reconcileTimers(fx.timers);
@@ -169,12 +202,16 @@
         el = mk('canvas', 'blimp-canvas-el');
         if (attrs.id !== undefined) el.id = attrVal(attrs.id);
         return el;
+      case 'draw':
+        el = mk('canvas', 'blimp-draw');
+        paint(el, attrs);
+        return el;
       case 'button':
         el = mk('button', 'blimp-button');
         el.type = 'button';
-        if (attrs.sends !== undefined) {
-          (function (msg) { el.addEventListener('click', function () { self.send(msg); }); })(attrVal(attrs.sends));
-        }
+        // read at click time, so a patch can change what it sends
+        el._blimpSends = attrs.sends !== undefined ? attrVal(attrs.sends) : undefined;
+        el.addEventListener('click', function () { if (el._blimpSends !== undefined) self.send(el._blimpSends); });
         break;
       case 'timer':
       case 'key':
@@ -185,6 +222,121 @@
     children.forEach(function (c) { el.appendChild(self.renderView(c)); });
     return el;
   };
+
+  // -- patching ---------------------------------------------------------------
+
+  // Make `el`, which shows node `a`, show node `b`; answer the element that
+  // does (el itself, unless it had to be replaced).
+  BlimpView.prototype._patch = function (el, a, b) {
+    if (a === b) return el;
+    var aText = !!a && a.text !== undefined, bText = !!b && b.text !== undefined;
+    if (aText && bText) {
+      if (a.text !== b.text) el.nodeValue = b.text;
+      return el;
+    }
+    if (!a || !b || aText || bText || a.tag !== b.tag) return this.renderView(b);
+    var ac = a.children || [], bc = b.children || [];
+    var sameAttrs = JSON.stringify(a.attrs || {}) === JSON.stringify(b.attrs || {});
+    if (b.tag === 'draw') {
+      if (!sameAttrs) paint(el, b.attrs || {});
+      return el;
+    }
+    if (!sameAttrs) {
+      if (b.tag === 'button') el._blimpSends = b.attrs && b.attrs.sends !== undefined ? attrVal(b.attrs.sends) : undefined;
+      else if (b.tag === 'link') el.href = attrVal((b.attrs || {}).href);
+      else if (b.tag !== 'timer' && b.tag !== 'key' && b.tag !== 'heading') return this.renderView(b);
+      else if (b.tag === 'heading' && attrVal((a.attrs || {}).level) !== attrVal((b.attrs || {}).level)) return this.renderView(b);
+    }
+    // a list wraps each child in an <li>, and an effect node is a text node
+    if (b.tag === 'list' || b.tag === 'timer' || b.tag === 'key') {
+      return b.tag === 'list' && JSON.stringify(ac) !== JSON.stringify(bc) ? this.renderView(b) : el;
+    }
+    if (ac.length !== bc.length) return this.renderView(b);
+    var kids = el.childNodes;
+    for (var i = 0; i < bc.length; i++) {
+      var child = kids[i];
+      var next = this._patch(child, ac[i], bc[i]);
+      if (next !== child) el.replaceChild(next, child);
+    }
+    return el;
+  };
+
+  // -- draw -------------------------------------------------------------------
+
+  function num(parts, i, line, n) {
+    var v = parseFloat(parts[i]);
+    if (isNaN(v)) throw new Error('draw: line ' + n + ' needs a number at field ' + i + ': ' + line);
+    return v;
+  }
+
+  // A fill: a CSS color, or v:/h: and colors for a gradient over the box.
+  function fillFor(ctx, fill, x, y, w, h) {
+    if (fill === undefined) throw new Error('draw: a shape without a color');
+    var kind = fill.slice(0, 2);
+    if (kind !== 'v:' && kind !== 'h:') return fill;
+    var colors = fill.slice(2).split(',');
+    var g = kind === 'v:' ? ctx.createLinearGradient(x, y, x, y + h) : ctx.createLinearGradient(x, y, x + w, y);
+    for (var i = 0; i < colors.length; i++) g.addColorStop(colors.length === 1 ? 0 : i / (colors.length - 1), colors[i]);
+    return g;
+  }
+
+  function paint(canvas, attrs) {
+    var w = attrInt(attrs.width, 0), h = attrInt(attrs.height, 0);
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.clearRect(0, 0, w, h);
+    var lines = String(attrVal(attrs.ops) || '').split('\n');
+    for (var n = 0; n < lines.length; n++) {
+      var line = lines[n];
+      if (line === '') continue;
+      var p = line.split(' ');
+      switch (p[0]) {
+        case 'rect':
+          var rx = num(p, 1, line, n + 1), ry = num(p, 2, line, n + 1), rw = num(p, 3, line, n + 1), rh = num(p, 4, line, n + 1);
+          ctx.fillStyle = fillFor(ctx, p[5], rx, ry, rw, rh);
+          ctx.fillRect(rx, ry, rw, rh);
+          break;
+        case 'circle':
+          var cx = num(p, 1, line, n + 1), cy = num(p, 2, line, n + 1), cr = num(p, 3, line, n + 1);
+          ctx.fillStyle = fillFor(ctx, p[4], cx - cr, cy - cr, 2 * cr, 2 * cr);
+          ctx.beginPath();
+          ctx.arc(cx, cy, Math.max(0, cr), 0, 2 * Math.PI);
+          ctx.fill();
+          break;
+        case 'line':
+          var x1 = num(p, 1, line, n + 1), y1 = num(p, 2, line, n + 1), x2 = num(p, 3, line, n + 1), y2 = num(p, 4, line, n + 1);
+          ctx.strokeStyle = fillFor(ctx, p[5], Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+          ctx.lineWidth = num(p, 6, line, n + 1);
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+          break;
+        case 'text':
+          var tx = num(p, 1, line, n + 1), ty = num(p, 2, line, n + 1), size = num(p, 3, line, n + 1);
+          var words = p.slice(6).join(' ');
+          ctx.font = 'bold ' + size + 'px sans-serif';
+          ctx.textAlign = p[5] || 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = fillFor(ctx, p[4], tx - size * words.length / 4, ty - size / 2, size * words.length / 2, size);
+          ctx.fillText(words, tx, ty);
+          break;
+        case 'alpha':
+          ctx.globalAlpha = Math.max(0, Math.min(1, num(p, 1, line, n + 1)));
+          break;
+        case 'shadow':
+          ctx.shadowBlur = num(p, 1, line, n + 1);
+          ctx.shadowColor = p[2] || 'transparent';
+          break;
+        default:
+          throw new Error('draw: line ' + (n + 1) + ' is not a shape draw knows (rect, circle, line, text, alpha, shadow): ' + line);
+      }
+    }
+  }
 
   // -- effects --------------------------------------------------------------
 
@@ -198,7 +350,7 @@
     } else if (node.tag === 'key') {
       var code = attrVal(attrs.code);
       var msg = attrVal(attrs.sends);
-      if (code !== undefined && code !== null && msg) fx.keys[String(code)] = msg;
+      if (code !== undefined && code !== null && msg) fx.keys[String(code)] = { down: msg, up: attrVal(attrs.up) };
     }
     var children = node.children || [];
     for (var i = 0; i < children.length; i++) this._collectEffects(children[i], fx);
@@ -231,10 +383,29 @@
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
     var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    var msg = this.keys[e.key];
-    if (!msg) return;
+    var spec = this.keys[e.key];
+    if (!spec) return;
     e.preventDefault();
-    this.send(msg);
+    if (spec.up) {
+      if (e.repeat || this._held[e.key]) return;
+      this._held[e.key] = true;
+    }
+    this.send(spec.down);
+  };
+
+  BlimpView.prototype._handleKeyUp = function (e) {
+    if (!this._held[e.key]) return;
+    delete this._held[e.key];
+    var spec = this.keys[e.key];
+    if (!this.mounted || this.error || !spec || !spec.up) return;
+    e.preventDefault();
+    this.send(spec.up);
+  };
+
+  // A window that loses focus never hears its held keys come up.
+  BlimpView.prototype._releaseAll = function () {
+    var self = this;
+    Object.keys(this._held).forEach(function (k) { self._handleKeyUp({ key: k, preventDefault: function () {} }); });
   };
 
   BlimpView.prototype._fail = function (text) {
