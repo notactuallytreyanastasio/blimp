@@ -1512,7 +1512,7 @@ actor CryptoTests do
   test "http_start refuses what is not an http(s) request, and http_result a handle not in flight" do
     assert(raises("http_start(\"GET\", \"file:///etc/passwd\", %{}, \"\")"))
     assert(raises("http_start(\"FETCH\", \"https://example.com/\", %{}, \"\")"))
-    assert(raises("http_start(\"GET\", \"https://example.com/\", %{Accept: 1}, \"\")"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"Accept\": 1}, \"\")"))
     assert(raises("http_result(31)"))
     assert(raises("http_result(99)"))
   end
