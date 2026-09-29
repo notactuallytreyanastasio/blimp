@@ -1485,6 +1485,33 @@ actor CryptoTests do
     assert(raises("hex_encode([1, 2])"))
   end
 
+  # -- hex_decode --
+  test "hex_decode undoes hex_encode, either case" do
+    raw = concat(from_char_code(0), from_char_code(255), "A")
+    assert_eq(hex_decode(hex_encode(raw)), raw)
+    assert_eq(hex_decode("00FF41"), raw)
+    assert_eq(hex_decode(""), "")
+    assert_eq(length(hex_decode(sha256("abc"))), 32)
+  end
+
+  test "hex_decode rejects an odd length and a non-digit" do
+    assert(raises("hex_decode(\"abc\")"))
+    assert(raises("hex_decode(\"zz\")"))
+    assert(raises("hex_decode(12)"))
+  end
+
+  # -- xor_bytes --
+  test "xor_bytes XORs byte by byte" do
+    assert_eq(hex_encode(xor_bytes(hex_decode("0ff0aa"), hex_decode("ff0f55"))), "f0ffff")
+    a = hex_decode(sha256("a"))
+    assert_eq(xor_bytes(xor_bytes(a, hex_decode(sha256("b"))), hex_decode(sha256("b"))), a)
+    assert_eq(xor_bytes("", ""), "")
+  end
+
+  test "xor_bytes rejects unequal lengths" do
+    assert(raises("xor_bytes(\"ab\", \"a\")"))
+  end
+
   # -- random_bytes / random_token --
   test "random_bytes answers n bytes" do
     assert_eq(length(random_bytes(16)), 16)
