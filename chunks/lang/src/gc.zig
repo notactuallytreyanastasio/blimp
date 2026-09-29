@@ -126,6 +126,10 @@ const Copier = struct {
             .params = c.params,
             .body = c.body,
             .env = try self.captured(c.env),
+            // The bitmask lookup checks before it searches env; left at its
+            // default of 0 it says the closure captured nothing, and every
+            // captured name falls through to whatever the caller has bound.
+            .env_names = c.env_names,
             .return_type = try self.optStr(c.return_type),
         };
         return out;
