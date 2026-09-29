@@ -655,28 +655,32 @@ fn builtinTail(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
 fn builtinSort(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     const src = args[0].list;
-    var items = allocator.alloc(*const Value, src.len) catch return error.OutOfMemory;
+    const items = allocator.alloc(*const Value, src.len) catch return error.OutOfMemory;
     @memcpy(items, src);
 
-    // Simple insertion sort on integers
-    var i: usize = 1;
-    while (i < items.len) : (i += 1) {
-        var j = i;
-        while (j > 0) {
-            const a_val = if (items[j - 1].* == .integer) items[j - 1].integer else @as(i64, 0);
-            const b_val = if (items[j].* == .integer) items[j].integer else @as(i64, 0);
-            if (a_val > b_val) {
-                const tmp = items[j - 1];
-                items[j - 1] = items[j];
-                items[j] = tmp;
-            }
-            j -= 1;
-        }
-    }
+    // Numbers sort numerically and strings by their bytes. Anything else, or
+    // a list that mixes the two, is a TypeError: this used to read every
+    // non-integer as 0 and hand back a list of strings exactly as it came in.
+    const all_numbers = for (items) |item| {
+        if (item.* != .integer and item.* != .float) break false;
+    } else true;
+    const all_strings = for (items) |item| {
+        if (item.* != .string) break false;
+    } else true;
+    if (!all_numbers and !all_strings) return error.TypeError;
+
+    std.sort.insertion(*const Value, items, {}, sortLessThan);
 
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .list = items };
     return result;
+}
+
+fn sortLessThan(_: void, a: *const Value, b: *const Value) bool {
+    if (a.* == .string) return std.mem.lessThan(u8, a.string, b.string);
+    const x: f64 = if (a.* == .integer) @floatFromInt(a.integer) else a.float;
+    const y: f64 = if (b.* == .integer) @floatFromInt(b.integer) else b.float;
+    return x < y;
 }
 
 // ── Map and utility builtins ────────────────────────────
