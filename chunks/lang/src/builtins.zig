@@ -56,6 +56,7 @@ pub const BuiltinRegistry = struct {
         reg.register("put", &builtinPut);
         reg.register("keys", &builtinKeys);
         reg.register("now", &builtinNow);
+        reg.register("now_ms", &builtinNowMs);
         reg.register("concat", &builtinConcat);
         reg.register("split", &builtinSplit);
         reg.register("contains", &builtinContains);
@@ -156,6 +157,8 @@ pub const BuiltinRegistry = struct {
         reg.register("exit", &builtinExit_impl);
         reg.register("tcp_set_nonblocking", &builtinTcpSetNonblocking_impl);
         reg.register("tcp_poll", &builtinTcpPoll_impl);
+        reg.register("sleep_ms", &builtinSleepMs_impl);
+        reg.register("read_line", &builtinReadLine_impl);
         return reg;
     }
 
@@ -344,6 +347,25 @@ fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
             break :blk @intCast(ts.sec);
         };
     return make(allocator, .{ .integer = timestamp });
+}
+
+/// now_ms() -> milliseconds on a clock that only goes forwards.
+///
+/// `now()` answers whole seconds of wall time, which cannot express a 200ms
+/// game tick and jumps if the system clock is set. This is MONOTONIC, so it is
+/// good for measuring an interval and useless for telling the time; the two
+/// are different questions and this answers the second one.
+fn builtinNowMs(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    const ms: i64 = if (is_wasm)
+        0 // TODO: import JS performance.now() via extern
+    else
+        blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+        };
+    return make(allocator, .{ .integer = ms });
 }
 
 // ── String builtins ─────────────────────────────────────
@@ -2158,6 +2180,62 @@ const builtinWaitpid_impl = if (is_wasm) native_stub.stub else builtinWaitpidNat
 const builtinExit_impl = if (is_wasm) native_stub.stub else builtinExitNative;
 const builtinTcpSetNonblocking_impl = if (is_wasm) native_stub.stub else builtinTcpSetNonblockingNative;
 const builtinTcpPoll_impl = if (is_wasm) native_stub.stub else builtinTcpPollNative;
+const builtinSleepMs_impl = if (is_wasm) native_stub.stub else builtinSleepMsNative;
+const builtinReadLine_impl = if (is_wasm) native_stub.stub else builtinReadLineNative;
+
+/// sleep_ms(n: Int) -> :ok
+///
+/// A game loop needs to do three things: read input, change state, and wait.
+/// Blimp could do the middle one. `now()` reports seconds, so a busy-wait on
+/// it cannot express 200ms and would burn a core besides.
+///
+/// `nanosleep` rather than `sleep` because the unit that matters here is
+/// milliseconds, and it restarts on a signal so a stray SIGWINCH from a
+/// resized terminal does not cut the wait short.
+fn builtinSleepMsNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const ms = args[0].integer;
+    if (ms > 0) {
+        var req: std.c.timespec = .{
+            .sec = @intCast(@divTrunc(ms, 1000)),
+            .nsec = @intCast(@rem(ms, 1000) * 1_000_000),
+        };
+        var rem: std.c.timespec = undefined;
+        while (std.c.nanosleep(&req, &rem) != 0) {
+            req = rem;
+        }
+    }
+    return make(allocator, .{ .atom = "ok" });
+}
+
+/// read_line() -> String without its newline, or nil at end of input.
+///
+/// nil rather than "" for end of input: a blank line a user typed is a real
+/// empty string, and a caller that cannot tell the two apart loops forever on
+/// a closed stdin.
+fn builtinReadLineNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    var line = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+    defer line.deinit(allocator);
+    var ch: [1]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(std.posix.STDIN_FILENO, &ch) catch return error.NotSupported;
+        if (n == 0) {
+            // End of input with nothing buffered is the end. With something
+            // buffered it is a last line that had no newline on it.
+            if (line.items.len == 0) return make(allocator, .nil);
+            break;
+        }
+        if (ch[0] == '\n') break;
+        line.append(allocator, ch[0]) catch return error.OutOfMemory;
+    }
+    // A terminal that sends CRLF would otherwise put the CR in the string,
+    // where it compares unequal to every key the caller is looking for.
+    var end = line.items.len;
+    if (end > 0 and line.items[end - 1] == '\r') end -= 1;
+    const owned = allocator.dupe(u8, line.items[0..end]) catch return error.OutOfMemory;
+    return make(allocator, .{ .string = owned });
+}
 
 /// to_html(view_node) -> String
 /// Renders a view_node tree to an HTML string.
@@ -3287,4 +3365,43 @@ test "write_file writes a string and read_file reads it back" {
     args[0] = bad;
     const failed = try builtinWriteFile(alloc, args);
     try std.testing.expect(!failed.boolean);
+}
+
+test "sleep_ms waits at least as long as it was asked to" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before = try builtinNowMs(a, &.{});
+    const ms = try make(a, .{ .integer = 60 });
+    const answer = try builtinSleepMsNative(a, &.{ms});
+    const after = try builtinNowMs(a, &.{});
+
+    try std.testing.expectEqualStrings("ok", answer.atom);
+    // Only a lower bound is asserted. A scheduler may take longer, and on a
+    // loaded machine it will; what must never happen is returning early.
+    try std.testing.expect(after.integer - before.integer >= 60);
+}
+
+test "sleep_ms rejects what it cannot wait for" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const notANumber = try make(a, .{ .string = "soon" });
+    try std.testing.expectError(error.TypeError, builtinSleepMsNative(a, &.{notANumber}));
+    try std.testing.expectError(error.TypeError, builtinSleepMsNative(a, &.{}));
+}
+
+test "now_ms goes forwards and has more than second resolution" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first = try builtinNowMs(a, &.{});
+    _ = try builtinSleepMsNative(a, &.{try make(a, .{ .integer = 5 })});
+    const second = try builtinNowMs(a, &.{});
+    // 5ms is unmeasurable with `now()`, which is the reason this exists.
+    try std.testing.expect(second.integer > first.integer);
 }
