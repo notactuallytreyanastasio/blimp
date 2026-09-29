@@ -1,0 +1,44 @@
+def greeting(n: Int) -> String do
+  "hello, request #{n}"
+end
+
+actor Server do
+  state fd: Int :: -1
+  state served: Int :: 0
+
+  on :start(port: Int) do
+    s = tcp_listen(port)
+    tcp_set_nonblocking(s)
+    become fd: s
+    reply s
+  end
+
+  on :tick do
+    ready = tcp_poll([fd], 50)
+    case length(ready) > 0 do
+      true -> self <- :accept
+      false -> :idle
+    end
+  end
+
+  on :accept do
+    c = tcp_accept(fd)
+    case c do
+      nil -> :none
+      _ ->
+        raw = tcp_read(c)
+        body = concat(greeting(served + 1), "\n")
+        tcp_write(c, concat("HTTP/1.1 200 OK\r\nContent-Length: ", to_string(length(body)), "\r\nConnection: close\r\n\r\n", body))
+        tcp_close(c)
+        become served: served + 1
+        reply :served
+    end
+  end
+
+  on :served do
+    reply served
+  end
+end
+
+server = spawn Server
+server <- :start(__PORT__)
