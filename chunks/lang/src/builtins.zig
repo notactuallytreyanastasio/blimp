@@ -111,6 +111,13 @@ pub const BuiltinRegistry = struct {
         reg.register("set_at", &builtinSetAt);
         reg.register("json_encode", &builtinJsonEncode);
         reg.register("json_decode", &builtinJsonDecode);
+        reg.register("sha256", &builtinSha256);
+        reg.register("hmac_sha256", &builtinHmacSha256);
+        reg.register("hex_encode", &builtinHexEncode);
+        reg.register("base64_encode", &builtinBase64Encode);
+        reg.register("base64_decode", &builtinBase64Decode);
+        reg.register("base64url_encode", &builtinBase64UrlEncode);
+        reg.register("base64url_decode", &builtinBase64UrlDecode);
         // View primitives
         reg.register("stack", &viewStack);
         reg.register("row", &viewRow);
@@ -162,6 +169,8 @@ pub const BuiltinRegistry = struct {
         reg.register("tcp_poll", &builtinTcpPoll_impl);
         reg.register("sleep_ms", &builtinSleepMs_impl);
         reg.register("read_line", &builtinReadLine_impl);
+        reg.register("random_bytes", &builtinRandomBytes_impl);
+        reg.register("random_token", &builtinRandomToken_impl);
         return reg;
     }
 
@@ -986,6 +995,97 @@ fn jsonToValue(allocator: std.mem.Allocator, j: std.json.Value, depth: usize) er
             return make(allocator, .{ .map = entries }) catch error.OutOfMemory;
         },
     }
+}
+
+// ── Hashing and encoding ────────────────────────────────
+//
+// A Blimp String is a byte string, so these take and answer Strings of
+// arbitrary bytes: sha256 of a UTF-8 string hashes its UTF-8 bytes, and
+// base64_decode can answer bytes that are not text at all.
+
+fn stringArg(v: *const Value) EvalError![]const u8 {
+    return if (v.* == .string) v.string else error.TypeError;
+}
+
+fn hexLower(allocator: std.mem.Allocator, bytes: []const u8) EvalError!*const Value {
+    const digits = "0123456789abcdef";
+    const out = allocator.alloc(u8, bytes.len * 2) catch return error.OutOfMemory;
+    for (bytes, 0..) |b, i| {
+        out[2 * i] = digits[b >> 4];
+        out[2 * i + 1] = digits[b & 0x0f];
+    }
+    return make(allocator, .{ .string = out });
+}
+
+/// sha256(s) -> the SHA-256 digest of s's bytes, as 64 lowercase hex digits.
+/// Raises TypeError for anything but a String; an atom is not hashed as its
+/// name.
+fn builtinSha256(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(try stringArg(args[0]), &digest, .{});
+    return hexLower(allocator, &digest);
+}
+
+/// hmac_sha256(key, message) -> HMAC-SHA256 as 64 lowercase hex digits
+/// (RFC 2104). A key longer than the 64-byte block is hashed first, as the
+/// RFC says. Raises TypeError unless both are Strings.
+fn builtinHmacSha256(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+    var mac: [Hmac.mac_length]u8 = undefined;
+    Hmac.create(&mac, try stringArg(args[1]), try stringArg(args[0]));
+    return hexLower(allocator, &mac);
+}
+
+/// hex_encode(bytes) -> two lowercase hex digits per byte. TypeError unless
+/// a String.
+fn builtinHexEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    return hexLower(allocator, try stringArg(args[0]));
+}
+
+fn base64Encode(allocator: std.mem.Allocator, codecs: std.base64.Codecs, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const src = try stringArg(args[0]);
+    const out = allocator.alloc(u8, codecs.Encoder.calcSize(src.len)) catch return error.OutOfMemory;
+    _ = codecs.Encoder.encode(out, src);
+    return make(allocator, .{ .string = out });
+}
+
+fn base64Decode(allocator: std.mem.Allocator, codecs: std.base64.Codecs, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const src = try stringArg(args[0]);
+    const len = codecs.Decoder.calcSizeForSlice(src) catch return error.TypeError;
+    const out = allocator.alloc(u8, len) catch return error.OutOfMemory;
+    codecs.Decoder.decode(out, src) catch return error.TypeError;
+    return make(allocator, .{ .string = out });
+}
+
+/// base64_encode(bytes) -> RFC 4648 base64, `+` and `/`, padded with `=`.
+fn builtinBase64Encode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Encode(allocator, std.base64.standard, args);
+}
+
+/// base64_decode(text) -> the bytes. Strict: the length must be a multiple
+/// of 4 with its `=` padding, only the standard alphabet, no whitespace, and
+/// no stray bits in the last character. Anything else is a TypeError, not a
+/// best guess at what was meant.
+fn builtinBase64Decode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Decode(allocator, std.base64.standard, args);
+}
+
+/// base64url_encode(bytes) -> RFC 4648 section 5: `-` and `_`, no padding.
+/// The form JWTs, cookies and URLs want.
+fn builtinBase64UrlEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Encode(allocator, std.base64.url_safe_no_pad, args);
+}
+
+/// base64url_decode(text) -> the bytes. As strict as base64_decode: `=`
+/// padding, `+` or `/`, or a length that leaves one dangling character is a
+/// TypeError.
+fn builtinBase64UrlDecode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return base64Decode(allocator, std.base64.url_safe_no_pad, args);
 }
 
 /// Write to stdout, ignoring a failure, because a builtin has nowhere to put
@@ -2415,6 +2515,39 @@ const builtinTcpSetNonblocking_impl = if (is_wasm) native_stub.stub else builtin
 const builtinTcpPoll_impl = if (is_wasm) native_stub.stub else builtinTcpPollNative;
 const builtinSleepMs_impl = if (is_wasm) native_stub.stub else builtinSleepMsNative;
 const builtinReadLine_impl = if (is_wasm) native_stub.stub else builtinReadLineNative;
+const builtinRandomBytes_impl = if (is_wasm) native_stub.stub else builtinRandomBytesNative;
+const builtinRandomToken_impl = if (is_wasm) native_stub.stub else builtinRandomTokenNative;
+
+/// n bytes from the operating system's CSPRNG (getentropy/getrandom through
+/// `Io.randomSecure`), or TypeError for a count that is not a non-negative
+/// Int. NotSupported if the OS will not give entropy -- there is no fallback
+/// to something weaker.
+fn secureBytes(allocator: std.mem.Allocator, args: []const *const Value) EvalError![]u8 {
+    if (args.len != 1 or args[0].* != .integer or args[0].integer < 0) return error.TypeError;
+    const buf = allocator.alloc(u8, @intCast(args[0].integer)) catch return error.OutOfMemory;
+    ioenv.io.randomSecure(buf) catch return error.NotSupported;
+    return buf;
+}
+
+/// random_bytes(n) -> a String of n bytes from the OS CSPRNG.
+///
+/// Not `random`: that is xorshift with a fixed seed, which is what a test or
+/// a game replay wants and exactly what a session id must not be. This one
+/// leaves the xorshift state alone, so a seeded sequence is not disturbed by
+/// a token minted in the middle of it. Native only; NotSupported on WASM.
+fn builtinRandomBytesNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    return make(allocator, .{ .string = try secureBytes(allocator, args) });
+}
+
+/// random_token(n) -> base64url (no padding) of n CSPRNG bytes: 32 bytes is
+/// a 43-character token that can go in a cookie or a URL unescaped.
+fn builtinRandomTokenNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    const raw = try secureBytes(allocator, args);
+    const enc = std.base64.url_safe_no_pad.Encoder;
+    const out = allocator.alloc(u8, enc.calcSize(raw.len)) catch return error.OutOfMemory;
+    _ = enc.encode(out, raw);
+    return make(allocator, .{ .string = out });
+}
 
 /// sleep_ms(n: Int) -> :ok
 ///

@@ -1391,3 +1391,135 @@ actor JsonTests do
     assert_eq(elem(json_decode(concat(opens, closes)), 0), :error)
   end
 end
+
+# ============================================================
+# Hashing, encoding, randomness
+# ============================================================
+
+actor CryptoTests do
+  # -- sha256 --
+  test "sha256 of empty string" do
+    assert_eq(sha256(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+  end
+
+  test "sha256 of abc" do
+    assert_eq(sha256("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+  end
+
+  test "sha256 rejects a non-string" do
+    assert_eq(length(sha256("x")), 64)
+    assert(raises("sha256(42)"))
+    assert(raises("sha256(:abc)"))
+  end
+
+  # -- hmac_sha256 --
+  test "hmac_sha256 known vector" do
+    assert_eq(hmac_sha256("key", "The quick brown fox jumps over the lazy dog"), "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+  end
+
+  test "hmac_sha256 key longer than a block is hashed first" do
+    long_key = join(map(range(1, 100), fn(i: Int) do "k" end), "")
+    assert_eq(hmac_sha256(long_key, "m"), "0482265a92ce176b0374f2192380b21e2d40126432c52f865cc0957053ae7a14")
+  end
+
+  test "hmac_sha256 rejects non-strings" do
+    assert_eq(length(hmac_sha256("k", "m")), 64)
+    assert(raises("hmac_sha256(\"k\", 1)"))
+    assert(raises("hmac_sha256(nil, \"m\")"))
+  end
+
+  # -- base64 --
+  test "base64_encode pads" do
+    assert_eq(base64_encode(""), "")
+    assert_eq(base64_encode("f"), "Zg==")
+    assert_eq(base64_encode("fo"), "Zm8=")
+    assert_eq(base64_encode("foo"), "Zm9v")
+    assert_eq(base64_encode("hello"), "aGVsbG8=")
+  end
+
+  test "base64_encode uses + and /" do
+    assert_eq(base64_encode(concat(from_char_code(251), from_char_code(255))), "+/8=")
+  end
+
+  test "base64_decode round trips" do
+    assert_eq(base64_decode("aGVsbG8="), "hello")
+    assert_eq(base64_decode(""), "")
+    assert_eq(base64_decode("+/8="), concat(from_char_code(251), from_char_code(255)))
+  end
+
+  test "base64_decode rejects invalid input" do
+    assert_eq(base64_decode("Zg=="), "f")
+    assert(raises("base64_decode(\"Zg\")"))
+    assert(raises("base64_decode(\"Z!==\")"))
+    assert(raises("base64_decode(\"-_8=\")"))
+    assert(raises("base64_decode(42)"))
+  end
+
+  # -- base64url --
+  test "base64url_encode has no padding and uses - and _" do
+    assert_eq(base64url_encode(concat(from_char_code(251), from_char_code(255))), "-_8")
+    assert_eq(base64url_encode("f"), "Zg")
+    assert_eq(base64url_encode(""), "")
+  end
+
+  test "base64url_decode round trips" do
+    assert_eq(base64url_decode("-_8"), concat(from_char_code(251), from_char_code(255)))
+    assert_eq(base64url_decode("aGVsbG8"), "hello")
+  end
+
+  test "base64url_decode rejects padding and the standard alphabet" do
+    assert_eq(base64url_decode("Zg"), "f")
+    assert(raises("base64url_decode(\"Zg==\")"))
+    assert(raises("base64url_decode(\"+/8\")"))
+    assert(raises("base64url_decode(\"Z\")"))
+  end
+
+  # -- hex_encode --
+  test "hex_encode lowercase" do
+    assert_eq(hex_encode(concat(from_char_code(0), from_char_code(255), "A")), "00ff41")
+    assert_eq(hex_encode(""), "")
+  end
+
+  test "hex_encode rejects a non-string" do
+    assert_eq(hex_encode("a"), "61")
+    assert(raises("hex_encode([1, 2])"))
+  end
+
+  # -- random_bytes / random_token --
+  test "random_bytes answers n bytes" do
+    assert_eq(length(random_bytes(16)), 16)
+    assert_eq(random_bytes(0), "")
+  end
+
+  test "random_bytes differ between calls" do
+    assert_ne(random_bytes(32), random_bytes(32))
+  end
+
+  test "random_bytes does not move the seeded random" do
+    seed(7)
+    a = random(1, 1000000)
+    seed(7)
+    random_bytes(8)
+    assert_eq(random(1, 1000000), a)
+  end
+
+  test "random_bytes rejects a negative or non-integer count" do
+    assert_eq(length(random_bytes(1)), 1)
+    assert(raises("random_bytes(-1)"))
+    assert(raises("random_bytes(\"4\")"))
+  end
+
+  test "random_token is url-safe base64 of n bytes" do
+    t = random_token(32)
+    assert_eq(length(t), 43)
+    assert_eq(length(base64url_decode(t)), 32)
+    refute(contains(t, "="))
+    refute(contains(t, "+"))
+    refute(contains(t, "/"))
+  end
+
+  test "random_token rejects a negative count" do
+    assert_eq(length(random_token(3)), 4)
+    assert(raises("random_token(-1)"))
+  end
+end

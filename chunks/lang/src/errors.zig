@@ -464,6 +464,8 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         "flat",    "zip",     "uniq",     "sum",
         "map",     "filter",  "reduce",   "each",
         "json_encode", "json_decode",
+        "sha256", "hmac_sha256", "hex_encode", "base64_encode", "base64_decode",
+        "base64url_encode", "base64url_decode", "random_bytes", "random_token",
     };
 
     var best_match: ?[]const u8 = null;
@@ -483,7 +485,7 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         hint.appendSlice(alloc, match) catch {};
         hint.appendSlice(alloc, "`?\n\n") catch {};
     }
-    hint.appendSlice(alloc, "Built-in functions:\n      length, max, min, append, reverse, lookup, put,\n      keys, now, concat, split, contains, to_string,\n      to_int, slice, upcase, downcase, range, head, tail,\n      sort, merge, values, type_of, print, rem, abs,\n      nil?, elem, floor, ceil, round, not, size, empty?,\n      flat, zip, uniq, sum, map, filter, reduce, each,\n      json_encode, json_decode") catch {};
+    hint.appendSlice(alloc, "Built-in functions:\n      length, max, min, append, reverse, lookup, put,\n      keys, now, concat, split, contains, to_string,\n      to_int, slice, upcase, downcase, range, head, tail,\n      sort, merge, values, type_of, print, rem, abs,\n      nil?, elem, floor, ceil, round, not, size, empty?,\n      flat, zip, uniq, sum, map, filter, reduce, each,\n      json_encode, json_decode, sha256, hmac_sha256, hex_encode,\n      base64_encode, base64_decode, base64url_encode, base64url_decode,\n      random_bytes, random_token") catch {};
 
     return .{
         .title = "UNKNOWN FUNCTION",
