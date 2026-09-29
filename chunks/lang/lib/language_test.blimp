@@ -692,6 +692,13 @@ actor MapLiteralTests do
     assert_eq(length(keys(m)), 0)
   end
 
+  test "a quoted map key is the string inside the quotes" do
+    m = %{"data-n": 3, "aria-label": "x", plain: 1}
+    assert_eq(lookup(m, "data-n"), 3)
+    assert_eq(lookup(m, "aria-label"), "x")
+    assert_eq(sort(keys(m)), ["aria-label", "data-n", "plain"])
+  end
+
   test "map with string values" do
     m = %{name: "alice", city: "nyc"}
     assert_eq(lookup(m, "name"), "alice")

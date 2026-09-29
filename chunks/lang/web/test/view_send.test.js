@@ -19,6 +19,7 @@ function fakeDocument() {
     appendChild(c) { this.children.push(c); return c; },
     replaceChild(n, o) { this.children[this.children.indexOf(o)] = n; return o; },
     setAttribute(k, v) { this.attrs[k] = v; },
+    removeAttribute(k) { delete this.attrs[k]; },
     addEventListener(type, f) { this.on[type] = f; },
     getContext() { return this.ctx || (this.ctx = fakeContext()); },
     set innerHTML(_) { this.children = []; },
@@ -27,6 +28,7 @@ function fakeDocument() {
   const text = (t) => ({ text: t, get nodeValue() { return this.text; }, set nodeValue(v) { this.text = v; } });
   return {
     createElement: el,
+    createElementNS: (_ns, tag) => el(tag),
     createTextNode: text,
     addEventListener(type, f) { listeners[type] = f; },
     removeEventListener(type) { delete listeners[type]; },
@@ -188,4 +190,53 @@ test('a held key sends once down, not on auto-repeat, and once up', async () => 
   assert.deepStrictEqual(sent, ['up_down', 'tick', 'up_up', 'tick']);
   assert.deepStrictEqual(b.send('pad', 'view').ok, true);
   view.unmount();
+});
+
+const SIZES = `
+actor Board do
+  state size: Int :: 4
+  state name: String :: ""
+  on :set_size(n: Int) do
+    become size: n
+  end
+  on :typed(s: String) do
+    become name: s
+  end
+  on :view do
+    reply el("div", %{class: "board board-#{size}", "data-size": size},
+      el("button", %{class: "mac-btn", click: :set_size, with: 8}, "8x8"),
+      el("input", %{type: "text", input: :typed, value: name}),
+      el("span", %{class: "who"}, "hi #{name}"))
+  end
+end
+board = spawn Board
+board <- :view`;
+
+test('el: the page own classes, a click sends its value, typing sends the text', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(SIZES, 'board').ok);
+  const div = container.children[0];
+  assert.strictEqual(div.tag, 'div');
+  assert.strictEqual(div.attrs.class, 'board board-4');
+  assert.strictEqual(div.attrs['data-size'], '4');
+  const [button, input] = div.children;
+  button.on.click({ preventDefault() {} });
+  assert.strictEqual(container.children[0], div, 'the div was rebuilt');
+  assert.strictEqual(div.attrs.class, 'board board-8');
+  input.value = 'a "quoted" #{x}';
+  input.on.input();
+  assert.strictEqual(textOf(div.children[2]), 'hi a "quoted" #{x}');
+  assert.strictEqual(div.children[1], input, 'the input was rebuilt while typing');
+  view.unmount();
+});
+
+test('el: a javascript: URL stops the view instead of rendering', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const view = new BlimpView(b, document.createElement('div'), { send: true });
+  view.render({ tag: 'el', attrs: { '@tag': { text: 'a' }, href: { text: ' javascript:alert(1)' } }, children: [] });
+  assert.match(view.error, /javascript: URL in href/);
 });

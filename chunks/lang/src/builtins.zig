@@ -142,6 +142,7 @@ pub const BuiltinRegistry = struct {
         reg.register("video", &viewVideo);
         reg.register("canvas", &viewCanvas);
         reg.register("draw", &viewDraw);
+        reg.register("el", &viewEl);
         reg.register("button", &viewButton);
         reg.register("timer", &viewTimer);
         reg.register("key", &viewKey);
@@ -2289,6 +2290,123 @@ fn viewDraw(allocator: std.mem.Allocator, args: []const *const Value) EvalError!
     return makeViewNode(allocator, "draw", attrs, &.{});
 }
 
+/// The elements el() may make. Nothing that loads or runs a document of its
+/// own (script, iframe, object, embed, style, link, meta, base).
+const el_tags = [_][]const u8{
+    "div",    "span",   "p",      "a",       "button",  "h1",     "h2",       "h3",         "h4",      "h5",
+    "h6",     "ul",     "ol",     "li",      "img",     "table",  "thead",    "tbody",      "tfoot",   "tr",
+    "td",     "th",     "input",  "textarea", "select", "option", "form",     "label",      "section", "header",
+    "footer", "nav",    "main",   "article", "aside",   "strong", "em",       "b",          "i",       "u",
+    "s",      "small",  "code",   "pre",     "blockquote", "hr",  "br",       "figure",     "figcaption", "details",
+    "summary", "kbd",   "sup",    "sub",     "dl",      "dt",     "dd",       "time",       "mark",    "abbr",
+    "canvas", "video",  "audio",  "source",  "svg",     "g",      "path",     "circle",     "rect",    "line",
+    "polyline", "polygon", "text", "tspan",  "defs",    "linearGradient", "radialGradient", "stop", "ellipse", "title",
+};
+
+/// Attr keys el() takes as instructions for the host, not as HTML.
+const el_event_keys = [_][]const u8{ "click", "with", "input", "change", "submit" };
+
+fn isElEventKey(key: []const u8) bool {
+    for (el_event_keys) |k| if (std.mem.eql(u8, k, key)) return true;
+    return false;
+}
+
+fn isUrlAttr(key: []const u8) bool {
+    return std.mem.eql(u8, key, "href") or std.mem.eql(u8, key, "src") or std.mem.eql(u8, key, "action") or
+        std.mem.eql(u8, key, "formaction") or std.mem.eql(u8, key, "xlink:href") or std.mem.eql(u8, key, "poster");
+}
+
+/// "javascript:" however it is spelled: leading spaces and control
+/// characters skipped, any case, as a browser reads it.
+fn isScriptUrl(v: []const u8) bool {
+    var i: usize = 0;
+    while (i < v.len and v[i] <= ' ') i += 1;
+    const rest = v[i..];
+    return rest.len >= 11 and std.ascii.eqlIgnoreCase(rest[0..11], "javascript:");
+}
+
+/// A value as Blimp source, for `with:`: the host sends it back as the
+/// message's argument, `app <- :set_size(8)`.
+fn blimpSource(allocator: std.mem.Allocator, v: *const Value) EvalError![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    switch (v.*) {
+        .integer => |n| out.print(allocator, "{d}", .{n}) catch return error.OutOfMemory,
+        .float => |f| out.print(allocator, "{d}", .{f}) catch return error.OutOfMemory,
+        .boolean => |b| out.appendSlice(allocator, if (b) "true" else "false") catch return error.OutOfMemory,
+        .nil => out.appendSlice(allocator, "nil") catch return error.OutOfMemory,
+        .atom => |a| {
+            out.append(allocator, ':') catch return error.OutOfMemory;
+            out.appendSlice(allocator, a) catch return error.OutOfMemory;
+        },
+        .string => |str| {
+            out.append(allocator, '"') catch return error.OutOfMemory;
+            var i: usize = 0;
+            while (i < str.len) : (i += 1) {
+                const c = str[i];
+                switch (c) {
+                    '"' => out.appendSlice(allocator, "\\\"") catch return error.OutOfMemory,
+                    '\\' => out.appendSlice(allocator, "\\\\") catch return error.OutOfMemory,
+                    '\n' => out.appendSlice(allocator, "\\n") catch return error.OutOfMemory,
+                    '\t' => out.appendSlice(allocator, "\\t") catch return error.OutOfMemory,
+                    '#' => out.appendSlice(allocator, if (i + 1 < str.len and str[i + 1] == '{') "\\#" else "#") catch return error.OutOfMemory,
+                    else => out.append(allocator, c) catch return error.OutOfMemory,
+                }
+            }
+            out.append(allocator, '"') catch return error.OutOfMemory;
+        },
+        else => return error.TypeError,
+    }
+    return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
+}
+
+/// el("div", %{class: "board", click: :new_game}, child, child, ...)
+///
+/// A real HTML (or SVG) element, so a page keeps its own markup and CSS.
+/// Attrs are HTML attributes, except five the host acts on:
+///
+///     click: :msg        a click sends the actor :msg
+///     with: value        ... as :msg(value)  (Int, Float, Bool, Atom, String)
+///     input: :msg        every keystroke sends :msg(the field's value)
+///     change: :msg       :msg(value), or :msg(checked) for a checkbox
+///     submit: :msg       :msg(the form's fields as a JSON string)
+///
+/// An attr whose value is nil or false is left off; true is written bare.
+/// Refused with TypeError: a tag not in el_tags, an on* attr, and a URL
+/// attr that is a javascript: URL. Children are variadic, lists flattened.
+fn viewEl(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 2 or args[0].* != .string) return error.TypeError;
+    const tag = args[0].string;
+    var known = false;
+    for (el_tags) |t| if (std.mem.eql(u8, t, tag)) {
+        known = true;
+    };
+    if (!known) return error.TypeError;
+    const entries: []const Value.MapEntry = switch (args[1].*) {
+        .map => |m| m,
+        .nil => &.{},
+        else => return error.TypeError,
+    };
+    const attrs = allocator.alloc(ViewAttr, entries.len + 1) catch return error.OutOfMemory;
+    attrs[0] = .{ .key = "@tag", .val = args[0] };
+    for (entries, 0..) |e, i| {
+        if (e.key.len >= 2 and std.ascii.eqlIgnoreCase(e.key[0..2], "on")) return error.TypeError;
+        if (e.key.len == 0 or e.key[0] == '@') return error.TypeError;
+        switch (e.val.*) {
+            .string => |v| if (isUrlAttr(e.key) and isScriptUrl(v)) return error.TypeError,
+            .integer, .float, .boolean, .nil, .atom => {},
+            else => return error.TypeError,
+        }
+        if (std.mem.eql(u8, e.key, "with")) {
+            const src = try allocator.create(Value);
+            src.* = .{ .string = try blimpSource(allocator, e.val) };
+            attrs[i + 1] = .{ .key = e.key, .val = src };
+        } else {
+            attrs[i + 1] = .{ .key = e.key, .val = e.val };
+        }
+    }
+    return makeViewNode(allocator, "el", attrs, args[2..]);
+}
+
 /// button("label", sends_atom) — clickable button that sends a message to the actor
 fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len < 1 or args.len > 2) return error.TypeError;
@@ -3047,11 +3165,62 @@ fn builtinToHtmlNative(allocator: std.mem.Allocator, args: []const *const Value)
     return result;
 }
 
-fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayListUnmanaged(u8)) !void {
+fn appendAttrEscaped(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    for (s) |c| switch (c) {
+        '<' => try buf.appendSlice(allocator, "&lt;"),
+        '>' => try buf.appendSlice(allocator, "&gt;"),
+        '&' => try buf.appendSlice(allocator, "&amp;"),
+        '"' => try buf.appendSlice(allocator, "&quot;"),
+        else => try buf.append(allocator, c),
+    };
+}
+
+/// An el() node as the markup it stands for, every attribute value escaped.
+/// The host instructions (click, with, input, change, submit) are not
+/// markup and are left out: to_html is a page without its program.
+fn renderElHtml(allocator: std.mem.Allocator, node: *const Value.ViewNode, buf: *std.ArrayListUnmanaged(u8)) std.mem.Allocator.Error!void {
+    const tag = node.attrs[0].val.string;
+    try buf.append(allocator, '<');
+    try buf.appendSlice(allocator, tag);
+    for (node.attrs[1..]) |attr| {
+        if (isElEventKey(attr.key)) continue;
+        switch (attr.val.*) {
+            .nil => continue,
+            .boolean => |b| {
+                if (!b) continue;
+                try buf.append(allocator, ' ');
+                try buf.appendSlice(allocator, attr.key);
+                continue;
+            },
+            else => {},
+        }
+        try buf.append(allocator, ' ');
+        try buf.appendSlice(allocator, attr.key);
+        try buf.appendSlice(allocator, "=\"");
+        switch (attr.val.*) {
+            .string => |v| try appendAttrEscaped(allocator, buf, v),
+            .atom => |a| try appendAttrEscaped(allocator, buf, a),
+            .integer => |n| try buf.print(allocator, "{d}", .{n}),
+            .float => |f| try buf.print(allocator, "{d}", .{f}),
+            else => {},
+        }
+        try buf.append(allocator, '"');
+    }
+    try buf.append(allocator, '>');
+    const void_tags = [_][]const u8{ "img", "input", "hr", "br", "source" };
+    for (void_tags) |v| if (std.mem.eql(u8, v, tag)) return;
+    for (node.children) |child| try renderHtml(allocator, child, buf);
+    try buf.appendSlice(allocator, "</");
+    try buf.appendSlice(allocator, tag);
+    try buf.append(allocator, '>');
+}
+
+fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayListUnmanaged(u8)) std.mem.Allocator.Error!void {
     switch (val.*) {
         .view_node => |node| {
             // Effect nodes (timer, key) are host instructions, not markup.
             if (std.mem.eql(u8, node.tag, "timer") or std.mem.eql(u8, node.tag, "key")) return;
+            if (std.mem.eql(u8, node.tag, "el")) return renderElHtml(allocator, node, buf);
             const tag = blimpTagToHtml(node.tag);
             try buf.appendSlice(allocator, "<");
             try buf.appendSlice(allocator, tag);
