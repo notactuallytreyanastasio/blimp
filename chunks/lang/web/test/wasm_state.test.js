@@ -55,3 +55,23 @@ test('reset clears the accumulated messages', async () => {
   b.ev(PROG);
   assert.deepStrictEqual(b.state().messages, []);
 });
+
+test('state stays valid JSON when an actor holds a string with quotes in it', async () => {
+  const b = await load();
+  b.ev('actor Holder do\n  state s: String :: ""\n  on :set do\n    become s: "<a href=\\"/x\\">say \\"hi\\"</a>"\n    reply :ok\n  end\nend\nh = spawn Holder\nq = "a \\"quoted\\" var"');
+  b.ev('h <- :set');
+  const s = b.state();
+  const holder = s.actors.find((a) => a.type === 'Holder');
+  assert.strictEqual(holder.state.s, '<a href="/x">say "hi"</a>');
+  assert.strictEqual(s.vars.find((v) => v.name === 'q').value, 'a "quoted" var');
+});
+
+test('a very long value is cut, and the state is still valid JSON', async () => {
+  const b = await load();
+  b.ev('actor Big do\n  state s: String :: ""\n  on :fill do\n    become s: reduce(range(1, 20000), "", fn(a: String, n: Int) -> String do concat(a, "\\"x") end)\n    reply :ok\n  end\nend\nbig = spawn Big');
+  b.ev('big <- :fill');
+  const s = b.state();
+  const v = s.actors.find((a) => a.type === 'Big').state.s;
+  assert.ok(v.length <= 2100, `state value is ${v.length} chars`);
+  assert.ok(v.endsWith('...'));
+});
