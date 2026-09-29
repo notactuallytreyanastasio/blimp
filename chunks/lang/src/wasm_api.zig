@@ -435,6 +435,164 @@ fn writeViewJson(w: anytype, val: *const Value) void {
     }
 }
 
+// ── blimp_send ──────────────────────────────────────────
+//
+// A host that animates an actor sends it a message many times a second.
+// Doing that through blimp_eval costs about 390 bytes a call that are never
+// returned: eval copies its source, and the AST parsed from it, onto the
+// permanent allocator, because a definition in that source may be pointed at
+// by a handler forever. A send defines nothing. So blimp_send builds the
+// source `target <- :message(args)` on the collected heap, parses and
+// evaluates it there, writes the reply out, and compacts; afterwards nothing
+// of the call is left but the actor's new state.
+//
+// It also skips what eval does for the playground's sidebar (the state JSON
+// and the message log), and it writes the reply as real JSON, into a buffer
+// that grows, rather than into a fixed one.
+
+var reply_buf: std.ArrayListUnmanaged(u8) = .empty;
+
+/// blimp_send(target, message, args) -> 0 ok, 1 parse error, 2 eval error,
+/// 3 no evaluator or out of memory, 4 a reply JSON cannot represent.
+///   target   name of a global binding holding the actor, e.g. "app"
+///   message  handler name without the colon, e.g. "frame"
+///   args     Blimp source for the arguments, comma-separated, or empty
+export fn blimp_send(
+    target_ptr: [*]const u8,
+    target_len: u32,
+    msg_ptr: [*]const u8,
+    msg_len: u32,
+    args_ptr: [*]const u8,
+    args_len: u32,
+) i32 {
+    var eval = &(evaluator orelse return 3);
+    const target = target_ptr[0..target_len];
+    const msg = msg_ptr[0..msg_len];
+    const args = args_ptr[0..args_len];
+
+    const source = if (args.len == 0)
+        std.fmt.allocPrint(heap(), "{s} <- :{s}", .{ target, msg })
+    else
+        std.fmt.allocPrint(heap(), "{s} <- :{s}({s})", .{ target, msg, args });
+    const src = source catch return 3;
+
+    const saved_source = eval.source;
+    eval.setSource(src);
+    defer eval.setSource(saved_source);
+    eval.msg_log_count = 0;
+
+    var parser = Parser.init(heap(), src);
+    const nodes = parser.parseFile() catch {
+        const m = std.fmt.bufPrint(&error_buf, "Parse error in send: {s}", .{src}) catch "Parse error in send";
+        error_len = @intCast(m.len);
+        compactHeap();
+        return 1;
+    };
+    if (nodes.len != 1) {
+        const m = std.fmt.bufPrint(&error_buf, "A send must be one expression: {s}", .{src}) catch "A send must be one expression";
+        error_len = @intCast(m.len);
+        compactHeap();
+        return 1;
+    }
+
+    const value = eval.eval(nodes[0]) catch {
+        if (eval.last_error) |err| {
+            var fbs = std.Io.Writer.fixed(&error_buf);
+            err.formatPlain(&fbs);
+            error_len = @intCast(fbs.buffered().len);
+        } else {
+            const m = std.fmt.bufPrint(&error_buf, "Evaluation error in send: {s}", .{src}) catch "Evaluation error";
+            error_len = @intCast(m.len);
+        }
+        eval.msg_log_count = 0;
+        compactHeap();
+        return 2;
+    };
+
+    reply_buf.clearRetainingCapacity();
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &reply_buf);
+    const ok = writeReplyJson(&aw.writer, value);
+    reply_buf = aw.toArrayList();
+    eval.msg_log_count = 0;
+    compactHeap();
+    if (!ok) {
+        const m = std.fmt.bufPrint(&error_buf, "The reply to {s} cannot be written as JSON", .{src}) catch "Reply cannot be written as JSON";
+        error_len = @intCast(m.len);
+        return 4;
+    }
+    error_len = 0;
+    return 0;
+}
+
+export fn blimp_get_reply_ptr() [*]const u8 {
+    return reply_buf.items.ptr;
+}
+
+export fn blimp_get_reply_len() u32 {
+    return @intCast(reply_buf.items.len);
+}
+
+/// JSON for a reply: numbers, strings, true/false/null; atoms as strings;
+/// lists and tuples as arrays; maps as objects; a view node as the object
+/// writeViewJson makes. Anything else (a closure, an actor ref, a hole)
+/// returns false, so the host gets an error instead of a guess.
+fn writeReplyJson(w: *std.Io.Writer, val: *const Value) bool {
+    switch (val.*) {
+        .integer => |n| w.print("{d}", .{n}) catch return false,
+        .float => |f| {
+            if (std.math.isFinite(f)) {
+                w.print("{d}", .{f}) catch return false;
+            } else {
+                w.writeAll("null") catch return false;
+            }
+        },
+        .boolean => |b| w.writeAll(if (b) "true" else "false") catch return false,
+        .nil => w.writeAll("null") catch return false,
+        .string => |s| writeJsonString(w, s) catch return false,
+        .atom => |a| writeJsonString(w, a) catch return false,
+        .list, .tuple => |items| {
+            w.writeAll("[") catch return false;
+            for (items, 0..) |item, i| {
+                if (i > 0) w.writeAll(",") catch return false;
+                if (!writeReplyJson(w, item)) return false;
+            }
+            w.writeAll("]") catch return false;
+        },
+        .map => |entries| {
+            w.writeAll("{") catch return false;
+            for (entries, 0..) |entry, i| {
+                if (i > 0) w.writeAll(",") catch return false;
+                writeJsonString(w, entry.key) catch return false;
+                w.writeAll(":") catch return false;
+                if (!writeReplyJson(w, entry.val)) return false;
+            }
+            w.writeAll("}") catch return false;
+        },
+        .view_node => writeViewJson(w, val),
+        else => return false,
+    }
+    return true;
+}
+
+fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
+    try w.writeAll("\"");
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => if (c < 0x20) {
+                try w.print("\\u{x:0>4}", .{c});
+            } else {
+                try w.writeByte(c);
+            },
+        }
+    }
+    try w.writeAll("\"");
+}
+
 /// Returns 1 if the last eval result was a view_node, 0 otherwise.
 export fn blimp_has_view() i32 {
     return if (has_view) 1 else 0;
