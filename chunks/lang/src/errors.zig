@@ -3,6 +3,68 @@ const Value = @import("value.zig").Value;
 const Environment = @import("env.zig").Environment;
 
 /// A rich, Elm-style error with source context, explanation, and hints.
+/// The text of one line of `source`, 1-based, for an error that knows where it
+/// happened. An error with no line prints the whole file, which for translated
+/// code is a thousand lines of prelude and no answer.
+pub fn lineAt(source: []const u8, line: u32) []const u8 {
+    if (line == 0) return source;
+    var current: u32 = 1;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < source.len) : (i += 1) {
+        if (source[i] != '\n') continue;
+        if (current == line) return source[start..i];
+        current += 1;
+        start = i + 1;
+    }
+    if (current == line) return source[start..];
+    return source;
+}
+
+/// A bubble nothing caught, named where it started.
+///
+/// `bubble` is how Temper-translated code raises, and one that reaches the top
+/// used to print `Runtime error: error.Bubble` -- no reason, no line.
+pub fn uncaughtBubble(reason: ?*const Value, source: []const u8, line: u32, col: u32) BlimpError {
+    var text: []const u8 = "A bubble reached the top of the program.";
+    if (reason) |r| {
+        var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+        const alloc = std.heap.page_allocator;
+        buf.appendSlice(alloc, "A bubble reached the top of the program: ") catch {};
+        var r_buf: [512]u8 = undefined;
+        var r_w = std.Io.Writer.fixed(&r_buf);
+        r.format(&r_w);
+        buf.appendSlice(alloc, r_w.buffered()) catch {};
+        text = buf.items;
+    }
+    return .{
+        .title = "UNCAUGHT BUBBLE",
+        .message = text,
+        .source_line = if (line == 0) null else lineAt(source, line),
+        .line = if (line == 0) null else line,
+        .col = if (line == 0) null else col,
+        .hint = "Handle it with `try ... catch` or `orelse`.",
+    };
+}
+
+/// A located error for a failure that never built a richer one.
+///
+/// `error.TypeError` on its own used to reach the top as
+/// `Runtime error: error.TypeError`, with no line and nothing to look at.
+pub fn runtimeError(err: anyerror, source: []const u8, line: u32, col: u32) BlimpError {
+    return .{
+        .title = "RUNTIME ERROR",
+        .message = std.fmt.allocPrint(
+            std.heap.page_allocator,
+            "{s} while evaluating this.",
+            .{@errorName(err)},
+        ) catch @errorName(err),
+        .source_line = lineAt(source, line),
+        .line = line,
+        .col = col,
+    };
+}
+
 pub const BlimpError = struct {
     title: []const u8,
     source_line: ?[]const u8 = null,
@@ -238,7 +300,10 @@ pub fn undefinedVariable(name: []const u8, source: []const u8, env: *const Envir
             hint_buf.appendSlice(allocator, "      ") catch {};
             hint_buf.appendSlice(allocator, binding.name) catch {};
             hint_buf.appendSlice(allocator, " = ") catch {};
-            binding.val.format(hint_buf.writer(allocator));
+            var val_buf: [256]u8 = undefined;
+            var val_w = std.Io.Writer.fixed(&val_buf);
+            binding.val.format(&val_w);
+            hint_buf.appendSlice(allocator, val_w.buffered()) catch {};
             hint_buf.appendSlice(allocator, "\n") catch {};
         }
     } else {
@@ -424,6 +489,16 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         .source_line = source,
         .message = std.fmt.allocPrint(alloc, "I don't know a function called `{s}`.", .{name}) catch "Unknown function.",
         .hint = hint.items,
+    };
+}
+
+/// Build a rich error when a recursion runs past the depth the stack can hold.
+pub fn recursionTooDeep(depth: u32, source: []const u8) BlimpError {
+    return .{
+        .title = "RECURSION TOO DEEP",
+        .source_line = source,
+        .message = std.fmt.allocPrint(std.heap.page_allocator, "A call nested {d} deep. The native stack cannot hold more.", .{depth}) catch "Recursion too deep.",
+        .hint = "A call in tail position runs in constant stack:\n      _ -> go(n - 1, acc + n)   # tail call, no growth\n      _ -> n + go(n - 1)        # not a tail call, one frame per step",
     };
 }
 

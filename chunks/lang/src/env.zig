@@ -6,6 +6,11 @@ const Value = @import("value.zig").Value;
 /// Follows the same pattern as TypeEnv in types.zig.
 pub const Environment = struct {
     scopes: std.ArrayList(Scope),
+    /// Binding lists left behind by popped scopes, kept for the next push.
+    /// Every call pushes a scope and pops it again, and the evaluator runs on
+    /// an arena that frees nothing, so without this list a call leaves its
+    /// binding buffer in the allocator for the rest of the run.
+    free_scopes: std.ArrayList(std.ArrayList(Binding)),
     allocator: std.mem.Allocator,
 
     pub const Binding = struct {
@@ -15,11 +20,36 @@ pub const Environment = struct {
 
     pub const Scope = struct {
         bindings: std.ArrayList(Binding),
+        /// One bit per name in this scope, by hash, maintained by `defineIn`.
+        /// A lookup whose bit is clear skips the scope without comparing a
+        /// single string.
+        ///
+        /// This is not a micro-optimisation.  A Blimp closure sees its
+        /// caller's locals, so resolving a global from N frames deep walks
+        /// all N scopes, and a recursion N deep does that N times: finding
+        /// `fib` was a quarter of the time in fib(35).  A false positive
+        /// costs a search that would have happened anyway; there are no
+        /// false negatives, so what the walk finds does not change.
+        names: u64 = 0,
     };
+
+    /// The bit this name claims in a scope's `names`.  Public because anything
+    /// that builds a Scope without going through `define` has to rebuild the
+    /// mask itself — gc.zig does, and the gc tests fail loudly if it stops.  Two loads and three
+    /// arithmetic ops: a real hash costs more than the string comparisons it
+    /// saves, because most lookups hit the innermost scope on the first try.
+    pub fn nameBit(name: []const u8) u64 {
+        if (name.len == 0) return 1;
+        const first: u64 = name[0];
+        const last: u64 = name[name.len - 1];
+        const h = first ^ (last << 2) ^ (@as(u64, name.len) << 4);
+        return @as(u64, 1) << @as(u6, @truncate(h));
+    }
 
     pub fn init(allocator: std.mem.Allocator) Environment {
         var env = Environment{
             .scopes = .{ .items = &.{}, .capacity = 0 },
+            .free_scopes = .{ .items = &.{}, .capacity = 0 },
             .allocator = allocator,
         };
         // Push the global scope
@@ -27,18 +57,26 @@ pub const Environment = struct {
         return env;
     }
 
-    /// Push a new scope (entering a block).
+    /// Push a new scope (entering a block), reusing a recycled binding list
+    /// when one is going spare.
     pub fn pushScope(self: *Environment) void {
-        self.scopes.append(self.allocator, .{
-            .bindings = .{ .items = &.{}, .capacity = 0 },
-        }) catch {};
+        const bindings = self.free_scopes.pop() orelse
+            std.ArrayList(Binding){ .items = &.{}, .capacity = 0 };
+        self.scopes.append(self.allocator, .{ .bindings = bindings }) catch {};
     }
 
     /// Pop the current scope (leaving a block).
     pub fn popScope(self: *Environment) void {
-        if (self.scopes.items.len > 0) {
-            _ = self.scopes.pop();
-        }
+        if (self.scopes.pop()) |scope| self.recycle(scope);
+    }
+
+    /// Keep a popped scope's binding buffer for the next push.  Dropping it
+    /// instead is what made a deep recursion grow without bound.
+    fn recycle(self: *Environment, scope: Scope) void {
+        // `names` belongs to the scope, not to the buffer being kept.
+        var bindings = scope.bindings;
+        bindings.clearRetainingCapacity();
+        self.free_scopes.append(self.allocator, bindings) catch {};
     }
 
     /// Number of scopes on the stack. Callers record this to pop back to it.
@@ -48,8 +86,8 @@ pub const Environment = struct {
 
     /// Pop scopes until only `n` remain (no-op if already at or below n).
     pub fn popTo(self: *Environment, n: usize) void {
-        if (self.scopes.items.len > n) {
-            self.scopes.shrinkRetainingCapacity(n);
+        while (self.scopes.items.len > n) {
+            if (self.scopes.pop()) |scope| self.recycle(scope);
         }
     }
 
@@ -65,7 +103,9 @@ pub const Environment = struct {
                 self.defineIn(base, b.name, b.val);
             }
         }
-        self.scopes.shrinkRetainingCapacity(base + 1);
+        while (self.scopes.items.len > base + 1) {
+            if (self.scopes.pop()) |scope| self.recycle(scope);
+        }
     }
 
     /// Define (or update) a variable in the current scope.
@@ -76,6 +116,7 @@ pub const Environment = struct {
 
     fn defineIn(self: *Environment, index: usize, name: []const u8, value: *const Value) void {
         const scope = &self.scopes.items[index];
+        scope.names |= nameBit(name);
         // Check for existing binding to update
         for (scope.bindings.items) |*binding| {
             if (std.mem.eql(u8, binding.name, name)) {
@@ -114,10 +155,12 @@ pub const Environment = struct {
 
     /// Look up a variable, searching from innermost to outermost scope.
     pub fn lookup(self: *const Environment, name: []const u8) ?*const Value {
+        const bit = nameBit(name);
         var i: usize = self.scopes.items.len;
         while (i > 0) {
             i -= 1;
             const scope = self.scopes.items[i];
+            if (scope.names & bit == 0) continue;
             // Search backwards for most recent binding
             var j: usize = scope.bindings.items.len;
             while (j > 0) {
@@ -218,6 +261,64 @@ test "collapseTo keeps the visible bindings in one scope" {
     try std.testing.expectEqual(base, env.depth());
     try std.testing.expect(env.lookup("x") == null);
     try std.testing.expect(env.lookup("g") != null);
+}
+
+test "a pushed and popped scope costs nothing the second time" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const val = try alloc.create(Value);
+    val.* = Value{ .integer = 1 };
+
+    // Let the scope stack and the first binding list reach their size.
+    for (0..64) |_| {
+        env.pushScope();
+        env.define("x", val);
+        env.popScope();
+    }
+    const settled = arena.queryCapacity();
+
+    for (0..10_000) |_| {
+        env.pushScope();
+        env.define("x", val);
+        env.popScope();
+    }
+
+    // Every call pushes a scope.  If popping dropped the binding list, this
+    // loop would leave 10_000 of them in the arena.
+    try std.testing.expectEqual(settled, arena.queryCapacity());
+}
+
+test "a name in an outer scope is found through many inner ones" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const target = try alloc.create(Value);
+    target.* = Value{ .integer = 99 };
+    const noise = try alloc.create(Value);
+    noise.* = Value{ .integer = 1 };
+
+    env.define("target", target);
+    for (0..64) |i| {
+        env.pushScope();
+        // Names chosen to land on assorted bits, including whatever `target`
+        // hashes to: a scope that claims the bit must still be searched, and
+        // one that does not must still be skipped correctly.
+        const name = try std.fmt.allocPrint(alloc, "n{d}", .{i});
+        env.define(name, noise);
+    }
+
+    try std.testing.expectEqual(@as(i64, 99), env.lookup("target").?.integer);
+    try std.testing.expect(env.lookup("absent") == null);
+
+    // And still after the frames above it are collapsed into one.
+    env.collapseTo(1);
+    try std.testing.expectEqual(@as(i64, 99), env.lookup("target").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), env.lookup("n7").?.integer);
 }
 
 test "inner scope shadows outer" {

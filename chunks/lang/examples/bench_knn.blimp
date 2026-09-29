@@ -1,20 +1,20 @@
 # K-nearest neighbors benchmark -- distance computation
 # Brute-force KNN: compute manhattan distances over an NxN grid
 
-def abs_val(x) do
+def abs_val(x: Int) do
   situation x do
     n when n >= 0 -> n
     _ -> 0 - x
   end
 end
 
-def manhattan(x1, y1, x2, y2) do
+def manhattan(x1: Int, y1: Int, x2: Int, y2: Int) do
   abs_val(x1 - x2) + abs_val(y1 - y2)
 end
 
 # Compute sum of distances from query point to all points in an NxN grid
 # This is O(N^2) distance calculations -- the hot loop of any KNN
-def grid_distances(n, qx, qy) do
+def grid_distances(n: Int, qx: Int, qy: Int) do
   situation n do
     0 -> 0
     _ ->
@@ -23,7 +23,7 @@ def grid_distances(n, qx, qy) do
   end
 end
 
-def grid_row(y, cols, qx, qy) do
+def grid_row(y: Int, cols: Int, qx: Int, qy: Int) do
   situation cols do
     0 -> 0
     _ ->

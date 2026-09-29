@@ -66,6 +66,24 @@ def greet(name: String) -> String do
   concat("Hello, ", name)
 end
 
+actor Holder do
+  state held: Any :: nil
+
+  on :set(c: Any) do
+    become held: c
+    reply nil
+  end
+
+  on :make do
+    become held: spawn SimpleCounter
+    reply nil
+  end
+
+  on :held do
+    reply held
+  end
+end
+
 # ============================================================
 # Actor definition and spawn
 # ============================================================
@@ -97,6 +115,24 @@ actor ActorSpawnTests do
     kv = spawn KeyValue
     kv <- :set("name", "alice")
     assert_eq(kv <- :get("name"), "alice")
+  end
+
+  # Regression: the receiver's registry entry is held for the whole handler
+  # body, so a spawn evaluated inside that body must not move it.
+  test "spawn in a send argument survives the send" do
+    h = spawn Holder
+    h <- :set(spawn SimpleCounter)
+    child = h <- :held
+    child <- :increment
+    assert_eq(child <- :get, 1)
+  end
+
+  test "spawn on the right of a become survives the handler" do
+    h = spawn Holder
+    h <- :make
+    child = h <- :held
+    child <- :increment
+    assert_eq(child <- :get, 1)
   end
 end
 

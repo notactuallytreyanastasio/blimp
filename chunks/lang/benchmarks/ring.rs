@@ -7,7 +7,6 @@ fn main() {
 
     // Create 10 "actor" channels
     let mut senders = Vec::new();
-    let mut receivers = Vec::new();
 
     for _ in 0..10 {
         let (tx, rx) = mpsc::channel::<(i64, mpsc::Sender<i64>)>();

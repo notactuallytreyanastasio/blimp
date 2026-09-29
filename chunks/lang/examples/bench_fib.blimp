@@ -1,7 +1,7 @@
 # Fibonacci benchmark -- recursive
 # fib(40) = 9227465
 
-def fib(n) do
+def fib(n: Int) do
   situation n do
     0 -> 0
     1 -> 1

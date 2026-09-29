@@ -37,7 +37,13 @@ pub const ActorTemplate = struct {
 pub const Registry = struct {
     allocator: std.mem.Allocator,
     templates: std.ArrayList(ActorTemplate),
-    instances: std.ArrayList(ActorEntry),
+    /// Instances are boxed, not stored inline.  `getInstance` hands out a
+    /// `*ActorEntry` that the evaluator keeps for the whole of a handler
+    /// body, and a handler body can spawn -- in an argument, on the right
+    /// of a `become`, anywhere.  Storing entries by value would let that
+    /// spawn's append reallocate the backing array and leave every
+    /// outstanding pointer dangling.  A box stays put.
+    instances: std.ArrayList(*ActorEntry),
     next_id: u64,
 
     pub fn init(allocator: std.mem.Allocator) Registry {
@@ -90,20 +96,23 @@ pub const Registry = struct {
             }
         }
 
-        self.instances.append(self.allocator, .{
+        const entry = self.allocator.create(ActorEntry) catch return ref;
+        entry.* = .{
             .ref = ref,
             .state_fields = state,
             .handlers = template.handlers,
             .status = .idle,
             .mailbox = Mailbox.init(),
-        }) catch {};
+        };
+        self.instances.append(self.allocator, entry) catch {};
 
         return ref;
     }
 
-    /// Look up a spawned instance by ref.
+    /// Look up a spawned instance by ref.  The pointer stays valid for the
+    /// life of the instance, including across later spawns.
     pub fn getInstance(self: *Registry, ref: ActorRef) ?*ActorEntry {
-        for (self.instances.items) |*entry| {
+        for (self.instances.items) |entry| {
             if (entry.ref.id == ref.id) return entry;
         }
         return null;
@@ -126,7 +135,7 @@ pub const Registry = struct {
     /// Restart all children of a supervisor.
     /// Children are actors whose type_name starts with supervisor_name + "."
     pub fn restartChildren(self: *Registry, supervisor_name: []const u8) void {
-        for (self.instances.items) |*entry| {
+        for (self.instances.items) |entry| {
             const name = entry.ref.type_name;
             // Check if this actor is a child of the supervisor
             if (name.len > supervisor_name.len + 1 and
@@ -297,4 +306,33 @@ test "instances have independent state" {
     // Instance 2 should be unaffected
     const entry2 = registry.getInstance(ref2).?;
     try std.testing.expect(entry2.state_fields[0].val.eql(Value{ .integer = 0 }));
+}
+
+test "instance pointers survive later spawns" {
+    // getInstance hands out a pointer into the instance list and the
+    // evaluator holds it for a whole handler body -- during which the
+    // handler may spawn.  Growing the list must not move entries out from
+    // under that pointer.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var registry = Registry.init(alloc);
+
+    const default_val = try alloc.create(Value);
+    default_val.* = Value{ .integer = 0 };
+    const defaults = try alloc.alloc(Value.MapEntry, 1);
+    defaults[0] = .{ .key = "count", .val = default_val };
+    registry.registerTemplate("Counter", defaults, &.{});
+
+    const tmpl = registry.lookupTemplate("Counter").?;
+    const ref = registry.spawn(tmpl, &.{});
+    const entry = registry.getInstance(ref).?;
+
+    // Enough spawns to force the backing array to grow several times.
+    for (0..64) |_| _ = registry.spawn(tmpl, &.{});
+
+    try std.testing.expectEqual(ref.id, entry.ref.id);
+    try std.testing.expectEqual(@as(usize, 1), entry.state_fields.len);
+    try std.testing.expect(entry == registry.getInstance(ref).?);
 }

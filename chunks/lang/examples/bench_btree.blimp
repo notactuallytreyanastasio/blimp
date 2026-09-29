@@ -4,7 +4,7 @@
 # tree_build(depth) builds a complete binary tree, returns node count
 # tree_check(depth) checksums a complete binary tree
 
-def tree_build(depth) do
+def tree_build(depth: Int) do
   situation depth do
     0 -> 1
     _ ->

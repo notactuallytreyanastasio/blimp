@@ -4,7 +4,7 @@
 LANG_DIR = chunks/lang
 BLOG_DIR = docs/blog
 
-.PHONY: help build repl compile wasm web deploy test bench errors clean
+.PHONY: help build build-fast repl compile wasm web deploy test bench errors clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -14,6 +14,9 @@ help: ## Show this help
 
 build: ## Build the Blimp compiler and interpreter
 	cd $(LANG_DIR) && zig build
+
+build-fast: ## Build an optimised interpreter (what the benchmarks measure)
+	cd $(LANG_DIR) && zig build interp -Doptimize=ReleaseFast
 
 repl: build ## Launch the REPL in a terminal
 	$(LANG_DIR)/zig-out/bin/blimp
@@ -41,7 +44,7 @@ test: build ## Run all tests
 	@echo "bank:" && $(LANG_DIR)/zig-out/bin/blimp-compile $(LANG_DIR)/examples/bank.blimp --run
 	@echo "traffic:" && $(LANG_DIR)/zig-out/bin/blimp-compile $(LANG_DIR)/examples/traffic_light.blimp --run
 
-bench: build ## Run benchmarks (fib, actors)
+bench: build-fast ## Run benchmarks (fib, actors)
 	cd $(LANG_DIR) && bash benchmarks/run.sh
 
 errors: build ## Showcase all error messages
