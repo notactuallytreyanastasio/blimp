@@ -238,9 +238,14 @@
       return this._fail(e.message || String(e));
     }
     this.view = view;
-    var fx = { timers: {}, keys: {} };
+    var fx = { timers: {}, keys: {}, fetches: {}, query: null };
     this._collectEffects(view, fx);
     this._reconcileTimers(fx.timers);
+    this._reconcileFetches(fx.fetches);
+    if (fx.query !== null && typeof location !== 'undefined' && typeof history !== 'undefined') {
+      var want = fx.query === '' ? location.pathname : '?' + fx.query;
+      if (location.search !== (fx.query === '' ? '' : '?' + fx.query)) history.replaceState(null, '', want);
+    }
     this.keys = fx.keys;
     if (this.opts.onRender) this.opts.onRender(view, fx);
   };
@@ -309,6 +314,8 @@
         break;
       case 'timer':
       case 'key':
+      case 'fetch':
+      case 'location_query':
         // effects render nothing; they are picked up by _collectEffects
         return document.createTextNode('');
       default: el = document.createElement('div');
@@ -564,6 +571,11 @@
       var ms = attrInt(attrs.ms, 0);
       var sends = attrVal(attrs.sends);
       if (ms > 0 && sends) fx.timers[ms + '|' + sends] = { ms: ms, sends: sends };
+    } else if (node.tag === 'fetch') {
+      var url = attrVal(attrs.url), fsends = attrVal(attrs.sends);
+      if (url && fsends) fx.fetches[url + '|' + fsends] = { url: url, sends: fsends };
+    } else if (node.tag === 'location_query') {
+      fx.query = String(attrVal(attrs.query));
     } else if (node.tag === 'key') {
       var code = attrVal(attrs.code);
       var msg = attrVal(attrs.sends);
@@ -586,6 +598,31 @@
         if (!self.timers[k]) return;
         self.send(t.sends);
       }, t.ms);
+    });
+  };
+
+  // Each fetch in the tree is made once while it stays there; one that
+  // leaves the tree is forgotten, so asking again fetches again.
+  BlimpView.prototype._reconcileFetches = function (wanted) {
+    var self = this;
+    this.fetched = this.fetched || {};
+    Object.keys(this.fetched).forEach(function (k) { if (!wanted[k]) delete self.fetched[k]; });
+    Object.keys(wanted).forEach(function (k) {
+      if (self.fetched[k]) return;
+      self.fetched[k] = true;
+      var f = wanted[k];
+      var deliver = function (status, body) {
+        if (!self.mounted || self.error || !self.fetched[k]) return;
+        // a send in progress (a timer, a click) finishes first
+        var go = function () {
+          if (self._sending) return setTimeout(go, 0);
+          self.send(f.sends, status + ', ' + literal(body));
+        };
+        go();
+      };
+      fetch(f.url, { credentials: 'same-origin' })
+        .then(function (r) { return r.text().then(function (t) { deliver(r.status, t); }); })
+        .catch(function () { deliver(0, ''); });
     });
   };
 

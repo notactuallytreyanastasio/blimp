@@ -145,6 +145,8 @@ pub const BuiltinRegistry = struct {
         reg.register("el", &viewEl);
         reg.register("button", &viewButton);
         reg.register("timer", &viewTimer);
+        reg.register("fetch", &viewFetch);
+        reg.register("location_query", &viewLocationQuery);
         reg.register("key", &viewKey);
         reg.register("input", &viewInput);
         reg.register("textarea", &viewTextarea);
@@ -2433,6 +2435,32 @@ fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     return makeViewNode(allocator, "button", &.{}, args[0..1]);
 }
 
+/// fetch(url, :msg) — effect node: the host GETs `url` (same origin, a path)
+/// once while this node is in the view, and sends :msg(status, body), body
+/// as a String; status 0 if the request failed. A view that stops asking and
+/// asks again gets it again. How a program in the browser reads data from
+/// its server: the view says what it needs.
+fn viewFetch(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .atom) return error.TypeError;
+    const url = args[0].string;
+    // a path on the page's own server: not another origin, not a scheme
+    if (url.len == 0 or url[0] != '/' or (url.len > 1 and url[1] == '/')) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "url", .val = args[0] };
+    attrs[1] = .{ .key = "sends", .val = args[1] };
+    return makeViewNode(allocator, "fetch", attrs, &.{});
+}
+
+/// location_query("year=2023&song=Tweezer") — effect node: the page's URL
+/// carries this query string (replaced, not pushed: no history entry per
+/// click), so the page can be linked to in the state it is in.
+fn viewLocationQuery(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 1);
+    attrs[0] = .{ .key = "query", .val = args[0] };
+    return makeViewNode(allocator, "location_query", attrs, &.{});
+}
+
 /// timer(ms, sends_atom) — effect node: while mounted, the host sends the atom every ms milliseconds
 fn viewTimer(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
@@ -3237,7 +3265,8 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
     switch (val.*) {
         .view_node => |node| {
             // Effect nodes (timer, key) are host instructions, not markup.
-            if (std.mem.eql(u8, node.tag, "timer") or std.mem.eql(u8, node.tag, "key")) return;
+            if (std.mem.eql(u8, node.tag, "timer") or std.mem.eql(u8, node.tag, "key") or
+                std.mem.eql(u8, node.tag, "fetch") or std.mem.eql(u8, node.tag, "location_query")) return;
             if (std.mem.eql(u8, node.tag, "el")) return renderElHtml(allocator, node, buf);
             const tag = blimpTagToHtml(node.tag);
             try buf.appendSlice(allocator, "<");

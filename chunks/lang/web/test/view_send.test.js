@@ -373,3 +373,47 @@ test('a field: selection in bytes both ways, shortcuts, debounced input, inner_h
   assert.strictEqual(container.children[0].children[0].attrs.value, 'typed');
   view.unmount();
 });
+
+const FETCHER = `
+actor Songs do
+  state year: String :: "2023"
+  state body: String :: ""
+  state status: Int :: -1
+  on :got(s: Int, b: String) do
+    become status: s, body: b
+  end
+  on :pick(y: String) do
+    become year: y, body: "", status: -1
+  end
+  on :view do
+    asks = case body do
+      "" -> [fetch(concat("/songs.json?year=", year), :got)]
+      _ -> []
+    end
+    reply el("div", %{}, el("p", %{}, concat(to_string(status), " ", body)), asks, location_query(concat("year=", year)))
+  end
+end
+songs = spawn Songs
+songs <- :view`;
+
+test('fetch() asks the host once while it is in the view; location_query() keeps the URL', async () => {
+  global.document = fakeDocument();
+  const asked = [];
+  global.fetch = (url) => { asked.push(url); return Promise.resolve({ status: 200, text: () => Promise.resolve('{"n": "\\"#{x}"}') }) };
+  global.location = { pathname: '/phish', search: '' };
+  global.history = { replaceState: (_s, _t, u) => { global.location.search = u.startsWith('?') ? u : '' } };
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(FETCHER, 'songs').ok);
+  assert.strictEqual(global.location.search, '?year=2023');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(asked, ['/songs.json?year=2023']);
+  assert.strictEqual(textOf(container.children[0].children[0]), '200 {"n": "\\"#{x}"}');
+  view.send('pick', '"2016"');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(asked, ['/songs.json?year=2023', '/songs.json?year=2016']);
+  assert.strictEqual(global.location.search, '?year=2016');
+  view.unmount();
+  delete global.fetch; delete global.location; delete global.history;
+});
