@@ -1485,6 +1485,22 @@ actor CryptoTests do
     assert(raises("hex_encode([1, 2])"))
   end
 
+  # -- el --
+  test "el renders as its own markup, attributes escaped, host instructions left out" do
+    v = el("div", %{class: "board board-8", "data-n": 3, click: :go, with: 8}, el("input", %{type: "checkbox", checked: true, disabled: false, value: "a\"<b>"}), "x < y")
+    assert_eq(to_html(v), "<div class=\"board board-8\" data-n=\"3\"><input type=\"checkbox\" checked value=\"a&quot;&lt;b&gt;\">x &lt; y</div>")
+  end
+
+  test "el refuses a tag it does not make, an on* attribute and a javascript: URL" do
+    assert(raises("el(\"script\", %{}, \"x\")"))
+    assert(raises("el(\"iframe\", %{src: \"/\"})"))
+    assert(raises("el(\"a\", %{onclick: \"x\"})"))
+    assert(raises("el(\"a\", %{\"OnMouseOver\": \"x\"})"))
+    assert(raises("el(\"a\", %{href: \" \\tJavaScript:alert(1)\"})"))
+    assert(raises("el(\"div\", %{class: [1]})"))
+    assert_eq(to_html(el("a", %{href: "/x?a=1&b=2"}, "ok")), "<a href=\"/x?a=1&amp;b=2\">ok</a>")
+  end
+
   # -- hex_decode --
   test "hex_decode undoes hex_encode, either case" do
     raw = concat(from_char_code(0), from_char_code(255), "A")

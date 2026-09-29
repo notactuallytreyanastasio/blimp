@@ -1300,7 +1300,18 @@ pub const Parser = struct {
         var entries: std.ArrayList(ast.Node.KeyValue) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             if (self.current.kind != .identifier and self.current.kind != .string) return error.UnexpectedToken;
-            const key = self.current.lexeme;
+            // "data-n": 1 is the key data-n. The lexeme of a string token
+            // keeps its quotes, and the key used to keep them too, so
+            // lookup(m, "data-n") answered nil for a key written that way.
+            // A key with an escape or an interpolation in it is refused
+            // rather than stored as its source text.
+            const key = if (self.current.kind == .string) blk: {
+                const lx = self.current.lexeme;
+                if (lx.len < 2) return error.UnexpectedToken;
+                const inner = lx[1 .. lx.len - 1];
+                if (std.mem.indexOfScalar(u8, inner, '\\') != null or std.mem.indexOf(u8, inner, "#{") != null) return error.UnexpectedToken;
+                break :blk inner;
+            } else self.current.lexeme;
             self.advance();
             try self.expect(.colon);
             self.skipNewlines();

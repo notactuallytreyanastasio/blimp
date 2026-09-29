@@ -26,6 +26,11 @@
 // draw(w, h, ops) is a canvas painted from a display list, one shape per
 // line (see viewDraw in builtins.zig); the canvas is kept and repainted.
 //
+// el(tag, attrs, children...) is a real element with the page's own classes
+// and attributes: {"tag":"el","attrs":{"@tag":{"text":"div"},"class":...}}.
+// Five attrs are instructions, not HTML (see viewEl): click (+ with),
+// input, change and submit each send the actor a message.
+//
 // Attr values arrive either as primitives or as {text: "..."} (strings and
 // ints both serialize that way), so every attr goes through attrVal().
 
@@ -40,6 +45,38 @@
   function attrInt(v, fallback) {
     var n = parseInt(attrVal(v), 10);
     return isNaN(n) ? fallback : n;
+  }
+
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  var SVG_TAGS = { svg: 1, g: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, text: 1, tspan: 1,
+    defs: 1, linearGradient: 1, radialGradient: 1, stop: 1, ellipse: 1, title: 0 };
+  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1 };
+  var URL_ATTRS = { href: 1, src: 1, action: 1, formaction: 1, 'xlink:href': 1, poster: 1 };
+
+  // A Blimp string literal holding `s`.
+  function literal(s) {
+    return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/#\{/g, '\\#{') + '"';
+  }
+
+  // Set el's attributes to `attrs`, touching only what differs from `old`.
+  function setAttrs(el, attrs, old) {
+    Object.keys(attrs).forEach(function (k) {
+      if (k.charAt(0) === '@' || EL_EVENTS[k]) return;
+      if (old && JSON.stringify(old[k]) === JSON.stringify(attrs[k])) return;
+      if (/^on/i.test(k)) throw new Error('el: an on* attribute (' + k + ') is not allowed');
+      var v = attrVal(attrs[k]);
+      if (v === false || v === null || v === undefined) { el.removeAttribute(k); if (k === 'checked') el.checked = false; return; }
+      if (v === true) { el.setAttribute(k, ''); if (k === 'checked') el.checked = true; return; }
+      v = String(v);
+      if (URL_ATTRS[k] && /^[\u0000-\u0020]*javascript:/i.test(v)) throw new Error('el: a javascript: URL in ' + k);
+      el.setAttribute(k, v);
+      // the property, not the attribute, is what a field shows once typed in
+      if (k === 'value' && 'value' in el) el.value = v;
+    });
+    if (old) Object.keys(old).forEach(function (k) {
+      if (k.charAt(0) === '@' || EL_EVENTS[k] || attrs.hasOwnProperty(k)) return;
+      el.removeAttribute(k);
+    });
   }
 
   function mk(tag, cls) {
@@ -84,14 +121,15 @@
     return r;
   };
 
-  BlimpView.prototype.send = function (msg) {
+  // send('set_size', '8') is `actor <- :set_size(8)`: args are Blimp source.
+  BlimpView.prototype.send = function (msg, args) {
     if (!this.mounted || this.error) return false;
     if (this._sending) return false;
     this._sending = true;
     try {
-      if (this.opts.onSend) this.opts.onSend(msg);
-      if (this.opts.send) return this._sendDirect(msg);
-      var r1 = this.blimp.eval(this.actorVar + ' <- :' + msg);
+      if (this.opts.onSend) this.opts.onSend(msg, args);
+      if (this.opts.send) return this._sendDirect(msg, args);
+      var r1 = this.blimp.eval(this.actorVar + ' <- :' + msg + (args !== undefined ? '(' + args + ')' : ''));
       if (!r1.ok) { this._fail(r1.error); return false; }
       var r2 = this.blimp.eval(this.actorVar + ' <- :view');
       if (!r2.ok) { this._fail(r2.error); return false; }
@@ -106,8 +144,8 @@
   // { send: true }: the message and the view both go through blimp.send, so
   // a game that runs for an hour does not keep an hour of evals. Opt-in,
   // because a page that shows the message log (getState) needs eval's.
-  BlimpView.prototype._sendDirect = function (msg) {
-    var r1 = this.blimp.send(this.actorVar, msg);
+  BlimpView.prototype._sendDirect = function (msg, args) {
+    var r1 = this.blimp.send(this.actorVar, msg, args);
     if (!r1.ok) { this._fail(r1.error); return false; }
     var r2 = this.blimp.send(this.actorVar, 'view');
     if (!r2.ok) { this._fail(r2.error); return false; }
@@ -206,6 +244,14 @@
         el = mk('canvas', 'blimp-draw');
         paint(el, attrs);
         return el;
+      case 'el':
+        var etag = attrVal(attrs['@tag']);
+        el = SVG_TAGS[etag] ? document.createElementNS(SVGNS, etag) : document.createElement(etag);
+        setAttrs(el, attrs, null);
+        this._listen(el, attrs);
+        children.forEach(function (c) { el.appendChild(self.renderView(c)); });
+        if (etag === 'select' && attrs.value !== undefined) el.value = String(attrVal(attrs.value));
+        return el;
       case 'button':
         el = mk('button', 'blimp-button');
         el.type = 'button';
@@ -221,6 +267,38 @@
     }
     children.forEach(function (c) { el.appendChild(self.renderView(c)); });
     return el;
+  };
+
+  // -- el events --------------------------------------------------------------
+
+  // The listeners read el._blimpOn when they fire, so a patch that changes
+  // what an element sends needs no new listener.
+  BlimpView.prototype._listen = function (el, attrs) {
+    var self = this;
+    el._blimpOn = {};
+    Object.keys(EL_EVENTS).forEach(function (k) { if (attrs[k] !== undefined) el._blimpOn[k] = attrVal(attrs[k]); });
+    if (el._blimpOn.click) el.addEventListener('click', function (e) {
+      var on = el._blimpOn;
+      if (!on.click) return;
+      e.preventDefault();
+      self.send(on.click, on['with']);
+    });
+    if (el._blimpOn.input) el.addEventListener('input', function () {
+      if (el._blimpOn.input) self.send(el._blimpOn.input, literal(el.value));
+    });
+    if (el._blimpOn.change) el.addEventListener('change', function () {
+      if (!el._blimpOn.change) return;
+      self.send(el._blimpOn.change, el.type === 'checkbox' ? String(el.checked) : literal(el.value));
+    });
+    if (el._blimpOn.submit) el.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var fields = {};
+      Array.prototype.forEach.call(el.elements || [], function (f) {
+        if (!f.name) return;
+        fields[f.name] = f.type === 'checkbox' ? f.checked : f.value;
+      });
+      if (el._blimpOn.submit) self.send(el._blimpOn.submit, literal(JSON.stringify(fields)));
+    });
   };
 
   // -- patching ---------------------------------------------------------------
@@ -239,6 +317,26 @@
     var sameAttrs = JSON.stringify(a.attrs || {}) === JSON.stringify(b.attrs || {});
     if (b.tag === 'draw') {
       if (!sameAttrs) paint(el, b.attrs || {});
+      return el;
+    }
+    if (b.tag === 'el') {
+      if (attrVal(a.attrs['@tag']) !== attrVal(b.attrs['@tag'])) return this.renderView(b);
+      if (!sameAttrs) {
+        setAttrs(el, b.attrs, a.attrs);
+        var had = el._blimpOn || {};
+        var want = {};
+        Object.keys(EL_EVENTS).forEach(function (k) { if (b.attrs[k] !== undefined) want[k] = attrVal(b.attrs[k]); });
+        // a kind of event it had no listener for needs a new element
+        if (Object.keys(want).some(function (k) { return k !== 'with' && !had[k]; })) return this.renderView(b);
+        el._blimpOn = want;
+      }
+      if (ac.length !== bc.length) return this.renderView(b);
+      var nodes = el.childNodes;
+      for (var j = 0; j < bc.length; j++) {
+        var c = nodes[j];
+        var n = this._patch(c, ac[j], bc[j]);
+        if (n !== c) el.replaceChild(n, c);
+      }
       return el;
     }
     if (!sameAttrs) {
