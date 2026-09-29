@@ -240,3 +240,41 @@ test('el: a javascript: URL stops the view instead of rendering', async () => {
   view.render({ tag: 'el', attrs: { '@tag': { text: 'a' }, href: { text: ' javascript:alert(1)' } }, children: [] });
   assert.match(view.error, /javascript: URL in href/);
 });
+
+const SWIPER = `
+actor Sw do
+  state moves: List :: []
+  state gen: Int :: 0
+  on :moved(d: Atom) do
+    become moves: [d | moves], gen: gen + 1
+  end
+  on :view do
+    reply el("div", %{class: "wrap", swipe: :moved},
+      el("div", %{id: "bar-#{gen}", class: "bar"}),
+      el("span", %{}, join(map(moves, fn(m: Atom) -> String do to_string(m) end), ",")))
+  end
+end
+sw = spawn Sw
+sw <- :view`;
+
+test('el: a swipe sends its direction as an atom, and a new id is a new element', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(SWIPER, 'sw').ok);
+  const wrap = container.children[0];
+  const bar = wrap.children[0];
+  const touch = (x, y) => ({ touches: [{ clientX: x, clientY: y }], preventDefault() {} });
+  wrap.on.touchstart(touch(100, 100));
+  wrap.on.touchmove(touch(95, 99));    // under 12px: nothing yet
+  wrap.on.touchmove(touch(80, 101));   // left
+  wrap.on.touchmove(touch(40, 101));   // the same swipe: sent once
+  assert.strictEqual(textOf(wrap.children[1]), 'left');
+  assert.notStrictEqual(wrap.children[0], bar, 'the bar kept its element through an id change');
+  assert.strictEqual(wrap.children[0].attrs.id, 'bar-1');
+  wrap.on.touchstart(touch(0, 0));
+  wrap.on.touchmove(touch(2, 30));     // down
+  assert.strictEqual(textOf(wrap.children[1]), 'down,left');
+  view.unmount();
+});

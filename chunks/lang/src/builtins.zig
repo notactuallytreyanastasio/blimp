@@ -2304,7 +2304,7 @@ const el_tags = [_][]const u8{
 };
 
 /// Attr keys el() takes as instructions for the host, not as HTML.
-const el_event_keys = [_][]const u8{ "click", "with", "input", "change", "submit" };
+const el_event_keys = [_][]const u8{ "click", "with", "input", "change", "submit", "swipe" };
 
 fn isElEventKey(key: []const u8) bool {
     for (el_event_keys) |k| if (std.mem.eql(u8, k, key)) return true;
@@ -2369,6 +2369,8 @@ fn blimpSource(allocator: std.mem.Allocator, v: *const Value) EvalError![]const 
 ///     input: :msg        every keystroke sends :msg(the field's value)
 ///     change: :msg       :msg(value), or :msg(checked) for a checkbox
 ///     submit: :msg       :msg(the form's fields as a JSON string)
+///     swipe: :msg        a finger moved 12px one way: :msg(:left), :right, :up
+///                        or :down, and the page does not scroll
 ///
 /// An attr whose value is nil or false is left off; true is written bare.
 /// Refused with TypeError: a tag not in el_tags, an on* attr, and a URL

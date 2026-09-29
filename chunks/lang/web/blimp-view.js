@@ -28,8 +28,10 @@
 //
 // el(tag, attrs, children...) is a real element with the page's own classes
 // and attributes: {"tag":"el","attrs":{"@tag":{"text":"div"},"class":...}}.
-// Five attrs are instructions, not HTML (see viewEl): click (+ with),
-// input, change and submit each send the actor a message.
+// Six attrs are instructions, not HTML (see viewEl): click (+ with),
+// input, change, submit and swipe each send the actor a message. An el
+// whose id changes is a new element: a CSS animation keyed to it starts
+// again, as it did when LiveView replaced the node.
 //
 // Attr values arrive either as primitives or as {text: "..."} (strings and
 // ints both serialize that way), so every attr goes through attrVal().
@@ -50,7 +52,7 @@
   var SVGNS = 'http://www.w3.org/2000/svg';
   var SVG_TAGS = { svg: 1, g: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, text: 1, tspan: 1,
     defs: 1, linearGradient: 1, radialGradient: 1, stop: 1, ellipse: 1, title: 0 };
-  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1 };
+  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1 };
   var URL_ATTRS = { href: 1, src: 1, action: 1, formaction: 1, 'xlink:href': 1, poster: 1 };
 
   // A Blimp string literal holding `s`.
@@ -290,6 +292,21 @@
       if (!el._blimpOn.change) return;
       self.send(el._blimpOn.change, el.type === 'checkbox' ? String(el.checked) : literal(el.value));
     });
+    if (el._blimpOn.swipe) {
+      var sx = 0, sy = 0, done = false;
+      el.addEventListener('touchstart', function (e) {
+        sx = e.touches[0].clientX; sy = e.touches[0].clientY; done = false;
+      }, { passive: true });
+      el.addEventListener('touchmove', function (e) {
+        if (done || !el._blimpOn.swipe) return;
+        var dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 12) return;
+        e.preventDefault();
+        done = true;
+        var dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+        self.send(el._blimpOn.swipe, ':' + dir);
+      }, { passive: false });
+    }
     if (el._blimpOn.submit) el.addEventListener('submit', function (e) {
       e.preventDefault();
       var fields = {};
@@ -321,6 +338,7 @@
     }
     if (b.tag === 'el') {
       if (attrVal(a.attrs['@tag']) !== attrVal(b.attrs['@tag'])) return this.renderView(b);
+      if (JSON.stringify(a.attrs.id) !== JSON.stringify(b.attrs.id)) return this.renderView(b);
       if (!sameAttrs) {
         setAttrs(el, b.attrs, a.attrs);
         var had = el._blimpOn || {};
