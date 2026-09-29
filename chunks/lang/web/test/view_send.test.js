@@ -453,3 +453,15 @@ bars <- :view`, 'bars').ok);
   assert.strictEqual(bb.attrs['data-full'], '');
   view.unmount();
 });
+
+test('what blimp.send does shows in getState: actors as they are, and the messages', async () => {
+  const b = await blimp();
+  assert.ok(b.eval('actor Inner do\n  state n: Int :: 0\n  on :ping do\n    become n: n + 1\n    reply :pong\n  end\nend\nactor Outer do\n  state inner: Any :: nil\n  on :start do\n    become inner: spawn Inner\n    reply :ok\n  end\n  on :go do\n    reply inner <- :ping\n  end\nend\no = spawn Outer\no <- :start').ok);
+  b.getState();
+  assert.deepStrictEqual(b.send('o', 'go'), { ok: true, value: 'pong' });
+  b.send('o', 'go');
+  const s = b.getState();
+  assert.deepStrictEqual(s.messages.map((m) => m.message), ['go', 'ping', 'go', 'ping']);
+  assert.strictEqual(s.actors.find((a) => a.type === 'Inner').state.n, '2');
+  assert.deepStrictEqual(b.getState().messages, []);
+});
