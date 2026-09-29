@@ -1690,3 +1690,97 @@ actor TimeTests do
     assert_eq(slice(format_time(now(), "%Y"), 0, 2), "20")
   end
 end
+
+# ============================================================
+# sort at scale, and sorting by a key
+# ============================================================
+
+# What sort_by(list, f) is until the evaluator can call a closure from a
+# builtin: the keys are computed by map, which can, and sorted by the
+# builtin, which is stable.
+def sort_by(xs: List, f: Function) -> List do
+  sort_by_keys(xs, map(xs, f))
+end
+
+actor SortTests do
+  test "sort 100k descending ints in well under a second" do
+    xs = reverse(range(1, 100000))
+    t0 = now_ms()
+    ys = sort(xs)
+    elapsed = now_ms() - t0
+    assert_eq(head(ys), 1)
+    assert_eq(elem(ys, 99999), 100000)
+    assert(elapsed < 2000)
+  end
+
+  test "sort 100k strings" do
+    xs = reverse(map(range(100000, 199999), fn(i: Int) do to_string(i) end))
+    t0 = now_ms()
+    ys = sort(xs)
+    assert(now_ms() - t0 < 2000)
+    assert_eq(head(ys), "100000")
+    assert_eq(elem(ys, 99999), "199999")
+  end
+
+  test "sort keeps duplicates" do
+    assert_eq(sort([3, 1, 3, 2, 1, 3]), [1, 1, 2, 3, 3, 3])
+  end
+
+  test "sort negative and float mix" do
+    assert_eq(sort([0.5, -2, 3, -2.5, 0]), [-2.5, -2, 0, 0.5, 3])
+  end
+
+  test "sort strings by bytes, uppercase first" do
+    assert_eq(sort(["b", "B", "a", "A", ""]), ["", "A", "B", "a", "b"])
+  end
+
+  test "sort rejects a mix and other types" do
+    assert_eq(sort([2, 1]), [1, 2])
+    assert(raises("sort([1, \"a\"])"))
+    assert(raises("sort([:b, :a])"))
+    assert(raises("sort([[2], [1]])"))
+    assert(raises("sort(\"ba\")"))
+  end
+
+  test "sort rejects NaN" do
+    assert_eq(sort([2.0, 1.0]), [1.0, 2.0])
+    assert(raises("sort([1.0, sqrt(-1.0), 0.5])"))
+  end
+
+  # -- sort_by_keys --
+  test "sort_by_keys orders items by their keys" do
+    assert_eq(sort_by_keys(["pear", "fig", "apple"], [4, 3, 5]), ["fig", "pear", "apple"])
+  end
+
+  test "sort_by_keys is stable" do
+    items = [{:a, 2}, {:b, 1}, {:c, 2}, {:d, 1}, {:e, 2}]
+    assert_eq(sort_by_keys(items, [2, 1, 2, 1, 2]), [{:b, 1}, {:d, 1}, {:a, 2}, {:c, 2}, {:e, 2}])
+  end
+
+  test "sort_by_keys with string keys" do
+    assert_eq(sort_by_keys([1, 2, 3], ["c", "a", "b"]), [2, 3, 1])
+  end
+
+  test "sort_by_keys rejects mismatched lengths and bad keys" do
+    assert_eq(sort_by_keys([1], [1]), [1])
+    assert(raises("sort_by_keys([1, 2], [1])"))
+    assert(raises("sort_by_keys([1, 2], [1, \"a\"])"))
+    assert(raises("sort_by_keys([1, 2], [nil, nil])"))
+    assert(raises("sort_by_keys([1, 2], [1.0, sqrt(-1.0)])"))
+  end
+
+  test "sort_by via a user def and map" do
+    posts = [%{title: "b", date: "2025-06-01"}, %{title: "a", date: "2024-01-09"}, %{title: "c", date: "2026-01-01"}]
+    sorted = sort_by(posts, fn(p: Map) do lookup(p, "date") end)
+    assert_eq(map(sorted, fn(p: Map) do lookup(p, "title") end), ["a", "b", "c"])
+  end
+
+  test "sort_by_keys 100k in well under a second" do
+    xs = range(1, 100000)
+    keys = map(xs, fn(i: Int) do 0 - i end)
+    t0 = now_ms()
+    ys = sort_by_keys(xs, keys)
+    assert(now_ms() - t0 < 2000)
+    assert_eq(head(ys), 100000)
+  end
+end

@@ -74,6 +74,7 @@ pub const BuiltinRegistry = struct {
         reg.register("head", &builtinHead);
         reg.register("tail", &builtinTail);
         reg.register("sort", &builtinSort);
+        reg.register("sort_by_keys", &builtinSortByKeys);
         reg.register("merge", &builtinMerge);
         reg.register("values", &builtinValues);
         reg.register("type_of", &builtinTypeOf);
@@ -822,28 +823,76 @@ fn builtinTail(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
 }
 
 /// sort([3, 1, 2]) => [1, 2, 3]
+///
+/// Numbers sort numerically (Ints and Floats together) and strings by their
+/// bytes. Anything else, a list that mixes the two, or a NaN is a TypeError.
+///
+/// pdqsort, so O(n log n) and not stable: 1 and 1.0 may come out in either
+/// order. It was insertion sort, and 100k descending Ints took 18 s.
 fn builtinSort(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
     const src = args[0].list;
+    try checkSortKeys(src);
     const items = allocator.alloc(*const Value, src.len) catch return error.OutOfMemory;
     @memcpy(items, src);
+    std.sort.pdq(*const Value, items, {}, sortLessThan);
+    return make(allocator, .{ .list = items });
+}
 
-    // Numbers sort numerically and strings by their bytes. Anything else, or
-    // a list that mixes the two, is a TypeError: this used to read every
-    // non-integer as 0 and hand back a list of strings exactly as it came in.
-    const all_numbers = for (items) |item| {
-        if (item.* != .integer and item.* != .float) break false;
+/// The rule sort and sort_by_keys share: all numbers or all strings.
+///
+/// This used to read every non-integer as 0 and hand back a list of strings
+/// exactly as it came in. NaN is refused too: it is neither less than nor
+/// greater than anything, which breaks the ordering a sort relies on, and
+/// [1.0, NaN, 0.5] came back from the old sort unsorted and unremarked.
+fn checkSortKeys(keys: []const *const Value) EvalError!void {
+    const all_numbers = for (keys) |k| {
+        switch (k.*) {
+            .integer => {},
+            .float => |f| if (std.math.isNan(f)) return error.TypeError,
+            else => break false,
+        }
     } else true;
-    const all_strings = for (items) |item| {
-        if (item.* != .string) break false;
+    const all_strings = for (keys) |k| {
+        if (k.* != .string) break false;
     } else true;
     if (!all_numbers and !all_strings) return error.TypeError;
+}
 
-    std.sort.insertion(*const Value, items, {}, sortLessThan);
+/// sort_by_keys(items, keys) -> items reordered so their keys ascend.
+///
+/// keys[i] is the key of items[i]; the two lists must be the same length.
+/// Keys follow sort's rules (all numbers or all strings, no NaN), anything
+/// else is a TypeError. Stable: items with equal keys keep their order, so
+/// sorting by a second key and then a first gives a two-key sort.
+///
+/// It exists because a builtin cannot call a closure -- only the evaluator
+/// can, which is why map and filter live there -- so `sort_by(list, f)` is
+/// spelled `sort_by_keys(list, map(list, f))` for now. That also calls f once
+/// per item rather than twice per comparison.
+fn builtinSortByKeys(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .list or args[1].* != .list) return error.TypeError;
+    return sortByKeys(allocator, args[0].list, args[1].list);
+}
 
-    const result = allocator.create(Value) catch return error.OutOfMemory;
-    result.* = Value{ .list = items };
-    return result;
+/// The body of sort_by_keys, public so that an evaluator-side
+/// `sort_by(list, f)` can compute the keys with the closure and hand them
+/// here.
+pub fn sortByKeys(allocator: std.mem.Allocator, items: []const *const Value, keys: []const *const Value) EvalError!*const Value {
+    if (items.len != keys.len) return error.TypeError;
+    try checkSortKeys(keys);
+    const order = allocator.alloc(usize, items.len) catch return error.OutOfMemory;
+    defer allocator.free(order);
+    for (order, 0..) |*o, i| o.* = i;
+    // Block sort is the stable one in std; pdq is not.
+    std.sort.block(usize, order, keys, struct {
+        fn lt(ks: []const *const Value, a: usize, b: usize) bool {
+            return sortLessThan({}, ks[a], ks[b]);
+        }
+    }.lt);
+    const out = allocator.alloc(*const Value, items.len) catch return error.OutOfMemory;
+    for (order, 0..) |o, i| out[i] = items[o];
+    return make(allocator, .{ .list = out });
 }
 
 fn sortLessThan(_: void, a: *const Value, b: *const Value) bool {

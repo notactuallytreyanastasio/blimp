@@ -31,7 +31,8 @@ def builtin_names() do
    "sha256", "hmac_sha256", "hex_encode", "base64_encode", "base64_decode",
    "base64url_encode", "base64url_decode", "random_bytes", "random_token",
    "getenv", "argv", "list_dir", "file_exists?", "file_size", "read_file",
-   "write_file", "format_time", "now_ms"]
+   "write_file", "format_time", "now_ms",
+   "sort_by_keys"]
 end
 
 def starts_with(str: String, prefix: String) -> Bool do
