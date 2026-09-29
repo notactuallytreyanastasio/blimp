@@ -141,6 +141,7 @@ pub const BuiltinRegistry = struct {
         reg.register("image", &viewImage);
         reg.register("video", &viewVideo);
         reg.register("canvas", &viewCanvas);
+        reg.register("draw", &viewDraw);
         reg.register("button", &viewButton);
         reg.register("timer", &viewTimer);
         reg.register("key", &viewKey);
@@ -2265,6 +2266,29 @@ fn viewCanvas(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     return makeViewNode(allocator, "canvas", attrs, &.{});
 }
 
+/// draw(width, height, ops) — a canvas the host paints from `ops`, a display
+/// list with one shape per line:
+///
+///     rect x y w h fill              circle x y r fill
+///     line x1 y1 x2 y2 stroke width  text x y size fill align words...
+///     alpha a                        shadow blur color   (both apply to
+///                                                         the lines after)
+///
+/// A fill is a CSS color, or `v:#c1,#c2,...` / `h:#c1,#c2,...` for a
+/// vertical or horizontal gradient across the shape. The view is a value,
+/// so a game draws a frame by returning it; the host keeps one canvas and
+/// repaints it, and fails, naming the line, on a shape it does not know.
+fn viewDraw(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3) return error.TypeError;
+    if (args[0].* != .integer or args[1].* != .integer or args[2].* != .string) return error.TypeError;
+    if (args[0].integer <= 0 or args[1].integer <= 0) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 3);
+    attrs[0] = .{ .key = "width", .val = args[0] };
+    attrs[1] = .{ .key = "height", .val = args[1] };
+    attrs[2] = .{ .key = "ops", .val = args[2] };
+    return makeViewNode(allocator, "draw", attrs, &.{});
+}
+
 /// button("label", sends_atom) — clickable button that sends a message to the actor
 fn viewButton(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len < 1 or args.len > 2) return error.TypeError;
@@ -2289,12 +2313,17 @@ fn viewTimer(allocator: std.mem.Allocator, args: []const *const Value) EvalError
 }
 
 /// key("ArrowLeft", sends_atom) — effect node: while mounted, that KeyboardEvent.key sends the atom
+/// key("ArrowUp", :down_atom, :up_atom) — a key that is held: the first atom
+/// when it goes down (the keyboard's auto-repeat is not sent again), the
+/// second when it comes up. A paddle moves while the key is held.
 fn viewKey(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
-    if (args.len != 2) return error.TypeError;
+    if (args.len != 2 and args.len != 3) return error.TypeError;
     if (args[0].* != .string or args[1].* != .atom) return error.TypeError;
-    const attrs = try allocator.alloc(ViewAttr, 2);
+    if (args.len == 3 and args[2].* != .atom) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, args.len);
     attrs[0] = .{ .key = "code", .val = args[0] };
     attrs[1] = .{ .key = "sends", .val = args[1] };
+    if (args.len == 3) attrs[2] = .{ .key = "up", .val = args[2] };
     return makeViewNode(allocator, "key", attrs, &.{});
 }
 
@@ -2690,6 +2719,44 @@ test "view canvas with id" {
     const result = try viewCanvas(alloc, args);
     try std.testing.expectEqualStrings("canvas", result.view_node.tag);
     try std.testing.expectEqualStrings("id", result.view_node.attrs[0].key);
+}
+
+test "view draw carries its size and display list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const w = try alloc.create(Value);
+    w.* = Value{ .integer = 800 };
+    const h = try alloc.create(Value);
+    h.* = Value{ .integer = 600 };
+    const ops = try alloc.create(Value);
+    ops.* = Value{ .string = "rect 0 0 800 600 #111\ncircle 400 300 10 v:#f0f,#0ff" };
+    const result = try viewDraw(alloc, &.{ w, h, ops });
+    try std.testing.expectEqualStrings("draw", result.view_node.tag);
+    try std.testing.expectEqualStrings("ops", result.view_node.attrs[2].key);
+    try std.testing.expectEqualStrings(ops.string, result.view_node.attrs[2].val.string);
+    const zero = try alloc.create(Value);
+    zero.* = Value{ .integer = 0 };
+    try std.testing.expectError(error.TypeError, viewDraw(alloc, &.{ zero, h, ops }));
+    try std.testing.expectError(error.TypeError, viewDraw(alloc, &.{ w, h, w }));
+}
+
+test "view key: two atoms is a held key" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const code = try alloc.create(Value);
+    code.* = Value{ .string = "ArrowUp" };
+    const down = try alloc.create(Value);
+    down.* = Value{ .atom = "up_pressed" };
+    const up = try alloc.create(Value);
+    up.* = Value{ .atom = "up_released" };
+    const tap = try viewKey(alloc, &.{ code, down });
+    try std.testing.expectEqual(@as(usize, 2), tap.view_node.attrs.len);
+    const held = try viewKey(alloc, &.{ code, down, up });
+    try std.testing.expectEqualStrings("up", held.view_node.attrs[2].key);
+    try std.testing.expectEqualStrings("up_released", held.view_node.attrs[2].val.atom);
+    try std.testing.expectError(error.TypeError, viewKey(alloc, &.{ code, down, code }));
 }
 
 test "view timer with ms and sends" {
@@ -3128,6 +3195,7 @@ fn blimpTagToHtml(tag: []const u8) []const u8 {
     if (std.mem.eql(u8, tag, "image")) return "img";
     if (std.mem.eql(u8, tag, "video")) return "video";
     if (std.mem.eql(u8, tag, "canvas")) return "canvas";
+    if (std.mem.eql(u8, tag, "draw")) return "canvas";
     if (std.mem.eql(u8, tag, "button")) return "button";
     if (std.mem.eql(u8, tag, "mount")) return "div";
     if (std.mem.eql(u8, tag, "input")) return "input";
