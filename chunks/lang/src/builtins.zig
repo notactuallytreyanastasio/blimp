@@ -167,6 +167,8 @@ pub const BuiltinRegistry = struct {
         reg.register("to_html", &builtinToHtml_impl);
         reg.register("tcp_listen", &builtinTcpListen_impl);
         reg.register("tcp_connect", &builtinTcpConnectNative);
+        reg.register("http_start", &builtinHttpStart);
+        reg.register("http_result", &builtinHttpResult);
         reg.register("tcp_accept", &builtinTcpAccept_impl);
         reg.register("tcp_read", &builtinTcpRead_impl);
         reg.register("tcp_write", &builtinTcpWrite_impl);
@@ -3463,6 +3465,160 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
 /// Blimp could listen and accept but not dial, so nothing written in it could
 /// be an HTTP client. `getaddrinfo` does the resolving, which is what makes
 /// "localhost" and a dotted quad the same amount of work here.
+// ── HTTPS, without stopping the program ──────────────────────────────────
+//
+// http_start(method, url, headers, body) -> handle
+// http_result(handle) -> nil (still going) | {:ok, status, body} | {:error, reason}
+//
+// A program that serves a website from one process cannot wait on a remote
+// server: while it waits, nobody else gets an answer. So the request runs on
+// a thread of its own -- std.http.Client, TLS and all, with the runtime's
+// Io -- and the program asks, from its own loop, whether it is done. The
+// answer is given once; the handle is free after it. Bodies are capped at
+// 8 MiB, and 32 requests may be in flight. The WebAssembly build has no
+// threads and no sockets, and refuses both.
+
+const http_slots_max = 32;
+const http_body_max = 8 * 1024 * 1024;
+
+const HttpSlot = struct {
+    // 0 free, 1 running, 2 done, 3 failed; written by the worker last
+    state: std.atomic.Value(u8) = .init(0),
+    method: std.http.Method = .GET,
+    url: []u8 = &.{},
+    body_in: []u8 = &.{},
+    headers: []std.http.Header = &.{},
+    header_bytes: []u8 = &.{},
+    status: u16 = 0,
+    body: []u8 = &.{},
+    reason: []const u8 = "",
+};
+
+var http_slots: [http_slots_max]HttpSlot = [_]HttpSlot{.{}} ** http_slots_max;
+
+fn httpWorker(slot: *HttpSlot) void {
+    const pa = std.heap.page_allocator;
+    var client: std.http.Client = .{ .allocator = pa, .io = ioenv.io };
+    defer client.deinit();
+    var out: std.Io.Writer.Allocating = .init(pa);
+    defer out.deinit();
+    const result = client.fetch(.{
+        .location = .{ .url = slot.url },
+        .method = slot.method,
+        .payload = if (slot.body_in.len > 0) slot.body_in else null,
+        .extra_headers = slot.headers,
+        .response_writer = &out.writer,
+        .keep_alive = false,
+    }) catch |err| {
+        slot.reason = @errorName(err);
+        slot.state.store(3, .release);
+        return;
+    };
+    const got = out.written();
+    if (got.len > http_body_max) {
+        slot.reason = "ResponseTooLarge";
+        slot.state.store(3, .release);
+        return;
+    }
+    slot.body = pa.dupe(u8, got) catch {
+        slot.reason = "OutOfMemory";
+        slot.state.store(3, .release);
+        return;
+    };
+    slot.status = @intFromEnum(result.status);
+    slot.state.store(2, .release);
+}
+
+fn httpFree(slot: *HttpSlot) void {
+    const pa = std.heap.page_allocator;
+    if (slot.url.len > 0) pa.free(slot.url);
+    if (slot.body_in.len > 0) pa.free(slot.body_in);
+    if (slot.headers.len > 0) pa.free(slot.headers);
+    if (slot.header_bytes.len > 0) pa.free(slot.header_bytes);
+    if (slot.body.len > 0) pa.free(slot.body);
+    slot.* = .{};
+}
+
+fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (is_wasm) return error.NotSupported;
+    if (args.len != 4 or args[0].* != .string or args[1].* != .string or args[3].* != .string) return error.TypeError;
+    const entries: []const Value.MapEntry = switch (args[2].*) {
+        .map => |m| m,
+        .nil => &.{},
+        else => return error.TypeError,
+    };
+    const method = std.meta.stringToEnum(std.http.Method, args[0].string) orelse return error.TypeError;
+    const url = args[1].string;
+    if (!std.mem.startsWith(u8, url, "https://") and !std.mem.startsWith(u8, url, "http://")) return error.TypeError;
+    var free_i: ?usize = null;
+    for (&http_slots, 0..) |*slot, i| {
+        if (slot.state.load(.acquire) == 0) {
+            free_i = i;
+            break;
+        }
+    }
+    const i = free_i orelse return make(allocator, .{ .integer = -1 });
+    const slot = &http_slots[i];
+    const pa = std.heap.page_allocator;
+    // the worker owns copies: the interpreter's heap is compacted under it
+    var total: usize = 0;
+    for (entries) |e| {
+        if (e.val.* != .string) return error.TypeError;
+        total += e.key.len + e.val.string.len;
+    }
+    const bytes = pa.alloc(u8, total) catch return error.OutOfMemory;
+    const headers = pa.alloc(std.http.Header, entries.len) catch return error.OutOfMemory;
+    var at: usize = 0;
+    for (entries, 0..) |e, h| {
+        @memcpy(bytes[at .. at + e.key.len], e.key);
+        const name = bytes[at .. at + e.key.len];
+        at += e.key.len;
+        @memcpy(bytes[at .. at + e.val.string.len], e.val.string);
+        const value = bytes[at .. at + e.val.string.len];
+        at += e.val.string.len;
+        headers[h] = .{ .name = name, .value = value };
+    }
+    slot.* = .{
+        .method = method,
+        .url = pa.dupe(u8, url) catch return error.OutOfMemory,
+        .body_in = pa.dupe(u8, args[3].string) catch return error.OutOfMemory,
+        .headers = headers,
+        .header_bytes = bytes,
+    };
+    slot.state.store(1, .release);
+    const thread = std.Thread.spawn(.{}, httpWorker, .{slot}) catch {
+        httpFree(slot);
+        return error.NotSupported;
+    };
+    thread.detach();
+    return make(allocator, .{ .integer = @intCast(i) });
+}
+
+fn builtinHttpResult(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (is_wasm) return error.NotSupported;
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    if (args[0].integer < 0 or args[0].integer >= http_slots_max) return error.TypeError;
+    const slot = &http_slots[@intCast(args[0].integer)];
+    switch (slot.state.load(.acquire)) {
+        0 => return error.TypeError, // not a request in flight
+        1 => return make(allocator, .nil),
+        else => {},
+    }
+    const items = try allocator.alloc(*const Value, 3);
+    if (slot.state.load(.acquire) == 2) {
+        items[0] = try make(allocator, .{ .atom = "ok" });
+        items[1] = try make(allocator, .{ .integer = slot.status });
+        items[2] = try make(allocator, .{ .string = allocator.dupe(u8, slot.body) catch return error.OutOfMemory });
+    } else {
+        items[0] = try make(allocator, .{ .atom = "error" });
+        items[1] = try make(allocator, .{ .string = allocator.dupe(u8, slot.reason) catch return error.OutOfMemory });
+        items[2] = try make(allocator, .nil);
+    }
+    httpFree(slot);
+    if (items[0].atom[0] == 'e') return make(allocator, .{ .tuple = items[0..2] });
+    return make(allocator, .{ .tuple = items });
+}
+
 fn builtinTcpConnectNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .string or args[1].* != .integer) return error.TypeError;
     if (is_wasm) return error.NotSupported;
