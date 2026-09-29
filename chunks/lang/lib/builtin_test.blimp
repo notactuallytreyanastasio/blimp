@@ -1619,3 +1619,74 @@ actor SystemTests do
     assert(got == big)
   end
 end
+
+# ============================================================
+# format_time (UTC). Expected values from Python's
+# datetime.fromtimestamp(t, timezone.utc).strftime(...)
+# ============================================================
+
+actor TimeTests do
+  test "format_time epoch zero" do
+    assert_eq(format_time(0, "%Y-%m-%d %H:%M:%S"), "1970-01-01 00:00:00")
+    assert_eq(format_time(0, "%A %a %B %b %j"), "Thursday Thu January Jan 001")
+  end
+
+  test "format_time a known afternoon" do
+    assert_eq(format_time(1790699821, "%Y-%m-%d %H:%M:%S %Z"), "2026-09-29 16:37:01 UTC")
+    assert_eq(format_time(1790699821, "%a, %d %b %Y %H:%M:%S GMT"), "Tue, 29 Sep 2026 16:37:01 GMT")
+    assert_eq(format_time(1790699821, "%I:%M %p, %A %B %d (day %j)"), "04:37 PM, Tuesday September 29 (day 272)")
+  end
+
+  test "format_time leap days" do
+    assert_eq(format_time(1709164800, "%Y-%m-%d %A %j"), "2024-02-29 Thursday 060")
+    assert_eq(format_time(951782400, "%Y-%m-%d %A %j"), "2000-02-29 Tuesday 060")
+    assert_eq(format_time(1735603200, "%Y-%m-%d %j"), "2024-12-31 366")
+  end
+
+  test "format_time 1900 was not a leap year" do
+    assert_eq(format_time(-2203891200, "%Y-%m-%d %A %j"), "1900-03-01 Thursday 060")
+  end
+
+  test "format_time before the epoch" do
+    assert_eq(format_time(-1, "%Y-%m-%d %H:%M:%S %I %p %A %j"), "1969-12-31 23:59:59 11 PM Wednesday 365")
+  end
+
+  test "format_time far future" do
+    assert_eq(format_time(253402300799, "%Y-%m-%d %H:%M:%S %A"), "9999-12-31 23:59:59 Friday")
+  end
+
+  test "format_time 12-hour clock at midnight and noon" do
+    assert_eq(format_time(0, "%I %p"), "12 AM")
+    assert_eq(format_time(43200, "%I %p"), "12 PM")
+    assert_eq(format_time(46800, "%I %p"), "01 PM")
+  end
+
+  test "format_time minus flag drops the zero padding" do
+    assert_eq(format_time(1704067200, "%B %-d, %Y"), "January 1, 2024")
+    assert_eq(format_time(1704067200, "%-m/%-d %-I%p %-j"), "1/1 12AM 1")
+  end
+
+  test "format_time percent literal and plain text" do
+    assert_eq(format_time(0, "100%% at %Y"), "100% at 1970")
+    assert_eq(format_time(0, ""), "")
+    assert_eq(format_time(0, "no directives"), "no directives")
+  end
+
+  test "format_time rejects unknown directives" do
+    assert_eq(format_time(0, "%Y"), "1970")
+    assert(raises("format_time(0, \"%Q\")"))
+    assert(raises("format_time(0, \"trailing %\")"))
+    assert(raises("format_time(0, \"%-Y\")"))
+  end
+
+  test "format_time rejects bad arguments" do
+    assert_eq(format_time(0, "%Y"), "1970")
+    assert(raises("format_time(1.5, \"%Y\")"))
+    assert(raises("format_time(\"0\", \"%Y\")"))
+    assert(raises("format_time(0, :iso)"))
+  end
+
+  test "format_time of now() is this century" do
+    assert_eq(slice(format_time(now(), "%Y"), 0, 2), "20")
+  end
+end

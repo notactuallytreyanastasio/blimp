@@ -57,6 +57,7 @@ pub const BuiltinRegistry = struct {
         reg.register("keys", &builtinKeys);
         reg.register("now", &builtinNow);
         reg.register("now_ms", &builtinNowMs);
+        reg.register("format_time", &builtinFormatTime);
         reg.register("concat", &builtinConcat);
         reg.register("split", &builtinSplit);
         reg.register("join", &builtinJoin);
@@ -383,6 +384,125 @@ fn builtinNowMs(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
             break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
         };
     return make(allocator, .{ .integer = ms });
+}
+
+const month_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+const day_names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+
+/// A moment in UTC, broken into the fields strftime prints.
+const CivilTime = struct {
+    year: i64,
+    month: u8, // 1..12
+    day: u8, // 1..31
+    yday: u16, // 1..366
+    wday: u8, // 0 = Sunday
+    hour: u8,
+    minute: u8,
+    second: u8,
+
+    /// Howard Hinnant's civil_from_days, on signed days, so it is right on
+    /// both sides of 1970 and through the Gregorian 100/400-year rules.
+    /// std.time.epoch would do the positive half; `-1` is 1969-12-31 and a
+    /// date format has no business refusing it.
+    fn fromEpoch(t: i64) CivilTime {
+        const days = @divFloor(t, 86400);
+        const secs: u32 = @intCast(@mod(t, 86400));
+        const z = days + 719468;
+        const era = @divFloor(z, 146097);
+        const doe: i64 = z - era * 146097; // [0, 146096]
+        const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365); // [0, 399]
+        const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100)); // [0, 365], March-based
+        const mp = @divFloor(5 * doy + 2, 153); // [0, 11], March = 0
+        const day: u8 = @intCast(doy - @divFloor(153 * mp + 2, 5) + 1);
+        const month: u8 = @intCast(if (mp < 10) mp + 3 else mp - 9);
+        const year = yoe + era * 400 + @as(i64, if (month <= 2) 1 else 0);
+
+        const leap = @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+        const before = [_]u16{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+        const yday = before[month - 1] + day + @as(u16, if (leap and month > 2) 1 else 0);
+
+        return .{
+            .year = year,
+            .month = month,
+            .day = day,
+            .yday = yday,
+            .wday = @intCast(@mod(days + 4, 7)), // 1970-01-01 was a Thursday
+            .hour = @intCast(secs / 3600),
+            .minute = @intCast(secs / 60 % 60),
+            .second = @intCast(secs % 60),
+        };
+    }
+};
+
+/// format_time(epoch_seconds, pattern) -> String, in UTC.
+///
+///   %Y year        %m month 01-12   %d day 01-31    %j day of year 001-366
+///   %H hour 00-23  %I hour 01-12    %p AM/PM        %M minute    %S second
+///   %B September   %b Sep           %A Tuesday      %a Tue
+///   %Z "UTC"       %% a literal %
+///
+/// `-` between the % and a numeric directive (d m j H I M S) drops its zero
+/// padding: "%B %-d" is "January 1", which is how a blog writes a date.
+///
+/// UTC only: there is no time zone database behind this, so %Z is always
+/// "UTC" rather than a guess at the reader's zone. Raises TypeError for an
+/// epoch that is not an Int (now() answers Ints), a pattern that is not a
+/// String, a directive not listed above, and a lone % at the end -- strftime
+/// would print those as they are, and a typo in a date format should not
+/// ship.
+fn builtinFormatTime(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
+    const t = CivilTime.fromEpoch(args[0].integer);
+    const pattern = args[1].string;
+    var out: std.ArrayList(u8) = .empty;
+    const oom = error.OutOfMemory;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (c != '%') {
+            out.append(allocator, c) catch return oom;
+            continue;
+        }
+        i += 1;
+        if (i >= pattern.len) return error.TypeError;
+        const no_pad = pattern[i] == '-';
+        if (no_pad) {
+            i += 1;
+            if (i >= pattern.len) return error.TypeError;
+        }
+        const d = pattern[i];
+        const num: ?i64 = switch (d) {
+            'd' => t.day,
+            'm' => t.month,
+            'j' => t.yday,
+            'H' => t.hour,
+            'I' => if (t.hour % 12 == 0) 12 else t.hour % 12,
+            'M' => t.minute,
+            'S' => t.second,
+            else => null,
+        };
+        if (num) |n| {
+            const width: usize = if (no_pad) 1 else if (d == 'j') 3 else 2;
+            out.print(allocator, "{d:0>[1]}", .{ @as(u64, @intCast(n)), width }) catch return oom;
+            continue;
+        }
+        if (no_pad) return error.TypeError;
+        switch (d) {
+            'Y' => if (t.year >= 0)
+                out.print(allocator, "{d:0>4}", .{@as(u64, @intCast(t.year))}) catch return oom
+            else
+                out.print(allocator, "{d}", .{t.year}) catch return oom,
+            'p' => out.appendSlice(allocator, if (t.hour < 12) "AM" else "PM") catch return oom,
+            'B' => out.appendSlice(allocator, month_names[t.month - 1]) catch return oom,
+            'b' => out.appendSlice(allocator, month_names[t.month - 1][0..3]) catch return oom,
+            'A' => out.appendSlice(allocator, day_names[t.wday]) catch return oom,
+            'a' => out.appendSlice(allocator, day_names[t.wday][0..3]) catch return oom,
+            'Z' => out.appendSlice(allocator, "UTC") catch return oom,
+            '%' => out.append(allocator, '%') catch return oom,
+            else => return error.TypeError,
+        }
+    }
+    return make(allocator, .{ .string = out.toOwnedSlice(allocator) catch return oom });
 }
 
 // ── String builtins ─────────────────────────────────────
