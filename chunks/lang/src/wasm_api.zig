@@ -64,7 +64,11 @@ var result_buf: [16384]u8 = undefined;
 var result_len: u32 = 0;
 var error_buf: [4096]u8 = undefined;
 var error_len: u32 = 0;
-var state_buf: [262144]u8 = undefined;
+// The state JSON grows with the program. It was a fixed 256 KiB, and a
+// write past the end was dropped without a word, so a big program -- Snake
+// compiled from Temper makes an actor of every point, 800 after a few
+// frames -- got cut-off JSON, and getState() answered with nothing at all.
+var state_buf: std.ArrayListUnmanaged(u8) = .empty;
 var state_len: u32 = 0;
 // Messages accumulate here, already serialized, across evals until JS reads
 // the state (a view host runs two evals per send and reads once). Value
@@ -299,8 +303,9 @@ fn writeStateValue(w: anytype, val: *const Value) void {
 
 fn updateStateJson() void {
     var eval = &(evaluator orelse return);
-    var fbs = std.Io.Writer.fixed(&state_buf);
-    const w = &fbs;
+    state_buf.clearRetainingCapacity();
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &state_buf);
+    const w = &aw.writer;
 
     w.writeAll("{\"vars\":[") catch {};
     const bindings = eval.env.allBindings(allocator);
@@ -346,7 +351,8 @@ fn updateStateJson() void {
 
     eval.msg_log_count = 0;
 
-    state_len = @intCast(fbs.buffered().len);
+    state_buf = aw.toArrayList();
+    state_len = @intCast(state_buf.items.len);
 }
 
 /// A send's messages go where an eval's do, into the text getState hands
@@ -680,7 +686,7 @@ export fn blimp_refresh_state() void {
 /// Get the state JSON pointer (for introspection sidebar).
 export fn blimp_get_state_ptr() [*]const u8 {
     messages_read = true;
-    return &state_buf;
+    return state_buf.items.ptr;
 }
 
 /// Get the state JSON length.

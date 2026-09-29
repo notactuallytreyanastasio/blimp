@@ -75,3 +75,10 @@ test('a very long value is cut, and the state is still valid JSON', async () => 
   assert.ok(v.length <= 2100, `state value is ${v.length} chars`);
   assert.ok(v.endsWith('...'));
 });
+
+test('the state of a big program is whole JSON, past what used to be the 256 KiB cap', async () => {
+  const b = await load();
+  b.ev('actor Dot do\n  state x: Int :: 0\n  state label: String :: "a dot with a label long enough to count"\n  on :ping do\n    reply x\n  end\nend\ndots = map(range(1, 3000), fn(i: Int) -> Any do spawn Dot end)');
+  const s = b.state();
+  assert.strictEqual(s.actors.length, 3000);
+});
