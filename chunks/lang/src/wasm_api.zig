@@ -349,6 +349,19 @@ fn updateStateJson() void {
     state_len = @intCast(fbs.buffered().len);
 }
 
+/// A send's messages go where an eval's do, into the text getState hands
+/// the canvas (and clears on reading): a page that runs its program by
+/// send -- every game on the blog -- drew its actors with no rays between
+/// them, because send cleared the log and nothing had read it. The text is
+/// bounded; what does not fit is dropped until the next read.
+fn keepSendMessages(eval: *Evaluator) void {
+    if (messages_read) {
+        messages_len = 0;
+        messages_read = false;
+    }
+    appendMessagesJson(eval);
+}
+
 fn appendMessagesJson(eval: *Evaluator) void {
     var fbs = std.Io.Writer.fixed(messages_buf[messages_len..]);
     const w = &fbs;
@@ -530,6 +543,7 @@ export fn blimp_send(
             const m = std.fmt.bufPrint(&error_buf, "Evaluation error in send: {s}", .{src}) catch "Evaluation error";
             error_len = @intCast(m.len);
         }
+        keepSendMessages(eval);
         eval.msg_log_count = 0;
         compactHeap();
         return 2;
@@ -539,6 +553,7 @@ export fn blimp_send(
     var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &reply_buf);
     const ok = writeReplyJson(&aw.writer, value);
     reply_buf = aw.toArrayList();
+    keepSendMessages(eval);
     eval.msg_log_count = 0;
     compactHeap();
     if (!ok) {
@@ -652,6 +667,14 @@ export fn blimp_get_error_ptr() [*]const u8 {
 /// Get the error string length.
 export fn blimp_get_error_len() u32 {
     return error_len;
+}
+
+/// Rebuild the state JSON from the program as it is now. eval rebuilds it
+/// after every evaluation; send does not (it is the cheap path), so a host
+/// that runs its program by send and draws it -- the blog's games and their
+/// canvases -- asks for it when it wants it.
+export fn blimp_refresh_state() void {
+    updateStateJson();
 }
 
 /// Get the state JSON pointer (for introspection sidebar).

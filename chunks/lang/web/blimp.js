@@ -72,8 +72,7 @@ class Blimp {
   // Unlike eval("target <- :msg"), a send keeps nothing afterwards: eval
   // holds on to its source and AST for good (about 390 bytes a call), which
   // a page that sends on every tick and key press cannot afford. It also
-  // does not rebuild getState()'s actors and message log; a page that reads
-  // those should keep using eval.
+  // keeps its messages for getState(), which rebuilds the actors when read.
   send(target, message, args) {
     const x = this.instance.exports;
     if (!x.blimp_send) return { ok: false, error: 'this blimp.wasm has no blimp_send' };
@@ -93,7 +92,10 @@ class Blimp {
     return { ok: true, value: JSON.parse(this._readString(x.blimp_get_reply_ptr(), x.blimp_get_reply_len())) };
   }
 
+  // The program's actors and the messages sent since the last read, for
+  // the canvas. Rebuilt on every call, so it is current after a send too.
   getState() {
+    if (this.instance.exports.blimp_refresh_state) this.instance.exports.blimp_refresh_state();
     const ptr = this.instance.exports.blimp_get_state_ptr();
     const len = this.instance.exports.blimp_get_state_len();
     const json = this._readString(ptr, len);
