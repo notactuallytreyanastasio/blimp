@@ -129,3 +129,18 @@ test('a reader that hangs up mid-body does not take the server down', { timeout:
   assert.strictEqual(s.proc.exitCode, null, 'the server exited: ' + s.log());
   assert.match(await control(s.sock, ':stats'), /^ticks /);
 });
+
+test('--attach sends a last line that has no newline after it', async (t) => {
+  const s = await start(t);
+  assert.strictEqual(await get(s.port), 'hello, request 1\n');
+  for (const input of ['server <- :served', 'server <- :served\n']) {
+    const a = spawn(BLIMP, ['--attach', s.sock]);
+    let out = '';
+    a.stdout.on('data', (d) => (out += d));
+    a.stderr.on('data', (d) => (out += d));
+    a.stdin.end(input);
+    const code = await new Promise((r) => a.on('close', r));
+    assert.strictEqual(code, 0, `${JSON.stringify(input)}: ${out}`);
+    assert.strictEqual(out, '=> 1\n', JSON.stringify(input));
+  }
+});

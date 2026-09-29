@@ -118,6 +118,8 @@ pub const BuiltinRegistry = struct {
         reg.register("sha256", &builtinSha256);
         reg.register("hmac_sha256", &builtinHmacSha256);
         reg.register("hex_encode", &builtinHexEncode);
+        reg.register("hex_decode", &builtinHexDecode);
+        reg.register("xor_bytes", &builtinXorBytes);
         reg.register("base64_encode", &builtinBase64Encode);
         reg.register("base64_decode", &builtinBase64Decode);
         reg.register("base64url_encode", &builtinBase64UrlEncode);
@@ -1252,6 +1254,32 @@ fn builtinHmacSha256(allocator: std.mem.Allocator, args: []const *const Value) E
 fn builtinHexEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     return hexLower(allocator, try stringArg(args[0]));
+}
+
+/// hex_decode(hex) -> the bytes two hex digits each stand for, either case:
+/// hex_decode(sha256(s)) is the raw digest. Raises TypeError for an odd
+/// length or a character that is not a hex digit, as base64_decode does.
+fn builtinHexDecode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const hex = try stringArg(args[0]);
+    if (hex.len % 2 != 0) return error.TypeError;
+    const out = allocator.alloc(u8, hex.len / 2) catch return error.OutOfMemory;
+    _ = std.fmt.hexToBytes(out, hex) catch return error.TypeError;
+    return make(allocator, .{ .string = out });
+}
+
+/// xor_bytes(a, b) -> a String of a's bytes each XORed with b's at the same
+/// place. The language has no bitwise operators, and SCRAM authentication
+/// (Postgres) folds 4,096 HMACs together with XOR. Raises TypeError unless
+/// the two are the same length: XOR of unequal strings has no one answer.
+fn builtinXorBytes(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return error.TypeError;
+    const a = try stringArg(args[0]);
+    const b = try stringArg(args[1]);
+    if (a.len != b.len) return error.TypeError;
+    const out = allocator.alloc(u8, a.len) catch return error.OutOfMemory;
+    for (out, a, b) |*o, x, y| o.* = x ^ y;
+    return make(allocator, .{ .string = out });
 }
 
 fn base64Encode(allocator: std.mem.Allocator, codecs: std.base64.Codecs, args: []const *const Value) EvalError!*const Value {
