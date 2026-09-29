@@ -792,6 +792,32 @@ actor StringInterpTests do
     assert_eq(kind("n"), "other")
   end
 
+  test "a case arm's body may hold -> in a string" do
+    f = fn(c: Bool) -> String do
+      case c do
+        true ->
+          a = "x"
+          concat(a, "-->")
+        false -> "no"
+      end
+    end
+    assert_eq(f(true), "x-->")
+    assert_eq(f(false), "no")
+  end
+
+  test "a case arm's body may hold a lambda after its first line" do
+    f = fn(c: Int) -> List do
+      case c do
+        1 ->
+          a = 1
+          map([a], fn(v: Int) -> Int do v + 1 end)
+        _ -> []
+      end
+    end
+    assert_eq(f(1), [2])
+    assert_eq(f(0), [])
+  end
+
   test "a backslash before # writes a literal #{" do
     x = 1
     assert_eq(length("\#{"), 2)
