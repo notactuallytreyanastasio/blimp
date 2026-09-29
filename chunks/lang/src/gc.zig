@@ -467,3 +467,52 @@ test "a def inside a function still keeps what it captured" {
     );
     try std.testing.expectEqual(@as(i64, 6), (try run(code.allocator(), &eval, "f(1)")).integer);
 }
+
+test "redefining an actor updates its running instances and keeps their state" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+
+    var eval = Evaluator.init(heaps[0].allocator());
+    eval.code_allocator = code.allocator();
+    _ = try run(code.allocator(), &eval,
+        \\actor Tally do
+        \\  state n: Int :: 0
+        \\  state old: String :: "gone soon"
+        \\  on :add(k: Int) do
+        \\    become n: n + k
+        \\    reply n + k
+        \\  end
+        \\  on :show do reply "n=#{n}" end
+        \\end
+        \\t = spawn Tally
+        \\t <- :add(5)
+        \\t <- :add(2)
+    );
+    try std.testing.expectEqualStrings("n=7", (try run(code.allocator(), &eval, "t <- :show")).string);
+
+    _ = try run(code.allocator(), &eval,
+        \\actor Tally do
+        \\  state n: Int :: 0
+        \\  state label: String :: "total"
+        \\  on :add(k: Int) do
+        \\    become n: n + k * 10
+        \\    reply n + k * 10
+        \\  end
+        \\  on :show do reply "#{label}: #{n}" end
+        \\end
+    );
+    try compact(&eval, heaps[1].allocator(), std.testing.allocator);
+    _ = heaps[0].reset(.free_all);
+
+    // the running instance: new handlers, its n kept, the new field defaulted
+    try std.testing.expectEqualStrings("total: 7", (try run(code.allocator(), &eval, "t <- :show")).string);
+    try std.testing.expectEqual(@as(i64, 17), (try run(code.allocator(), &eval, "t <- :add(1)")).integer);
+    // a new instance gets the new definition too
+    try std.testing.expectEqualStrings("total: 0", (try run(code.allocator(), &eval, "u = spawn Tally\nu <- :show")).string);
+}

@@ -64,6 +64,22 @@ test('a function redefined over the control socket is used by the next request',
   assert.strictEqual(await get(s.port), 'changed at 2\n');
 });
 
+test('an actor redefined over the control socket keeps its state and answers with its new code', async (t) => {
+  const s = await start(t);
+  assert.strictEqual(await get(s.port), 'hello, request 1\n');
+  assert.strictEqual(await get(s.port), 'hello, request 2\n');
+  // The same Server, with :accept answering differently and a new field.
+  const program = fs.readFileSync(PROGRAM, 'utf8');
+  const actor = program.slice(program.indexOf('actor Server do'), program.indexOf('server = spawn Server'));
+  const v2 = actor
+    .replace('state served: Int :: 0', 'state served: Int :: 0\n  state version: String :: "v2"')
+    .replace('body = page(served + 1)', 'body = concat(version, " ", page(served + 1))');
+  assert.notStrictEqual(v2, actor);
+  assert.match(await control(s.sock, v2), /^=> /);
+  assert.strictEqual(await get(s.port), 'v2 hello, request 3\n');
+  assert.strictEqual(await control(s.sock, 'server <- :served'), '=> 3\n');
+});
+
 test('a failing command reports and the site keeps serving', async (t) => {
   const s = await start(t);
   const r = await control(s.sock, 'undefined_thing(1)');
