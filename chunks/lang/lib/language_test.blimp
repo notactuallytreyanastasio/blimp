@@ -775,6 +775,23 @@ actor StringInterpTests do
     assert_eq(result, concat("<a href=", "\"", "/blog", "\"", ">", "\t", "blog</a>"))
   end
 
+  test "a case pattern with an escape in it matches that character" do
+    kind = fn(c: String) -> String do
+      case c do
+        "\n" -> "newline"
+        "\t" -> "tab"
+        "\\" -> "backslash"
+        "\"" -> "quote"
+        _ -> "other"
+      end
+    end
+    assert_eq(kind("\n"), "newline")
+    assert_eq(kind("\t"), "tab")
+    assert_eq(kind("\\"), "backslash")
+    assert_eq(kind("\""), "quote")
+    assert_eq(kind("n"), "other")
+  end
+
   test "a backslash before # writes a literal #{" do
     x = 1
     assert_eq(length("\#{"), 2)
