@@ -62,6 +62,8 @@ pub const BuiltinRegistry = struct {
         reg.register("split", &builtinSplit);
         reg.register("join", &builtinJoin);
         reg.register("contains", &builtinContains);
+        reg.register("index_of", &builtinIndexOf);
+        reg.register("replace", &builtinReplace);
         reg.register("to_string", &builtinToString);
         reg.register("to_int", &builtinToInt);
         reg.register("char_at", &builtinCharAt);
@@ -623,6 +625,39 @@ fn builtinContains(allocator: std.mem.Allocator, args: []const *const Value) Eva
     if (args[0].* != .string or args[1].* != .string) return error.TypeError;
     const found = std.mem.indexOf(u8, args[0].string, args[1].string) != null;
     return make(allocator, .{ .boolean = found });
+}
+
+/// index_of("hello world", "world") => 6, or -1 when it is not there.
+///
+/// A byte offset, so it can go straight to `slice`. An empty needle is found
+/// at 0, as in every other language's indexOf. Strings only: TypeError for
+/// a list or an atom, rather than searching its formatted text.
+///
+/// A program's own `def index_of` still wins; user defs shadow builtins.
+fn builtinIndexOf(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const at: i64 = if (std.mem.indexOf(u8, args[0].string, args[1].string)) |i| @intCast(i) else -1;
+    return make(allocator, .{ .integer = at });
+}
+
+/// replace(s, find, with) => s with every occurrence of find replaced,
+/// scanning left to right without overlap ("aaa", "aa", "b" => "ba") and
+/// never rescanning what it inserted, so replacing "a" with "aa" terminates.
+///
+/// TypeError for an empty find -- it matches between every pair of bytes and
+/// there is no one answer to what replacing it means -- and for non-Strings.
+/// A string with no match comes back as the same value, not a copy.
+fn builtinReplace(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3 or args[0].* != .string or args[1].* != .string or args[2].* != .string) return error.TypeError;
+    const s = args[0].string;
+    const find = args[1].string;
+    const with = args[2].string;
+    if (find.len == 0) return error.TypeError;
+    const count = std.mem.count(u8, s, find);
+    if (count == 0) return args[0];
+    const out = allocator.alloc(u8, s.len - count * find.len + count * with.len) catch return error.OutOfMemory;
+    _ = std.mem.replace(u8, s, find, with, out);
+    return make(allocator, .{ .string = out });
 }
 
 /// to_string(42) => "42", to_string(:ok) => "ok"

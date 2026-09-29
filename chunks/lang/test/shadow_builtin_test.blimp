@@ -1,0 +1,29 @@
+# A program's own def wins over a builtin of the same name.
+# Run: ./blimp test/shadow_builtin_test.blimp --test
+#
+# index_of and replace became builtins after programs had already written
+# their own (the blog's 00_text.blimp has both). Those programs must keep
+# calling their version, so these defs answer something the builtins never
+# would.
+
+def index_of(s: String, find: String) -> Int do
+  -99
+end
+
+def replace(s: String, find: String, with: String) -> String do
+  "user replace"
+end
+
+actor ShadowBuiltinTests do
+  test "a user def index_of shadows the builtin" do
+    assert_eq(index_of("abc", "b"), -99)
+  end
+
+  test "a user def replace shadows the builtin" do
+    assert_eq(replace("abc", "b", "x"), "user replace")
+  end
+
+  test "builtins the program did not redefine still answer" do
+    assert_eq(json_encode([1]), "[1]")
+  end
+end

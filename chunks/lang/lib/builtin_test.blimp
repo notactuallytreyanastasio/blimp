@@ -1784,3 +1784,79 @@ actor SortTests do
     assert_eq(head(ys), 100000)
   end
 end
+
+# ============================================================
+# index_of / replace
+# (test/shadow_builtin_test.blimp checks a user def still wins)
+# ============================================================
+
+actor SearchReplaceTests do
+  # -- index_of --
+  test "index_of finds the first occurrence" do
+    assert_eq(index_of("hello world", "world"), 6)
+    assert_eq(index_of("hello", "h"), 0)
+    assert_eq(index_of("abcabc", "c"), 2)
+  end
+
+  test "index_of absent is -1" do
+    assert_eq(index_of("hello", "z"), -1)
+    assert_eq(index_of("", "a"), -1)
+    assert_eq(index_of("ab", "abc"), -1)
+  end
+
+  test "index_of empty needle is 0" do
+    assert_eq(index_of("abc", ""), 0)
+    assert_eq(index_of("", ""), 0)
+  end
+
+  test "index_of counts bytes, as slice does" do
+    s = "café!"
+    i = index_of(s, "!")
+    assert_eq(i, 5)
+    assert_eq(slice(s, i, 1), "!")
+  end
+
+  test "index_of rejects non-strings" do
+    assert_eq(index_of("a", "a"), 0)
+    assert(raises("index_of([1, 2], 2)"))
+    assert(raises("index_of(\"abc\", :b)"))
+  end
+
+  # -- replace --
+  test "replace replaces every occurrence" do
+    assert_eq(replace("a-b-c", "-", "+"), "a+b+c")
+    assert_eq(replace("one two two", "two", "2"), "one 2 2")
+  end
+
+  test "replace with no match answers the same string" do
+    assert_eq(replace("abc", "z", "y"), "abc")
+    assert_eq(replace("", "z", "y"), "")
+  end
+
+  test "replace scans left to right without overlap" do
+    assert_eq(replace("aaa", "aa", "b"), "ba")
+    assert_eq(replace("aaaa", "aa", "b"), "bb")
+  end
+
+  test "replace does not rescan what it inserted" do
+    assert_eq(replace("aXa", "a", "aa"), "aaXaa")
+    assert_eq(replace("<p>", "<", "&lt;"), "&lt;p>")
+  end
+
+  test "replace with empty replacement deletes" do
+    assert_eq(replace("a, b, c", ", ", ""), "abc")
+  end
+
+  test "replace escapes HTML in the usual order" do
+    s = "<a href=\"x\">&</a>"
+    out = replace(replace(replace(replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;")
+    assert_eq(out, "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;")
+  end
+
+  test "replace rejects an empty find and non-strings" do
+    assert_eq(replace("a", "a", "b"), "b")
+    assert(raises("replace(\"abc\", \"\", \"x\")"))
+    assert(raises("replace(\"abc\", \"b\", 1)"))
+    assert(raises("replace(:abc, \"b\", \"x\")"))
+  end
+end
