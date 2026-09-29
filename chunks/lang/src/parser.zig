@@ -347,22 +347,27 @@ pub const Parser = struct {
         };
     }
 
-    /// Check if current position looks like a branch start by scanning
-    /// the source for -> on the same line. Doesn't modify parser state.
-    fn looksLikeBranch(self: *const Parser) bool {
-        // Scan forward from AFTER current token looking for -> on this line.
-        // The current token's lexeme tells us where we are in the source.
-        const lexeme_ptr = @intFromPtr(self.current.lexeme.ptr);
-        const source_ptr = @intFromPtr(self.lexer.source.ptr);
-        if (lexeme_ptr < source_ptr) return false;
-        var pos = lexeme_ptr - source_ptr + self.current.lexeme.len;
-        while (pos + 1 < self.lexer.source.len) {
-            const c = self.lexer.source[pos];
-            if (c == '\n') return false;
-            if (c == '-' and self.lexer.source[pos + 1] == '>') return true;
-            pos += 1;
+    /// Whether the line at the current token starts a new branch: a pattern,
+    /// an optional `when` guard, then `->`. Decided by parsing that far on a
+    /// copy of the lexer and putting everything back.
+    ///
+    /// This used to scan the raw source for the characters `->` anywhere on
+    /// the line, so a body line holding the string "-->" or a lambda
+    /// `fn(v: Int) -> Int do ... end` was taken for the next branch and the
+    /// parse failed on it.
+    fn looksLikeBranch(self: *Parser) bool {
+        const saved_lexer = self.lexer;
+        const saved_current = self.current;
+        defer {
+            self.lexer = saved_lexer;
+            self.current = saved_current;
         }
-        return false;
+        _ = self.parseExpression() catch return false;
+        if (self.current.kind == .kw_when) {
+            self.advance();
+            _ = self.parseExpression() catch return false;
+        }
+        return self.current.kind == .arrow;
     }
 
     /// DEPRECATED: old lookahead approach
