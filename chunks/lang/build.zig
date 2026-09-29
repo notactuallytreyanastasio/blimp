@@ -41,6 +41,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            // fork, waitpid, isatty and realpath come from `std.c`. macOS
+            // links libc whether or not it is asked to; Linux does not, and
+            // without this the build stops at the first `extern "c"`.
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "blimp", .module = lib_mod },
             },
