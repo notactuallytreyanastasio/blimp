@@ -274,6 +274,26 @@ fn writeJsonEscaped(w: anytype, val: *const Value) void {
     }
 }
 
+/// A binding's or a state field's value, as a JSON string: formatted the way
+/// the sidebar shows it, escaped, and cut at `state_value_cap` bytes with
+/// "..." after. These used to be written between quotes unescaped, so one
+/// string holding a `"` -- any HTML at all -- made the whole state invalid
+/// JSON, and a host reading it got nothing.
+const state_value_cap = 2048;
+fn writeStateValue(w: anytype, val: *const Value) void {
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    writeJsonEscaped(&aw.writer, val);
+    const text = aw.written();
+    const cut = text.len > state_value_cap;
+    writeJsonString(w, if (cut) text[0..state_value_cap] else text) catch {};
+    if (cut) {
+        // Replace the closing quote with an ellipsis inside the string.
+        w.undo(1);
+        w.writeAll("...\"") catch {};
+    }
+}
+
 fn updateStateJson() void {
     var eval = &(evaluator orelse return);
     var fbs = std.Io.Writer.fixed(&state_buf);
@@ -285,9 +305,9 @@ fn updateStateJson() void {
         if (i > 0) w.writeAll(",") catch {};
         w.writeAll("{\"name\":\"") catch {};
         w.writeAll(b.name) catch {};
-        w.writeAll("\",\"value\":\"") catch {};
-        writeJsonEscaped(w, b.val);
-        w.writeAll("\"}") catch {};
+        w.writeAll("\",\"value\":") catch {};
+        writeStateValue(w, b.val);
+        w.writeAll("}") catch {};
     }
 
     w.writeAll("],\"actors\":[") catch {};
@@ -303,9 +323,8 @@ fn updateStateJson() void {
             if (fi > 0) w.writeAll(",") catch {};
             w.writeAll("\"") catch {};
             w.writeAll(field.key) catch {};
-            w.writeAll("\":\"") catch {};
-            writeJsonEscaped(w, field.val);
-            w.writeAll("\"") catch {};
+            w.writeAll("\":") catch {};
+            writeStateValue(w, field.val);
         }
         w.writeAll("}}") catch {};
         actor_idx += 1;
