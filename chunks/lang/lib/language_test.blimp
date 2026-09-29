@@ -768,6 +768,18 @@ actor StringInterpTests do
     result = "len is #{length([1, 2, 3])}"
     assert_eq(result, "len is 3")
   end
+
+  test "escapes around an interpolation are processed" do
+    href = "/blog"
+    result = "<a href=\"#{href}\">\tblog</a>"
+    assert_eq(result, concat("<a href=", "\"", "/blog", "\"", ">", "\t", "blog</a>"))
+  end
+
+  test "a string longer than 4096 bytes interpolates whole" do
+    long = reduce(range(1, 1000), "", fn(acc: String, n: Int) -> String do concat(acc, "abcde") end)
+    result = "[#{long}]"
+    assert_eq(length(result), length(long) + 2)
+  end
 end
 
 # ============================================================
