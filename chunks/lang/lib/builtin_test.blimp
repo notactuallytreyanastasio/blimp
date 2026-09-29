@@ -1509,6 +1509,14 @@ actor CryptoTests do
     assert_eq(to_html(el("div", %{}, location_query("a=1"))), "<div></div>")
   end
 
+  test "http_start refuses what is not an http(s) request, and http_result a handle not in flight" do
+    assert(raises("http_start(\"GET\", \"file:///etc/passwd\", %{}, \"\")"))
+    assert(raises("http_start(\"FETCH\", \"https://example.com/\", %{}, \"\")"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{Accept: 1}, \"\")"))
+    assert(raises("http_result(31)"))
+    assert(raises("http_result(99)"))
+  end
+
   # -- hex_decode --
   test "hex_decode undoes hex_encode, either case" do
     raw = concat(from_char_code(0), from_char_code(255), "A")
