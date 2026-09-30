@@ -187,6 +187,8 @@ pub const BuiltinRegistry = struct {
         reg.register("exit", &builtinExit_impl);
         reg.register("tcp_set_nonblocking", &builtinTcpSetNonblocking_impl);
         reg.register("tcp_poll", &builtinTcpPoll_impl);
+        reg.register("tcp_write_some", &builtinTcpWriteSome_impl);
+        reg.register("tcp_poll_write", &builtinTcpPollWrite_impl);
         reg.register("sleep_ms", &builtinSleepMs_impl);
         reg.register("read_line", &builtinReadLine_impl);
         reg.register("random_bytes", &builtinRandomBytes_impl);
@@ -3054,6 +3056,8 @@ const builtinWaitpid_impl = if (is_wasm) native_stub.stub else builtinWaitpidNat
 const builtinExit_impl = if (is_wasm) native_stub.stub else builtinExitNative;
 const builtinTcpSetNonblocking_impl = if (is_wasm) native_stub.stub else builtinTcpSetNonblockingNative;
 const builtinTcpPoll_impl = if (is_wasm) native_stub.stub else builtinTcpPollNative;
+const builtinTcpWriteSome_impl = if (is_wasm) native_stub.stub else builtinTcpWriteSomeNative;
+const builtinTcpPollWrite_impl = if (is_wasm) native_stub.stub else builtinTcpPollWriteNative;
 const builtinSleepMs_impl = if (is_wasm) native_stub.stub else builtinSleepMsNative;
 const builtinReadLine_impl = if (is_wasm) native_stub.stub else builtinReadLineNative;
 const builtinRandomBytes_impl = if (is_wasm) native_stub.stub else builtinRandomBytesNative;
@@ -3887,6 +3891,213 @@ fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Valu
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .atom = if (off == bytes.len) "ok" else "error" };
     return result;
+}
+
+/// tcp_write_some(fd: Int, data: String) -> Int | :error
+///
+/// One send() that never waits: the number of bytes of `data` the kernel took,
+/// from 0 (its send buffer is full) up to `length(data)`. The caller keeps the
+/// rest, `slice(data, n, length(data))`, and offers it again once
+/// `tcp_poll_write` says the socket has room. :error when the peer is gone
+/// (reset, or closed and then written to).
+///
+/// This is the write a program that serves many sockets from one thread
+/// needs. `tcp_write` takes all of it or gives up, so a peer that stops
+/// reading holds the only thread for as long as tcp_write waits for it --
+/// 10s since the reader last took a byte -- and every other client waits
+/// with it.
+///
+/// A socket nobody called tcp_set_nonblocking on is made non-blocking for the
+/// one send() and put back, so it cannot block here either. Not MSG_DONTWAIT:
+/// macOS does not honour it on a blocking TCP socket. Measured, a 256KB
+/// send(MSG_DONTWAIT) to a loopback peer that never reads sat in the kernel
+/// until it was killed, where Linux answers EAGAIN.
+///
+/// Raises TypeError for an fd that is not an open socket: that is a bug in the
+/// program (closed twice, or never a socket), not something the peer did.
+fn builtinTcpWriteSomeNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+    const bytes = args[1].string;
+    if (bytes.len == 0) return make(allocator, .{ .integer = 0 });
+    const flags: u32 = if (@hasDecl(std.c.MSG, "NOSIGNAL")) std.c.MSG.NOSIGNAL else 0;
+    const fl = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    if (fl < 0) return error.TypeError; // not an open fd
+    const nonblock: c_int = @as(c_int, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK");
+    if (fl & nonblock == 0) {
+        if (std.c.fcntl(fd, std.posix.F.SETFL, fl | nonblock) < 0) return error.NotSupported;
+    }
+    defer if (fl & nonblock == 0) {
+        _ = std.c.fcntl(fd, std.posix.F.SETFL, fl);
+    };
+    while (true) {
+        const n = std.c.send(fd, bytes.ptr, bytes.len, flags);
+        if (n >= 0) return make(allocator, .{ .integer = @intCast(n) });
+        const e: std.posix.E = @enumFromInt(std.c._errno().*);
+        switch (e) {
+            .INTR => continue,
+            .AGAIN => return make(allocator, .{ .integer = 0 }), // EWOULDBLOCK is the same number
+            .BADF, .NOTSOCK, .FAULT, .INVAL => return error.TypeError,
+            else => return make(allocator, .{ .atom = "error" }), // EPIPE, ECONNRESET, ENOTCONN, ...
+        }
+    }
+}
+
+/// tcp_poll_write(fds: List of Int, timeout_ms: Int) -> List of Int
+///
+/// `tcp_poll` for the other direction: the fds a `tcp_write_some` would take
+/// at least one byte on without waiting, in the order given. timeout_ms as in
+/// tcp_poll: -1 waits for one, 0 answers at once. Like tcp_poll, an fd that
+/// has hung up, failed, or is not open is reported ready, because a write to
+/// it will not wait -- it answers :error, and the caller learns the socket is
+/// dead instead of waiting on it forever.
+fn builtinTcpPollWriteNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .list or args[1].* != .integer) return error.TypeError;
+    const fd_list = args[0].list;
+    if (args[1].integer < -1 or args[1].integer > std.math.maxInt(i32)) return error.TypeError;
+    const timeout_ms: i32 = @intCast(args[1].integer);
+    sweepLingering();
+    const pollfds = allocator.alloc(std.posix.pollfd, fd_list.len) catch return error.OutOfMemory;
+    for (fd_list, 0..) |fd_val, i| {
+        if (fd_val.* != .integer) return error.TypeError;
+        pollfds[i] = .{ .fd = @intCast(fd_val.integer), .events = std.posix.POLL.OUT, .revents = 0 };
+    }
+    _ = std.posix.poll(pollfds, timeout_ms) catch return error.NotSupported;
+    const ready_events = std.posix.POLL.OUT | std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL;
+    var ready: std.ArrayList(*const Value) = .empty;
+    for (pollfds) |pfd| {
+        if (pfd.revents & ready_events == 0) continue;
+        ready.append(allocator, try make(allocator, .{ .integer = @intCast(pfd.fd) })) catch return error.OutOfMemory;
+    }
+    return make(allocator, .{ .list = ready.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
+
+// ============================================================
+// tcp_write_some / tcp_poll_write tests
+// ============================================================
+
+/// A connected loopback pair: `server` is the accepted end, `client` the
+/// dialled one. Both blocking, which is the case tcp_write_some must not wait
+/// in.
+const LoopbackPair = struct {
+    server: c_int,
+    client: c_int,
+
+    fn open() !LoopbackPair {
+        const l = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+        if (l < 0) return error.SocketFailed;
+        defer _ = std.c.close(l);
+        var addr = std.mem.zeroes(std.posix.sockaddr.in);
+        addr.family = std.posix.AF.INET;
+        addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
+        if (std.c.bind(l, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0) return error.BindFailed;
+        if (std.c.listen(l, 1) < 0) return error.ListenFailed;
+        var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+        _ = std.c.getsockname(l, @ptrCast(&addr), &len);
+        const c = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+        if (c < 0) return error.SocketFailed;
+        if (std.c.connect(c, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0) return error.ConnectFailed;
+        const s = std.c.accept(l, null, null);
+        if (s < 0) return error.AcceptFailed;
+        return .{ .server = s, .client = c };
+    }
+
+    fn close(p: LoopbackPair) void {
+        _ = std.c.close(p.server);
+        _ = std.c.close(p.client);
+    }
+};
+
+test "tcp_write_some to a peer that never reads takes what fits and never waits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pair = try LoopbackPair.open();
+    defer pair.close();
+
+    const fd = try make(a, .{ .integer = pair.server });
+    const chunk = try a.alloc(u8, 256 * 1024);
+    @memset(chunk, 'x');
+    const data = try make(a, .{ .string = chunk });
+
+    // Offer 256KB at a time until the kernel takes nothing. tcp_write would
+    // sit in here for 10 seconds; this must come back from every call at once.
+    const t0 = monoMs();
+    var taken: usize = 0;
+    var calls: usize = 0;
+    while (calls < 10_000) : (calls += 1) {
+        const r = try builtinTcpWriteSomeNative(a, &.{ fd, data });
+        try std.testing.expect(r.* == .integer);
+        if (r.integer == 0) break;
+        try std.testing.expect(r.integer <= chunk.len);
+        taken += @intCast(r.integer);
+    }
+    const took = monoMs() - t0;
+    try std.testing.expect(calls < 10_000); // it did fill up
+    try std.testing.expect(taken > 0);
+    try std.testing.expect(took < 1000);
+
+    // Not asserted: that tcp_poll_write now says "not writable". macOS grows
+    // a loopback send buffer while the peer's receive buffer has room, so a
+    // socket that just answered EAGAIN can be writable 20ms later without the
+    // reader taking anything. What is asserted is that asking does not wait
+    // past its timeout.
+    const fds = try make(a, .{ .list = try a.dupe(*const Value, &.{fd}) });
+    const t1 = monoMs();
+    _ = try builtinTcpPollWriteNative(a, &.{ fds, try make(a, .{ .integer = 0 }) });
+    try std.testing.expect(monoMs() - t1 < 100);
+
+    // The reader drains everything; the socket is writable again, and the
+    // bytes that arrived are exactly the ones reported taken.
+    var got: usize = 0;
+    var buf: [65536]u8 = undefined;
+    while (got < taken) {
+        const n = std.c.read(pair.client, &buf, buf.len);
+        try std.testing.expect(n > 0);
+        got += @intCast(n);
+    }
+    try std.testing.expectEqual(taken, got);
+    const ready = try builtinTcpPollWriteNative(a, &.{ fds, try make(a, .{ .integer = 1000 }) });
+    try std.testing.expectEqual(@as(usize, 1), ready.list.len);
+    try std.testing.expectEqual(@as(i64, pair.server), ready.list[0].integer);
+    const again = try builtinTcpWriteSomeNative(a, &.{ fd, data });
+    try std.testing.expect(again.integer > 0);
+}
+
+test "tcp_write_some says :error once the peer is gone, and raises on a non-socket" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pair = try LoopbackPair.open();
+    defer _ = std.c.close(pair.server);
+    // SO_LINGER 0: the client's close sends RST, so the server's next send is
+    // ECONNRESET/EPIPE, not a write into a half-closed connection that
+    // succeeds once.
+    const lin = extern struct { onoff: c_int, linger: c_int }{ .onoff = 1, .linger = 0 };
+    _ = std.c.setsockopt(pair.client, std.posix.SOL.SOCKET, std.posix.SO.LINGER, std.mem.asBytes(&lin), @sizeOf(@TypeOf(lin)));
+    _ = std.c.close(pair.client);
+
+    const fd = try make(a, .{ .integer = pair.server });
+    const data = try make(a, .{ .string = "hello" });
+    var r = try builtinTcpWriteSomeNative(a, &.{ fd, data });
+    var tries: usize = 0;
+    while (r.* == .integer and tries < 100) : (tries += 1) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5_000_000 };
+        _ = std.c.nanosleep(&ts, null);
+        r = try builtinTcpWriteSomeNative(a, &.{ fd, data });
+    }
+    try std.testing.expectEqualStrings("error", r.atom);
+
+    // A gone peer is reported writable, so a program waiting on it finds out.
+    const fds = try make(a, .{ .list = try a.dupe(*const Value, &.{fd}) });
+    const ready = try builtinTcpPollWriteNative(a, &.{ fds, try make(a, .{ .integer = 0 }) });
+    try std.testing.expectEqual(@as(usize, 1), ready.list.len);
+
+    // stdin-ish: an fd that is not open is the program's bug.
+    const bad = try make(a, .{ .integer = 1_000_000 });
+    try std.testing.expectError(error.TypeError, builtinTcpWriteSomeNative(a, &.{ bad, data }));
+    try std.testing.expectError(error.TypeError, builtinTcpWriteSomeNative(a, &.{ fd, fd }));
+    try std.testing.expectError(error.TypeError, builtinTcpPollWriteNative(a, &.{ fds, try make(a, .{ .integer = -2 }) }));
 }
 
 // ------------------------------------------------------------
