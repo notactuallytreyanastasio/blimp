@@ -1517,6 +1517,17 @@ actor CryptoTests do
     assert(raises("http_result(99)"))
   end
 
+  test "ws_open refuses what is not a ws(s) url, and the others a handle that is not open" do
+    assert(raises("ws_open(\"https://example.com/\", %{})"))
+    assert(raises("ws_open(\"ws://example.com/\", %{\"X-A\": 1})"))
+    assert(raises("ws_open(\"ws://example.com/\", %{\"X-A\": \"a\\r\\nInjected: 1\"})"))
+    assert(raises("ws_recv(3)"))
+    assert(raises("ws_recv(12345)"))
+    assert(raises("ws_send(12345, \"hi\")"))
+    assert(raises("ws_close(12345)"))
+    assert(raises("ws_stats(12345)"))
+  end
+
   # -- hex_decode --
   test "hex_decode undoes hex_encode, either case" do
     raw = concat(from_char_code(0), from_char_code(255), "A")
