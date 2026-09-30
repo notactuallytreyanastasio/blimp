@@ -1,3 +1,5 @@
+> **Historical.** This note describes a counter server from March 2026 (`chunks/lang/web/server.blimp`). The web framework being built now is documented at https://blimp.bobbby.online/web/ and lives in the blog repo, `blimp_site/src/41_web.blimp`.
+
 # Blimp Web Framework — State of the Work
 
 > This document is a handoff guide. It describes what has been built, how it works, what the known rough edges are, and what to work on next. Written for an AI picking this up cold.
