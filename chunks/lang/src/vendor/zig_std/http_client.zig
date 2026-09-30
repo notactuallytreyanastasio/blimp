@@ -13,6 +13,8 @@ const builtin = @import("builtin");
 const std = @import("std");
 // Blimp: the TLS client beside this file, not std.crypto.tls.Client (see tls_client.zig).
 const TlsClient = @import("tls_client.zig");
+// Blimp: the flate decompressor beside this file, not std's (see flate_decompress.zig).
+const FlateDecompress = @import("flate_decompress.zig");
 const Io = std.Io;
 const testing = std.testing;
 const http = std.http;
@@ -361,14 +363,21 @@ pub const Connection = struct {
                         .read_buffer = tls_read_buffer,
                         .write_buffer = socket_write_buffer,
                         .entropy = &random_buffer,
-                        .realtime_now = client.now.?,
+                        // Blimp: `orelse`, not `.?`. A redirect from http:// to
+                        // https:// reached here with `now` never set, because
+                        // only `request` loaded the CA bundle, and the `.?` killed
+                        // the process; `redirect` now loads it too, and if
+                        // anything else ever skips it, it is an error, not a panic.
+                        .realtime_now = client.now orelse return error.CertificateBundleNotLoaded,
                         // This is appropriate for HTTPS because the HTTP headers contain
                         // the content length which is used to detect truncation attacks.
                         .allow_truncation_attacks = true,
                     },
                 ) catch |err| switch (err) {
-                    error.WriteFailed => return tls.connection.stream_writer.err.?,
-                    error.ReadFailed => return tls.connection.stream_reader.err.?,
+                    // Blimp: `orelse`, not `.?`: a failure the stream did not
+                    // explain is still an error, not a panic.
+                    error.WriteFailed => return tls.connection.stream_writer.err orelse error.WriteFailed,
+                    error.ReadFailed => return tls.connection.stream_reader.err orelse error.ReadFailed,
                     else => |e| return e,
                 },
             };
@@ -401,10 +410,10 @@ pub const Connection = struct {
             .tls => {
                 if (disable_tls) unreachable;
                 const tls: *const Tls = @alignCast(@fieldParentPtr("connection", c));
-                return tls.client.read_err orelse c.stream_reader.err.?;
+                return tls.client.read_err orelse c.stream_reader.err; // Blimp: no `.?`
             },
             .plain => {
-                return c.stream_reader.err.?;
+                return c.stream_reader.err; // Blimp: no `.?`, the result is optional
             },
         };
     }
@@ -543,6 +552,8 @@ pub const Response = struct {
                 else => return error.HttpHeadersInvalid,
             };
             if (first_line[8] != ' ') return error.HttpHeadersInvalid;
+            // Blimp: `parseInt3` wraps, so "HTTP/1.1 2x0" was status 920.
+            for (first_line[9..12]) |c| if (!std.ascii.isDigit(c)) return error.HttpHeadersInvalid;
             const status: http.Status = @enumFromInt(parseInt3(first_line[9..12]));
             const reason = mem.trimStart(u8, first_line[12..], " ");
 
@@ -1095,7 +1106,7 @@ pub const Request = struct {
         try w.writeAll("\r\n");
     }
 
-    pub const ReceiveHeadError = http.Reader.HeadError || ConnectError || error{
+    pub const ReceiveHeadError = http.Reader.HeadError || ConnectError || Connection.ReadError || error{
         /// Server sent headers that did not conform to the HTTP protocol.
         ///
         /// To find out more detailed diagnostics, `http.Reader.head_buffer` can be
@@ -1113,6 +1124,8 @@ pub const Request = struct {
         HttpChunkTruncated,
         HttpHeadersOversize,
         UnsupportedUriScheme,
+        /// Blimp: reading a redirect's body failed; see `readFailure`.
+        HttpBodyReadFailed,
 
         /// Sending the request failed. Error code can be found on the
         /// `Connection` object.
@@ -1226,7 +1239,7 @@ pub const Request = struct {
             // the correct state. This causes `new_location` to be invalidated.
             const reader = r.reader.bodyReader(&.{}, head.transfer_encoding, head.content_length);
             _ = reader.discardRemaining() catch |err| switch (err) {
-                error.ReadFailed => return r.reader.body_err.?,
+                error.ReadFailed => return r.readFailure(), // Blimp: was `body_err.?`
             };
         }
         const new_uri = r.uri.resolveInPlace(location.len, aux_buf) catch |err| switch (err) {
@@ -1272,6 +1285,10 @@ pub const Request = struct {
             return error.RedirectRequiresResend;
         }
 
+        // Blimp: an http:// request never loaded the CA bundle (`request` does
+        // that only for https://), so a redirect to https:// went into the TLS
+        // handshake with `client.now` null and panicked.
+        if (protocol == .tls) try r.client.loadCaBundle();
         const new_connection = try r.client.connect(new_host, uriPort(new_uri, protocol), protocol);
         r.uri = new_uri;
         r.connection = new_connection;
@@ -1284,6 +1301,23 @@ pub const Request = struct {
         };
         r.redirect_behavior.subtractOne();
     }
+
+    /// Blimp: why reading the response failed, without a `.?`.
+    ///
+    /// std answers a `ReadFailed` from the body reader with
+    /// `bodyErr().?`, but `body_err` is set only for errors the HTTP layer
+    /// itself finds (a bad chunk header). A read that failed underneath it --
+    /// the connection reset, a TLS record that did not decrypt, the fetch
+    /// cancelled at its deadline -- leaves `body_err` null, and the `.?`
+    /// panicked. The reason is on the connection; if nothing recorded one,
+    /// that is still an error.
+    pub fn readFailure(r: *const Request) BodyReadError {
+        if (r.reader.body_err) |e| return e;
+        if (r.connection) |c| if (c.getReadError()) |e| return e;
+        return error.HttpBodyReadFailed;
+    }
+
+    pub const BodyReadError = http.Reader.BodyError || Connection.ReadError || error{HttpBodyReadFailed};
 
     /// Returns true if the default behavior is required, otherwise handles
     /// writing (or not writing) the header.
@@ -1637,6 +1671,31 @@ pub fn connect(
     return connection;
 }
 
+/// Loads the system's root certificates, once per client, before the first
+/// TLS connection. Blimp: moved out of `request` so that `Request.redirect`
+/// can call it too; an http:// request that redirects to https:// never
+/// passed through here, and its TLS handshake panicked on `client.now.?`.
+fn loadCaBundle(client: *Client) error{ Canceled, CertificateBundleLoadFailure }!void {
+    if (disable_tls) return;
+    const io = client.io;
+    {
+        try client.ca_bundle_lock.lockShared(io);
+        defer client.ca_bundle_lock.unlockShared(io);
+        if (client.now != null) return;
+    }
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(client.allocator);
+    const now = Io.Clock.real.now(io);
+    bundle.rescan(client.allocator, io, now) catch |err| switch (err) {
+        error.Canceled => |e| return e,
+        else => return error.CertificateBundleLoadFailure,
+    };
+    try client.ca_bundle_lock.lock(io);
+    defer client.ca_bundle_lock.unlock(io);
+    client.now = now;
+    std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
+}
+
 pub const RequestError = ConnectTcpError || error{
     UnsupportedUriScheme,
     UriMissingHost,
@@ -1697,8 +1756,6 @@ pub fn request(
     uri: Uri,
     options: RequestOptions,
 ) RequestError!Request {
-    const io = client.io;
-
     if (std.debug.runtime_safety) {
         for (options.extra_headers) |header| {
             assert(header.name.len != 0);
@@ -1715,25 +1772,7 @@ pub fn request(
 
     const protocol = Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
 
-    if (protocol == .tls) tls: {
-        if (disable_tls) unreachable;
-        {
-            try client.ca_bundle_lock.lockShared(io);
-            defer client.ca_bundle_lock.unlockShared(io);
-            if (client.now != null) break :tls;
-        }
-        var bundle: std.crypto.Certificate.Bundle = .empty;
-        defer bundle.deinit(client.allocator);
-        const now = Io.Clock.real.now(io);
-        bundle.rescan(client.allocator, io, now) catch |err| switch (err) {
-            error.Canceled => |e| return e,
-            else => return error.CertificateBundleLoadFailure,
-        };
-        try client.ca_bundle_lock.lock(io);
-        defer client.ca_bundle_lock.unlock(io);
-        client.now = now;
-        std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
-    }
+    if (protocol == .tls) try client.loadCaBundle();
 
     const connection = options.connection orelse c: {
         var host_name_buffer: [HostName.max_len]u8 = undefined;
@@ -1773,6 +1812,10 @@ pub const FetchOptions = struct {
     redirect_behavior: ?Request.RedirectBehavior = null,
     /// If the server sends a body, it will be written here.
     response_writer: ?*Writer = null,
+    /// Blimp: the most body bytes to write to `response_writer`; one more is
+    /// `error.ResponseTooLarge`, found while the body arrives rather than
+    /// after all of it is in memory.
+    response_limit: ?usize = null,
 
     location: Location,
     method: ?http.Method = null,
@@ -1801,8 +1844,13 @@ pub const FetchResult = struct {
     status: http.Status,
 };
 
-pub const FetchError = Uri.ParseError || RequestError || Request.ReceiveHeadError || error{
+pub const FetchError = Uri.ParseError || RequestError || Request.ReceiveHeadError || Request.BodyReadError ||
+    FlateDecompress.Error || error{
     StreamTooLong,
+    /// Blimp: more body than `response_limit`.
+    ResponseTooLarge,
+    /// Blimp: the connection ended before Content-Length bytes of body.
+    HttpBodyTruncated,
     /// TODO provide optional diagnostics when this occurs or break into more error codes
     WriteFailed,
     UnsupportedCompressionMethod,
@@ -1845,32 +1893,76 @@ pub fn fetch(client: *Client, options: FetchOptions) FetchError!FetchResult {
         try client.allocator.alloc(u8, 8 * 1024);
     defer if (options.redirect_buffer == null) client.allocator.free(redirect_buffer);
 
-    var response = try req.receiveHead(redirect_buffer);
+    // Blimp: a ReadFailed while reading the head says only that; the
+    // connection says why (reset, TLS alert, cancelled).
+    var response = req.receiveHead(redirect_buffer) catch |err| switch (err) {
+        error.ReadFailed => return req.readFailure(),
+        else => |e| return e,
+    };
 
     const response_writer = options.response_writer orelse {
         const reader = response.reader(&.{});
         _ = reader.discardRemaining() catch |err| switch (err) {
-            error.ReadFailed => return response.bodyErr().?,
+            error.ReadFailed => return req.readFailure(), // Blimp: was `bodyErr().?`
         };
         return .{ .status = response.head.status };
     };
 
+    // Blimp: no body to read. `readerDecompressing`, unlike `reader`, does not
+    // check, so a HEAD answered with a Content-Length waited for that many
+    // bytes that never come.
+    if (!req.method.responseHasBody()) return .{ .status = response.head.status };
+
+    // Blimp: gzip and deflate go through the vendored flate decompressor
+    // (flate_decompress.zig), not std's, which panics on a body cut off at
+    // the wrong bit. zstd is never offered (`default_accept_encoding`), so a
+    // server that sends it anyway has already been refused by `receiveHead`.
     const decompress_buffer: []u8 = switch (response.head.content_encoding) {
         .identity => &.{},
-        .zstd => options.decompress_buffer orelse try client.allocator.alloc(u8, std.compress.zstd.default_window_len),
         .deflate, .gzip => options.decompress_buffer orelse try client.allocator.alloc(u8, std.compress.flate.max_window_len),
-        .compress => return error.UnsupportedCompressionMethod,
+        .zstd, .compress => return error.UnsupportedCompressionMethod,
     };
     defer if (options.decompress_buffer == null) client.allocator.free(decompress_buffer);
 
     var transfer_buffer: [64]u8 = undefined;
-    var decompress: http.Decompress = undefined;
-    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-
-    _ = reader.streamRemaining(response_writer) catch |err| switch (err) {
-        error.ReadFailed => return response.bodyErr().?,
-        else => |e| return e,
+    const transfer = response.reader(&transfer_buffer);
+    var flate: FlateDecompress = undefined;
+    const reader: *Reader = switch (response.head.content_encoding) {
+        .identity => transfer,
+        .gzip, .deflate => |e| blk: {
+            flate = .init(transfer, if (e == .gzip) .gzip else .zlib, decompress_buffer);
+            break :blk &flate.reader;
+        },
+        .zstd, .compress => unreachable, // returned above
     };
+    const decompressing = response.head.content_encoding != .identity;
+
+    // Blimp: std's `streamRemaining(...)` catch `bodyErr().?` panicked on
+    // every read that failed below the HTTP layer (see `readFailure`), and
+    // read the whole body whatever its size.
+    var written: usize = 0;
+    while (true) {
+        const room: Io.Limit = if (options.response_limit) |max| .limited(max + 1 - written) else .unlimited;
+        written += reader.stream(response_writer, room) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.WriteFailed => |e| return e,
+            error.ReadFailed => {
+                const why = req.readFailure();
+                if (why != error.HttpBodyReadFailed) return why;
+                if (req.reader.state == .body_remaining_content_length) return error.HttpBodyTruncated;
+                // the decompressor keeps its own reason
+                if (decompressing) if (flate.err) |e| return switch (e) {
+                    error.EndOfStream => error.HttpBodyTruncated,
+                    else => e,
+                };
+                return why;
+            },
+        };
+        if (options.response_limit) |max| if (written > max) return error.ResponseTooLarge;
+    }
+    // Blimp: the Content-Length reader answers a connection closed early as
+    // the end of the body, so a cut-off body came back as a whole one.
+    if (req.reader.state == .body_remaining_content_length) return error.HttpBodyTruncated;
 
     return .{ .status = response.head.status };
 }
