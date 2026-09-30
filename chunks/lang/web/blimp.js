@@ -55,7 +55,12 @@ class Blimp {
         const viewPtr = this.instance.exports.blimp_get_view_ptr();
         const viewLen = this.instance.exports.blimp_get_view_len();
         const viewJson = this._readString(viewPtr, viewLen);
-        try { viewData = JSON.parse(viewJson); } catch (e) { /* ignore */ }
+        // A view that does not parse is an error the page sees, with where
+        // and what. It used to be dropped here, and mount reported that the
+        // program "did not produce a view" -- true of nothing but the parse.
+        const parsed = Blimp._parseJson(viewJson, 'view JSON');
+        if (parsed.error) return { ok: false, error: parsed.error, value: this._readString(resultPtr, resultLen) };
+        viewData = parsed.value;
       }
       return { ok: true, value: this._readString(resultPtr, resultLen), view: viewData };
     } else {
@@ -89,7 +94,9 @@ class Blimp {
     if (status !== 0) {
       return { ok: false, error: this._readString(x.blimp_get_error_ptr(), x.blimp_get_error_len()) };
     }
-    return { ok: true, value: JSON.parse(this._readString(x.blimp_get_reply_ptr(), x.blimp_get_reply_len())) };
+    const parsed = Blimp._parseJson(this._readString(x.blimp_get_reply_ptr(), x.blimp_get_reply_len()), 'reply JSON');
+    if (parsed.error) return { ok: false, error: parsed.error };
+    return { ok: true, value: parsed.value };
   }
 
   // The program's actors and the messages sent since the last read, for
@@ -100,7 +107,12 @@ class Blimp {
     const len = this.instance.exports.blimp_get_state_len();
     const json = this._readString(ptr, len);
     if (!json) return { vars: [], actors: [] };
-    try { return JSON.parse(json); } catch (e) { return { vars: [], actors: [] }; }
+    // A state that does not parse comes back empty, as before, but with an
+    // `error` saying why: an empty canvas is otherwise indistinguishable
+    // from a program with no actors.
+    const parsed = Blimp._parseJson(json, 'state JSON');
+    if (parsed.error) return { vars: [], actors: [], messages: [], error: parsed.error };
+    return parsed.value;
   }
 
   complete(prefix) {
@@ -128,6 +140,21 @@ class Blimp {
 
   onError(callback) {
     this._onError = callback;
+  }
+
+  // JSON.parse, with a failure turned into a message that names what was
+  // being read, what the parser said, and the text around where it stopped
+  // (control characters shown escaped, since they are usually the cause).
+  static _parseJson(json, what) {
+    try {
+      return { value: JSON.parse(json) };
+    } catch (e) {
+      const m = /position (\d+)/.exec(e.message);
+      const at = m ? Number(m[1]) : 0;
+      const near = json.slice(Math.max(0, at - 30), at + 30)
+        .replace(/[\u0000-\u001f]/g, (c) => JSON.stringify(c).slice(1, -1));
+      return { error: `blimp.wasm returned ${what} (${json.length} bytes) that does not parse: ${e.message}; near: ${near}` };
+    }
   }
 
   _readString(ptr, len) {
