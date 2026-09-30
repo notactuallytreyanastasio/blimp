@@ -3480,6 +3480,7 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
 // ── HTTPS, without stopping the program ──────────────────────────────────
 //
 // http_start(method, url, headers, body) -> handle
+// http_start(method, url, headers, body, %{timeout_ms: Int, max_redirects: Int}) -> handle
 // http_result(handle) -> nil (still going) | {:ok, status, body} | {:error, reason}
 //
 // A program that serves a website from one process cannot wait on a remote
@@ -3497,13 +3498,42 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
 // the client would send, rather than going out as a second copy of it; a
 // header name or value that would split the request (CR, LF, a ':' in the
 // name, an empty name) is refused by http_start.
+//
+// Every request has a deadline: `timeout_ms` from http_start, 15s unless the
+// options say otherwise, for the whole of it -- DNS, connect, TLS, redirects
+// and body. Without one, a server that accepted and never answered held its
+// slot for as long as the process lived, and 32 of them stopped every
+// outbound request the site makes. At the deadline http_result answers
+// {:error, "timeout"} and the handle is free for the next http_start at
+// once, whether or not the worker has finished unwinding: the request lives
+// in a job the worker frees, not in the slot. The worker cancels the fetch
+// through the Io (std.Io.Threaded interrupts the blocked syscall with
+// SIGIO), so the socket is closed and the thread ends, not leaked.
+//
+// Redirects: GET-like requests (no body) follow up to `max_redirects`, 5
+// unless the options say otherwise (std's default is 3, which is what made a
+// 4-hop chain TooManyHttpRedirects). `max_redirects: 0` follows none and
+// answers the 3xx itself as {:ok, 302, body}; the result carries no headers,
+// so where it pointed is not in it. A request with a body never follows a
+// redirect, as before: std will not resend a body.
 
 const http_slots_max = 32;
 const http_body_max = 8 * 1024 * 1024;
+const http_timeout_default_ms: i64 = 15_000;
+const http_timeout_max_ms: i64 = 600_000;
+const http_redirects_default: u16 = 5;
+const http_redirects_max: i64 = 20;
 
-const HttpSlot = struct {
-    // 0 free, 1 running, 2 done, 3 failed; written by the worker last
-    state: std.atomic.Value(u8) = .init(0),
+/// One request, owned by its worker thread from start to finish. The slot
+/// points at it; when the program stops waiting (the deadline passed), the
+/// slot lets go and the worker frees it when it is done.
+const HttpJob = struct {
+    // 1 running, 2 done, 3 failed, 4 abandoned by the program. The worker
+    // moves 1 -> 2|3, http_result moves 1 -> 4; whoever loses the race to
+    // move it off 1 knows the other side owns the job now.
+    state: std.atomic.Value(u8) = .init(1),
+    // set by the fetch task when client.fetch has returned, whatever it said
+    fetched: std.atomic.Value(u8) = .init(0),
     method: std.http.Method = .GET,
     url: []u8 = &.{},
     body_in: []u8 = &.{},
@@ -3513,60 +3543,125 @@ const HttpSlot = struct {
     header_bytes: []u8 = &.{},
     // the standard headers the program named, which replace the client's own
     std_headers: HttpClient.Request.Headers = .{},
+    timeout_ms: i64 = http_timeout_default_ms,
+    max_redirects: u16 = http_redirects_default,
     status: u16 = 0,
     body: []u8 = &.{},
     reason: []const u8 = "",
     reason_buf: [96]u8 = undefined,
 };
 
+const HttpSlot = struct {
+    job: ?*HttpJob = null,
+    deadline: i64 = 0,
+};
+
+// touched only by the interpreter's thread
 var http_slots: [http_slots_max]HttpSlot = [_]HttpSlot{.{}} ** http_slots_max;
 
-fn httpWorker(slot: *HttpSlot) void {
+fn httpFetch(job: *HttpJob) void {
+    defer job.fetched.store(1, .release);
     const pa = std.heap.page_allocator;
     var client: HttpClient = .{ .allocator = pa, .io = ioenv.io };
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(pa);
     defer out.deinit();
+    const redirects: ?HttpClient.Request.RedirectBehavior = if (job.body_in.len > 0)
+        null // std's own choice for a request with a body: never follow
+    else if (job.max_redirects == 0)
+        .unhandled
+    else
+        .init(job.max_redirects);
     const result = client.fetch(.{
-        .location = .{ .url = slot.url },
-        .method = slot.method,
-        .payload = if (slot.body_in.len > 0) slot.body_in else null,
-        .headers = slot.std_headers,
-        .extra_headers = slot.headers,
+        .location = .{ .url = job.url },
+        .method = job.method,
+        .payload = if (job.body_in.len > 0) job.body_in else null,
+        .headers = job.std_headers,
+        .extra_headers = job.headers,
         .response_writer = &out.writer,
         .response_limit = http_body_max,
         .keep_alive = false,
+        .redirect_behavior = redirects,
     }) catch |err| {
-        slot.reason = switch (err) {
+        job.reason = switch (err) {
             // which handshake failure: an expired certificate and a server
             // with no cipher suite in common are both TlsInitializationFailed
             error.TlsInitializationFailed => if (client.tls_init_error) |why|
-                std.fmt.bufPrint(&slot.reason_buf, "TlsInitializationFailed: {s}", .{@errorName(why)}) catch @errorName(err)
+                std.fmt.bufPrint(&job.reason_buf, "TlsInitializationFailed: {s}", .{@errorName(why)}) catch @errorName(err)
             else
                 @errorName(err),
             else => @errorName(err),
         };
-        slot.state.store(3, .release);
         return;
     };
     const got = out.written();
-    slot.body = pa.dupe(u8, got) catch {
-        slot.reason = "OutOfMemory";
-        slot.state.store(3, .release);
+    job.body = pa.dupe(u8, got) catch {
+        job.reason = "OutOfMemory";
         return;
     };
-    slot.status = @intFromEnum(result.status);
-    slot.state.store(2, .release);
+    job.status = @intFromEnum(result.status);
 }
 
-fn httpFree(slot: *HttpSlot) void {
+fn httpWorker(job: *HttpJob) void {
+    const io = ioenv.io;
+    const deadline = monoMs() + job.timeout_ms;
+    var timed_out = false;
+    if (io.concurrent(httpFetch, .{job})) |fut| {
+        var f = fut;
+        while (job.fetched.load(.acquire) == 0 and monoMs() < deadline) {
+            var ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&ts, null);
+        }
+        if (job.fetched.load(.acquire) == 0) {
+            timed_out = true;
+            f.cancel(io);
+        } else f.await(io);
+    } else |_| {
+        // An Io that cannot run the fetch concurrently cannot time it out.
+        // Say so rather than run it without a deadline.
+        job.reason = "NoConcurrency";
+    }
+    if (timed_out) {
+        if (job.body.len > 0) std.heap.page_allocator.free(job.body);
+        job.body = &.{};
+        job.reason = "timeout";
+    }
+    const final: u8 = if (!timed_out and job.reason.len == 0) 2 else 3;
+    if (job.state.cmpxchgStrong(1, final, .acq_rel, .acquire) != null) {
+        httpJobFree(job); // the program stopped waiting; nobody else will
+    }
+}
+
+fn httpJobFree(job: *HttpJob) void {
     const pa = std.heap.page_allocator;
-    if (slot.url.len > 0) pa.free(slot.url);
-    if (slot.body_in.len > 0) pa.free(slot.body_in);
-    if (slot.headers_all.len > 0) pa.free(slot.headers_all);
-    if (slot.header_bytes.len > 0) pa.free(slot.header_bytes);
-    if (slot.body.len > 0) pa.free(slot.body);
-    slot.* = .{};
+    if (job.url.len > 0) pa.free(job.url);
+    if (job.body_in.len > 0) pa.free(job.body_in);
+    if (job.headers_all.len > 0) pa.free(job.headers_all);
+    if (job.header_bytes.len > 0) pa.free(job.header_bytes);
+    if (job.body.len > 0) pa.free(job.body);
+    pa.destroy(job);
+}
+
+/// Reads http_start's options map. Anything it does not know, or a value out
+/// of range, is a TypeError: a misspelt `timeout` that silently meant 15s is
+/// the kind of wrong that hides.
+fn httpOptions(job: *HttpJob, v: *const Value) EvalError!void {
+    const entries: []const Value.MapEntry = switch (v.*) {
+        .map => |m| m,
+        .nil => return,
+        else => return error.TypeError,
+    };
+    for (entries) |e| {
+        if (e.val.* != .integer) return error.TypeError;
+        const n = e.val.integer;
+        if (std.mem.eql(u8, e.key, "timeout_ms")) {
+            if (n < 1 or n > http_timeout_max_ms) return error.TypeError;
+            job.timeout_ms = n;
+        } else if (std.mem.eql(u8, e.key, "max_redirects")) {
+            if (n < 0 or n > http_redirects_max) return error.TypeError;
+            job.max_redirects = @intCast(n);
+        } else return error.TypeError;
+    }
 }
 
 /// std's client asserts these (a panic in a safe build); a program passing
@@ -3594,7 +3689,8 @@ fn httpStdHeader(h: *HttpClient.Request.Headers, name: []const u8) ?*HttpClient.
 
 fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (is_wasm) return error.NotSupported;
-    if (args.len != 4 or args[0].* != .string or args[1].* != .string or args[3].* != .string) return error.TypeError;
+    if (args.len != 4 and args.len != 5) return error.TypeError;
+    if (args[0].* != .string or args[1].* != .string or args[3].* != .string) return error.TypeError;
     const entries: []const Value.MapEntry = switch (args[2].*) {
         .map => |m| m,
         .nil => &.{},
@@ -3603,23 +3699,24 @@ fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) Ev
     const method = std.meta.stringToEnum(std.http.Method, args[0].string) orelse return error.TypeError;
     const url = args[1].string;
     if (!std.mem.startsWith(u8, url, "https://") and !std.mem.startsWith(u8, url, "http://")) return error.TypeError;
+    var opts: HttpJob = .{};
+    if (args.len == 5) try httpOptions(&opts, args[4]);
+    for (entries) |e| {
+        if (e.val.* != .string) return error.TypeError;
+        if (!httpHeaderOk(e.key, e.val.string)) return error.TypeError;
+    }
     var free_i: ?usize = null;
     for (&http_slots, 0..) |*slot, i| {
-        if (slot.state.load(.acquire) == 0) {
+        if (slot.job == null) {
             free_i = i;
             break;
         }
     }
     const i = free_i orelse return make(allocator, .{ .integer = -1 });
-    const slot = &http_slots[i];
     const pa = std.heap.page_allocator;
     // the worker owns copies: the interpreter's heap is compacted under it
     var total: usize = 0;
-    for (entries) |e| {
-        if (e.val.* != .string) return error.TypeError;
-        if (!httpHeaderOk(e.key, e.val.string)) return error.TypeError;
-        total += e.key.len + e.val.string.len;
-    }
+    for (entries) |e| total += e.key.len + e.val.string.len;
     const bytes = pa.alloc(u8, total) catch return error.OutOfMemory;
     const headers = pa.alloc(std.http.Header, entries.len) catch return error.OutOfMemory;
     var std_headers: HttpClient.Request.Headers = .{};
@@ -3639,7 +3736,8 @@ fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) Ev
             n_extra += 1;
         }
     }
-    slot.* = .{
+    const job = pa.create(HttpJob) catch return error.OutOfMemory;
+    job.* = .{
         .method = method,
         .url = pa.dupe(u8, url) catch return error.OutOfMemory,
         .body_in = pa.dupe(u8, args[3].string) catch return error.OutOfMemory,
@@ -3647,13 +3745,15 @@ fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) Ev
         .headers_all = headers,
         .header_bytes = bytes,
         .std_headers = std_headers,
+        .timeout_ms = opts.timeout_ms,
+        .max_redirects = opts.max_redirects,
     };
-    slot.state.store(1, .release);
-    const thread = std.Thread.spawn(.{}, httpWorker, .{slot}) catch {
-        httpFree(slot);
+    const thread = std.Thread.spawn(.{}, httpWorker, .{job}) catch {
+        httpJobFree(job);
         return error.NotSupported;
     };
     thread.detach();
+    http_slots[i] = .{ .job = job, .deadline = monoMs() + job.timeout_ms };
     return make(allocator, .{ .integer = @intCast(i) });
 }
 
@@ -3662,24 +3762,228 @@ fn builtinHttpResult(allocator: std.mem.Allocator, args: []const *const Value) E
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     if (args[0].integer < 0 or args[0].integer >= http_slots_max) return error.TypeError;
     const slot = &http_slots[@intCast(args[0].integer)];
-    switch (slot.state.load(.acquire)) {
-        0 => return error.TypeError, // not a request in flight
-        1 => return make(allocator, .nil),
-        else => {},
+    const job = slot.job orelse return error.TypeError; // not a request in flight
+    if (job.state.load(.acquire) == 1) {
+        if (monoMs() < slot.deadline) return make(allocator, .nil);
+        // Past the deadline and the worker has not finished: stop waiting.
+        // If the worker finishes in between, the exchange fails and its
+        // answer is the one given.
+        if (job.state.cmpxchgStrong(1, 4, .acq_rel, .acquire) == null) {
+            slot.* = .{};
+            const items = try allocator.alloc(*const Value, 2);
+            items[0] = try make(allocator, .{ .atom = "error" });
+            items[1] = try make(allocator, .{ .string = "timeout" });
+            return make(allocator, .{ .tuple = items });
+        }
     }
     const items = try allocator.alloc(*const Value, 3);
-    if (slot.state.load(.acquire) == 2) {
+    if (job.state.load(.acquire) == 2) {
         items[0] = try make(allocator, .{ .atom = "ok" });
-        items[1] = try make(allocator, .{ .integer = slot.status });
-        items[2] = try make(allocator, .{ .string = allocator.dupe(u8, slot.body) catch return error.OutOfMemory });
+        items[1] = try make(allocator, .{ .integer = job.status });
+        items[2] = try make(allocator, .{ .string = allocator.dupe(u8, job.body) catch return error.OutOfMemory });
     } else {
         items[0] = try make(allocator, .{ .atom = "error" });
-        items[1] = try make(allocator, .{ .string = allocator.dupe(u8, slot.reason) catch return error.OutOfMemory });
+        items[1] = try make(allocator, .{ .string = allocator.dupe(u8, job.reason) catch return error.OutOfMemory });
         items[2] = try make(allocator, .nil);
     }
-    httpFree(slot);
+    httpJobFree(job);
+    slot.* = .{};
     if (items[0].atom[0] == 'e') return make(allocator, .{ .tuple = items[0..2] });
     return make(allocator, .{ .tuple = items });
+}
+
+// ============================================================
+// http_start deadline and redirect tests
+// ============================================================
+
+/// A loopback HTTP/1.1 server, one thread per connection. `/hang` reads the
+/// request and never answers, and counts the connection once the client has
+/// closed it; `/r/N` redirects to `/r/N-1`; `/r/0` and everything else is a
+/// 200.
+const HttpTestServer = struct {
+    listen_fd: c_int,
+    port: u16,
+    hangs_closed: std.atomic.Value(u32) = .init(0),
+
+    fn start() !*HttpTestServer {
+        const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+        if (fd < 0) return error.SocketFailed;
+        var addr = std.mem.zeroes(std.posix.sockaddr.in);
+        addr.family = std.posix.AF.INET;
+        addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
+        if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0) return error.BindFailed;
+        if (std.c.listen(fd, 64) < 0) return error.ListenFailed;
+        var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+        _ = std.c.getsockname(fd, @ptrCast(&addr), &len);
+        const s = try std.heap.page_allocator.create(HttpTestServer);
+        s.* = .{ .listen_fd = fd, .port = std.mem.bigToNative(u16, addr.port) };
+        const t = try std.Thread.spawn(.{}, acceptLoop, .{s});
+        t.detach();
+        return s;
+    }
+
+    fn acceptLoop(s: *HttpTestServer) void {
+        while (true) {
+            const c = std.c.accept(s.listen_fd, null, null);
+            if (c < 0) return; // the test closed the listener
+            const t = std.Thread.spawn(.{}, serveOne, .{ s, c }) catch {
+                _ = std.c.close(c);
+                continue;
+            };
+            t.detach();
+        }
+    }
+
+    fn serveOne(s: *HttpTestServer, c: c_int) void {
+        defer _ = std.c.close(c);
+        var buf: [4096]u8 = undefined;
+        var got: usize = 0;
+        while (std.mem.indexOf(u8, buf[0..got], "\r\n\r\n") == null) {
+            const n = std.c.read(c, buf[got..].ptr, buf.len - got);
+            if (n <= 0) return;
+            got += @intCast(n);
+        }
+        const line_end = std.mem.indexOf(u8, buf[0..got], "\r\n").?;
+        var parts = std.mem.splitScalar(u8, buf[0..line_end], ' ');
+        _ = parts.next();
+        const path = parts.next() orelse "/";
+        if (std.mem.eql(u8, path, "/hang")) {
+            while (std.c.read(c, &buf, buf.len) > 0) {}
+            _ = s.hangs_closed.fetchAdd(1, .release);
+            return;
+        }
+        var out: [256]u8 = undefined;
+        const answer = if (std.mem.startsWith(u8, path, "/r/") and !std.mem.eql(u8, path, "/r/0")) blk: {
+            const n = std.fmt.parseInt(u32, path[3..], 10) catch 0;
+            break :blk std.fmt.bufPrint(&out, "HTTP/1.1 302 Found\r\nLocation: /r/{d}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{n - 1}) catch return;
+        } else "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\narrived";
+        _ = std.c.write(c, answer.ptr, answer.len);
+    }
+};
+
+fn httpTestNap(ms: u32) void {
+    var ts: std.c.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @as(isize, ms % 1000) * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&ts, null);
+}
+
+/// http_start then http_result until it answers, or 20s.
+fn httpTestFetch(a: std.mem.Allocator, url: []const u8, opts: ?*const Value) !*const Value {
+    var args: [5]*const Value = .{
+        try make(a, .{ .string = "GET" }),
+        try make(a, .{ .string = url }),
+        try make(a, .nil),
+        try make(a, .{ .string = "" }),
+        undefined,
+    };
+    if (opts) |o| args[4] = o;
+    const h = try builtinHttpStart(a, args[0..if (opts == null) 4 else 5]);
+    try std.testing.expect(h.integer >= 0);
+    var tries: usize = 0;
+    while (tries < 4000) : (tries += 1) {
+        const r = try builtinHttpResult(a, &.{h});
+        if (r.* != .nil) return r;
+        httpTestNap(5);
+    }
+    return error.NeverAnswered;
+}
+
+fn httpTestOpts(a: std.mem.Allocator, key: []const u8, n: i64) !*const Value {
+    const entries = try a.alloc(Value.MapEntry, 1);
+    entries[0] = .{ .key = key, .val = try make(a, .{ .integer = n }) };
+    return make(a, .{ .map = entries });
+}
+
+test "http_start: a server that never answers is {:error, \"timeout\"} at the deadline, and the slot and socket come back" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpTestServer.start();
+
+    var url_buf: [64]u8 = undefined;
+    const hang = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/hang", .{srv.port});
+    const t0 = monoMs();
+    const r = try httpTestFetch(a, hang, try httpTestOpts(a, "timeout_ms", 300));
+    const took = monoMs() - t0;
+    try std.testing.expectEqualStrings("error", r.tuple[0].atom);
+    try std.testing.expectEqualStrings("timeout", r.tuple[1].string);
+    try std.testing.expect(took >= 300);
+    try std.testing.expect(took < 1500);
+
+    // The worker cancelled the fetch: the server sees the connection closed,
+    // rather than a thread left blocked in a read for the life of the process.
+    var tries: usize = 0;
+    while (srv.hangs_closed.load(.acquire) < 1 and tries < 400) : (tries += 1) httpTestNap(5);
+    try std.testing.expectEqual(@as(u32, 1), srv.hangs_closed.load(.acquire));
+
+    // Every slot held by a hanging request, then all of them freed at once.
+    var hs: [http_slots_max]*const Value = undefined;
+    for (&hs) |*h| {
+        h.* = try builtinHttpStart(a, &.{ try make(a, .{ .string = "GET" }), try make(a, .{ .string = hang }), try make(a, .nil), try make(a, .{ .string = "" }), try httpTestOpts(a, "timeout_ms", 200) });
+        try std.testing.expect(h.*.integer >= 0);
+    }
+    const full = try builtinHttpStart(a, &.{ try make(a, .{ .string = "GET" }), try make(a, .{ .string = hang }), try make(a, .nil), try make(a, .{ .string = "" }) });
+    try std.testing.expectEqual(@as(i64, -1), full.integer);
+    httpTestNap(250);
+    for (hs) |h| {
+        const got = try builtinHttpResult(a, &.{h});
+        try std.testing.expectEqualStrings("timeout", got.tuple[1].string);
+    }
+    const ok_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{srv.port});
+    const ok = try httpTestFetch(a, ok_url, null);
+    try std.testing.expectEqualStrings("ok", ok.tuple[0].atom);
+    try std.testing.expectEqual(@as(i64, 200), ok.tuple[1].integer);
+    tries = 0;
+    while (srv.hangs_closed.load(.acquire) < 1 + http_slots_max and tries < 400) : (tries += 1) httpTestNap(5);
+    try std.testing.expectEqual(@as(u32, 1 + http_slots_max), srv.hangs_closed.load(.acquire));
+}
+
+test "http_start follows 5 redirects by default, as many as max_redirects says, and none at 0" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpTestServer.start();
+    var url_buf: [64]u8 = undefined;
+
+    const five = try httpTestFetch(a, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/r/5", .{srv.port}), null);
+    try std.testing.expectEqualStrings("ok", five.tuple[0].atom);
+    try std.testing.expectEqualStrings("arrived", five.tuple[2].string);
+
+    const six = try httpTestFetch(a, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/r/6", .{srv.port}), null);
+    try std.testing.expectEqualStrings("TooManyHttpRedirects", six.tuple[1].string);
+
+    const six_ok = try httpTestFetch(a, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/r/6", .{srv.port}), try httpTestOpts(a, "max_redirects", 6));
+    try std.testing.expectEqualStrings("arrived", six_ok.tuple[2].string);
+
+    const none = try httpTestFetch(a, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/r/2", .{srv.port}), try httpTestOpts(a, "max_redirects", 0));
+    try std.testing.expectEqualStrings("ok", none.tuple[0].atom);
+    try std.testing.expectEqual(@as(i64, 302), none.tuple[1].integer);
+}
+
+test "http_start refuses options it does not know or cannot honour" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = [_]*const Value{ try make(a, .{ .string = "GET" }), try make(a, .{ .string = "http://127.0.0.1:9/" }), try make(a, .nil), try make(a, .{ .string = "" }) };
+    const bad = [_]*const Value{
+        try httpTestOpts(a, "timeout", 1000),
+        try httpTestOpts(a, "timeout_ms", 0),
+        try httpTestOpts(a, "timeout_ms", http_timeout_max_ms + 1),
+        try httpTestOpts(a, "max_redirects", -1),
+        try httpTestOpts(a, "max_redirects", http_redirects_max + 1),
+        try make(a, .{ .integer = 5 }),
+    };
+    for (bad) |o| {
+        try std.testing.expectError(error.TypeError, builtinHttpStart(a, &.{ base[0], base[1], base[2], base[3], o }));
+    }
+    for (http_slots) |s| try std.testing.expect(s.job == null);
 }
 
 // ============================================================
@@ -3794,6 +4098,23 @@ const HttpBadServer = struct {
             // connection open so a client that waits for it is caught
             send(c, "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n");
             httpTestNap(3000);
+        } else if (std.mem.startsWith(u8, path, "/drip")) {
+            // a head at once, then a byte of body every 200ms for 4s: the
+            // response has started when the deadline comes
+            const head = if (eq(u8, path, "/drip"))
+                "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\n"
+            else if (eq(u8, path, "/drip-chunked"))
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            else if (eq(u8, path, "/drip-redirect"))
+                "HTTP/1.1 302 Found\r\nLocation: /ok\r\nContent-Length: 20\r\nConnection: close\r\n\r\n"
+            else
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+            send(c, head);
+            const byte = if (eq(u8, path, "/drip-chunked")) "1\r\nx\r\n" else "x";
+            for (0..20) |_| {
+                httpTestNap(200);
+                if (std.c.write(c, byte.ptr, byte.len) <= 0) return;
+            }
         } else if (eq(u8, path, "/bad-status")) {
             send(c, "HTTP/1.1 2x0 Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         } else {
@@ -3801,11 +4122,6 @@ const HttpBadServer = struct {
         }
     }
 };
-
-fn httpTestNap(ms: u32) void {
-    var ts: std.c.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @as(isize, ms % 1000) * std.time.ns_per_ms };
-    _ = std.c.nanosleep(&ts, null);
-}
 
 /// http_start then http_result until it answers, or 20s.
 fn httpTestRequest(a: std.mem.Allocator, method: []const u8, url: []const u8, headers: *const Value) !*const Value {
@@ -3934,7 +4250,46 @@ test "http_start: a User-Agent (any case) replaces the client's, and a header th
         entries[0] = .{ .key = kv[0], .val = try make(a, .{ .string = kv[1] }) };
         try std.testing.expectError(error.TypeError, builtinHttpStart(a, &.{ try make(a, .{ .string = "GET" }), try make(a, .{ .string = url }), try make(a, .{ .map = entries }), try make(a, .{ .string = "" }) }));
     }
-    for (http_slots) |slot| try std.testing.expectEqual(@as(u8, 0), slot.state.load(.acquire));
+    for (http_slots) |slot| try std.testing.expect(slot.job == null);
+}
+
+test "http_start: a deadline that comes while the body is arriving is {:error, \"timeout\"}, and the worker ends without a panic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+    const hang = try HttpTestServer.start();
+    var url_buf: [96]u8 = undefined;
+
+    // At 35-http-timeout's first commit (bc90267) each of the first four
+    // answered timeout on time and then the worker panicked on std's
+    // `bodyErr().?` as the cancelled read unwound through `fetch`, killing
+    // the process a moment after the program had its answer. The fifth is
+    // a TLS handshake the server never answers: cancelled mid-handshake.
+    const cases = [_][]const u8{ "/drip", "/drip-chunked", "/drip-none", "/drip-redirect" };
+    var urls: [cases.len + 1][]const u8 = undefined;
+    for (cases, 0..) |path, k| urls[k] = try a.dupe(u8, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}{s}", .{ srv.port, path }));
+    urls[cases.len] = try a.dupe(u8, try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/hang", .{hang.port}));
+    for (urls) |url| {
+        const t0 = monoMs();
+        const r = try httpTestFetch(a, url, try httpTestOpts(a, "timeout_ms", 500));
+        const took = monoMs() - t0;
+        std.testing.expectEqualStrings("timeout", r.tuple[1].string) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ url, r.tuple[1].string });
+            return err;
+        };
+        try std.testing.expect(took >= 500 and took < 1500);
+    }
+    // the workers finish unwinding after the answers; give them the time
+    // the panic used to take, then the next request is answered as usual
+    httpTestNap(1000);
+    const ok = try httpTestFetch(a, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/ok", .{srv.port}), null);
+    try std.testing.expectEqualStrings("arrived", ok.tuple[2].string);
+    for (http_slots) |slot| try std.testing.expect(slot.job == null);
 }
 
 // ── A WebSocket client, without stopping the program ─────────────────────
