@@ -21,7 +21,7 @@
 
 <h1>Web reference</h1>
 
-<p class="lede">These are the rules <code>src/41_web.blimp</code> follows, as the code has them at blog commit <code>c18668d</code> (<a href="https://github.com/notactuallytreyanastasio/blog/pull/100">PR #100</a>). Blimp has no modules and no private functions: every <code>def</code> in the site is global. The functions below are the ones meant to be called. The rest are listed at the end so you know which names are taken.</p>
+<p class="lede">These are the rules <code>src/41_web.blimp</code> follows, as the code has them at blog commit <code>c75fced</code> (<a href="https://github.com/notactuallytreyanastasio/blog/pull/100">PR #100</a>). Blimp has no modules and no private functions: every <code>def</code> in the site is global. The functions below are the ones meant to be called. The rest are listed at the end so you know which names are taken.</p>
 
 <nav class="toc" aria-label="On this page">
 <ol>
@@ -47,7 +47,7 @@
 <tr><td><code>path</code></td><td>without the query</td><td><code>"/web/echo/9"</code></td></tr>
 <tr><td><code>query</code></td><td>raw query string, <code>""</code> if none</td><td><code>"x=q"</code></td></tr>
 <tr><td><code>headers</code></td><td>lower-cased name → value. A header sent twice is joined with <code>", "</code>, and <code>Cookie</code> with <code>"; "</code></td><td><code>%{"content-type" =&gt; "application/x-www-form-urlencoded", ...}</code></td></tr>
-<tr><td><code>body</code></td><td>the raw body, as read. See <a href="#bodies">framing</a> for what "as read" includes</td><td><code>"y=2"</code></td></tr>
+<tr><td><code>body</code></td><td>the raw body: exactly <code>Content-Length</code> bytes, <code>""</code> when there is none. See <a href="#bodies">framing</a></td><td><code>"y=2"</code></td></tr>
 <tr><td><code>cookies</code></td><td>request cookies, name → value, values as sent</td><td><code>%{"_blimp_session" =&gt; "eyJ..."}</code></td></tr>
 <tr><td><code>query_params</code></td><td>the query, decoded. A repeated name keeps the last value</td><td><code>%{"x" =&gt; "q"}</code></td></tr>
 <tr><td><code>body_params</code></td><td>a urlencoded form, or a JSON body that is an object. <code>%{}</code> otherwise</td><td><code>%{"y" =&gt; "2"}</code></td></tr>
@@ -70,9 +70,9 @@
 </table></div>
 
 <p>The <code>params</code> column is real output. The demo route <code>/web/echo/:id</code> returns <code>conn.params</code> as JSON:</p>
-<pre><code><span class="cmd">$ curl -s -b jar -X PATCH -H "X-CSRF-Token: $T" -d 'title=new' 'localhost:4170/web/echo/7?x=q'</span>
+<pre><code><span class="cmd">$ curl -s -b j3 -X PATCH -H "X-CSRF-Token: $T" -d 'title=new' 'localhost:4176/web/echo/7?x=q'</span>
 {"method":"PATCH","id":"7","params":{"x":"q","title":"new","id":"7"}}
-<span class="cmd">$ curl -s -b jar -X DELETE -H "X-CSRF-Token: $T" localhost:4170/web/echo/a%20b</span>
+<span class="cmd">$ curl -s -b j3 -X DELETE -H "X-CSRF-Token: $T" localhost:4176/web/echo/a%20b</span>
 {"method":"DELETE","id":"a b","params":{"id":"a b"}}</code></pre>
 
 <h2 id="functions">Functions<a class="anchor" href="#functions">#</a></h2>
@@ -81,9 +81,9 @@
 <div class="table-wrap"><table>
 <tr><th>signature</th><th>what it does</th></tr>
 <tr><td class="sig"><code>web_route(method: String, pattern: String, pipeline: List, handler: Any) -&gt; Map</code></td><td>A route as data. <code>pattern</code> is like <code>"/api/blinks/:id/save"</code>. <code>pipeline</code> is a list of plugs, and <code>handler</code> is <code>fn(conn: Map) -&gt; Map</code>.</td></tr>
-<tr><td class="sig"><code>web_dispatch(raw: String, req: Map, routes: List, secret: String) -&gt; Any</code></td><td>The whole framework in one call. It returns <code>{wire, status, req}</code>, or <code>nil</code> for a GET/HEAD whose path no route matches. The tests call it directly with a raw request string, so they need no socket.</td></tr>
+<tr><td class="sig"><code>web_dispatch(raw: String, req: Map, routes: List, secret: String) -&gt; Any</code></td><td>The whole framework in one call. It returns <code>{wire, status, req}</code>, or <code>nil</code> for a GET/HEAD whose path no GET route matches. A crash in a plug, the handler or the response they built is caught here and answered with a 500. The tests call it directly with a raw request string, so they need no socket.</td></tr>
 <tr><td class="sig"><code>web_handle(raw: String, req: Map) -&gt; Any</code></td><td>In <code>main.blimp</code>: <code>web_dispatch(raw, req, WEB_ROUTES, WEB_SECRET)</code>.</td></tr>
-<tr><td class="sig"><code>web_find(routes: List, method: String, path: String) -&gt; Any</code></td><td><code>{:ok, route, path_params}</code>, or <code>{:method, allowed}</code>, or <code>nil</code>.</td></tr>
+<tr><td class="sig"><code>web_find(routes: List, method: String, path: String) -&gt; Any</code></td><td><code>{:ok, route, path_params}</code>, or <code>{:method, allowed}</code>, or <code>nil</code>. For GET and HEAD it never returns <code>{:method, ...}</code>: a path with no GET route is <code>nil</code>, and goes on to <code>dynamic()</code>.</td></tr>
 </table></div>
 
 <h3>Reading the request</h3>
@@ -115,7 +115,7 @@ end
 def x_logout(conn: Map) -&gt; Map do
   put(web_redirect(web_clear_session(conn), "/notes"), :status, 302)
 end</code></pre>
-<pre><code><span class="cmd">$ curl -si localhost:4172/x/headers</span>
+<pre><code><span class="cmd">$ curl -si localhost:4176/x/headers</span>
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
 Content-Length: 2
@@ -125,13 +125,13 @@ X-Served-By: blimp
 Connection: close
 
 hi
-<span class="cmd">$ curl -si -b j3 -X POST -H 'Content-Type: application/json' -d '{}' localhost:4172/x/logout</span>
+<span class="cmd">$ curl -si -b jar -X POST -H 'Content-Type: application/json' -d '{}' localhost:4176/x/logout</span>
 HTTP/1.1 302 Found
 Content-Type: text/plain; charset=utf-8
 Content-Length: 0
 Cache-Control: no-store
 Location: /notes
-Set-Cookie: _blimp_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0
+Set-Cookie: _blimp_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0
 X-Served-By: blimp
 Connection: close</code></pre>
 
@@ -172,10 +172,10 @@ WEB_API = [web_fetch_session, web_require_json]               # JSON routes with
 <tr><td class="sig"><code>web_content_length(headers: Map) -&gt; Int</code></td><td>Returns <code>-1</code> when absent, and <code>-2</code> when it is not 1 to 12 plain digits.</td></tr>
 </table></div>
 
-<p><strong>Why <code>web_url_decode</code> exists.</strong> The obvious move is to reuse <code>url_decode</code> from <code>src/40_http.blimp</code>, but it recurses once per byte. Blimp's interpreter reclaims nothing until the tick returns, so a 300 KB form field ran it out of its 2 GB heap, and the request was never answered. <code>web_url_decode</code> splits on <code>%</code> and joins natively, one step per <code>%</code>. The test decodes a 512 KiB field with it. On the running server, a 300,012-byte JSON body was parsed and answered in 7 ms:</p>
-<pre><code><span class="cmd">$ curl -s -w "\n%{http_code} %{time_total}s\n" -H 'Content-Type: application/json' --data-binary @big.json localhost:4170/api/notes | tail -c 60</span>
+<p><strong>Why <code>web_url_decode</code> exists.</strong> The obvious move is to reuse <code>url_decode</code> from <code>src/40_http.blimp</code>, but it recurses once per byte. Blimp's interpreter reclaims nothing until the tick returns, so a 300 KB form field ran it out of its 2 GB heap, and the request was never answered. <code>web_url_decode</code> splits on <code>%</code> and joins natively, one step per <code>%</code>. The test decodes a 512 KiB field with it. On the running server, a 300,012-byte JSON body was parsed and answered in 10 ms (6 ms on the three runs after it):</p>
+<pre><code><span class="cmd">$ curl -s -w "\n%{http_code} %{time_total}s\n" -H 'Content-Type: application/json' --data-binary @big.json localhost:4176/api/notes | tail -c 60</span>
 word word word word word word","words":60000}
-201 0.006634s</code></pre>
+201 0.010127s</code></pre>
 
 <h2 id="routing">Routing<a class="anchor" href="#routing">#</a></h2>
 
@@ -183,38 +183,43 @@ word word word word word word","words":60000}
   <li><strong>Segments match exactly, and <code>:name</code> matches one non-empty segment.</strong> <code>/api/blinks/:id/save</code> matches <code>/api/blinks/42/save</code>. It does not match <code>/api/blinks//save</code>, <code>/api/blinks/42</code> or <code>/api/blinks/42/save/x</code>. A <code>:param</code> is URL-decoded, so <code>/web/echo/a%20b</code> gives <code>id</code> = <code>"a b"</code>. There are no wildcards and no optional segments. A trailing slash is a segment of its own, so <code>/notes/</code> does not match <code>/notes</code>. It falls through to <code>dynamic()</code>, which redirects it.</li>
   <li><strong>The first match wins</strong>, in the order of the <code>WEB_ROUTES</code> list.</li>
   <li><strong>HEAD is answered by the GET route.</strong> The handler runs, and the response has the GET's headers, including its <code>Content-Length</code>, with no body. A handler with side effects has them on HEAD too.</li>
-  <li><strong>405 with <code>Allow</code>.</strong> If the path matches only routes for other methods, the answer is 405. <code>Allow</code> lists those methods, and HEAD is added when there is a GET. <code>OPTIONS</code> is not special. It is a 405 too.</li>
-  <li><strong>Precedence over <code>dynamic()</code>.</strong> The prebuilt pages, <code>/</code> and the posts, are answered before the framework is asked. Then, for a GET or HEAD, <code>WEB_ROUTES</code> is checked before <code>dynamic()</code>. If any route of any method matches the path, the framework answers. For other methods it answers with a 405, and <code>dynamic()</code> never sees that path.</li>
+  <li><strong>405 with <code>Allow</code>.</strong> A method other than GET and HEAD, on a path that matches only routes for other methods, is 405. <code>Allow</code> lists those methods, and HEAD is added when there is a GET. <code>OPTIONS</code> is not special. It is a 405 too. <code>Allow</code> does not list the GET and HEAD that <code>dynamic()</code> may serve for the same path: the framework cannot know them without running <code>dynamic()</code>.</li>
+  <li><strong>Framing comes before routing.</strong> A POST, PUT or PATCH without <code>Content-Length</code> is 411 before any route is looked at, so it is 411 even on a path where the answer would be 405.</li>
+  <li><strong>Precedence over <code>dynamic()</code>.</strong> The prebuilt pages, <code>/</code> and the posts, are answered before the framework is asked. Then, for a GET or HEAD, <code>WEB_ROUTES</code> is checked before <code>dynamic()</code>, and only a GET route claims it. A route for another method on the same path does not: the GET goes on to <code>dynamic()</code>. Every other method goes to the framework first and only there, because the prebuilt pages and <code>dynamic()</code> answer nothing but GET and HEAD.</li>
 </ul>
-<pre><code><span class="cmd">$ curl -si -X PUT localhost:4170/notes</span>          <span class="note"># GET and POST routes exist</span>
+<pre><code><span class="cmd">$ curl -si -X PUT -H 'Content-Length: 0' localhost:4176/notes | grep -E '^HTTP|^Allow'</span>          <span class="note"># GET and POST routes exist</span>
 HTTP/1.1 405 Method Not Allowed
 Allow: GET, POST, HEAD
-<span class="cmd">$ curl -si -X DELETE localhost:4170/notes/1</span>      <span class="note"># only GET /notes/:n</span>
+<span class="cmd">$ curl -si -X PUT localhost:4176/notes | grep -E '^HTTP|^Allow'</span>                             <span class="note"># curl sends no Content-Length for an empty PUT</span>
+HTTP/1.1 411 Length Required
+<span class="cmd">$ curl -si -X DELETE localhost:4176/notes/1 | grep -E '^HTTP|^Allow'</span>      <span class="note"># only GET /notes/:n</span>
 HTTP/1.1 405 Method Not Allowed
 Allow: GET, HEAD
-<span class="cmd">$ curl -si -X POST -d x=1 localhost:4170/blog</span>    <span class="note"># no route at all: the answer from before this chapter</span>
+<span class="cmd">$ curl -si -X POST -d x=1 localhost:4176/blog | grep -E '^HTTP|^Allow'</span>    <span class="note"># no route at all: the answer from before this chapter</span>
 HTTP/1.1 405 Method Not Allowed
 Allow: GET, HEAD
 
-<span class="note"># a build whose only extra route is POST /directory; GET /directory is a dynamic() page</span>
-<span class="cmd">$ curl -s -o /dev/null -w "%{http_code}\n" localhost:4170/directory</span>   <span class="note"># without the route</span>
+<span class="note"># POST /directory is registered; GET /directory is a dynamic() page</span>
+<span class="cmd">$ curl -s -o /dev/null -w '%{http_code}\n' localhost:4176/directory</span>
 200
-<span class="cmd">$ curl -si localhost:4171/directory | head -5</span>                         <span class="note"># with it</span>
+<span class="cmd">$ curl -sI localhost:4176/directory | head -1</span>
+HTTP/1.1 200 OK
+<span class="cmd">$ curl -si -X POST -d x=1 localhost:4176/directory | sed -n '1p;$p'</span>
+HTTP/1.1 200 OK
+posted
+<span class="cmd">$ curl -si -X PUT -H 'Content-Length: 0' localhost:4176/directory | grep -E '^HTTP|^Allow'</span>   <span class="note"># Allow leaves out dynamic()'s GET</span>
 HTTP/1.1 405 Method Not Allowed
-Content-Type: text/plain; charset=utf-8
-Content-Length: 19
-Cache-Control: no-cache
 Allow: POST</code></pre>
-<p class="caption">Header lines not relevant here are left out of the first three.</p>
+<p class="caption">Each command is filtered to the lines that matter. Before the fix in <code>8d7abaf</code>, the <code>GET</code> and <code>HEAD</code> of <code>/directory</code> were both <code>405 Allow: POST</code>.</p>
 
 <h2 id="bodies">Reading bodies<a class="anchor" href="#bodies">#</a></h2>
 
 <p><strong>Why the obvious version is wrong.</strong> The server read a request with one <code>tcp_read</code>. That is one <code>read(2)</code> of at most 64 KiB, and it does not wait. Calling it in a loop until it returns nothing does not help. A body sent after its headers is not in the socket yet when the loop looks. That includes curl waiting on <code>Expect: 100-continue</code>, and a proxy that streams. So the loop would end early, with a short body and no error. The framework reads to a <em>count</em> instead:</p>
 <ol>
   <li>GET and HEAD are passed on exactly as they were read. Their bodies are not read.</li>
-  <li>For anything else, <code>web_read_rest</code> waits with <code>tcp_poll</code> and reads until the headers have ended and <code>Content-Length</code> bytes of body are in. It gives up after <code>WEB_READ_MS</code> (2000 ms), counted from the first read.</li>
+  <li>For anything else, <code>web_read_rest</code> waits with <code>tcp_poll</code> and reads until the headers have ended and <code>Content-Length</code> bytes of body are in. POST, PUT and PATCH must send <code>Content-Length</code>. Any other method without one has an empty body, which is what <code>curl -X DELETE</code> sends. It gives up after <code>WEB_READ_MS</code> (2000 ms), counted from the first read.</li>
   <li>Once the headers are in, the body is short, and the request says <code>Expect: 100-continue</code>, it writes <code>HTTP/1.1 100 Continue</code> once.</li>
-  <li>It stops at once, without reading the body, when the request is chunked, its <code>Content-Length</code> is not a number, or its <code>Content-Length</code> is over the limit.</li>
+  <li>It stops at once, without reading the body, when the request is chunked, its <code>Content-Length</code> is not a number, its <code>Content-Length</code> is over the limit, or its header block is over 16 KiB.</li>
   <li><code>web_frame_error</code> then turns what was read into a refusal or lets it through (<a href="#refusals">table below</a>).</li>
   <li><code>web_parse_body</code> runs on every request a route matched, <em>before</em> the pipeline:
     <ul>
@@ -226,21 +231,27 @@ Allow: POST</code></pre>
   </li>
 </ol>
 
-<pre><code><span class="cmd">$ curl -sv -H 'Expect: 100-continue' -H 'Content-Type: application/json' --data-binary @big.json localhost:4170/api/notes</span>
+<pre><code><span class="cmd">$ curl -sv -H 'Expect: 100-continue' -H 'Content-Type: application/json' --data-binary @big.json localhost:4176/api/notes 2&gt;&amp;1 | grep -E '^[&lt;&gt;] (HTTP|Expect)'</span>
 &gt; Expect: 100-continue
 &lt; HTTP/1.1 100 Continue
 &lt; HTTP/1.1 201 Created</code></pre>
 
-<p><strong>Framing is lenient, in two ways that matter.</strong> The body is everything after the blank line, not <code>Content-Length</code> bytes of it. So extra bytes end up in the body. And a POST with no <code>Content-Length</code> gets whatever arrived in the first read as its body. HTTP says such a request has no body. The server closes every connection after one response, so this cannot desynchronise a pipeline. It can make a well-formed body fail to parse:</p>
-<pre><code><span class="cmd">$ printf 'POST /api/notes HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{"text":"abc"}GARBAGE' | nc -w 3 localhost 4170 | tail -1</span>
-the body is not JSON: SyntaxError at line 1, column 15
-<span class="cmd">$ printf 'POST /api/notes HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n{"text":"no length"}' | nc -w 3 localhost 4170 | tail -1</span>
-{"saved":"no length","words":2}</code></pre>
+<p><strong>The body is exactly <code>Content-Length</code> bytes.</strong> What comes after them is dropped, not read as a second request: every response closes its connection, so there is no pipelining for those bytes to belong to. <strong>Why the obvious version is wrong:</strong> taking everything after the blank line as the body is right only when the client sent exactly what it said it would, and a POST with no length would end wherever the socket read happened to stop. If the headers and body arrive in two packets, that is an empty body, and the handler answers as if nothing was sent. So a POST, PUT or PATCH with no <code>Content-Length</code> is refused:</p>
+<pre><code><span class="cmd">$ printf 'POST /api/notes HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{"text":"abc"}GARBAGE' | nc -w 3 localhost 4176 | tail -1</span>
+{"saved":"abc","words":1}
+<span class="cmd">$ printf 'POST /api/notes HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n{"text":"no length"}' | nc -w 3 localhost 4176 | sed -n '1p;$p'</span>
+HTTP/1.1 411 Length Required
+a body needs a Content-Length
+<span class="cmd">$ printf "DELETE /web/echo/3 HTTP/1.1\r\nHost: x\r\nCookie: _blimp_session=$C\r\nX-CSRF-Token: $T\r\n\r\nstray" | nc -w 3 localhost 4176 | sed -n '1p;$p'</span>
+HTTP/1.1 200 OK
+{"method":"DELETE","id":"3","params":{"id":"3"}}</code></pre>
+<p class="caption">Before <code>919656d</code> the first request was a 400 (<code>the body is not JSON: SyntaxError at line 1, column 15</code>) and the second a 201. The DELETE carries its session cookie and token and five stray bytes with no length. It has an empty body, so the stray bytes are ignored.</p>
 
 <h2 id="sessions">Sessions<a class="anchor" href="#sessions">#</a></h2>
 
 <h3>The cookie</h3>
-<pre><code>_blimp_session=&lt;payload&gt;.&lt;mac&gt;; Path=/; HttpOnly; Secure; SameSite=Lax
+<pre><code>_blimp_session=&lt;payload&gt;.&lt;mac&gt;; Path=/; HttpOnly; SameSite=Lax           <span class="note"># DATABASE_URL unset</span>
+_blimp_session=&lt;payload&gt;.&lt;mac&gt;; Path=/; HttpOnly; Secure; SameSite=Lax   <span class="note"># DATABASE_URL set</span>
 
 payload = base64url(json_encode(session))
 mac     = hex(HMAC-SHA256(secret, "blimp-session." &lt;&gt; payload))</code></pre>
@@ -250,11 +261,15 @@ mac     = hex(HMAC-SHA256(secret, "blimp-session." &lt;&gt; payload))</code></pr
   <li><strong>A tampered cookie</strong> gets the log line <code>web: a session cookie failed its MAC on POST /notes</code>. The request carries on with no session, so under <code>WEB_BROWSER</code> the CSRF check then fails with a 403. The bad cookie is not deleted. It is replaced the next time something writes the session.</li>
   <li><strong><code>Set-Cookie</code> is sent only when the session changed</strong> (<code>session_dirty</code>). An empty session is sent as a deletion (<code>Max-Age=0</code>).</li>
   <li><strong>4000 bytes at most.</strong> A session that signs to a longer cookie is a 500, not a truncated cookie:
-<pre><code><span class="cmd">$ curl -si -b j4 -d "_csrf_token=$T&amp;text=$(python3 -c "print('x'*3000)")" localhost:4170/notes | sed -n '1p;$p'</span>
+<pre><code><span class="cmd">$ curl -si -b j4 -d "_csrf_token=$T&amp;text=$(python3 -c "print('x'*3000)")" localhost:4176/notes | sed -n '1p;$p'</span>
 HTTP/1.1 500 Internal Server Error
 the session is too large for its cookie
 <span class="note"># server log: web: the session outgrew its cookie on POST /notes</span></code></pre></li>
-  <li><strong><code>Secure</code></strong>: browsers keep the cookie over plain HTTP only on <code>localhost</code>. See <a href="index.html#browser">In a browser</a>.</li>
+  <li><strong><code>Secure</code> in production only.</strong> <code>WEB_COOKIE_ATTRS</code> is <code>web_cookie_attrs(prod)</code>, where <code>prod</code> is whether <code>DATABASE_URL</code> is set, the same rule <code>web_session_secret</code> uses. A browser sends a Secure cookie back over plain HTTP only to <code>localhost</code>, so a Secure cookie on a dev server reached by its LAN address was dropped and every form POST was a 403 (<a href="index.html#browser">In a browser</a>). Printed from a script that loads <code>40_http.blimp</code> and <code>41_web.blimp</code>:
+<pre><code><span class="cmd">$ blimp attrs.blimp</span>
+WEB_COOKIE_ATTRS = ; Path=/; HttpOnly; SameSite=Lax
+<span class="cmd">$ DATABASE_URL=postgres://x/y blimp attrs.blimp</span>
+WEB_COOKIE_ATTRS = ; Path=/; HttpOnly; Secure; SameSite=Lax</code></pre></li>
   <li><strong>No expiry.</strong> The cookie has no <code>Max-Age</code>, so the browser drops it when it closes (depending on the browser's session restore). The server accepts it forever, because the payload carries no time. Rotating <code>SESSION_SECRET</code> is the only way to revoke sessions, and it revokes all of them.</li>
 </ul>
 
@@ -265,14 +280,15 @@ the session is too large for its cookie
   <li><strong>If it is set but under 32 bytes</strong>, the site refuses to start, with or without a database.</li>
   <li><strong>If neither is set</strong>, as on a laptop or in the tests, it uses a fixed dev secret and says so in the boot log.</li>
 </ul>
-<pre><code><span class="cmd">$ DATABASE_URL=postgres://nobody@127.0.0.1:1/x blimp --serve _build/site-4171.blimp --tick "site &lt;- :tick"</span>
-"SESSION_SECRET is not set, and DATABASE_URL is: refusing to start with a guessable session key"
+<pre><code><span class="cmd">$ DATABASE_URL=postgres://nobody@127.0.0.1:1/x blimp --serve _build/site-4177.blimp --tick "site &lt;- :tick"</span>
+SESSION_SECRET is not set, and DATABASE_URL is: refusing to start with a guessable session key
 <span class="note"># exit 1</span>
-<span class="cmd">$ SESSION_SECRET=short DATABASE_URL=postgres://nobody@127.0.0.1:1/x blimp --serve _build/site-4171.blimp --tick "site &lt;- :tick"</span>
-"SESSION_SECRET is under 32 bytes: refusing to start"
+<span class="cmd">$ SESSION_SECRET=short DATABASE_URL=postgres://nobody@127.0.0.1:1/x blimp --serve _build/site-4177.blimp --tick "site &lt;- :tick"</span>
+SESSION_SECRET is under 32 bytes: refusing to start
 <span class="note"># exit 1</span>
-<span class="cmd">$ blimp --serve _build/site-4170.blimp --tick "site &lt;- :tick"</span>
+<span class="cmd">$ blimp --serve _build/site-4176.blimp --tick "site &lt;- :tick"</span>
 SESSION_SECRET is not set: sessions are signed with the dev secret (DATABASE_URL is unset, so this is not production)</code></pre>
+<p class="caption">Before <code>c75fced</code> the two refusals were printed with <code>print()</code>, which wrapped them in double quotes.</p>
 <p class="warn">Deploying PR #100 therefore needs <code>SESSION_SECRET</code> in the server's environment, <code>/opt/blog/.env</code> and the compose file. Without it the production site does not come back up. The refusal fires before the database is touched.</p>
 
 <h2 id="csrf">CSRF<a class="anchor" href="#csrf">#</a></h2>
@@ -286,20 +302,20 @@ SESSION_SECRET is not set: sessions are signed with the dev secret (DATABASE_URL
 </ul>
 
 <h3>The API opt-out, and why it is safe</h3>
-<p><code>WEB_API</code> swaps the token check for <code>web_require_json</code>. A cross-site <code>&lt;form&gt;</code> can only send three content types: urlencoded, multipart and <code>text/plain</code>. It cannot send <code>application/json</code>. A cross-site <code>fetch()</code> that sets <code>application/json</code> is preflighted with <code>OPTIONS</code>, and this server answers every <code>OPTIONS</code> with a 405, so the preflight fails and the browser never sends the request. A JSON request that reaches the handler therefore came from a page on this site, or from something that is not a browser and has no victim's cookie to use. DELETE is let through without the content type because a cross-site DELETE is preflighted too. I checked this in headless Chrome. A page on <code>http://127.0.0.1:8765</code> made three <code>fetch()</code> calls with <code>credentials: "include"</code> to the server on <code>localhost:4170</code>. The server log shows what arrived:</p>
+<p><code>WEB_API</code> swaps the token check for <code>web_require_json</code>. A cross-site <code>&lt;form&gt;</code> can only send three content types: urlencoded, multipart and <code>text/plain</code>. It cannot send <code>application/json</code>. A cross-site <code>fetch()</code> that sets <code>application/json</code> is preflighted with <code>OPTIONS</code>, and this server answers every <code>OPTIONS</code> with a 405, so the preflight fails and the browser never sends the request. A JSON request that reaches the handler therefore came from a page on this site, or from something that is not a browser and has no victim's cookie to use. DELETE is let through without the content type because a cross-site DELETE is preflighted too. I checked this in headless Chrome. A page on <code>http://127.0.0.1:8765</code> made three <code>fetch()</code> calls with <code>credentials: "include"</code> to the server on <code>localhost:4176</code>. The server log shows what arrived:</p>
 <pre><code>POST   /api/notes   application/json  -&gt; Failed to fetch
 DELETE /web/echo/1                    -&gt; Failed to fetch
 POST   /api/notes   text/plain        -&gt; Failed to fetch
 
 <span class="note"># server log</span>
-OPTIONS /api/notes 405 0ms
-OPTIONS /web/echo/1 405 0ms
+OPTIONS /api/notes 405 1ms
+OPTIONS /web/echo/1 405 1ms
 POST /api/notes 415 1ms</code></pre>
 <p class="caption">The JSON POST and the DELETE never got past their preflight. The <code>text/plain</code> POST is a "simple" request, so the browser sent it without a preflight, and <code>web_require_json</code> refused it. The page could not read any of the three answers.</p>
 <p>The session is still fetched, so an API route can see who is logged in:</p>
-<pre><code><span class="cmd">$ curl -s -b jar -H 'Content-Type: application/json' -d '"s"' localhost:4170/web/api/echo</span>
+<pre><code><span class="cmd">$ curl -s -b jar -H 'Content-Type: application/json' -d '"s"' localhost:4176/web/api/echo</span>
 {"json":"s","session":"ok"}
-<span class="cmd">$ curl -s -H 'Content-Type: application/json' -d '[1,2]' localhost:4170/web/api/echo</span>
+<span class="cmd">$ curl -s -H 'Content-Type: application/json' -d '[1,2]' localhost:4176/web/api/echo</span>
 {"json":[1,2],"session":"none"}</code></pre>
 <p>A route with the pipeline <code>[]</code> has neither protection. Use it only for endpoints that are safe to call from anywhere.</p>
 
@@ -314,34 +330,50 @@ POST /api/notes 415 1ms</code></pre>
 <tr><td>408</td><td><code>the body did not all arrive</code></td><td>fewer than <code>Content-Length</code> bytes within 2 s (measured: 2.006 s)</td></tr>
 <tr><td>408</td><td><code>the request headers did not all arrive</code></td><td>no blank line after the headers within 2 s (non-GET)</td></tr>
 <tr><td>411</td><td><code>chunked bodies are not accepted; send Content-Length</code></td><td>any <code>Transfer-Encoding</code></td></tr>
+<tr><td>411</td><td><code>a body needs a Content-Length</code></td><td>POST, PUT or PATCH with no <code>Content-Length</code>, on any path, before routing</td></tr>
 <tr><td>413</td><td><code>the body is over 1048576 bytes</code></td><td><code>Content-Length</code> over <code>WEB_MAX_BODY</code>. The body is not read.</td></tr>
 <tr><td>415</td><td><code>multipart bodies are not supported</code></td><td><code>multipart/*</code>, on any route</td></tr>
 <tr><td>415</td><td><code>this route takes Content-Type: application/json</code></td><td><code>web_require_json</code></td></tr>
-<tr><td>431</td><td><code>the request headers are too large</code></td><td>16 KiB arrived with no blank line yet. Complete headers larger than that, sent in one read, are accepted: a 17,000-byte header on a finished request got a normal answer.</td></tr>
+<tr><td>431</td><td><code>the request headers are too large</code></td><td>a header block over 16 KiB, still arriving or complete, on a request the framework answers: every method but GET and HEAD, and a GET or HEAD that a GET route claims. A GET that goes on to a prebuilt page or <code>dynamic()</code> is not held to it (see below).</td></tr>
+<tr><td>500</td><td><code>internal server error</code></td><td>a plug or the handler crashed, or the conn it returned could not be turned into a response (a <code>nil</code> body). The log gets <code>web: 500 on GET /crash: the pipeline or handler crashed (division_by_zero)</code>, or <code>building the response crashed</code></td></tr>
 <tr><td>500</td><td><code>a response header carried a line break</code></td><td>CR/LF in <code>location</code> or a <code>resp_headers</code> entry</td></tr>
 <tr><td>500</td><td><code>the session is too large for its cookie</code></td><td>signed cookie over 4000 bytes</td></tr>
-<tr><td><em>none</em></td><td><em>the client waits until it gives up</em></td><td>a plug or the handler raised a runtime error, or returned a conn whose body is not a string. <code>web_dispatch</code> has no <code>try</code> (<a href="index.html#not-done">see the guide</a>).</td></tr>
+<tr><td><em>none</em></td><td><em>the client waits until it gives up</em></td><td>not the framework: a runtime error in <code>dynamic()</code> or a prebuilt route. Only what <code>41_web.blimp</code> calls is wrapped in <code>try</code> (<a href="index.html#not-done">see the guide</a>).</td></tr>
 </table></div>
+<pre><code><span class="cmd">$ curl -si -H "X-Big: $(cat big17k)" -H 'Content-Type: application/json' -d '{"text":"hi"}' localhost:4176/api/notes | sed -n '1p;$p'</span>
+HTTP/1.1 431 Request Header Fields Too Large
+the request headers are too large
+<span class="cmd">$ curl -si -H "X-Big: $(cat big15k)" -H 'Content-Type: application/json' -d '{"text":"hi"}' localhost:4176/api/notes | sed -n '1p;$p'</span>
+HTTP/1.1 201 Created
+{"saved":"hi","words":1}
+<span class="cmd">$ curl -s -o /dev/null -w '%{http_code}\n' -H "X-Big: $(cat big17k)" localhost:4176/notes</span>      <span class="note"># a web GET route</span>
+431
+<span class="cmd">$ curl -s -o /dev/null -w '%{http_code}\n' -H "X-Big: $(cat big17k)" localhost:4176/directory</span>  <span class="note"># dynamic()</span>
+200
+<span class="cmd">$ curl -si -X POST localhost:4176/blog | sed -n '1p;$p'</span>
+HTTP/1.1 411 Length Required
+a body needs a Content-Length</code></pre>
+<p class="caption"><code>big17k</code> and <code>big15k</code> hold 17,000 and 15,000 <code>x</code>s. Before <code>e6be45f</code> the first request was a 200: the limit was checked only while the blank line had not arrived yet.</p>
 
 <h2 id="limits">Limits and constants<a class="anchor" href="#limits">#</a></h2>
 <div class="table-wrap"><table>
 <tr><th>name</th><th>value</th><th>meaning</th></tr>
 <tr><td><code>WEB_MAX_BODY</code></td><td><code>1048576</code></td><td>largest body, bytes (1 MiB)</td></tr>
-<tr><td><code>WEB_MAX_HEAD</code></td><td><code>16384</code></td><td>how much may arrive before the headers end</td></tr>
+<tr><td><code>WEB_MAX_HEAD</code></td><td><code>16384</code></td><td>largest header block, bytes, on a request the framework answers</td></tr>
 <tr><td><code>WEB_READ_MS</code></td><td><code>2000</code></td><td>how long to wait for the rest of a non-GET request. The one server thread answers nobody else meanwhile: a GET sent while a body was late took 1.79 s.</td></tr>
 <tr><td><code>WEB_SESSION_COOKIE</code></td><td><code>"_blimp_session"</code></td><td></td></tr>
-<tr><td><code>WEB_COOKIE_ATTRS</code></td><td><code>"; Path=/; HttpOnly; Secure; SameSite=Lax"</code></td><td></td></tr>
+<tr><td><code>WEB_COOKIE_ATTRS</code></td><td><code>"; Path=/; HttpOnly; SameSite=Lax"</code></td><td>with <code>Secure</code> before <code>SameSite</code> when <code>DATABASE_URL</code> is set (<code>web_cookie_attrs</code>)</td></tr>
 <tr><td><code>WEB_MAX_COOKIE</code></td><td><code>4000</code></td><td>longest <code>Set-Cookie</code> value allowed: the name, the signed session and the attributes together</td></tr>
 <tr><td><code>WEB_DEV_SECRET</code></td><td>fixed string</td><td>the secret when neither <code>SESSION_SECRET</code> nor <code>DATABASE_URL</code> is set</td></tr>
 </table></div>
 
 <h2 id="internals">Internal names<a class="anchor" href="#internals">#</a></h2>
 <p>These are global too. Do not define your own with these names. Blimp lets a later <code>def</code> replace an earlier one, and the error then points at the call, not at the duplicate.</p>
-<p><code>web_read_rest</code>, <code>web_read_more</code>, <code>web_read_wait</code>, <code>web_headers_in</code>, <code>web_all_digits</code>, <code>web_cookies_in</code>, <code>web_unescape_piece</code>, <code>web_form_in</code>, <code>web_url_encode_from</code>, <code>web_match_path</code>, <code>web_find_in</code>, <code>web_allow</code>, <code>has_string</code>, <code>web_conn</code>, <code>web_parse_body</code>, <code>web_run_plugs</code>, <code>web_frame_error</code>, <code>web_plain</code>, <code>web_finish</code>, <code>web_bad_header</code>, <code>web_splice</code>, and the demo: <code>web_demo_routes</code>, <code>web_echo_page</code>, <code>web_echo_post</code>, <code>web_echo_item</code>, <code>web_echo_api</code>.</p>
+<p><code>web_read_rest</code>, <code>web_read_more</code>, <code>web_read_wait</code>, <code>web_headers_in</code>, <code>web_all_digits</code>, <code>web_cookies_in</code>, <code>web_unescape_piece</code>, <code>web_form_in</code>, <code>web_url_encode_from</code>, <code>web_match_path</code>, <code>web_find_in</code>, <code>web_allow</code>, <code>has_string</code>, <code>web_conn</code>, <code>web_parse_body</code>, <code>web_run_plugs</code>, <code>web_frame_error</code>, <code>web_body_error</code>, <code>web_has_body</code>, <code>web_method_of</code>, <code>web_plain</code>, <code>web_run</code>, <code>web_crashed</code>, <code>web_finish</code>, <code>web_cookie_attrs</code>, <code>web_bad_header</code>, <code>web_splice</code>, and the demo: <code>web_demo_routes</code>, <code>web_echo_page</code>, <code>web_echo_post</code>, <code>web_echo_item</code>, <code>web_echo_api</code>.</p>
 
 </main>
 <footer>
-  Written against blog commit <code>c18668d</code> (PR #100). If the code and this page disagree, the code is right and this page has a bug.
+  Written against blog commit <code>c75fced</code> (PR #100). If the code and this page disagree, the code is right and this page has a bug.
 </footer>
 <script src="/tutorial/blimp-highlight.js"></script>
 <script>
