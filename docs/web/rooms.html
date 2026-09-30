@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blimp rooms and presence</title>
+<meta name="description" content="src/89_rooms.blimp: one actor that knows who is in each room and what every socket is sent, flushed once per tick. The API, the wire format, the bounds, and the write that still blocks.">
+<link rel="stylesheet" href="web.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">BLIMP</a>
+  <nav>
+    <a href="/web/">web: guide</a>
+    <a href="/web/reference.html">web: reference</a>
+    <a href="/web/rooms.html" aria-current="page">web: rooms</a>
+    <a href="https://github.com/notactuallytreyanastasio/blimp">github</a>
+  </nav>
+</header>
+<main>
+
+<h1>Rooms and presence: one actor, one write per socket per tick</h1>
+
+<p class="lede">Six live pages on the Blimp server each wrote their own room: a map of sockets to people, a join that sends the newcomer the room, a leave, and a loop over <code>tcp_write</code>. None of them could say who was in a room without code of its own for it. <code>src/89_rooms.blimp</code> does that job once, as an actor. It plays the part of Phoenix's PubSub, Presence and Channel, which is what <code>/blinks</code> uses for the same job.</p>
+
+<dl class="facts">
+  <dt>Where it lives</dt>
+  <dd><a href="https://github.com/notactuallytreyanastasio/blog/pull/102">notactuallytreyanastasio/blog#102</a>, branch <code>blimp-blog/61-rooms</code>, commit <code>68f5fa1</code>: <code>blimp_site/src/89_rooms.blimp</code> (517 lines) and <code>test/rooms_test.blimp</code> (10 tests, all passing when I ran them).</dd>
+  <dd>Open PR, not merged or deployed. <code>/cursor-tracker</code> is the one page moved onto it so far. MAP_ROOM, FIREHOSE, MTA, BJ and WORDLE still keep their own loops.</dd>
+  <dt>How it relates to the <a href="index.html">request side</a></dt>
+  <dd>It is separate. WebSockets still arrive through the server's existing <code>upgrade()</code>, and the hub is given their fds. It never parses a frame the client sends. The app does that and asks the hub whether it may act on it.</dd>
+</dl>
+
+<h2 id="shape">The shape<a class="anchor" href="#shape">#</a></h2>
+
+<p>The site has one hub, <code>ROOMS = spawn Rooms</code>, and a test spawns its own. A <em>topic</em> is a room: <code>"cursors"</code>, <code>"blink:42"</code>. A socket is a plain fd. <strong>Nothing is written when it is said.</strong> <code>:broadcast</code> frames the text once and puts it on an outbox. <code>main.blimp</code>'s <code>live_tick</code> calls <code>ROOMS &lt;- :flush</code> once per tick, after every room has pushed, and each socket then gets everything addressed to it that tick in one <code>tcp_write</code>. Sockets in the same set of topics share one built string.</p>
+
+<div class="table-wrap"><table>
+<tr><th>message</th><th>reply</th><th>what it does</th></tr>
+<tr><td class="sig"><code>:open(topic, %{diffs: Bool, format: fn})</code></td><td><code>:ok</code></td><td>Optional. A topic opens itself on first join with <code>diffs: true</code>. <code>format</code> is <code>fn(event: String, topic: String, body: Map) -&gt; String</code> and shapes the presence frames.</td></tr>
+<tr><td class="sig"><code>:join(topic, fd, who, meta)</code></td><td>member</td><td>Adds <code>fd</code> as <code>who</code>. Joining again replaces the old membership. With diffs on, the joiner is queued a <code>presence_state</code>.</td></tr>
+<tr><td class="sig"><code>:update(topic, fd, meta)</code></td><td>member or <code>nil</code></td><td>Replaces <code>meta</code>. Returns <code>nil</code> when <code>fd</code> is not in the topic.</td></tr>
+<tr><td class="sig"><code>:patch(topic, fd, fields)</code></td><td>member or <code>nil</code></td><td>Merges <code>fields</code> into <code>meta</code>.</td></tr>
+<tr><td class="sig"><code>:leave(topic, fd)</code></td><td><code>:ok</code></td><td></td></tr>
+<tr><td class="sig"><code>:drop(fd)</code></td><td>topics left</td><td>The socket is gone, so it leaves every topic.</td></tr>
+<tr><td class="sig"><code>:member(topic, fd)</code> / <code>:list(topic)</code></td><td>member or <code>nil</code> / members</td><td><code>:list</code> gives members in join order.</td></tr>
+<tr><td class="sig"><code>:broadcast(topic, text)</code></td><td><code>:ok</code></td><td>Queues <code>text</code> for every member of the topic.</td></tr>
+<tr><td class="sig"><code>:broadcast_from(fd, topic, text)</code></td><td><code>:ok</code></td><td>The same, except for <code>fd</code>.</td></tr>
+<tr><td class="sig"><code>:send(fd, text)</code></td><td><code>:ok</code></td><td>One socket, <strong>which must be in some topic</strong>. See below.</td></tr>
+<tr><td class="sig"><code>:inbound(fd)</code></td><td><code>:ok</code> or <code>:limited</code></td><td>Call it for every frame received. On <code>:limited</code>, drop the frame.</td></tr>
+<tr><td class="sig"><code>:flush</code></td><td><code>%{sockets, frames, bytes, kicked}</code></td><td>Writes everything queued. Close each fd in <code>kicked</code>.</td></tr>
+<tr><td class="sig"><code>:sent(fd)</code> / <code>:stats</code></td><td>texts / map</td><td><code>:sent</code> is for tests: a negative fd is never written, and this returns what it would have been sent.</td></tr>
+</table></div>
+
+<p>A member is <code>%{ref, who, since, meta}</code>. The app chooses <code>who</code>. <code>ref</code> is made at join and survives updates. <code>since</code> is <code>now_ms()</code> at join, the interpreter's millisecond clock (406099760 in the run below). It is not a Unix time, so do not show it as a date.</p>
+
+<h2 id="wire">What goes on the wire<a class="anchor" href="#wire">#</a></h2>
+
+<p>This is real output. Test sockets <code>-1</code> (ada) and <code>-2</code> (bob) join <code>"blink:42"</code>, and the hub flushes. Then ada broadcasts a comment to everyone but herself and patches her meta. cy joins and leaves within the same tick, and the hub flushes again:</p>
+<pre><code class="blimp">hub = spawn Rooms
+hub &lt;- :join("blink:42", -1, "ada", %{name: "Ada"})
+hub &lt;- :join("blink:42", -2, "bob", %{name: "Bob"})
+hub &lt;- :flush
+hub &lt;- :broadcast_from(-1, "blink:42", "{\"t\":\"comment\",\"body\":\"hi\"}")
+hub &lt;- :patch("blink:42", -1, %{typing: true})
+hub &lt;- :join("blink:42", -3, "cy", %{})
+hub &lt;- :leave("blink:42", -3)
+hub &lt;- :flush</code></pre>
+<pre class="wrap"><code>join   -&gt; {"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada"}}
+flush  -&gt; {"sockets":2,"frames":4,"bytes":713,"kicked":[]}
+ada &lt;- {"t":"presence_state","topic":"blink:42","members":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada"}}]}
+ada &lt;- {"t":"presence_diff","topic":"blink:42","joins":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada"}},{"ref":"-2.2","who":"bob","since":406099760,"meta":{"name":"Bob"}}],"leaves":[]}
+bob &lt;- {"t":"presence_state","topic":"blink:42","members":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada"}},{"ref":"-2.2","who":"bob","since":406099760,"meta":{"name":"Bob"}}]}
+bob &lt;- {"t":"presence_diff","topic":"blink:42","joins":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada"}},{"ref":"-2.2","who":"bob","since":406099760,"meta":{"name":"Bob"}}],"leaves":[]}
+flush  -&gt; {"sockets":2,"frames":3,"bytes":455,"kicked":[]}
+ada &lt;- {"t":"presence_diff","topic":"blink:42","joins":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada","typing":true}}],"leaves":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada"}}]}
+bob &lt;- {"t":"comment","body":"hi"}
+bob &lt;- {"t":"presence_diff","topic":"blink:42","joins":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada","typing":true}}],"leaves":[{"ref":"-1.1","who":"ada","since":406099760,"meta":{"name":"Ada"}}]}</code></pre>
+<ul>
+  <li><strong>Presence is batched.</strong> There is one <code>presence_diff</code> per topic per flush, not one per event. Two joins in one tick arrive as one frame.</li>
+  <li><strong>Apply leaves, then joins, keyed by <code>ref</code>.</strong> An update is sent as the member's old self in <code>leaves</code> and new self in <code>joins</code>, with the same ref. A member who came and went within one tick, cy here, is in neither list, and nobody sees them.</li>
+  <li><strong>A joiner's <code>presence_state</code> and the diff after it overlap.</strong> bob's state already lists ada and bob, and the diff lists them again. Keying by ref makes the overlap harmless.</li>
+  <li><strong>App frames are sent exactly as given.</strong> The hub adds nothing to them, so an existing page keeps its own protocol.</li>
+  <li><strong><code>diffs: false</code></strong> turns off <code>presence_state</code> and <code>presence_diff</code> entirely. <code>/cursor-tracker</code> uses it because its own <code>"users"</code> frame already carries the room. It builds that frame from <code>:list</code>.</li>
+  <li><strong><code>format</code></strong> is for a client that wants another shape. The iOS blinks app speaks Phoenix v2, <code>[join_ref, ref, topic, event, payload]</code>, and a test covers a v2 formatter.</li>
+</ul>
+
+<h2 id="bounds">Bounds<a class="anchor" href="#bounds">#</a></h2>
+<ul>
+  <li><strong>Inbound:</strong> a token bucket per socket, <code>ROOMS_RATE</code> = 30 frames a second with bursts of <code>ROOMS_BURST</code> = 60. Seventy frames at the same instant:
+<pre><code>ok: 60, limited: 10</code></pre></li>
+  <li><strong>Outbound:</strong> a socket owed more than <code>ROOMS_MAX_BYTES</code> (262144) in one flush is not written. It leaves every topic, and its fd comes back in <code>kicked</code> for <code>main.blimp</code> to close. The hub does not drop frames and carry on, because the page would then show a room that is not the room.</li>
+</ul>
+
+<h2 id="not-done">What does not work<a class="anchor" href="#not-done">#</a></h2>
+
+<div class="bad"><strong>A slow reader can still stop the whole site.</strong> <code>tcp_write</code> either takes all of its data or blocks the only thread until 10 s pass with nothing taken. <code>tcp_poll</code> reports only readability, and the runtime has no write that takes what fits and returns. The PR's probe connects a peer that never reads, and here is my run of it:
+<pre><code>"64KB: ok in 0ms"
+"64KB more: ok in 0ms"
+"4MB more: error in 15117ms"
+"FAIL: tcp_write blocked the only thread; there is no write that takes what fits and returns (wanted: tcp_write_some(fd, data) -&gt; bytes taken, or tcp_poll reporting writability)"</code></pre>
+The PR measured 20.3 s for the same write. The 256 KB bound only limits how much one tick adds to a stalled socket's backlog. The PR reports that loopback absorbs about 768 KB before the first write blocks. The fix needs a runtime primitive, <code>tcp_write_some</code> or write interest in <code>tcp_poll</code>, and then <code>:flush</code> is the only place that needs to change. That primitive is being added to the interpreter as I write this, on the Blimp repo's branch <code>35-io-nonblocking</code>, and the rooms library does not use it yet.</div>
+
+<ul>
+  <li><strong><code>:send</code> to a socket in no topic is dropped silently.</strong> <code>:flush</code> only walks sockets that have joined something, so a frame for any other fd disappears, and the flush reports nothing:
+<pre><code class="blimp">hub &lt;- :send(-7, "{\"t\":\"hello\"}")
+hub &lt;- :flush      # {"sockets":0,"frames":0,"bytes":0,"kicked":[]}
+hub &lt;- :sent(-7)   # []</code></pre>
+  Join the socket to a topic first, or write to it directly.</li>
+  <li><strong>Calling <code>:open</code> again replaces both options.</strong> <code>:open("t", %{format: v2})</code> followed by <code>:open("t", %{})</code> leaves the topic with the default format. Its next <code>presence_state</code> was <code>{"t":"presence_state",...}</code>, not a v2 array. Pass every option each time.</li>
+  <li><strong>It costs more than the hand-written loop it replaces.</strong> The PR measured about 1.8 times the cursor room's old tick: 1450 µs against 2575 µs at 100 visitors. A move is now two hub calls instead of one <code>put</code>. When everyone joins in the same tick, presence is quadratic, because each joiner's state lists everyone before it: 250 joins took 45 ms, and their flush 44 ms. I did not re-run these benchmarks.</li>
+  <li><strong>The limits are global constants.</strong> There is no per-topic or per-socket rate.</li>
+  <li><strong>Nothing live exercises the kick.</strong> A cursor page is never owed 256 KB in one tick. The hub side is tested, but the close in <code>main.blimp</code> is not.</li>
+</ul>
+
+</main>
+<footer>
+  Written against blog commit <code>68f5fa1</code> (PR #102). The outputs are from runs of that commit's build. If the code and this page disagree, the code is right and this page has a bug.
+</footer>
+<script src="/tutorial/blimp-highlight.js"></script>
+<script>
+  if (window.blimpHighlight) {
+    document.querySelectorAll('pre code.blimp').forEach(function (el) {
+      el.innerHTML = window.blimpHighlight(el.textContent);
+    });
+  }
+</script>
+</body>
+</html>
