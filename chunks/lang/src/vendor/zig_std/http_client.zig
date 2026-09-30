@@ -361,14 +361,21 @@ pub const Connection = struct {
                         .read_buffer = tls_read_buffer,
                         .write_buffer = socket_write_buffer,
                         .entropy = &random_buffer,
-                        .realtime_now = client.now.?,
+                        // Blimp: `orelse`, not `.?`. A redirect from http:// to
+                        // https:// reached here with `now` never set, because
+                        // only `request` loaded the CA bundle, and the `.?` killed
+                        // the process; `redirect` now loads it too, and if
+                        // anything else ever skips it, it is an error, not a panic.
+                        .realtime_now = client.now orelse return error.CertificateBundleNotLoaded,
                         // This is appropriate for HTTPS because the HTTP headers contain
                         // the content length which is used to detect truncation attacks.
                         .allow_truncation_attacks = true,
                     },
                 ) catch |err| switch (err) {
-                    error.WriteFailed => return tls.connection.stream_writer.err.?,
-                    error.ReadFailed => return tls.connection.stream_reader.err.?,
+                    // Blimp: `orelse`, not `.?`: a failure the stream did not
+                    // explain is still an error, not a panic.
+                    error.WriteFailed => return tls.connection.stream_writer.err orelse error.WriteFailed,
+                    error.ReadFailed => return tls.connection.stream_reader.err orelse error.ReadFailed,
                     else => |e| return e,
                 },
             };
@@ -1272,6 +1279,10 @@ pub const Request = struct {
             return error.RedirectRequiresResend;
         }
 
+        // Blimp: an http:// request never loaded the CA bundle (`request` does
+        // that only for https://), so a redirect to https:// went into the TLS
+        // handshake with `client.now` null and panicked.
+        if (protocol == .tls) try r.client.loadCaBundle();
         const new_connection = try r.client.connect(new_host, uriPort(new_uri, protocol), protocol);
         r.uri = new_uri;
         r.connection = new_connection;
@@ -1637,6 +1648,31 @@ pub fn connect(
     return connection;
 }
 
+/// Loads the system's root certificates, once per client, before the first
+/// TLS connection. Blimp: moved out of `request` so that `Request.redirect`
+/// can call it too; an http:// request that redirects to https:// never
+/// passed through here, and its TLS handshake panicked on `client.now.?`.
+fn loadCaBundle(client: *Client) error{ Canceled, CertificateBundleLoadFailure }!void {
+    if (disable_tls) return;
+    const io = client.io;
+    {
+        try client.ca_bundle_lock.lockShared(io);
+        defer client.ca_bundle_lock.unlockShared(io);
+        if (client.now != null) return;
+    }
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(client.allocator);
+    const now = Io.Clock.real.now(io);
+    bundle.rescan(client.allocator, io, now) catch |err| switch (err) {
+        error.Canceled => |e| return e,
+        else => return error.CertificateBundleLoadFailure,
+    };
+    try client.ca_bundle_lock.lock(io);
+    defer client.ca_bundle_lock.unlock(io);
+    client.now = now;
+    std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
+}
+
 pub const RequestError = ConnectTcpError || error{
     UnsupportedUriScheme,
     UriMissingHost,
@@ -1697,8 +1733,6 @@ pub fn request(
     uri: Uri,
     options: RequestOptions,
 ) RequestError!Request {
-    const io = client.io;
-
     if (std.debug.runtime_safety) {
         for (options.extra_headers) |header| {
             assert(header.name.len != 0);
@@ -1715,25 +1749,7 @@ pub fn request(
 
     const protocol = Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
 
-    if (protocol == .tls) tls: {
-        if (disable_tls) unreachable;
-        {
-            try client.ca_bundle_lock.lockShared(io);
-            defer client.ca_bundle_lock.unlockShared(io);
-            if (client.now != null) break :tls;
-        }
-        var bundle: std.crypto.Certificate.Bundle = .empty;
-        defer bundle.deinit(client.allocator);
-        const now = Io.Clock.real.now(io);
-        bundle.rescan(client.allocator, io, now) catch |err| switch (err) {
-            error.Canceled => |e| return e,
-            else => return error.CertificateBundleLoadFailure,
-        };
-        try client.ca_bundle_lock.lock(io);
-        defer client.ca_bundle_lock.unlock(io);
-        client.now = now;
-        std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
-    }
+    if (protocol == .tls) try client.loadCaBundle();
 
     const connection = options.connection orelse c: {
         var host_name_buffer: [HostName.max_len]u8 = undefined;

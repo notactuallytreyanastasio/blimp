@@ -3522,7 +3522,10 @@ fn httpWorker(slot: *HttpSlot) void {
         slot.reason = switch (err) {
             // which handshake failure: an expired certificate and a server
             // with no cipher suite in common are both TlsInitializationFailed
-            error.TlsInitializationFailed => std.fmt.bufPrint(&slot.reason_buf, "TlsInitializationFailed: {s}", .{@errorName(client.tls_init_error.?)}) catch @errorName(err),
+            error.TlsInitializationFailed => if (client.tls_init_error) |why|
+                std.fmt.bufPrint(&slot.reason_buf, "TlsInitializationFailed: {s}", .{@errorName(why)}) catch @errorName(err)
+            else
+                @errorName(err),
             else => @errorName(err),
         };
         slot.state.store(3, .release);
@@ -3631,6 +3634,123 @@ fn builtinHttpResult(allocator: std.mem.Allocator, args: []const *const Value) E
     httpFree(slot);
     if (items[0].atom[0] == 'e') return make(allocator, .{ .tuple = items[0..2] });
     return make(allocator, .{ .tuple = items });
+}
+
+// ============================================================
+// http_start: what a remote server does is never a panic
+// ============================================================
+
+/// A loopback HTTP/1.1 server, one thread per connection, where every path
+/// is a way for a response to go wrong.
+const HttpBadServer = struct {
+    listen_fd: c_int,
+    port: u16,
+
+    fn start() !*HttpBadServer {
+        const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+        if (fd < 0) return error.SocketFailed;
+        var addr = std.mem.zeroes(std.posix.sockaddr.in);
+        addr.family = std.posix.AF.INET;
+        addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
+        if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0) return error.BindFailed;
+        if (std.c.listen(fd, 64) < 0) return error.ListenFailed;
+        var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+        _ = std.c.getsockname(fd, @ptrCast(&addr), &len);
+        const s = try std.heap.page_allocator.create(HttpBadServer);
+        s.* = .{ .listen_fd = fd, .port = std.mem.bigToNative(u16, addr.port) };
+        const t = try std.Thread.spawn(.{}, acceptLoop, .{s});
+        t.detach();
+        return s;
+    }
+
+    fn acceptLoop(s: *HttpBadServer) void {
+        while (true) {
+            const c = std.c.accept(s.listen_fd, null, null);
+            if (c < 0) return;
+            const t = std.Thread.spawn(.{}, serveOne, .{ s, c }) catch {
+                _ = std.c.close(c);
+                continue;
+            };
+            t.detach();
+        }
+    }
+
+    fn send(c: c_int, bytes: []const u8) void {
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const n = std.c.write(c, bytes[at..].ptr, bytes.len - at);
+            if (n <= 0) return;
+            at += @intCast(n);
+        }
+    }
+
+    fn serveOne(s: *HttpBadServer, c: c_int) void {
+        defer _ = std.c.close(c);
+        var buf: [4096]u8 = undefined;
+        var got: usize = 0;
+        while (std.mem.indexOf(u8, buf[0..got], "\r\n\r\n") == null) {
+            if (got == buf.len) return;
+            const n = std.c.read(c, buf[got..].ptr, buf.len - got);
+            if (n <= 0) return;
+            got += @intCast(n);
+            if (buf[0] == 0x16) return; // a TLS ClientHello: hang up on it
+        }
+        const line_end = std.mem.indexOf(u8, buf[0..got], "\r\n").?;
+        var parts = std.mem.splitScalar(u8, buf[0..line_end], ' ');
+        _ = parts.next();
+        const path = parts.next() orelse "/";
+        var out: [256]u8 = undefined;
+        const eq = std.mem.eql;
+        if (eq(u8, path, "/ok")) {
+            send(c, "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\narrived");
+        } else if (eq(u8, path, "/to-https")) {
+            // this same port, as https: the handshake fails, but first the
+            // client has to get as far as starting one
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 301 Moved\r\nLocation: https://127.0.0.1:{d}/ok\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{s.port}) catch return);
+        } else {
+            send(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    }
+};
+
+fn httpTestNap(ms: u32) void {
+    var ts: std.c.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @as(isize, ms % 1000) * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&ts, null);
+}
+
+/// http_start then http_result until it answers, or 20s.
+fn httpTestRequest(a: std.mem.Allocator, method: []const u8, url: []const u8, headers: *const Value) !*const Value {
+    const h = try builtinHttpStart(a, &.{ try make(a, .{ .string = method }), try make(a, .{ .string = url }), headers, try make(a, .{ .string = "" }) });
+    try std.testing.expect(h.integer >= 0);
+    var tries: usize = 0;
+    while (tries < 4000) : (tries += 1) {
+        const r = try builtinHttpResult(a, &.{h});
+        if (r.* != .nil) return r;
+        httpTestNap(5);
+    }
+    return error.NeverAnswered;
+}
+
+test "http_start: an http:// url that redirects to https:// reaches the TLS handshake instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+    var url_buf: [96]u8 = undefined;
+    // The https:// side is this plain server, so the handshake fails; what
+    // matters is that it is attempted. On main this panicked on `client.now.?`
+    // before the ClientHello was written: only a request that *started* as
+    // https:// loaded the CA bundle and set the clock.
+    const r = try httpTestRequest(a, "GET", try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/to-https", .{srv.port}), try make(a, .nil));
+    try std.testing.expectEqualStrings("error", r.tuple[0].atom);
+    std.testing.expect(std.mem.startsWith(u8, r.tuple[1].string, "TlsInitializationFailed: ")) catch |err| {
+        std.debug.print("got {s}\n", .{r.tuple[1].string});
+        return err;
+    };
 }
 
 // ── A WebSocket client, without stopping the program ─────────────────────
