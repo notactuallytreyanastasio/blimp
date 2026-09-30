@@ -1,3 +1,7 @@
+//! Zig 0.16.0's lib/std/compress/flate/token.zig, vendored into Blimp
+//! unchanged but for this comment: flate_decompress.zig needs it, and std
+//! does not export it.
+//!
 const std = @import("std");
 const builtin = @import("builtin");
 

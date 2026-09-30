@@ -1,4 +1,20 @@
-const std = @import("../../std.zig");
+//! Zig 0.16.0's lib/std/compress/flate/Decompress.zig, vendored into Blimp.
+//!
+//! http_start's worker decompresses gzip and deflate bodies with it, and
+//! upstream's panics on a body that is cut off: a gzip response whose
+//! connection closed early killed the whole process (a safe build asserts in
+//! `Reader.toss`). What differs from upstream, each marked "Blimp:" below:
+//!
+//!  1. `tossBitsShort` checked `buffered * 8 + consumed_bits < n` where it
+//!     means `buffered * 8 - consumed_bits < n`: with a partly consumed last
+//!     byte it tossed a byte that was not there. Now EndOfStream, which is
+//!     `error.ReadFailed` with `err` set, like every other truncation.
+//!  2. `@import("std")` and `flate_token.zig` instead of paths in the std tree.
+//!  3. Upstream's tests that read its testdata/fuzz corpus are gone: the
+//!     installed Zig lib does not ship the corpus. The truncation and
+//!     corruption tests at the end are Blimp's.
+//!
+const std = @import("std"); // Blimp
 const assert = std.debug.assert;
 const flate = std.compress.flate;
 const testing = std.testing;
@@ -7,7 +23,7 @@ const Reader = std.Io.Reader;
 const Container = flate.Container;
 
 const Decompress = @This();
-const token = @import("token.zig");
+const token = @import("flate_token.zig"); // Blimp
 
 input: *Reader,
 consumed_bits: u3,
@@ -579,7 +595,8 @@ fn peekBitsShortEnding(d: *Decompress, n: u4) !u16 {
 }
 
 fn tossBitsShort(d: *Decompress, n: u4) !void {
-    if (d.input.bufferedLen() * 8 + d.consumed_bits < n) return error.EndOfStream;
+    // Blimp: consumed bits are bits no longer there; upstream added them.
+    if (d.input.bufferedLen() * 8 < @as(usize, n) + d.consumed_bits) return error.EndOfStream;
     d.tossBits(n);
 }
 
@@ -923,146 +940,8 @@ test "zlib decompress non compressed block (type 0)" {
     }, "Hello world\n");
 }
 
-test "failing end-of-stream" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/end-of-stream.input"), error.EndOfStream);
-}
-test "failing invalid-distance" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/invalid-distance.input"), error.InvalidMatch);
-}
-test "failing invalid-tree01" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/invalid-tree01.input"), error.IncompleteHuffmanTree);
-}
-test "failing invalid-tree02" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/invalid-tree02.input"), error.IncompleteHuffmanTree);
-}
-test "failing invalid-tree03" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/invalid-tree03.input"), error.IncompleteHuffmanTree);
-}
-test "failing lengths-overflow" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/lengths-overflow.input"), error.InvalidDynamicBlockHeader);
-}
-test "failing out-of-codes" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/out-of-codes.input"), error.InvalidCode);
-}
-test "failing puff01" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff01.input"), error.WrongStoredBlockNlen);
-}
-test "failing puff02" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff02.input"), error.EndOfStream);
-}
-test "failing puff04" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff04.input"), error.InvalidCode);
-}
-test "failing puff05" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff05.input"), error.EndOfStream);
-}
-test "failing puff06" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff06.input"), error.EndOfStream);
-}
-test "failing puff08" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff08.input"), error.InvalidCode);
-}
-test "failing puff10" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff10.input"), error.InvalidCode);
-}
-test "failing puff11" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff11.input"), error.InvalidMatch);
-}
-test "failing puff12" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff12.input"), error.InvalidDynamicBlockHeader);
-}
-test "failing puff13" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff13.input"), error.IncompleteHuffmanTree);
-}
-test "failing puff14" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff14.input"), error.EndOfStream);
-}
-test "failing puff15" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff15.input"), error.IncompleteHuffmanTree);
-}
-test "failing puff16" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff16.input"), error.InvalidDynamicBlockHeader);
-}
-test "failing puff17" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff17.input"), error.MissingEndOfBlockCode);
-}
-test "failing fuzz1" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/fuzz1.input"), error.InvalidDynamicBlockHeader);
-}
-test "failing fuzz2" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/fuzz2.input"), error.InvalidDynamicBlockHeader);
-}
-test "failing fuzz3" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/fuzz3.input"), error.InvalidMatch);
-}
-test "failing fuzz4" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/fuzz4.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff18" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff18.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff19" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff19.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff20" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff20.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff21" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff21.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff22" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff22.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff23" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff23.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff24" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff24.input"), error.IncompleteHuffmanTree);
-}
-test "failing puff25" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff25.input"), error.OversubscribedHuffmanTree);
-}
-test "failing puff26" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff26.input"), error.InvalidDynamicBlockHeader);
-}
-test "failing puff27" {
-    try testFailure(.raw, @embedFile("testdata/fuzz/puff27.input"), error.InvalidDynamicBlockHeader);
-}
-
-test "deflate-stream" {
-    try testDecompress(
-        .raw,
-        @embedFile("testdata/fuzz/deflate-stream.input"),
-        @embedFile("testdata/fuzz/deflate-stream.expect"),
-    );
-}
-
-test "empty-distance-alphabet01" {
-    try testDecompress(.raw, @embedFile("testdata/fuzz/empty-distance-alphabet01.input"), "");
-}
-
-test "empty-distance-alphabet02" {
-    try testDecompress(.raw, @embedFile("testdata/fuzz/empty-distance-alphabet02.input"), "");
-}
-
-test "puff03" {
-    try testDecompress(.raw, @embedFile("testdata/fuzz/puff03.input"), &.{0xa});
-}
-
-test "puff09" {
-    try testDecompress(.raw, @embedFile("testdata/fuzz/puff09.input"), "P");
-}
-
 test "invalid block type" {
     try testFailure(.raw, &[_]u8{0b110}, error.InvalidBlockType);
-}
-
-test "bug 18966" {
-    try testDecompress(
-        .gzip,
-        @embedFile("testdata/fuzz/bug_18966.input"),
-        @embedFile("testdata/fuzz/bug_18966.expect"),
-    );
 }
 
 test "reading into empty buffer" {
@@ -1171,4 +1050,57 @@ fn testDecompress(container: Container, compressed: []const u8, expected_plain: 
     const decompressed_len = try decompress.reader.streamRemaining(&aw.writer);
     try testing.expectEqual(expected_plain.len, decompressed_len);
     try testing.expectEqualSlices(u8, expected_plain, aw.written());
+}
+
+// ── Blimp: a body cut off or corrupted is an error, never a panic ────────
+
+const blimp_test_data = struct {
+    pub const hello_gz = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xed\xc4\x31\x0d\x00\x00\x08\x03\x30\x2b\x98\x23\xe1\x58\x82\xff\x0f\x11\xbc\xed\xd1\xe9\x64\x6b\x6c\xdb\xb6\x6d\xdb\xb6\x6d\xdb\xf6\xe3\x03\xc1\x37\x0c\x40\x70\x17\x00\x00";
+    pub const words_gz = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff\x95\x5a\x59\x6e\xdb\x40\x0c\xfd\xe7\x29\x74\x83\xfc\x07\x45\xef\x92\x16\x46\x12\xb4\x71\x8c\x44\x3f\xbd\x7d\x6d\x78\x16\xf2\x2d\xa3\x44\x41\x61\x59\x9a\x85\x43\x3e\x3e\x2e\xee\xe5\xe3\xfd\x72\xfa\xd8\xff\x6d\x3f\xde\x4e\xfb\xd3\xcf\xed\x65\xdf\x2f\x9f\x8f\x0f\x0f\xdb\xaf\xbf\xaf\xe7\x3f\x9f\xdb\xfb\xf3\xe3\xeb\xdb\xd3\xf3\x69\xbb\x5e\xe3\xfe\xd2\x27\xb5\x41\xd7\x6b\x7f\x39\xd1\x94\xb1\xd6\xb8\x19\xaf\x6e\xc3\xf3\xd2\x76\xdb\xb4\x2e\x8e\x49\xaf\xae\x57\x93\xff\xf7\xfb\x79\x3f\x9d\xf7\x39\xb8\x3d\xcf\xe2\xf7\x31\x73\x56\xd9\x6e\x9c\x4e\x9e\x3d\x6d\x1e\x45\xf2\x31\x2d\xae\x7f\xe3\x4b\xdf\xeb\x36\xbe\x6d\x56\xce\x9e\x64\x89\xbc\x44\x7f\x3e\x06\x4a\x6d\xb5\x15\x2f\x60\xc4\x58\x9a\x71\x8c\xe6\x9b\x9b\xe8\xbc\x63\x97\x25\x48\x0b\xf3\x0d\xe9\x1d\x31\x12\x24\xe5\x58\x2c\xb2\x52\xfb\x42\x49\x59\x8c\xa3\x24\x09\x1f\xf9\x7a\xc1\x22\xea\x15\x0b\x3a\x9e\x24\x5b\xe1\x36\x49\xaa\x04\xbf\x40\xf4\xf5\xcf\xf6\x5e\x88\xc1\xba\x9f\x40\x1d\xab\x66\x53\x2f\x6e\x92\x22\x95\x8f\x14\x70\x07\x9d\x0c\x0d\x85\x36\x16\x0e\x64\xa7\x14\x6b\x81\x4e\x14\xda\x18\x6b\xd1\xfe\x08\xff\x56\xec\x89\x41\xd2\xe0\x4d\x9c\xac\x6b\x1a\x90\xf0\xa0\x3c\x12\x27\x8e\xef\x6d\xe1\xfb\x55\x9e\xf6\x7f\x05\x4c\x6d\x78\x90\xe2\xac\x1b\x15\x1e\x0a\xa1\x3b\xcd\xa4\x77\x0b\x97\xc9\xf7\x47\xec\x84\xac\xfa\x22\x72\x10\x68\x79\x66\x72\x47\xc6\x62\x75\x98\xf6\x51\x21\x15\xf3\x46\x98\x68\xb2\x73\x55\x56\xa6\x32\x94\x11\xfc\x32\x6b\x33\x99\xb5\xe8\x27\x3d\x47\xe4\xb6\x55\x92\x1d\xf2\xa0\xb9\x7d\xb9\xcb\xfe\x2b\x4f\x5d\x3f\xa2\x9c\x07\x77\x1c\x97\x1c\xd6\x4f\x0b\x6c\x93\x47\x46\x1a\x9e\x7c\x0c\x36\xc8\x8b\xc4\xd8\xb1\xbd\x48\x3e\xd2\x9e\x30\x36\x14\x24\x34\x54\x75\x2a\xe0\xbc\x1d\x61\x01\xbc\x1e\x15\xfd\x69\xf3\xc4\xd3\x82\x7c\x0f\xb8\x7f\xe1\x6d\xe8\xc0\x59\x91\x31\xfd\x8c\x37\xa8\x5a\x64\xe7\x2b\x07\x21\x2e\xd2\xf1\xc4\x45\xb9\x45\x0e\x54\x59\x88\xf6\x31\xf1\xca\x8d\xa3\xe7\xfa\x38\xf4\x36\x94\xfa\x48\xfc\xea\x3d\x0d\x7b\x88\x10\x2d\x79\xc6\x14\x80\xb7\xe0\xdc\x85\x28\xe0\x8f\x4a\x40\x53\xa0\xe9\x21\xd1\x1c\x43\x61\x11\x48\x23\x93\x12\x31\xb5\x25\xdd\x7a\x3e\xa7\x7f\xc3\x60\x2c\x15\xc8\x01\x07\x0d\x20\xa9\xa9\x33\x50\x0c\x7b\x0a\xc6\x43\xc1\xc4\xe8\xd4\x88\x05\x95\xd7\x80\x11\x9b\xd6\x0f\x61\x68\x8a\x1a\xfc\x8e\x50\xc1\xea\xc4\x5a\x85\x12\x3f\xc2\xac\x0e\x17\x95\xc3\x31\xe3\xaa\xb6\x5e\xc6\xdd\xb9\x50\x75\x93\x60\x93\xe6\x03\x65\x0a\xca\xf7\x22\xef\x42\xb8\xde\x57\x57\x11\x9f\xf6\x54\xfe\x4a\x71\x57\x6b\x2e\x65\x2c\x92\x5b\x0a\x22\x26\x3c\x03\xce\x29\x63\x0b\xa1\xb8\xce\x11\xb5\x4c\x3f\x37\x13\xf4\x34\x29\xb9\x04\xbf\xe2\x28\x42\xca\x94\x6e\x5e\x46\x38\xd2\x67\xf7\xf9\x46\xf4\x5a\xf8\x9e\x70\x62\x3a\xea\x57\x2a\x7e\xde\x02\xd0\x42\x5a\x82\xe7\x82\xda\x65\x41\x55\x28\xc6\x7a\xfe\x64\x6f\xdc\x8f\xb3\x08\xa2\xbf\xe9\xcb\x5c\x7d\x5a\x80\xe3\x67\x41\x57\x89\x4a\x47\xc9\x74\xb1\x4d\x4e\xd5\x4a\x07\x41\x44\x7f\xc2\x31\x3a\xe5\xa6\x8a\x3c\x99\x2e\xab\xbe\x0c\xdf\xb4\x3d\xc9\xe4\xdc\x1c\x58\xb8\x0f\xda\x29\x8b\xa0\x5a\x03\x0e\x60\xd5\xa9\xd2\x84\x58\xc6\xc9\xc0\x34\x33\xc5\x69\x51\x1b\xcb\x4c\x9d\xb3\x13\x0d\x6e\x55\x8c\x30\xe9\xa8\x52\x55\xaa\x39\x6d\xc4\x05\xaf\xd0\xf9\x68\x6a\x35\x60\x29\x23\xeb\x9c\xe8\x3e\xd3\x27\x8c\x45\x3c\x5d\x9b\x2e\x08\xac\xb8\x0a\x68\x2e\xeb\x7e\x96\xbf\x18\xb5\xea\x53\x11\x12\x92\x69\x2c\x1d\x2f\x1a\x90\x66\x84\x79\xbb\x2c\xc3\x55\xaf\x61\xe2\x8c\x82\x17\x6b\x8b\xb3\x13\xa4\x38\x9f\x30\x2d\x02\x01\x82\x8c\x28\x81\xa7\x0c\xef\x2e\x14\x32\xd2\x65\x25\x31\xc2\xad\x6c\x69\xd2\x37\xdf\x97\x2c\x7e\xcb\xdb\x1d\xe5\xfd\x96\xcb\x4d\xab\xac\x6c\x27\xa3\x36\x07\x17\xec\x12\x88\x70\xa7\xf4\x24\x9b\xd4\xaa\xfd\xa6\x8b\xee\xdc\x62\xdc\xb8\xd1\xb5\x20\x9f\x75\xa9\x57\x58\x75\x51\x84\x47\xa7\x18\x5b\xea\xda\x64\x43\x25\xeb\x81\xfd\xf5\xf4\x55\x96\x1e\x2c\x70\x1e\x26\x82\x0e\xc7\x88\x02\x6e\x6e\xed\x49\x08\x42\xe3\x86\xa1\x39\x33\x0b\xca\xa6\x75\x60\xb6\x99\x5c\x45\x95\x28\xf2\xd4\x6c\x76\x6e\x50\xa2\x4a\x0b\xe3\xee\xd1\xac\x52\x19\x4e\x45\xc8\x3c\xec\x5f\xd8\xd4\xc9\xf9\x2b\xa7\x05\x78\x52\x9d\x3c\xa8\x80\x77\xec\x12\x8b\xba\x50\x76\x30\x45\x45\xb9\x42\x82\xab\x9c\xa8\xfb\xb8\x90\xac\xc6\x3f\x2c\x2f\x10\xbb\x36\x01\xa5\xce\x76\x71\x72\x91\x63\x1f\x37\x91\xf5\x2f\x2a\x1b\xf7\x42\x4d\xf9\x6b\xc1\xa2\x2d\x5c\x9b\xb9\x48\xbe\xa9\xe0\xea\xa5\x19\x67\xf8\xc7\x21\x7b\x71\xdc\xce\xb8\x32\x41\x90\x28\x40\xf2\xd8\x6c\xa3\x5a\x77\x15\x89\x4f\xd4\xcf\x90\x0e\x5c\xfe\x57\x96\x94\x7f\x55\x70\x6d\xd0\x60\x47\x70\xa9\x70\xe0\xfa\x70\x6e\xc0\xaa\x67\xde\x35\xac\xb2\xe4\x2f\x24\x2f\xf6\x37\x1f\x65\xcb\x74\x16\x4e\x4b\x6d\x04\xe3\xd4\x19\x8e\x27\x0b\x29\xd3\x0a\x0c\x91\xe5\xd7\x0f\x3a\x6b\xd6\x5e\x46\x9a\xac\x21\x54\x1e\x62\xe8\xad\xa0\xcd\x7a\x89\x75\x58\x22\x49\xf4\x55\xd6\x36\x4d\x31\xe4\xcd\x33\x85\x57\x29\x60\xce\x6c\x40\x94\xd3\xb6\x57\x96\x03\xa3\x2d\x92\x23\x03\x49\xf9\xa4\xa8\xe2\xbc\xbf\x32\xfc\x54\xaf\xd7\x35\x38\xf5\xef\x0a\x90\x48\xe9\xd8\xa9\x9f\xb6\xba\x99\x88\x4e\x36\x3d\x74\x8a\xba\x8a\xa0\xc7\x14\xbc\xc2\xc9\x1a\x09\x3a\xcf\xca\x84\xa2\x9b\x64\x94\xd4\x19\x91\x45\xd7\x51\xf5\x75\x7c\x8b\xdd\x39\xce\x51\xb5\x22\x9b\xf5\x94\x66\xae\x3a\x66\xac\x9a\x00\xff\xa1\x53\x9a\xc2\x78\xab\xbd\x59\x43\x58\xca\x45\xea\x8f\x97\xa6\x7f\x32\xcb\x7e\x9b\x1a\x85\x3e\xd0\xb7\x7a\x9a\xcb\xec\xd2\x26\xad\xf7\x4b\x31\x8d\xf8\x2f\x0c\xd2\x68\x5d\x15\xff\x01\x34\x42\xfd\xc9\xbd\x25\x00\x00";
+    pub const dyn_gz = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\x0b\xc9\x48\x55\x28\x2c\xcd\x4c\xce\x56\x48\x2a\xca\x2f\xcf\x53\x48\xcb\xaf\x50\xc8\x2a\xcd\x2d\x28\x56\xc8\x2f\x4b\x2d\x52\x28\x01\x4a\xe7\x24\x56\x55\x2a\xa4\xe4\xa7\xeb\x29\x84\xd0\x4c\xb1\x82\xa2\x92\xb2\x8a\xaa\x9a\xba\x86\xa6\x96\xb6\x8e\xae\x9e\xbe\x81\xa1\x91\xb1\x89\xa9\x99\xb9\x85\xa5\x95\xb5\x8d\xad\x9d\xbd\x83\xa3\x93\xb3\x8b\xab\x9b\xbb\x87\xa7\x97\xb7\x8f\xaf\x9f\x7f\x40\x60\x50\x70\x48\x68\x58\x78\x44\x64\x54\x74\x4c\x6c\x5c\x7c\x42\x62\x52\x72\x4a\x6a\x5a\x7a\x46\x66\x56\x76\x4e\x6e\x5e\x7e\x41\x61\x51\x71\x49\x69\x59\x79\x45\x65\x55\x75\x4d\x6d\x9d\x4d\x46\x49\x6e\x8e\x9d\x4d\x46\x6a\x62\x8a\x9d\x4d\x6e\x6a\x49\xa2\x42\x41\x51\x7e\x41\x6a\x51\x49\xa5\xad\x52\x7e\xba\x55\x49\x66\x49\x4e\xaa\x92\x42\x72\x7e\x5e\x49\x6a\x5e\x89\xad\x52\x52\x4e\x66\x5e\x76\xb1\x92\x9d\x8d\x3e\x44\x87\x3e\x58\x3b\x57\xc8\x68\x58\x8d\x86\xd5\x68\x58\x0d\x68\x58\x01\x00\xc6\x70\x7b\x2e\xb0\x04\x00\x00";
+    pub const dyn_plain_len = 1200;
+    pub const fixed_gz = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\x13\xcb\x48\xcd\xc9\xc9\x57\xc8\x40\x22\xd3\x32\x2b\x52\x53\x14\x32\x4a\xd3\xd2\x72\x13\xf3\x00\x89\xa4\xd2\x07\x1f\x00\x00\x00";
+};
+
+/// Decompresses `in` in both of the decompressor's modes (no buffer: it
+/// writes straight to the output; a window buffer: http.zig's choice) and
+/// says whether it finished. Any other ending than finished or ReadFailed
+/// with `err` set fails the test; a panic fails it harder.
+fn blimpTryDecompress(container: Container, in: []const u8, buffered: bool) !bool {
+    var reader: Reader = .fixed(in);
+    var aw: Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const window = try testing.allocator.alloc(u8, if (buffered) flate.max_window_len else 0);
+    defer testing.allocator.free(window);
+    var d: Decompress = .init(&reader, container, window);
+    _ = d.reader.streamRemaining(&aw.writer) catch |err| switch (err) {
+        error.ReadFailed => {
+            try testing.expect(d.err != null);
+            return false;
+        },
+        error.WriteFailed => return err,
+    };
+    return true;
+}
+
+test "Blimp: a gzip body cut off at any byte is an error, not a panic" {
+    for ([_][]const u8{ blimp_test_data.dyn_gz, blimp_test_data.fixed_gz, blimp_test_data.hello_gz, blimp_test_data.words_gz }) |gz| {
+        for ([_]bool{ false, true }) |buffered| {
+            for (0..gz.len) |n| {
+                try testing.expect(!try blimpTryDecompress(.gzip, gz[0..n], buffered));
+            }
+            try testing.expect(try blimpTryDecompress(.gzip, gz, buffered));
+        }
+    }
+}
+
+test "Blimp: a gzip body with any one bit flipped decompresses or is an error, not a panic" {
+    var buf: [blimp_test_data.dyn_gz.len]u8 = undefined;
+    for ([_]bool{ false, true }) |buffered| {
+        for (0..buf.len * 8) |bit| {
+            @memcpy(&buf, blimp_test_data.dyn_gz);
+            buf[bit / 8] ^= @as(u8, 1) << @intCast(bit % 8);
+            _ = try blimpTryDecompress(.gzip, &buf, buffered);
+        }
+    }
 }

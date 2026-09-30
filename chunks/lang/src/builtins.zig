@@ -3485,6 +3485,10 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
 // answer is given once; the handle is free after it. Bodies are capped at
 // 8 MiB, and 32 requests may be in flight. The WebAssembly build has no
 // threads and no sockets, and refuses both.
+//
+// Nothing the remote end does may stop the process: this is one thread of a
+// server that answers everyone. Every failure in the worker is an
+// {:error, reason}.
 
 const http_slots_max = 32;
 const http_body_max = 8 * 1024 * 1024;
@@ -3517,6 +3521,7 @@ fn httpWorker(slot: *HttpSlot) void {
         .payload = if (slot.body_in.len > 0) slot.body_in else null,
         .extra_headers = slot.headers,
         .response_writer = &out.writer,
+        .response_limit = http_body_max,
         .keep_alive = false,
     }) catch |err| {
         slot.reason = switch (err) {
@@ -3532,11 +3537,6 @@ fn httpWorker(slot: *HttpSlot) void {
         return;
     };
     const got = out.written();
-    if (got.len > http_body_max) {
-        slot.reason = "ResponseTooLarge";
-        slot.state.store(3, .release);
-        return;
-    }
     slot.body = pa.dupe(u8, got) catch {
         slot.reason = "OutOfMemory";
         slot.state.store(3, .release);
@@ -3641,10 +3641,15 @@ fn builtinHttpResult(allocator: std.mem.Allocator, args: []const *const Value) E
 // ============================================================
 
 /// A loopback HTTP/1.1 server, one thread per connection, where every path
-/// is a way for a response to go wrong.
+/// is a way for a response to go wrong. Before the tests below, every path
+/// but /ok either killed the process or got a wrong answer.
 const HttpBadServer = struct {
     listen_fd: c_int,
     port: u16,
+
+    // "hello " * 1000, gzip level 9, cut in half: a body whose deflate
+    // stream ends mid-symbol; std's flate decoder asserted on it
+    const gz_half = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xed\xc4\x31\x0d\x00\x00\x08\x03\x30\x2b\x98\x23\xe1\x58\x82\xff";
 
     fn start() !*HttpBadServer {
         const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
@@ -3684,6 +3689,12 @@ const HttpBadServer = struct {
         }
     }
 
+    /// Close with SO_LINGER 0: the client's next read is ECONNRESET.
+    fn reset(c: c_int) void {
+        const linger = extern struct { onoff: c_int, secs: c_int }{ .onoff = 1, .secs = 0 };
+        _ = std.c.setsockopt(c, std.posix.SOL.SOCKET, std.posix.SO.LINGER, std.mem.asBytes(&linger), @sizeOf(@TypeOf(linger)));
+    }
+
     fn serveOne(s: *HttpBadServer, c: c_int) void {
         defer _ = std.c.close(c);
         var buf: [4096]u8 = undefined;
@@ -3707,6 +3718,32 @@ const HttpBadServer = struct {
             // this same port, as https: the handshake fails, but first the
             // client has to get as far as starting one
             send(c, std.fmt.bufPrint(&out, "HTTP/1.1 301 Moved\r\nLocation: https://127.0.0.1:{d}/ok\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{s.port}) catch return);
+        } else if (eq(u8, path, "/reset-mid-body") or eq(u8, path, "/reset-mid-redirect")) {
+            const status = if (eq(u8, path, "/reset-mid-body")) "200 OK" else "302 Found\r\nLocation: /ok";
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 {s}\r\nContent-Length: 100000\r\nConnection: close\r\n\r\nyyyyyyyyyy", .{status}) catch return);
+            httpTestNap(100);
+            reset(c);
+        } else if (eq(u8, path, "/reset-mid-chunked")) {
+            send(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\na\r\nyyyyyyyyyy\r\n");
+            httpTestNap(100);
+            reset(c);
+        } else if (eq(u8, path, "/close-mid-body")) {
+            send(c, "HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\nyyyyyyyyyy");
+        } else if (eq(u8, path, "/gzip-cut")) {
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{gz_half.len}) catch return);
+            send(c, gz_half);
+        } else if (eq(u8, path, "/endless")) {
+            // no length, never ends: the cap has to stop it as it arrives
+            send(c, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+            const chunk: [65536]u8 = @splat('e');
+            while (std.c.write(c, &chunk, chunk.len) > 0) {}
+        } else if (eq(u8, path, "/head-with-length")) {
+            // a HEAD answer names a length it will never send; hold the
+            // connection open so a client that waits for it is caught
+            send(c, "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n");
+            httpTestNap(3000);
+        } else if (eq(u8, path, "/bad-status")) {
+            send(c, "HTTP/1.1 2x0 Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         } else {
             send(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
@@ -3729,6 +3766,55 @@ fn httpTestRequest(a: std.mem.Allocator, method: []const u8, url: []const u8, he
         httpTestNap(5);
     }
     return error.NeverAnswered;
+}
+
+fn httpTestExpectError(a: std.mem.Allocator, srv: *HttpBadServer, method: []const u8, path: []const u8, reason: []const u8) !void {
+    var url_buf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}{s}", .{ srv.port, path });
+    const r = try httpTestRequest(a, method, url, try make(a, .nil));
+    std.testing.expectEqualStrings("error", r.tuple[0].atom) catch |err| {
+        std.debug.print("{s} {s}: {s} {d}\n", .{ method, path, r.tuple[0].atom, r.tuple[1].integer });
+        return err;
+    };
+    std.testing.expectEqualStrings(reason, r.tuple[1].string) catch |err| {
+        std.debug.print("{s} {s}\n", .{ method, path });
+        return err;
+    };
+}
+
+test "http_start: a server that resets, cuts off, never ends or garbles a response is an {:error, reason}" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+
+    // each of these killed the process: std's fetch answers a body read
+    // that failed underneath HTTP with `bodyErr().?`, and body_err is null
+    try httpTestExpectError(a, srv, "GET", "/reset-mid-body", "ConnectionResetByPeer");
+    try httpTestExpectError(a, srv, "GET", "/reset-mid-chunked", "ConnectionResetByPeer");
+    try httpTestExpectError(a, srv, "GET", "/reset-mid-redirect", "ConnectionResetByPeer");
+    // std's flate decoder asserted on a gzip stream cut off mid-symbol
+    try httpTestExpectError(a, srv, "GET", "/gzip-cut", "HttpBodyTruncated");
+    // read until the heap was gone, then asked the kernel for an EINVAL read
+    try httpTestExpectError(a, srv, "GET", "/endless", "ResponseTooLarge");
+    // these did not panic, but answered wrong: {:ok, 200, <1000 of 100000
+    // bytes>} and {:ok, 920, ""}
+    try httpTestExpectError(a, srv, "GET", "/close-mid-body", "HttpBodyTruncated");
+    try httpTestExpectError(a, srv, "GET", "/bad-status", "HttpHeadersInvalid");
+
+    var url_buf: [96]u8 = undefined;
+    // a HEAD answered with a Content-Length waited for a body that never comes
+    const t0 = monoMs();
+    const head = try httpTestRequest(a, "HEAD", try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/head-with-length", .{srv.port}), try make(a, .nil));
+    try std.testing.expectEqual(@as(i64, 200), head.tuple[1].integer);
+    try std.testing.expect(monoMs() - t0 < 2000);
+
+    const ok = try httpTestRequest(a, "GET", try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/ok", .{srv.port}), try make(a, .nil));
+    try std.testing.expectEqualStrings("arrived", ok.tuple[2].string);
 }
 
 test "http_start: an http:// url that redirects to https:// reaches the TLS handshake instead of panicking" {
