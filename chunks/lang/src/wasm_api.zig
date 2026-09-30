@@ -14,6 +14,7 @@ extern "env" fn blimp_js_error(ptr: [*]const u8, len: u32) void;
 
 const allocator = std.heap.wasm_allocator;
 const gc = @import("gc.zig");
+const wasm_bufs = @import("wasm_bufs.zig");
 
 var evaluator: ?Evaluator = null;
 
@@ -59,27 +60,65 @@ export fn blimp_heap_bytes() u32 {
     return @intCast(heaps[live_heap].queryCapacity());
 }
 
-// Result/error buffers - we write into these, JS reads them
-var result_buf: [16384]u8 = undefined;
-var result_len: u32 = 0;
-var error_buf: [4096]u8 = undefined;
-var error_len: u32 = 0;
+// Everything below is written here and read by JS through a pointer and a
+// length. The result, view, state and reply buffers grow to fit: each was a
+// fixed array once (16 KiB, 64 KiB, 256 KiB), and a write past the end was
+// dropped without a word, so the page parsed cut-off JSON -- nine chess
+// boards on one page "did not produce a view". A buffer that grows moves,
+// so the pointer is only good until the next call; blimp.js asks for it
+// after every call.
+var result_buf: std.ArrayListUnmanaged(u8) = .empty;
+// An error keeps a cap, and says when it hit it (see wasm_bufs.capError).
+var error_buf: std.ArrayListUnmanaged(u8) = .empty;
 // The state JSON grows with the program. It was a fixed 256 KiB, and a
 // write past the end was dropped without a word, so a big program -- Snake
 // compiled from Temper makes an actor of every point, 800 after a few
 // frames -- got cut-off JSON, and getState() answered with nothing at all.
 var state_buf: std.ArrayListUnmanaged(u8) = .empty;
 var state_len: u32 = 0;
-// Messages accumulate here, already serialized, across evals until JS reads
-// the state (a view host runs two evals per send and reads once). Value
-// pointers in eval.msg_log only live for one eval, so the text is kept.
-var messages_buf: [196608]u8 = undefined;
-var messages_len: u32 = 0;
+// Messages accumulate here, already serialized, across evals and sends until
+// JS reads the state (a view host runs two evals per send and reads once).
+// Value pointers in eval.msg_log only live for one eval, so the text is
+// kept. The log has a cap, and past it drops the oldest and counts them in
+// the state's "messages_dropped" (see wasm_bufs.MessageLog for why a cap).
+const messages_cap = 196608;
+var messages: wasm_bufs.MessageLog = .init(messages_cap);
+var message_entry: std.ArrayListUnmanaged(u8) = .empty;
 var messages_read: bool = false;
 var last_status: i32 = 0;
-var view_buf: [65536]u8 = undefined;
-var view_len: u32 = 0;
+var view_buf: std.ArrayListUnmanaged(u8) = .empty;
 var has_view: bool = false;
+
+/// Replace the error text with `fmt` and `args`, cut and marked at the cap.
+fn setError(comptime fmt: []const u8, args: anytype) void {
+    error_buf.clearRetainingCapacity();
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &error_buf);
+    aw.writer.print(fmt, args) catch {};
+    error_buf = aw.toArrayList();
+    wasm_bufs.capError(&error_buf, wasm_bufs.error_cap);
+}
+
+/// The evaluator's error as the error text, or `fallback` when there is none.
+fn setEvalError(eval: *Evaluator, fallback: []const u8) void {
+    const err = eval.last_error orelse return setError("{s}", .{fallback});
+    error_buf.clearRetainingCapacity();
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &error_buf);
+    err.formatPlain(&aw.writer);
+    error_buf = aw.toArrayList();
+    wasm_bufs.capError(&error_buf, wasm_bufs.error_cap);
+}
+
+/// Write `val` into `buf`, replacing what was there, as view JSON or as the
+/// REPL's text.
+fn writeValueInto(buf: *std.ArrayListUnmanaged(u8), val: *const Value, comptime as: enum { view_json, text }) void {
+    buf.clearRetainingCapacity();
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, buf);
+    switch (as) {
+        .view_json => writeViewJson(&aw.writer, val),
+        .text => val.format(&aw.writer),
+    }
+    buf.* = aw.toArrayList();
+}
 
 // Message log - track recent sends for canvas rays
 const MaxMessages = 64;
@@ -97,8 +136,8 @@ var message_count: u32 = 0;
 /// Initialize the Blimp interpreter. Call once before eval.
 export fn blimp_init() void {
     evaluator = freshEvaluator();
-    result_len = 0;
-    error_len = 0;
+    result_buf.clearRetainingCapacity();
+    error_buf.clearRetainingCapacity();
     state_len = 0;
     last_status = 0;
 }
@@ -125,12 +164,11 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     var parser = Parser.init(allocator, source);
     const nodes = parser.parseFile() catch {
         // Parse error
-        const msg = std.fmt.bufPrint(&error_buf, "Parse error at line {}, col {}", .{
+        setError("Parse error at line {}, col {}", .{
             parser.current.line,
             parser.current.col,
-        }) catch "Parse error";
-        error_len = @intCast(msg.len);
-        result_len = 0;
+        });
+        result_buf.clearRetainingCapacity();
         last_status = 1;
         return 1;
     };
@@ -139,16 +177,8 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     var last_value: ?*const Value = null;
     for (nodes) |node| {
         last_value = eval.eval(node) catch {
-            // Eval error
-            if (eval.last_error) |err| {
-                var fbs = std.Io.Writer.fixed(&error_buf);
-                err.formatPlain(&fbs);
-                error_len = @intCast(fbs.buffered().len);
-            } else {
-                const msg = std.fmt.bufPrint(&error_buf, "Evaluation error", .{}) catch "Evaluation error";
-                error_len = @intCast(msg.len);
-            }
-            result_len = 0;
+            setEvalError(eval, "Evaluation error");
+            result_buf.clearRetainingCapacity();
             last_status = 2;
             compactHeap();
             return 2;
@@ -160,26 +190,19 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
         // Check if result is a view_node -- serialize as JSON for DOM rendering
         if (val.* == .view_node) {
             has_view = true;
-            var vfbs = std.Io.Writer.fixed(&view_buf);
-            writeViewJson(&vfbs, val);
-            view_len = @intCast(vfbs.buffered().len);
-            // Also set text result for REPL display
-            var fbs = std.Io.Writer.fixed(&result_buf);
-            val.format(&fbs);
-            result_len = @intCast(fbs.buffered().len);
+            writeValueInto(&view_buf, val, .view_json);
         } else {
             has_view = false;
-            view_len = 0;
-            var fbs = std.Io.Writer.fixed(&result_buf);
-            val.format(&fbs);
-            result_len = @intCast(fbs.buffered().len);
+            view_buf.clearRetainingCapacity();
         }
+        // The text result, for the REPL, a view's too
+        writeValueInto(&result_buf, val, .text);
     } else {
         has_view = false;
-        view_len = 0;
-        result_len = 0;
+        view_buf.clearRetainingCapacity();
+        result_buf.clearRetainingCapacity();
     }
-    error_len = 0;
+    error_buf.clearRetainingCapacity();
     last_status = 0;
 
     // Update state JSON for sidebar
@@ -341,13 +364,14 @@ fn updateStateJson() void {
     // Message log for canvas rays and the inspector: this eval's entries are
     // appended to the accumulated text, which JS clears by reading it.
     if (messages_read) {
-        messages_len = 0;
+        messages.clear();
         messages_read = false;
     }
     appendMessagesJson(eval);
+    messages.trim();
     w.writeAll("],\"messages\":[") catch {};
-    w.writeAll(messages_buf[0..messages_len]) catch {};
-    w.writeAll("]}") catch {};
+    messages.writeJoined(w) catch {};
+    w.print("],\"messages_dropped\":{d}}}", .{messages.dropped}) catch {};
 
     eval.msg_log_count = 0;
 
@@ -358,23 +382,22 @@ fn updateStateJson() void {
 /// A send's messages go where an eval's do, into the text getState hands
 /// the canvas (and clears on reading): a page that runs its program by
 /// send -- every game on the blog -- drew its actors with no rays between
-/// them, because send cleared the log and nothing had read it. The text is
-/// bounded; what does not fit is dropped until the next read.
+/// them, because send cleared the log and nothing had read it. The log is
+/// bounded; past the cap the oldest go, and the state says how many.
 fn keepSendMessages(eval: *Evaluator) void {
     if (messages_read) {
-        messages_len = 0;
+        messages.clear();
         messages_read = false;
     }
     appendMessagesJson(eval);
 }
 
 fn appendMessagesJson(eval: *Evaluator) void {
-    var fbs = std.Io.Writer.fixed(messages_buf[messages_len..]);
-    const w = &fbs;
     for (0..eval.msg_log_count) |mi| {
-        const start = fbs.buffered().len;
         const msg = eval.msg_log[mi];
-        if (messages_len > 0 or mi > 0) w.writeAll(",") catch {};
+        message_entry.clearRetainingCapacity();
+        var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &message_entry);
+        const w = &aw.writer;
         w.writeAll("{\"target\":\"ref<") catch {};
         w.writeAll(msg.target_type) catch {};
         w.writeAll(":") catch {};
@@ -402,17 +425,10 @@ fn appendMessagesJson(eval: *Evaluator) void {
         } else {
             w.writeAll("null") catch {};
         }
-        w.writeAll("}") catch {
-            // out of room: drop this partial entry, keep what fit
-            fbs.end = start;
-            break;
-        };
-        if (fbs.buffered().len >= fbs.buffer.len - 1) {
-            fbs.end = start;
-            break;
-        }
+        w.writeAll("}") catch {};
+        message_entry = aw.toArrayList();
+        messages.push(allocator, message_entry.items);
     }
-    messages_len += @intCast(fbs.buffered().len);
 }
 
 /// Serialize a view_node tree as JSON for the JS renderer.
@@ -528,26 +544,21 @@ export fn blimp_send(
 
     var parser = Parser.init(heap(), src);
     const nodes = parser.parseFile() catch {
-        const m = std.fmt.bufPrint(&error_buf, "Parse error in send: {s}", .{src}) catch "Parse error in send";
-        error_len = @intCast(m.len);
+        setError("Parse error in send: {s}", .{src});
         compactHeap();
         return 1;
     };
     if (nodes.len != 1) {
-        const m = std.fmt.bufPrint(&error_buf, "A send must be one expression: {s}", .{src}) catch "A send must be one expression";
-        error_len = @intCast(m.len);
+        setError("A send must be one expression: {s}", .{src});
         compactHeap();
         return 1;
     }
 
     const value = eval.eval(nodes[0]) catch {
-        if (eval.last_error) |err| {
-            var fbs = std.Io.Writer.fixed(&error_buf);
-            err.formatPlain(&fbs);
-            error_len = @intCast(fbs.buffered().len);
+        if (eval.last_error == null) {
+            setError("Evaluation error in send: {s}", .{src});
         } else {
-            const m = std.fmt.bufPrint(&error_buf, "Evaluation error in send: {s}", .{src}) catch "Evaluation error";
-            error_len = @intCast(m.len);
+            setEvalError(eval, "");
         }
         keepSendMessages(eval);
         eval.msg_log_count = 0;
@@ -563,11 +574,10 @@ export fn blimp_send(
     eval.msg_log_count = 0;
     compactHeap();
     if (!ok) {
-        const m = std.fmt.bufPrint(&error_buf, "The reply to {s} cannot be written as JSON", .{src}) catch "Reply cannot be written as JSON";
-        error_len = @intCast(m.len);
+        setError("The reply to {s} cannot be written as JSON", .{src});
         return 4;
     }
-    error_len = 0;
+    error_buf.clearRetainingCapacity();
     return 0;
 }
 
@@ -647,32 +657,32 @@ export fn blimp_has_view() i32 {
 
 /// Get the view JSON pointer.
 export fn blimp_get_view_ptr() [*]const u8 {
-    return &view_buf;
+    return view_buf.items.ptr;
 }
 
 /// Get the view JSON length.
 export fn blimp_get_view_len() u32 {
-    return view_len;
+    return @intCast(view_buf.items.len);
 }
 
 /// Get the result string pointer.
 export fn blimp_get_result_ptr() [*]const u8 {
-    return &result_buf;
+    return result_buf.items.ptr;
 }
 
 /// Get the result string length.
 export fn blimp_get_result_len() u32 {
-    return result_len;
+    return @intCast(result_buf.items.len);
 }
 
 /// Get the error string pointer.
 export fn blimp_get_error_ptr() [*]const u8 {
-    return &error_buf;
+    return error_buf.items.ptr;
 }
 
 /// Get the error string length.
 export fn blimp_get_error_len() u32 {
-    return error_len;
+    return @intCast(error_buf.items.len);
 }
 
 /// Rebuild the state JSON from the program as it is now. eval rebuilds it
@@ -697,12 +707,12 @@ export fn blimp_get_state_len() u32 {
 /// Reset the interpreter to a clean state.
 export fn blimp_reset() void {
     evaluator = freshEvaluator();
-    result_len = 0;
-    error_len = 0;
+    result_buf.clearRetainingCapacity();
+    error_buf.clearRetainingCapacity();
     state_len = 0;
-    messages_len = 0;
+    messages.clear();
     messages_read = false;
-    view_len = 0;
+    view_buf.clearRetainingCapacity();
     has_view = false;
     last_status = 0;
 }
