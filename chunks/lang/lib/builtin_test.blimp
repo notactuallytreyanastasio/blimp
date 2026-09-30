@@ -1567,8 +1567,30 @@ actor CryptoTests do
     assert(raises("http_start(\"GET\", \"file:///etc/passwd\", %{}, \"\")"))
     assert(raises("http_start(\"FETCH\", \"https://example.com/\", %{}, \"\")"))
     assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"Accept\": 1}, \"\")"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"X-A\": \"a\\r\\nX-Injected: 1\"}, \"\")"))
     assert(raises("http_result(31)"))
     assert(raises("http_result(99)"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{timeout: 5})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{timeout_ms: 0})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{max_redirects: 21})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", 5)"))
+  end
+
+  test "tcp_write_some and tcp_poll_write: a count, never a wait; misuse raises" do
+    l = tcp_listen(47311)
+    c = tcp_connect("127.0.0.1", 47311)
+    s = tcp_accept(l)
+    assert_eq(tcp_write_some(s, ""), 0)
+    assert_eq(tcp_write_some(s, "hello"), 5)
+    assert_eq(tcp_poll_write([s], 0), [s])
+    assert_eq(tcp_read(c), "hello")
+    tcp_close(c)
+    tcp_close(s)
+    tcp_close(l)
+    assert(raises("tcp_write_some(-1, \"x\")"))
+    assert(raises("tcp_write_some(1, 2)"))
+    assert(raises("tcp_poll_write(3, 0)"))
+    assert(raises("tcp_poll_write([\"a\"], 0)"))
   end
 
   test "ws_open refuses what is not a ws(s) url, and the others a handle that is not open" do
@@ -1982,5 +2004,152 @@ actor SearchReplaceTests do
     assert(raises("replace(\"abc\", \"\", \"x\")"))
     assert(raises("replace(\"abc\", \"b\", 1)"))
     assert(raises("replace(:abc, \"b\", \"x\")"))
+  end
+end
+
+# ============================================================
+# P-256 and AES-128-GCM: what Web Push (RFC 8291/8292) needs.
+# Every String here is raw bytes; hex_decode/base64url_decode make them.
+# slice(s, start, len) takes a length, not an end.
+# ============================================================
+
+# RFC 8291 Appendix A inputs.
+def rfc8291_as_private() -> String do
+  base64url_decode("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")
+end
+
+def rfc8291_as_public() -> String do
+  base64url_decode("BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8")
+end
+
+def rfc8291_ua_private() -> String do
+  base64url_decode("q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94")
+end
+
+def rfc8291_ua_public() -> String do
+  base64url_decode("BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4")
+end
+
+# The P-256 group order n: the first scalar that is not a private key.
+def p256_order() -> String do
+  hex_decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+end
+
+def zeros(n: Int) -> String do
+  hex_decode(join(map(range(1, n), fn(i: Int) do "00" end), ""))
+end
+
+actor P256Tests do
+  test "p256_public_key reproduces both RFC 8291 key pairs" do
+    assert_eq(p256_public_key(rfc8291_as_private()), rfc8291_as_public())
+    assert_eq(p256_public_key(rfc8291_ua_private()), rfc8291_ua_public())
+  end
+
+  test "p256_ecdh is the RFC 8291 ecdh_secret from either side" do
+    expected = base64url_decode("kyrL1jIIOHEzg3sM2ZWRHDRB62YACZhhSlknJ672kSs")
+    assert_eq(p256_ecdh(rfc8291_as_private(), rfc8291_ua_public()), expected)
+    assert_eq(p256_ecdh(rfc8291_ua_private(), rfc8291_as_public()), expected)
+  end
+
+  test "p256_keypair is a fresh 32-byte scalar and its 65-byte point" do
+    k1 = p256_keypair()
+    k2 = p256_keypair()
+    assert_eq(length(elem(k1, 0)), 32)
+    assert_eq(length(elem(k1, 1)), 65)
+    assert_eq(slice(elem(k1, 1), 0, 1), hex_decode("04"))
+    assert_eq(p256_public_key(elem(k1, 0)), elem(k1, 1))
+    assert_ne(elem(k1, 0), elem(k2, 0))
+    assert_eq(p256_ecdh(elem(k1, 0), elem(k2, 1)), p256_ecdh(elem(k2, 0), elem(k1, 1)))
+  end
+
+  test "a private key must be a 32-byte scalar in [1, n)" do
+    assert(raises("p256_public_key(\"short\")"))
+    assert(raises("p256_public_key(hex_decode(\"0000000000000000000000000000000000000000000000000000000000000000\"))"))
+    assert(raises("p256_public_key(hex_decode(\"ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551\"))"))
+    assert(raises("p256_public_key(42)"))
+  end
+
+  test "p256_ecdh refuses a peer key that is not a point on the curve" do
+    good = rfc8291_ua_public()
+    # flip the last byte of y: still 65 bytes, no longer on the curve
+    bad = slice(good, 0, 64) ++ xor_bytes(slice(good, 64, 1), hex_decode("01"))
+    assert_eq(length(bad), 65)
+    assert(raises("p256_ecdh(base64url_decode(\"yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw\"), base64url_decode(\"" ++ base64url_encode(bad) ++ "\"))"))
+    # a 33-byte compressed point is not what Web Push sends; say so
+    assert(raises("p256_ecdh(base64url_decode(\"yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw\"), \"" ++ "x" ++ "\")"))
+  end
+
+  test "ecdsa_p256_sign makes a 64-byte r||s that ecdsa_p256_verify accepts" do
+    sig = ecdsa_p256_sign(rfc8291_as_private(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ4In0")
+    assert_eq(length(sig), 64)
+    assert(ecdsa_p256_verify(rfc8291_as_public(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ4In0", sig))
+    refute(ecdsa_p256_verify(rfc8291_as_public(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ5In0", sig))
+    refute(ecdsa_p256_verify(rfc8291_ua_public(), "eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ4In0", sig))
+  end
+
+  test "ecdsa_p256_sign is deterministic: same key and message, same signature" do
+    assert_eq(ecdsa_p256_sign(rfc8291_as_private(), "m"), ecdsa_p256_sign(rfc8291_as_private(), "m"))
+    assert_ne(ecdsa_p256_sign(rfc8291_as_private(), "m"), ecdsa_p256_sign(rfc8291_as_private(), "n"))
+  end
+
+  # Wycheproof ecdsa_secp256r1_sha256_p1363_test.json, first group.
+  test "ecdsa_p256_verify agrees with Wycheproof" do
+    pub = hex_decode("042927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c732838c7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e")
+    msg = hex_decode("313233343030")
+    # tcId 1, valid
+    assert(ecdsa_p256_verify(pub, msg, hex_decode("2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e184cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd76")))
+    # tcId 4, invalid: r replaced by n - r
+    refute(ecdsa_p256_verify(pub, msg, hex_decode("d45c5740946b2a147f59262ee6f5bc90bd01ed280528b62b3aed5fc93f06f739b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db")))
+    # r = 0 and s = 0 are never valid
+    refute(ecdsa_p256_verify(pub, msg, zeros(64)))
+    # r = n: out of range, not reduced to 0
+    refute(ecdsa_p256_verify(pub, msg, p256_order() ++ slice(hex_decode("2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e184cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd76"), 32, 32)))
+  end
+
+  test "ecdsa_p256_verify: a signature that is not 64 bytes is an error, not false" do
+    assert(raises("ecdsa_p256_verify(base64url_decode(\"BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8\"), \"m\", \"short\")"))
+    assert(raises("ecdsa_p256_sign(\"short\", \"m\")"))
+  end
+end
+
+actor AesGcmTests do
+  # McGrew & Viega, "The Galois/Counter Mode of Operation", test case 2.
+  test "aes128gcm_encrypt: GCM spec test case 2 (zero key, one zero block)" do
+    out = aes128gcm_encrypt(zeros(16), zeros(12), zeros(16), "")
+    assert_eq(hex_encode(out), "0388dace60b6a392f328c2b971b2fe78" ++ "ab6e47d42cec13bdf53a67b21257bddf")
+  end
+
+  # Test case 4: 60-byte plaintext (not a whole block) and 20 bytes of AAD.
+  test "aes128gcm_encrypt: GCM spec test case 4 (partial block, AAD)" do
+    key = hex_decode("feffe9928665731c6d6a8f9467308308")
+    iv = hex_decode("cafebabefacedbaddecaf888")
+    pt = hex_decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+    aad = hex_decode("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+    out = aes128gcm_encrypt(key, iv, pt, aad)
+    assert_eq(hex_encode(out), "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091" ++ "5bc94fbc3221a5db94fae95ae7121a47")
+    assert_eq(aes128gcm_decrypt(key, iv, out, aad), pt)
+  end
+
+  test "aes128gcm_decrypt answers nil for a forged tag, a changed byte or other AAD" do
+    key = hex_decode("feffe9928665731c6d6a8f9467308308")
+    iv = hex_decode("cafebabefacedbaddecaf888")
+    out = aes128gcm_encrypt(key, iv, "attack at dawn", "hdr")
+    assert_eq(aes128gcm_decrypt(key, iv, out, "hdr"), "attack at dawn")
+    assert_eq(aes128gcm_decrypt(key, iv, out, "HDR"), nil)
+    flipped = xor_bytes(slice(out, 0, 1), hex_decode("01")) ++ slice(out, 1, length(out) - 1)
+    assert_eq(aes128gcm_decrypt(key, iv, flipped, "hdr"), nil)
+    assert_eq(aes128gcm_decrypt(key, iv, slice(out, 0, length(out) - 1) ++ "x", "hdr"), nil)
+  end
+
+  test "aes128gcm: the empty plaintext is just the tag" do
+    assert_eq(hex_encode(aes128gcm_encrypt(zeros(16), zeros(12), "", "")), "58e2fccefa7e3061367f1d57a4e7455a")
+    assert_eq(aes128gcm_decrypt(zeros(16), zeros(12), hex_decode("58e2fccefa7e3061367f1d57a4e7455a"), ""), "")
+  end
+
+  test "aes128gcm: wrong-length key, nonce or a ciphertext shorter than a tag is an error" do
+    assert(raises("aes128gcm_encrypt(\"0123456789abcde\", \"0123456789ab\", \"p\", \"\")"))
+    assert(raises("aes128gcm_encrypt(\"0123456789abcdef\", \"0123456789a\", \"p\", \"\")"))
+    assert(raises("aes128gcm_decrypt(\"0123456789abcdef\", \"0123456789ab\", \"short\", \"\")"))
+    assert(raises("aes128gcm_encrypt(\"0123456789abcdef\", \"0123456789ab\", 1, \"\")"))
   end
 end

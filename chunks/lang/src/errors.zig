@@ -51,6 +51,17 @@ pub fn uncaughtBubble(reason: ?*const Value, source: []const u8, line: u32, col:
 ///
 /// `error.TypeError` on its own used to reach the top as
 /// `Runtime error: error.TypeError`, with no line and nothing to look at.
+/// A builtin refused an argument and said why ("p256_ecdh: peer_public must
+/// be 65 bytes, got 33"). The text is copied: the builtin's buffer is reused
+/// by the next failure. `locate` fills in the line as the error unwinds.
+pub fn builtinFailure(why: []const u8, source: []const u8) BlimpError {
+    return .{
+        .title = "BAD ARGUMENT",
+        .message = std.heap.page_allocator.dupe(u8, why) catch "a builtin refused its arguments",
+        .source_line = source,
+    };
+}
+
 pub fn runtimeError(err: anyerror, source: []const u8, line: u32, col: u32) BlimpError {
     return .{
         .title = "RUNTIME ERROR",
@@ -468,6 +479,8 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         "json_encode", "json_decode",
         "sha256", "hmac_sha256", "hex_encode", "hex_decode", "xor_bytes", "base64_encode", "base64_decode",
         "base64url_encode", "base64url_decode", "random_bytes", "random_token",
+        "p256_keypair", "p256_public_key", "p256_ecdh", "ecdsa_p256_sign", "ecdsa_p256_verify",
+        "aes128gcm_encrypt", "aes128gcm_decrypt",
         "getenv", "argv", "list_dir", "file_exists?", "file_size", "read_file", "write_file",
         "format_time", "now_ms", "sort_by_keys", "index_of", "replace",
     };
