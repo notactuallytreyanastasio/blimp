@@ -1518,6 +1518,23 @@ actor CryptoTests do
     assert(raises("http_result(99)"))
   end
 
+  test "tcp_write_some and tcp_poll_write: a count, never a wait; misuse raises" do
+    l = tcp_listen(47311)
+    c = tcp_connect("127.0.0.1", 47311)
+    s = tcp_accept(l)
+    assert_eq(tcp_write_some(s, ""), 0)
+    assert_eq(tcp_write_some(s, "hello"), 5)
+    assert_eq(tcp_poll_write([s], 0), [s])
+    assert_eq(tcp_read(c), "hello")
+    tcp_close(c)
+    tcp_close(s)
+    tcp_close(l)
+    assert(raises("tcp_write_some(-1, \"x\")"))
+    assert(raises("tcp_write_some(1, 2)"))
+    assert(raises("tcp_poll_write(3, 0)"))
+    assert(raises("tcp_poll_write([\"a\"], 0)"))
+  end
+
   test "ws_open refuses what is not a ws(s) url, and the others a handle that is not open" do
     assert(raises("ws_open(\"https://example.com/\", %{})"))
     assert(raises("ws_open(\"ws://example.com/\", %{\"X-A\": 1})"))
