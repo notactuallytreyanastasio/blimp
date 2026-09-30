@@ -1,5 +1,8 @@
 const std = @import("std");
 const ioenv = @import("ioenv.zig");
+// Zig 0.16's std.http.Client, pointed at a TLS client that also speaks
+// TLS 1.2 with ECDSA certificates. See src/vendor/zig_std/tls_client.zig.
+const HttpClient = @import("vendor/zig_std/http_client.zig");
 const builtin = @import("builtin");
 const Value = @import("value.zig").Value;
 const interned = @import("value.zig").interned;
@@ -3481,11 +3484,19 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
 //
 // A program that serves a website from one process cannot wait on a remote
 // server: while it waits, nobody else gets an answer. So the request runs on
-// a thread of its own -- std.http.Client, TLS and all, with the runtime's
+// a thread of its own -- Zig's HTTP client (vendored), TLS and all, with the runtime's
 // Io -- and the program asks, from its own loop, whether it is done. The
 // answer is given once; the handle is free after it. Bodies are capped at
 // 8 MiB, and 32 requests may be in flight. The WebAssembly build has no
 // threads and no sockets, and refuses both.
+//
+// Nothing the remote end does may stop the process: this is one thread of a
+// server that answers everyone. Every failure in the worker is an
+// {:error, reason}. A header named User-Agent, Host, Authorization,
+// Connection, Accept-Encoding or Content-Type (any case) replaces the one
+// the client would send, rather than going out as a second copy of it; a
+// header name or value that would split the request (CR, LF, a ':' in the
+// name, an empty name) is refused by http_start.
 
 const http_slots_max = 32;
 const http_body_max = 8 * 1024 * 1024;
@@ -3497,17 +3508,22 @@ const HttpSlot = struct {
     url: []u8 = &.{},
     body_in: []u8 = &.{},
     headers: []std.http.Header = &.{},
+    // what was allocated for `headers`, which may be fewer
+    headers_all: []std.http.Header = &.{},
     header_bytes: []u8 = &.{},
+    // the standard headers the program named, which replace the client's own
+    std_headers: HttpClient.Request.Headers = .{},
     status: u16 = 0,
     body: []u8 = &.{},
     reason: []const u8 = "",
+    reason_buf: [96]u8 = undefined,
 };
 
 var http_slots: [http_slots_max]HttpSlot = [_]HttpSlot{.{}} ** http_slots_max;
 
 fn httpWorker(slot: *HttpSlot) void {
     const pa = std.heap.page_allocator;
-    var client: std.http.Client = .{ .allocator = pa, .io = ioenv.io };
+    var client: HttpClient = .{ .allocator = pa, .io = ioenv.io };
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(pa);
     defer out.deinit();
@@ -3515,20 +3531,25 @@ fn httpWorker(slot: *HttpSlot) void {
         .location = .{ .url = slot.url },
         .method = slot.method,
         .payload = if (slot.body_in.len > 0) slot.body_in else null,
+        .headers = slot.std_headers,
         .extra_headers = slot.headers,
         .response_writer = &out.writer,
+        .response_limit = http_body_max,
         .keep_alive = false,
     }) catch |err| {
-        slot.reason = @errorName(err);
+        slot.reason = switch (err) {
+            // which handshake failure: an expired certificate and a server
+            // with no cipher suite in common are both TlsInitializationFailed
+            error.TlsInitializationFailed => if (client.tls_init_error) |why|
+                std.fmt.bufPrint(&slot.reason_buf, "TlsInitializationFailed: {s}", .{@errorName(why)}) catch @errorName(err)
+            else
+                @errorName(err),
+            else => @errorName(err),
+        };
         slot.state.store(3, .release);
         return;
     };
     const got = out.written();
-    if (got.len > http_body_max) {
-        slot.reason = "ResponseTooLarge";
-        slot.state.store(3, .release);
-        return;
-    }
     slot.body = pa.dupe(u8, got) catch {
         slot.reason = "OutOfMemory";
         slot.state.store(3, .release);
@@ -3542,10 +3563,33 @@ fn httpFree(slot: *HttpSlot) void {
     const pa = std.heap.page_allocator;
     if (slot.url.len > 0) pa.free(slot.url);
     if (slot.body_in.len > 0) pa.free(slot.body_in);
-    if (slot.headers.len > 0) pa.free(slot.headers);
+    if (slot.headers_all.len > 0) pa.free(slot.headers_all);
     if (slot.header_bytes.len > 0) pa.free(slot.header_bytes);
     if (slot.body.len > 0) pa.free(slot.body);
     slot.* = .{};
+}
+
+/// std's client asserts these (a panic in a safe build); a program passing
+/// a user-supplied header through should get a TypeError instead, and a
+/// value with a CRLF in it must never reach the wire.
+fn httpHeaderOk(name: []const u8, value: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| if (c == ':' or c == '\r' or c == '\n') return false;
+    for (value) |c| if (c == '\r' or c == '\n') return false;
+    return true;
+}
+
+/// The client writes these six itself; a program's own goes in their place
+/// (`.override`) rather than beside them as a second copy.
+fn httpStdHeader(h: *HttpClient.Request.Headers, name: []const u8) ?*HttpClient.Request.Headers.Value {
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(name, "user-agent")) return &h.user_agent;
+    if (eq(name, "host")) return &h.host;
+    if (eq(name, "authorization")) return &h.authorization;
+    if (eq(name, "connection")) return &h.connection;
+    if (eq(name, "accept-encoding")) return &h.accept_encoding;
+    if (eq(name, "content-type")) return &h.content_type;
+    return null;
 }
 
 fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
@@ -3573,26 +3617,36 @@ fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) Ev
     var total: usize = 0;
     for (entries) |e| {
         if (e.val.* != .string) return error.TypeError;
+        if (!httpHeaderOk(e.key, e.val.string)) return error.TypeError;
         total += e.key.len + e.val.string.len;
     }
     const bytes = pa.alloc(u8, total) catch return error.OutOfMemory;
     const headers = pa.alloc(std.http.Header, entries.len) catch return error.OutOfMemory;
+    var std_headers: HttpClient.Request.Headers = .{};
     var at: usize = 0;
-    for (entries, 0..) |e, h| {
+    var n_extra: usize = 0;
+    for (entries) |e| {
         @memcpy(bytes[at .. at + e.key.len], e.key);
         const name = bytes[at .. at + e.key.len];
         at += e.key.len;
         @memcpy(bytes[at .. at + e.val.string.len], e.val.string);
         const value = bytes[at .. at + e.val.string.len];
         at += e.val.string.len;
-        headers[h] = .{ .name = name, .value = value };
+        if (httpStdHeader(&std_headers, name)) |field| {
+            field.* = .{ .override = value };
+        } else {
+            headers[n_extra] = .{ .name = name, .value = value };
+            n_extra += 1;
+        }
     }
     slot.* = .{
         .method = method,
         .url = pa.dupe(u8, url) catch return error.OutOfMemory,
         .body_in = pa.dupe(u8, args[3].string) catch return error.OutOfMemory,
-        .headers = headers,
+        .headers = headers[0..n_extra],
+        .headers_all = headers,
         .header_bytes = bytes,
+        .std_headers = std_headers,
     };
     slot.state.store(1, .release);
     const thread = std.Thread.spawn(.{}, httpWorker, .{slot}) catch {
@@ -3626,6 +3680,261 @@ fn builtinHttpResult(allocator: std.mem.Allocator, args: []const *const Value) E
     httpFree(slot);
     if (items[0].atom[0] == 'e') return make(allocator, .{ .tuple = items[0..2] });
     return make(allocator, .{ .tuple = items });
+}
+
+// ============================================================
+// http_start: what a remote server does is never a panic
+// ============================================================
+
+/// A loopback HTTP/1.1 server, one thread per connection, where every path
+/// is a way for a response to go wrong. Before the tests below, every path
+/// but /ok either killed the process or got a wrong answer.
+const HttpBadServer = struct {
+    listen_fd: c_int,
+    port: u16,
+
+    // "hello " * 1000, gzip level 9, cut in half: a body whose deflate
+    // stream ends mid-symbol; std's flate decoder asserted on it
+    const gz_half = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xed\xc4\x31\x0d\x00\x00\x08\x03\x30\x2b\x98\x23\xe1\x58\x82\xff";
+
+    fn start() !*HttpBadServer {
+        const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+        if (fd < 0) return error.SocketFailed;
+        var addr = std.mem.zeroes(std.posix.sockaddr.in);
+        addr.family = std.posix.AF.INET;
+        addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
+        if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in)) < 0) return error.BindFailed;
+        if (std.c.listen(fd, 64) < 0) return error.ListenFailed;
+        var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+        _ = std.c.getsockname(fd, @ptrCast(&addr), &len);
+        const s = try std.heap.page_allocator.create(HttpBadServer);
+        s.* = .{ .listen_fd = fd, .port = std.mem.bigToNative(u16, addr.port) };
+        const t = try std.Thread.spawn(.{}, acceptLoop, .{s});
+        t.detach();
+        return s;
+    }
+
+    fn acceptLoop(s: *HttpBadServer) void {
+        while (true) {
+            const c = std.c.accept(s.listen_fd, null, null);
+            if (c < 0) return;
+            const t = std.Thread.spawn(.{}, serveOne, .{ s, c }) catch {
+                _ = std.c.close(c);
+                continue;
+            };
+            t.detach();
+        }
+    }
+
+    fn send(c: c_int, bytes: []const u8) void {
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const n = std.c.write(c, bytes[at..].ptr, bytes.len - at);
+            if (n <= 0) return;
+            at += @intCast(n);
+        }
+    }
+
+    /// Close with SO_LINGER 0: the client's next read is ECONNRESET.
+    fn reset(c: c_int) void {
+        const linger = extern struct { onoff: c_int, secs: c_int }{ .onoff = 1, .secs = 0 };
+        _ = std.c.setsockopt(c, std.posix.SOL.SOCKET, std.posix.SO.LINGER, std.mem.asBytes(&linger), @sizeOf(@TypeOf(linger)));
+    }
+
+    fn serveOne(s: *HttpBadServer, c: c_int) void {
+        defer _ = std.c.close(c);
+        var buf: [4096]u8 = undefined;
+        var got: usize = 0;
+        while (std.mem.indexOf(u8, buf[0..got], "\r\n\r\n") == null) {
+            if (got == buf.len) return;
+            const n = std.c.read(c, buf[got..].ptr, buf.len - got);
+            if (n <= 0) return;
+            got += @intCast(n);
+            if (buf[0] == 0x16) return; // a TLS ClientHello: hang up on it
+        }
+        const head_end = std.mem.indexOf(u8, buf[0..got], "\r\n\r\n").?;
+        const line_end = std.mem.indexOf(u8, buf[0..got], "\r\n").?;
+        var parts = std.mem.splitScalar(u8, buf[0..line_end], ' ');
+        _ = parts.next();
+        const path = parts.next() orelse "/";
+        var out: [256]u8 = undefined;
+        const eq = std.mem.eql;
+        if (eq(u8, path, "/ok")) {
+            send(c, "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\narrived");
+        } else if (eq(u8, path, "/headers")) {
+            // the request's header lines, as the body
+            const hs = buf[line_end + 2 .. head_end];
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{hs.len}) catch return);
+            send(c, hs);
+        } else if (eq(u8, path, "/to-https")) {
+            // this same port, as https: the handshake fails, but first the
+            // client has to get as far as starting one
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 301 Moved\r\nLocation: https://127.0.0.1:{d}/ok\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{s.port}) catch return);
+        } else if (eq(u8, path, "/reset-mid-body") or eq(u8, path, "/reset-mid-redirect")) {
+            const status = if (eq(u8, path, "/reset-mid-body")) "200 OK" else "302 Found\r\nLocation: /ok";
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 {s}\r\nContent-Length: 100000\r\nConnection: close\r\n\r\nyyyyyyyyyy", .{status}) catch return);
+            httpTestNap(100);
+            reset(c);
+        } else if (eq(u8, path, "/reset-mid-chunked")) {
+            send(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\na\r\nyyyyyyyyyy\r\n");
+            httpTestNap(100);
+            reset(c);
+        } else if (eq(u8, path, "/close-mid-body")) {
+            send(c, "HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\nyyyyyyyyyy");
+        } else if (eq(u8, path, "/gzip-cut")) {
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{gz_half.len}) catch return);
+            send(c, gz_half);
+        } else if (eq(u8, path, "/endless")) {
+            // no length, never ends: the cap has to stop it as it arrives
+            send(c, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+            const chunk: [65536]u8 = @splat('e');
+            while (std.c.write(c, &chunk, chunk.len) > 0) {}
+        } else if (eq(u8, path, "/head-with-length")) {
+            // a HEAD answer names a length it will never send; hold the
+            // connection open so a client that waits for it is caught
+            send(c, "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n");
+            httpTestNap(3000);
+        } else if (eq(u8, path, "/bad-status")) {
+            send(c, "HTTP/1.1 2x0 Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        } else {
+            send(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    }
+};
+
+fn httpTestNap(ms: u32) void {
+    var ts: std.c.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @as(isize, ms % 1000) * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&ts, null);
+}
+
+/// http_start then http_result until it answers, or 20s.
+fn httpTestRequest(a: std.mem.Allocator, method: []const u8, url: []const u8, headers: *const Value) !*const Value {
+    const h = try builtinHttpStart(a, &.{ try make(a, .{ .string = method }), try make(a, .{ .string = url }), headers, try make(a, .{ .string = "" }) });
+    try std.testing.expect(h.integer >= 0);
+    var tries: usize = 0;
+    while (tries < 4000) : (tries += 1) {
+        const r = try builtinHttpResult(a, &.{h});
+        if (r.* != .nil) return r;
+        httpTestNap(5);
+    }
+    return error.NeverAnswered;
+}
+
+fn httpTestExpectError(a: std.mem.Allocator, srv: *HttpBadServer, method: []const u8, path: []const u8, reason: []const u8) !void {
+    var url_buf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}{s}", .{ srv.port, path });
+    const r = try httpTestRequest(a, method, url, try make(a, .nil));
+    std.testing.expectEqualStrings("error", r.tuple[0].atom) catch |err| {
+        std.debug.print("{s} {s}: {s} {d}\n", .{ method, path, r.tuple[0].atom, r.tuple[1].integer });
+        return err;
+    };
+    std.testing.expectEqualStrings(reason, r.tuple[1].string) catch |err| {
+        std.debug.print("{s} {s}\n", .{ method, path });
+        return err;
+    };
+}
+
+test "http_start: a server that resets, cuts off, never ends or garbles a response is an {:error, reason}" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+
+    // each of these killed the process: std's fetch answers a body read
+    // that failed underneath HTTP with `bodyErr().?`, and body_err is null
+    try httpTestExpectError(a, srv, "GET", "/reset-mid-body", "ConnectionResetByPeer");
+    try httpTestExpectError(a, srv, "GET", "/reset-mid-chunked", "ConnectionResetByPeer");
+    try httpTestExpectError(a, srv, "GET", "/reset-mid-redirect", "ConnectionResetByPeer");
+    // std's flate decoder asserted on a gzip stream cut off mid-symbol
+    try httpTestExpectError(a, srv, "GET", "/gzip-cut", "HttpBodyTruncated");
+    // read until the heap was gone, then asked the kernel for an EINVAL read
+    try httpTestExpectError(a, srv, "GET", "/endless", "ResponseTooLarge");
+    // these did not panic, but answered wrong: {:ok, 200, <1000 of 100000
+    // bytes>} and {:ok, 920, ""}
+    try httpTestExpectError(a, srv, "GET", "/close-mid-body", "HttpBodyTruncated");
+    try httpTestExpectError(a, srv, "GET", "/bad-status", "HttpHeadersInvalid");
+
+    var url_buf: [96]u8 = undefined;
+    // a HEAD answered with a Content-Length waited for a body that never comes
+    const t0 = monoMs();
+    const head = try httpTestRequest(a, "HEAD", try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/head-with-length", .{srv.port}), try make(a, .nil));
+    try std.testing.expectEqual(@as(i64, 200), head.tuple[1].integer);
+    try std.testing.expect(monoMs() - t0 < 2000);
+
+    const ok = try httpTestRequest(a, "GET", try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/ok", .{srv.port}), try make(a, .nil));
+    try std.testing.expectEqualStrings("arrived", ok.tuple[2].string);
+}
+
+test "http_start: an http:// url that redirects to https:// reaches the TLS handshake instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+    var url_buf: [96]u8 = undefined;
+    // The https:// side is this plain server, so the handshake fails; what
+    // matters is that it is attempted. On main this panicked on `client.now.?`
+    // before the ClientHello was written: only a request that *started* as
+    // https:// loaded the CA bundle and set the clock.
+    const r = try httpTestRequest(a, "GET", try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/to-https", .{srv.port}), try make(a, .nil));
+    try std.testing.expectEqualStrings("error", r.tuple[0].atom);
+    std.testing.expect(std.mem.startsWith(u8, r.tuple[1].string, "TlsInitializationFailed: ")) catch |err| {
+        std.debug.print("got {s}\n", .{r.tuple[1].string});
+        return err;
+    };
+}
+
+test "http_start: a User-Agent (any case) replaces the client's, and a header that would split the request raises" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+    var url_buf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/headers", .{srv.port});
+
+    for ([_][]const u8{ "User-Agent", "user-agent", "USER-AGENT" }) |name| {
+        const entries = try a.alloc(Value.MapEntry, 2);
+        entries[0] = .{ .key = name, .val = try make(a, .{ .string = "blinks/1.0" }) };
+        entries[1] = .{ .key = "X-Other", .val = try make(a, .{ .string = "yes" }) };
+        const r = try httpTestRequest(a, "GET", url, try make(a, .{ .map = entries }));
+        const sent = r.tuple[2].string;
+        // one user-agent line, and it is ours
+        var lines = std.mem.splitSequence(u8, sent, "\r\n");
+        var uas: usize = 0;
+        while (lines.next()) |line| {
+            if (std.ascii.startsWithIgnoreCase(line, "user-agent:")) {
+                uas += 1;
+                try std.testing.expectEqualStrings("user-agent: blinks/1.0", line);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), uas);
+        try std.testing.expect(std.mem.indexOf(u8, sent, "X-Other: yes") != null);
+    }
+
+    const bad = [_][2][]const u8{
+        .{ "X-A", "a\r\nX-Injected: 1" },
+        .{ "X-A", "a\nb" },
+        .{ "X-A\r\nX-B", "c" },
+        .{ "X:A", "c" },
+        .{ "", "c" },
+    };
+    for (bad) |kv| {
+        const entries = try a.alloc(Value.MapEntry, 1);
+        entries[0] = .{ .key = kv[0], .val = try make(a, .{ .string = kv[1] }) };
+        try std.testing.expectError(error.TypeError, builtinHttpStart(a, &.{ try make(a, .{ .string = "GET" }), try make(a, .{ .string = url }), try make(a, .{ .map = entries }), try make(a, .{ .string = "" }) }));
+    }
+    for (http_slots) |slot| try std.testing.expectEqual(@as(u8, 0), slot.state.load(.acquire));
 }
 
 // ── A WebSocket client, without stopping the program ─────────────────────

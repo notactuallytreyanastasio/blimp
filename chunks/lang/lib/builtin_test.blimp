@@ -1513,6 +1513,7 @@ actor CryptoTests do
     assert(raises("http_start(\"GET\", \"file:///etc/passwd\", %{}, \"\")"))
     assert(raises("http_start(\"FETCH\", \"https://example.com/\", %{}, \"\")"))
     assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"Accept\": 1}, \"\")"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"X-A\": \"a\\r\\nX-Injected: 1\"}, \"\")"))
     assert(raises("http_result(31)"))
     assert(raises("http_result(99)"))
   end
