@@ -13,6 +13,11 @@
 
 const std = @import("std");
 
+/// The heap the running program allocates from, for `process_stats()` to
+/// report. main.zig sets it; a program run some other way (tests, the
+/// browser) has none, and reports heap_bytes 0.
+pub var current: ?*const HeapLimit = null;
+
 pub const HeapLimit = struct {
     child: std.mem.Allocator,
     /// Bytes this run may hold at once.  Zero means no ceiling.
