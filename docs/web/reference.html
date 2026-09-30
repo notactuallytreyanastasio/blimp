@@ -21,7 +21,7 @@
 
 <h1>Web reference</h1>
 
-<p class="lede">These are the rules <code>src/41_web.blimp</code> follows, as the code has them at blog commit <code>c75fced</code> (<a href="https://github.com/notactuallytreyanastasio/blog/pull/100">PR #100</a>). Blimp has no modules and no private functions: every <code>def</code> in the site is global. The functions below are the ones meant to be called. The rest are listed at the end so you know which names are taken.</p>
+<p class="lede">These are the rules <code>src/41_web.blimp</code> follows, as the code has them at blog commit <code>c75fced</code>, with the two fixes after it (<code>2d5dfbd</code>, <code>5d4d55b</code>) re-run at <code>5d4d55b</code> (<a href="https://github.com/notactuallytreyanastasio/blog/pull/100">PR #100</a>). Blimp has no modules and no private functions: every <code>def</code> in the site is global. The functions below are the ones meant to be called. The rest are listed at the end so you know which names are taken.</p>
 
 <nav class="toc" aria-label="On this page">
 <ol>
@@ -52,7 +52,7 @@
 <tr><td><code>query_params</code></td><td>the query, decoded. A repeated name keeps the last value</td><td><code>%{"x" =&gt; "q"}</code></td></tr>
 <tr><td><code>body_params</code></td><td>a urlencoded form, or a JSON body that is an object. <code>%{}</code> otherwise</td><td><code>%{"y" =&gt; "2"}</code></td></tr>
 <tr><td><code>json</code></td><td>the decoded JSON body, any JSON value. <code>nil</code> if there was no JSON body</td><td><code>nil</code></td></tr>
-<tr><td><code>path_params</code></td><td>the route's <code>:params</code>, URL-decoded</td><td><code>%{"id" =&gt; "9"}</code></td></tr>
+<tr><td><code>path_params</code></td><td>the route's <code>:params</code>, percent-decoded: <code>%XX</code> only, so a <code>+</code> stays a <code>+</code></td><td><code>%{"id" =&gt; "9"}</code></td></tr>
 <tr><td><code>params</code></td><td>all three merged. Query, then body, then path, so on a name clash path wins over body and body wins over query</td><td><code>%{"x" =&gt; "q", "y" =&gt; "2", "id" =&gt; "9"}</code></td></tr>
 <tr><td><code>session</code></td><td>string keys → JSON values. <code>%{}</code> until <code>web_fetch_session</code> runs</td><td><code>%{"_csrf_token" =&gt; "..."}</code></td></tr>
 <tr><td><code>session_dirty</code></td><td><code>true</code> once the session has been changed. Only then is <code>Set-Cookie</code> sent</td><td><code>false</code></td></tr>
@@ -166,6 +166,7 @@ WEB_API = [web_fetch_session, web_require_json]               # JSON routes with
 <tr><th>signature</th><th>what it does</th></tr>
 <tr><td class="sig"><code>web_decode_form(text: String) -&gt; Map</code></td><td><code>"a=1&amp;b=x+y"</code> → <code>%{"a" =&gt; "1", "b" =&gt; "x y"}</code>. A repeated name keeps the last value. A bare name maps to <code>""</code>.</td></tr>
 <tr><td class="sig"><code>web_url_decode(s: String) -&gt; String</code></td><td><code>%XX</code> and <code>+</code>, with no step per character. Use this, not <code>url_decode</code>, for anything the size of a body.</td></tr>
+<tr><td class="sig"><code>web_path_decode(s: String) -&gt; String</code></td><td><code>%XX</code> only, for a path segment: <code>"c++%20x"</code> → <code>"c++ x"</code>. <code>+</code> means a space only in a form or a query string. Path parameters use this (since <code>5d4d55b</code>).</td></tr>
 <tr><td class="sig"><code>web_url_encode(s: String) -&gt; String</code></td><td>Percent-encodes everything except <code>A-Za-z0-9-_.~</code>. It takes one step per byte, so keep it to short strings.</td></tr>
 <tr><td class="sig"><code>web_parse_cookies(header: String) -&gt; Map</code></td><td><code>"a=1; b=2"</code> → map. Values are kept as sent.</td></tr>
 <tr><td class="sig"><code>web_headers(head_text: String) -&gt; Map</code></td><td>The header block, with the request line first, → a map with lower-cased names.</td></tr>
@@ -180,18 +181,18 @@ word word word word word word","words":60000}
 <h2 id="routing">Routing<a class="anchor" href="#routing">#</a></h2>
 
 <ul>
-  <li><strong>Segments match exactly, and <code>:name</code> matches one non-empty segment.</strong> <code>/api/blinks/:id/save</code> matches <code>/api/blinks/42/save</code>. It does not match <code>/api/blinks//save</code>, <code>/api/blinks/42</code> or <code>/api/blinks/42/save/x</code>. A <code>:param</code> is URL-decoded, so <code>/web/echo/a%20b</code> gives <code>id</code> = <code>"a b"</code>. There are no wildcards and no optional segments. A trailing slash is a segment of its own, so <code>/notes/</code> does not match <code>/notes</code>. It falls through to <code>dynamic()</code>, which redirects it.</li>
+  <li><strong>Segments match exactly, and <code>:name</code> matches one non-empty segment.</strong> <code>/api/blinks/:id/save</code> matches <code>/api/blinks/42/save</code>. It does not match <code>/api/blinks//save</code>, <code>/api/blinks/42</code> or <code>/api/blinks/42/save/x</code>. A <code>:param</code> is percent-decoded, so <code>/web/echo/a%20b</code> gives <code>id</code> = <code>"a b"</code>. A <code>+</code> in a path is a <code>+</code>: <code>/web/echo/c++</code> gives <code>"c++"</code> and <code>/api/blinks/+3</code> gives <code>"+3"</code>. Before <code>5d4d55b</code> path parameters were form-decoded and those were <code>"c  "</code> and <code>" 3"</code>. A query string and a form body still read <code>+</code> as a space. There are no wildcards and no optional segments. A trailing slash is a segment of its own, so <code>/notes/</code> does not match <code>/notes</code>. It falls through to <code>dynamic()</code>, which redirects it.</li>
   <li><strong>The first match wins</strong>, in the order of the <code>WEB_ROUTES</code> list.</li>
   <li><strong>HEAD is answered by the GET route.</strong> The handler runs, and the response has the GET's headers, including its <code>Content-Length</code>, with no body. A handler with side effects has them on HEAD too.</li>
   <li><strong>405 with <code>Allow</code>.</strong> A method other than GET and HEAD, on a path that matches only routes for other methods, is 405. <code>Allow</code> lists those methods, and HEAD is added when there is a GET. <code>OPTIONS</code> is not special. It is a 405 too. <code>Allow</code> does not list the GET and HEAD that <code>dynamic()</code> may serve for the same path: the framework cannot know them without running <code>dynamic()</code>.</li>
-  <li><strong>Framing comes before routing.</strong> A POST, PUT or PATCH without <code>Content-Length</code> is 411 before any route is looked at, so it is 411 even on a path where the answer would be 405.</li>
+  <li><strong>Routing comes before framing.</strong> A method the path does not take is 405 with <code>Allow</code>, whatever its body looks like. 411, 413, 408 and 431 apply only to a request a route will hand to a handler. Until <code>2d5dfbd</code> it was the other way round: a POST, PUT or PATCH without <code>Content-Length</code> was 411 before any route was looked at, so an empty <code>curl -X POST</code> to <code>/blog</code> was 411.</li>
   <li><strong>Precedence over <code>dynamic()</code>.</strong> The prebuilt pages, <code>/</code> and the posts, are answered before the framework is asked. Then, for a GET or HEAD, <code>WEB_ROUTES</code> is checked before <code>dynamic()</code>, and only a GET route claims it. A route for another method on the same path does not: the GET goes on to <code>dynamic()</code>. Every other method goes to the framework first and only there, because the prebuilt pages and <code>dynamic()</code> answer nothing but GET and HEAD.</li>
 </ul>
 <pre><code><span class="cmd">$ curl -si -X PUT -H 'Content-Length: 0' localhost:4176/notes | grep -E '^HTTP|^Allow'</span>          <span class="note"># GET and POST routes exist</span>
 HTTP/1.1 405 Method Not Allowed
 Allow: GET, POST, HEAD
 <span class="cmd">$ curl -si -X PUT localhost:4176/notes | grep -E '^HTTP|^Allow'</span>                             <span class="note"># curl sends no Content-Length for an empty PUT</span>
-HTTP/1.1 411 Length Required
+HTTP/1.1 411 Length Required                                                                 <span class="note"># at c75fced; 405 since 2d5dfbd, re-run under refusals</span>
 <span class="cmd">$ curl -si -X DELETE localhost:4176/notes/1 | grep -E '^HTTP|^Allow'</span>      <span class="note"># only GET /notes/:n</span>
 HTTP/1.1 405 Method Not Allowed
 Allow: GET, HEAD
@@ -330,11 +331,11 @@ POST /api/notes 415 1ms</code></pre>
 <tr><td>408</td><td><code>the body did not all arrive</code></td><td>fewer than <code>Content-Length</code> bytes within 2 s (measured: 2.006 s)</td></tr>
 <tr><td>408</td><td><code>the request headers did not all arrive</code></td><td>no blank line after the headers within 2 s (non-GET)</td></tr>
 <tr><td>411</td><td><code>chunked bodies are not accepted; send Content-Length</code></td><td>any <code>Transfer-Encoding</code></td></tr>
-<tr><td>411</td><td><code>a body needs a Content-Length</code></td><td>POST, PUT or PATCH with no <code>Content-Length</code>, on any path, before routing</td></tr>
+<tr><td>411</td><td><code>a body needs a Content-Length</code></td><td>POST, PUT or PATCH with no <code>Content-Length</code>, to a route that takes that method. Anywhere else it is 405.</td></tr>
 <tr><td>413</td><td><code>the body is over 1048576 bytes</code></td><td><code>Content-Length</code> over <code>WEB_MAX_BODY</code>. The body is not read.</td></tr>
 <tr><td>415</td><td><code>multipart bodies are not supported</code></td><td><code>multipart/*</code>, on any route</td></tr>
 <tr><td>415</td><td><code>this route takes Content-Type: application/json</code></td><td><code>web_require_json</code></td></tr>
-<tr><td>431</td><td><code>the request headers are too large</code></td><td>a header block over 16 KiB, still arriving or complete, on a request the framework answers: every method but GET and HEAD, and a GET or HEAD that a GET route claims. A GET that goes on to a prebuilt page or <code>dynamic()</code> is not held to it (see below).</td></tr>
+<tr><td>431</td><td><code>the request headers are too large</code></td><td>a header block over 16 KiB, still arriving or complete, on a request a route here matches, of any method. A 405 is not held to it (since <code>2d5dfbd</code>). A GET that goes on to a prebuilt page or <code>dynamic()</code> is not held to it (see below).</td></tr>
 <tr><td>500</td><td><code>internal server error</code></td><td>a plug or the handler crashed, or the conn it returned could not be turned into a response (a <code>nil</code> body). The log gets <code>web: 500 on GET /crash: the pipeline or handler crashed (division_by_zero)</code>, or <code>building the response crashed</code></td></tr>
 <tr><td>500</td><td><code>a response header carried a line break</code></td><td>CR/LF in <code>location</code> or a <code>resp_headers</code> entry</td></tr>
 <tr><td>500</td><td><code>the session is too large for its cookie</code></td><td>signed cookie over 4000 bytes</td></tr>
@@ -350,9 +351,30 @@ HTTP/1.1 201 Created
 431
 <span class="cmd">$ curl -s -o /dev/null -w '%{http_code}\n' -H "X-Big: $(cat big17k)" localhost:4176/directory</span>  <span class="note"># dynamic()</span>
 200
-<span class="cmd">$ curl -si -X POST localhost:4176/blog | sed -n '1p;$p'</span>
+<span class="cmd">$ curl -si -X POST localhost:4176/blog | sed -n '1p;$p'</span>                <span class="note"># at c75fced; 405 since 2d5dfbd, below</span>
 HTTP/1.1 411 Length Required
 a body needs a Content-Length</code></pre>
+<p class="caption">Re-run at <code>5d4d55b</code> on a plain build of the branch (port 4177, no notes app; the demo's <code>/web/echo</code> takes GET and POST, <code>/web/api/echo</code> POST only). At <code>c75fced</code> the first four were all <code>411</code>:</p>
+<pre><code><span class="cmd">$ curl -si -X POST localhost:4177/blog</span>
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD
+<span class="cmd">$ curl -si -X PUT localhost:4177/blog</span>
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD
+<span class="cmd">$ curl -si -X PUT localhost:4177/web/echo</span>
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, POST, HEAD
+<span class="cmd">$ curl -si -X POST -H 'Transfer-Encoding: chunked' --data-binary abc localhost:4177/blog</span>
+HTTP/1.1 405 Method Not Allowed
+<span class="cmd">$ curl -si -X POST localhost:4177/web/api/echo</span>                      <span class="note"># a route that takes POST: still 411</span>
+HTTP/1.1 411 Length Required
+a body needs a Content-Length
+<span class="cmd">$ curl -si -X POST -H 'Content-Type: application/json' -H 'Transfer-Encoding: chunked' --data-binary '[1]' localhost:4177/web/api/echo</span>
+HTTP/1.1 411 Length Required
+chunked bodies are not accepted; send Content-Length
+<span class="cmd">$ time curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Length: 2000000' localhost:4177/web/api/echo</span>
+413
+real 0.00                                                                  <span class="note"># not waited for</span></code></pre>
 <p class="caption"><code>big17k</code> and <code>big15k</code> hold 17,000 and 15,000 <code>x</code>s. Before <code>e6be45f</code> the first request was a 200: the limit was checked only while the blank line had not arrived yet.</p>
 
 <h2 id="limits">Limits and constants<a class="anchor" href="#limits">#</a></h2>
@@ -373,7 +395,7 @@ a body needs a Content-Length</code></pre>
 
 </main>
 <footer>
-  Written against blog commit <code>c75fced</code> (PR #100). If the code and this page disagree, the code is right and this page has a bug.
+  Written against blog commit <code>c75fced</code> (PR #100), and re-run at <code>5d4d55b</code> for the 405-before-411 and path-decoding fixes. If the code and this page disagree, the code is right and this page has a bug.
 </footer>
 <script src="/tutorial/blimp-highlight.js"></script>
 <script>

@@ -30,7 +30,7 @@
 
 <dl class="facts">
   <dt>Where it lives</dt>
-  <dd>The site repo, not this one: <a href="https://github.com/notactuallytreyanastasio/blog/pull/100">notactuallytreyanastasio/blog#100</a>, branch <code>blimp-blog/60-web-core</code>, files <code>blimp_site/src/41_web.blimp</code>, <code>blimp_site/test/web_test.blimp</code>, and the hooks in <code>blimp_site/main.blimp</code>. Documented at commit <code>c75fced</code>.</dd>
+  <dd>The site repo, not this one: <a href="https://github.com/notactuallytreyanastasio/blog/pull/100">notactuallytreyanastasio/blog#100</a>, branch <code>blimp-blog/60-web-core</code>, files <code>blimp_site/src/41_web.blimp</code>, <code>blimp_site/test/web_test.blimp</code>, and the hooks in <code>blimp_site/main.blimp</code>. Documented at commit <code>c75fced</code>, re-run at <code>5d4d55b</code>.</dd>
   <dt>Status</dt>
   <dd>Open PR, not merged, not deployed. Nothing on bobbby.online answers a POST yet.</dd>
   <dt>Shape</dt>
@@ -143,7 +143,7 @@ WEB_SECRET = web_session_secret()</code></pre>
 
 <p>From then on, <code>handle()</code> sends a request to the framework in two cases:</p>
 <ul>
-  <li><strong>Any method but GET and HEAD: always, and first.</strong> The prebuilt pages and <code>dynamic()</code> answer only GET and HEAD, so nothing else is asked. If no route matches, the answer is <code>405</code> with <code>Allow: GET, HEAD</code>, which is what every POST got before. A POST, PUT or PATCH with no <code>Content-Length</code> is refused with <code>411</code> before any route is looked at, so an empty <code>curl -X POST</code> to any path, <code>/blog</code> included, is now 411 where it used to be 405.</li>
+  <li><strong>Any method but GET and HEAD: always, and first.</strong> The prebuilt pages and <code>dynamic()</code> answer only GET and HEAD, so nothing else is asked. If no route matches, the answer is <code>405</code> with <code>Allow: GET, HEAD</code>, which is what every POST got before. That holds whatever the body looks like: an empty <code>curl -X POST</code> to <code>/blog</code> is 405, not 411. Body framing (411, 413, 408, 431) is judged only for a request a route will hand to a handler.</li>
   <li><strong>A GET or HEAD for a path that is not one of the site's prebuilt pages</strong> is checked against <code>WEB_ROUTES</code> before <code>dynamic()</code>. Only a GET route claims it. <code>web_handle</code> returns <code>nil</code> when no GET route matches that path, and the request goes on to <code>dynamic()</code> the same as before.</li>
 </ul>
 
@@ -258,8 +258,8 @@ http://192.168.1.238:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt
 
 <ol>
   <li><strong>Read.</strong> For anything but GET and HEAD, <code>web_read_rest</code> keeps reading until it has the headers and <code>Content-Length</code> bytes of body, for up to 2 seconds. It answers <code>Expect: 100-continue</code> on the way.</li>
-  <li><strong>Frame.</strong> Some requests are refused before any route sees them: a chunked body (411), a POST, PUT or PATCH with no <code>Content-Length</code> (411), a <code>Content-Length</code> that is not a number (400), a body over 1 MiB (413), a header block over 16 KiB, whether it is still arriving or came whole (431), and a body that did not all arrive (408).</li>
-  <li><strong>Route.</strong> The first route whose pattern and method match wins. A GET or HEAD is claimed only by a GET route, and otherwise falls through to <code>dynamic()</code>. Any other method whose path matches only routes for other methods gets 405 with <code>Allow</code>.</li>
+  <li><strong>Route.</strong> The first route whose pattern and method match wins. A GET or HEAD is claimed only by a GET route, and otherwise falls through to <code>dynamic()</code>. Any other method with no route for it gets 405 with <code>Allow</code>, before its body is looked at.</li>
+  <li><strong>Frame.</strong> A request a route matched is refused before the handler sees it for: a header block over 16 KiB, whether it is still arriving or came whole (431), a chunked body (411), a POST, PUT or PATCH with no <code>Content-Length</code> (411), a <code>Content-Length</code> that is not a number (400), a body over 1 MiB (413, not read), and a body that did not all arrive (408).</li>
   <li><strong>Conn.</strong> The request becomes a map: headers, cookies, query, and the body, which is exactly <code>Content-Length</code> bytes, parsed by its content type. A form or a JSON object becomes <code>body_params</code>. Bad JSON is 400, multipart is 415.</li>
   <li><strong>Pipeline.</strong> The plugs run in order, and one that sets <code>halted</code> ends the pipeline.</li>
   <li><strong>Handler.</strong> It runs if nothing halted. If a plug or the handler crashes, the answer is a plain <code>500 internal server error</code> and the log gets one line naming the request.</li>
@@ -279,15 +279,15 @@ http://192.168.1.238:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt
   <li><strong>The CSRF token is not masked.</strong> The same 43 characters appear in every page for the life of the session. That makes it readable by a BREACH-style compression attack if the page is ever served compressed next to attacker-controlled text. Phoenix masks the token per render. This does not.</li>
   <li><strong>One thread.</strong> The server answers one connection at a time. A POST whose body is slow holds everyone else for up to 2 seconds. With a client that sent its headers and then 7 of 20 body bytes, a GET made at the same moment took 1.79 s to answer. Then the slow client got <code>408 the body did not all arrive</code>.</li>
   <li><strong><code>Allow</code> can be short.</strong> A path with a web route for POST and a <code>dynamic()</code> page for GET answers PUT with <code>405 Allow: POST</code>. The GET and HEAD are missing because only <code>dynamic()</code> knows about them.</li>
-  <li><strong>The 16 KiB header limit covers only requests the framework answers.</strong> A GET that goes on to a prebuilt page or <code>dynamic()</code> is read once, at most 64 KiB, as before: a 17,000-byte header on <code>GET /directory</code> is a 200, and on <code>GET /notes</code> a 431.</li>
+  <li><strong>The 16 KiB header limit covers only requests a route here matches.</strong> A 405 is not held to it. A GET that goes on to a prebuilt page or <code>dynamic()</code> is read once, at most 64 KiB, as before: a 17,000-byte header on <code>GET /directory</code> is a 200, and on <code>GET /notes</code> a 431.</li>
   <li><strong>HEAD runs the GET handler.</strong> Side effects happen. <code>HEAD /notes</code> with no cookie creates a session and returns its <code>Set-Cookie</code>.</li>
-  <li><strong>No 404 for an unknown path on POST.</strong> A POST to a path no route knows is 405 <code>Allow: GET, HEAD</code>, as it was before this chapter, or 411 if it has no <code>Content-Length</code>.</li>
+  <li><strong>No 404 for an unknown path on POST.</strong> A POST to a path no route knows is 405 <code>Allow: GET, HEAD</code>, as it was before this chapter, with or without a <code>Content-Length</code>.</li>
   <li><strong>No response streaming, no WebSocket routes.</strong> A handler returns the whole body. WebSockets still go through the server's existing <code>upgrade()</code> path. They are not part of this.</li>
 </ul>
 
 <h2 id="fixed">Fixed since the first draft of this page<a class="anchor" href="#fixed">#</a></h2>
 
-<p>The first version of this page listed six bugs. PR #100 now has a commit for each, with a test that fails before it. Each is re-run here against the fixed build.</p>
+<p>The first version of this page listed six bugs, and a second pass found two more: one of the fixes made an empty POST to any path a 411, and a <code>+</code> in a path became a space. PR #100 now has a commit for each, with a test that fails before it. Each is re-run here against the fixed build.</p>
 
 <p><strong>A handler that crashes answers 500.</strong> It used to leave the client waiting and the socket in <code>CLOSE_WAIT</code>. The obvious fix, a <code>try</code> around the handler, is not enough. A handler that returns a conn whose body is <code>nil</code> returns normally, and the failure comes later, when the conn is turned into bytes. So the framework has two <code>try</code> blocks: one around the pipeline and handler, one around building the response. These are two probe routes. One divides 100 by <code>?n=</code>, and the other answers <code>web_text(conn, 200, head([]))</code>, which is <code>nil</code>:</p>
 <pre><code class="blimp">def crash_handler(conn: Map) -&gt; Map do
@@ -337,6 +337,23 @@ GET /nil 500 0ms</code></pre>
 
 <p><strong>The cookie is <code>Secure</code> only in production</strong>, so a LAN address over plain HTTP keeps its session (<a href="#browser">in a browser</a>).</p>
 
+<p><strong>A method the path does not take is 405 before its body is judged</strong> (<code>2d5dfbd</code>). The body fix above made framing run before routing, so an empty <code>curl -X POST</code> or <code>-X PUT</code> to any path, <code>/blog</code> included, became 411 where it had been 405. Now the route is found first. Re-run at <code>5d4d55b</code> (at <code>c75fced</code> each of the first two was <code>411 a body needs a Content-Length</code>):</p>
+<pre><code><span class="cmd">$ curl -si -X POST localhost:4177/blog | grep -E '^HTTP|^Allow'</span>
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD
+<span class="cmd">$ curl -si -X PUT localhost:4177/web/echo | grep -E '^HTTP|^Allow'</span>
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, POST, HEAD
+<span class="cmd">$ curl -si -X POST localhost:4177/web/api/echo | sed -n '1p;$p'</span>     <span class="note"># a route that takes POST</span>
+HTTP/1.1 411 Length Required
+a body needs a Content-Length</code></pre>
+<p class="caption">Chunked is still 411 and a declared 2 MB body still 413 without being read, on routes that take them (<a href="reference.html#refusals">refusals</a>). GET pages are byte-identical to origin/main's build for the 14 paths checked.</p>
+
+<p><strong>A <code>+</code> in a path segment is a <code>+</code></strong> (<code>5d4d55b</code>, found by the blinks writes chapter). Path parameters were form-decoded, so the tag <code>c++</code> arrived as <code>"c  "</code>. Re-run at <code>5d4d55b</code>, a CSRF-carrying PATCH to the demo:</p>
+<pre><code><span class="cmd">$ curl -s -b jar -X PATCH -H "x-csrf-token: $TOKEN" -H 'Content-Length: 0' 'localhost:4177/web/echo/c++?q=a+b'</span>
+{"method":"PATCH","id":"c++","params":{"q":"a b","id":"c++"}}
+<span class="note"># at 2d5dfbd: {"method":"PATCH","id":"c  ","params":{"q":"a b","id":"c  "}}</span></code></pre>
+
 <p><strong>The boot refusals print plainly.</strong> They used <code>print()</code>, which quotes a string the way source code writes it (<a href="reference.html#sessions">SESSION_SECRET</a>).</p>
 
 <h2 id="rooms">Rooms and presence (chapter 61)<a class="anchor" href="#rooms">#</a></h2>
@@ -345,7 +362,7 @@ GET /nil 500 0ms</code></pre>
 
 </main>
 <footer>
-  Written against blog commit <code>c75fced</code> (PR #100). The transcripts are from a local build of that commit. If the code and this page disagree, the code is right and this page is a bug.
+  Written against blog commit <code>c75fced</code> (PR #100). The transcripts are from a local build of that commit, except those marked as re-run at <code>5d4d55b</code>. If the code and this page disagree, the code is right and this page is a bug.
 </footer>
 <script src="/tutorial/blimp-highlight.js"></script>
 <script>
