@@ -2547,7 +2547,7 @@ pub const Evaluator = struct {
     /// Preserves the indentation of the original hole line.
     fn patchHole(self: *Evaluator, file_path: []const u8, hole_line: u32, generated: []const u8, directive: []const u8) !void {
         // Read the file
-        const file_source = try std.Io.Dir.cwd().readFileAlloc(ioenv.io, file_path, self.allocator, .limited(4 * 1024 * 1024));
+        const file_source = try std.Io.Dir.cwd().readFileAlloc(ioenv.io, file_path, self.allocator, .limited(64 * 1024 * 1024));
         defer self.allocator.free(file_source);
 
         // Split into lines, find the hole line (1-indexed)
