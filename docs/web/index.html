@@ -260,7 +260,7 @@ http://192.168.1.238:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt
   <li><strong>Read.</strong> For anything but GET and HEAD, <code>web_read_rest</code> keeps reading until it has the headers and <code>Content-Length</code> bytes of body, for up to 2 seconds. It answers <code>Expect: 100-continue</code> on the way.</li>
   <li><strong>Route.</strong> The first route whose pattern and method match wins. A GET or HEAD is claimed only by a GET route, and otherwise falls through to <code>dynamic()</code>. Any other method with no route for it gets 405 with <code>Allow</code>, before its body is looked at.</li>
   <li><strong>Frame.</strong> A request a route matched is refused before the handler sees it for: a header block over 16 KiB, whether it is still arriving or came whole (431), a chunked body (411), a <code>Content-Length</code> that is not a number (400), a body over 1 MiB (413, not read), and a body that did not all arrive (408).</li>
-  <li><strong>Conn.</strong> The request becomes a map: headers, cookies, query, and the body, which is exactly <code>Content-Length</code> bytes (empty when there is no <code>Content-Length</code>), parsed by its content type. A form or a JSON object becomes <code>body_params</code>. Bad JSON is 400, multipart is 415.</li>
+  <li><strong>Conn.</strong> The request becomes a map: headers, cookies, query, and the body, which is exactly <code>Content-Length</code> bytes (empty when there is no <code>Content-Length</code>), parsed by its content type. A form or a JSON object becomes <code>body_params</code>. Invalid UTF-8 in the query or a form, and JSON that does not parse, get Plug.Parsers' 400 here, before any plug (<a href="reference.html#utf8">reference</a>). Multipart is 415.</li>
   <li><strong>Pipeline.</strong> The plugs run in order, and one that sets <code>halted</code> ends the pipeline.</li>
   <li><strong>Handler.</strong> It runs if nothing halted. If a plug or the handler crashes, the answer is a plain <code>500 internal server error</code> and the log gets one line naming the request.</li>
   <li><strong>Finish.</strong> The conn becomes bytes. If the session changed, it is re-signed into <code>Set-Cookie</code>. A header value with a CR or LF is a 500, not a split response. A session cookie over 4000 bytes is also a 500. So is a conn that cannot be turned into bytes at all, such as one whose body is <code>nil</code>.</li>
@@ -281,13 +281,14 @@ http://192.168.1.238:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt
   <li><strong><code>Allow</code> can be short.</strong> A path with a web route for POST and a <code>dynamic()</code> page for GET answers PUT with <code>405 Allow: POST</code>. The GET and HEAD are missing because only <code>dynamic()</code> knows about them.</li>
   <li><strong>The 16 KiB header limit covers only requests a route here matches.</strong> A 405 is not held to it. A GET that goes on to a prebuilt page or <code>dynamic()</code> is read once, at most 64 KiB, as before: a 17,000-byte header on <code>GET /directory</code> is a 200, and on <code>GET /notes</code> a 431.</li>
   <li><strong>HEAD runs the GET handler.</strong> Side effects happen. <code>HEAD /notes</code> with no cookie creates a session and returns its <code>Set-Cookie</code>.</li>
+  <li><strong>Invalid UTF-8 is refused only on routed requests.</strong> <code>GET /blog?x=%FF</code> is served by the fixed table (200), and <code>POST /blog -d a=%FF</code> is 405. Phoenix answers both with 400, because its parsers run before its router.</li>
   <li><strong>No 404 for an unknown path on POST.</strong> A POST to a path no route knows is 405 <code>Allow: GET, HEAD</code>, as it was before this chapter, with or without a <code>Content-Length</code>.</li>
   <li><strong>No response streaming, no WebSocket routes.</strong> A handler returns the whole body. WebSockets still go through the server's existing <code>upgrade()</code> path. They are not part of this.</li>
 </ul>
 
 <h2 id="fixed">Fixed since the first draft of this page<a class="anchor" href="#fixed">#</a></h2>
 
-<p>The first version of this page listed six bugs, and later passes found three more: one of the fixes made an empty POST to any path a 411, a <code>+</code> in a path became a space, and the same fix still refused a bodiless POST to a route that takes POST, which HTTP allows. PR #100 now has a commit for each, with a test that fails before it. Each is re-run here against the fixed build.</p>
+<p>The first version of this page listed six bugs, and later passes found four more: one of the fixes made an empty POST to any path a 411, a <code>+</code> in a path became a space, and the same fix still refused a bodiless POST to a route that takes POST, which HTTP allows, and invalid UTF-8 reached handlers that Phoenix never lets it reach. PR #100 now has a commit for each, with a test that fails before it. Each is re-run here against the fixed build.</p>
 
 <p><strong>A handler that crashes answers 500.</strong> It used to leave the client waiting and the socket in <code>CLOSE_WAIT</code>. The obvious fix, a <code>try</code> around the handler, is not enough. A handler that returns a conn whose body is <code>nil</code> returns normally, and the failure comes later, when the conn is turned into bytes. So the framework has two <code>try</code> blocks: one around the pipeline and handler, one around building the response. These are two probe routes. One divides 100 by <code>?n=</code>, and the other answers <code>web_text(conn, 200, head([]))</code>, which is <code>nil</code>:</p>
 <pre><code class="blimp">def crash_handler(conn: Map) -&gt; Map do
@@ -360,6 +361,15 @@ HTTP/1.1 200 OK
 {"json":null,"session":"none"}
 <span class="cmd">$ curl -s -b jar -X PATCH -H "x-csrf-token: $TOKEN" 'localhost:4181/web/echo/c++?q=a+b'</span>     <span class="note"># no Content-Length: 0 needed now</span>
 {"method":"PATCH","id":"c++","params":{"q":"a b","id":"c++"}}</code></pre>
+
+<p><strong>Invalid UTF-8 in a query, a form or a JSON body is Plug.Parsers' 400, before any plug</strong> (<code>8e9c970</code>, raised by the Blinks comments chapter). It used to reach the handler, and a <code>web_json</code> answer then raised in <code>json_encode</code> and became a 500. Re-run at <code>8e9c970</code> on :4184:</p>
+<pre><code><span class="cmd">$ curl -si -X POST -d 'message=%FF' localhost:4184/web/echo | sed -n '1,2p;$p'</span>
+HTTP/1.1 400 Bad Request
+Content-Type: text/html; charset=utf-8
+Bad Request                                                    <span class="note"># at d522c8d: 403 invalid CSRF token</span>
+<span class="cmd">$ curl -s -H 'accept: application/json' 'localhost:4184/web/echo?x=%E2%82'</span>
+{"errors":{"detail":"Bad Request"}}                            <span class="note"># at d522c8d: 200, the page</span></code></pre>
+<p class="caption">Path parameters are left alone, because Phoenix leaves them alone. The details and the Accept rule are in the <a href="reference.html#utf8">reference</a>.</p>
 
 <p><strong>The boot refusals print plainly.</strong> They used <code>print()</code>, which quotes a string the way source code writes it (<a href="reference.html#sessions">SESSION_SECRET</a>).</p>
 

@@ -170,6 +170,9 @@ WEB_API = [web_fetch_session, web_require_json]               # JSON routes with
 <tr><td class="sig"><code>web_url_encode(s: String) -&gt; String</code></td><td>Percent-encodes everything except <code>A-Za-z0-9-_.~</code>. It takes one step per byte, so keep it to short strings.</td></tr>
 <tr><td class="sig"><code>web_parse_cookies(header: String) -&gt; Map</code></td><td><code>"a=1; b=2"</code> → map. Values are kept as sent.</td></tr>
 <tr><td class="sig"><code>web_headers(head_text: String) -&gt; Map</code></td><td>The header block, with the request line first, → a map with lower-cased names.</td></tr>
+<tr><td class="sig"><code>web_utf8_valid(s: String) -&gt; Bool</code></td><td>Whether <code>s</code> is UTF-8, as <code>String.valid?</code> judges it. Uses <code>utf8_valid</code> where the interpreter has it and <code>json_encode</code> where it does not, and both are native.</td></tr>
+<tr><td class="sig"><code>web_form_utf8(text: String) -&gt; Bool</code></td><td>Whether every decoded name and value of <code>a=b&amp;c=d</code> text is UTF-8, in one check of the whole text.</td></tr>
+<tr><td class="sig"><code>web_bad_request(conn: Map, query_ok: Bool) -&gt; Map</code></td><td>Plug.Parsers' 400, in the format Accept (or a readable query's <code>_format</code>) asks for, halted.</td></tr>
 <tr><td class="sig"><code>web_content_length(headers: Map) -&gt; Int</code></td><td>Returns <code>-1</code> when absent, and <code>-2</code> when it is not 1 to 12 plain digits.</td></tr>
 </table></div>
 
@@ -225,7 +228,8 @@ Allow: POST</code></pre>
   <li><code>web_parse_body</code> runs on every request a route matched, <em>before</em> the pipeline:
     <ul>
       <li><code>application/x-www-form-urlencoded</code> → <code>body_params</code></li>
-      <li><code>application/json</code> → <code>json</code>, and also <code>body_params</code> when it is an object. Bad JSON is 400.</li>
+      <li>first, a query string or a form whose decoded names or values are not UTF-8, and JSON that does not parse, are Plug's 400 and the pipeline never runs (<a href="#utf8">below</a>, since <code>8e9c970</code>)</li>
+      <li><code>application/json</code> → <code>json</code>, and also <code>body_params</code> when it is an object.</li>
       <li><code>multipart/*</code> → 415</li>
       <li>anything else: the raw <code>body</code>, nothing parsed</li>
     </ul>
@@ -250,6 +254,39 @@ HTTP/1.1 200 OK
 HTTP/1.1 200 OK
 {"method":"DELETE","id":"3","params":{"id":"3"}}</code></pre>
 <p class="caption">Before <code>919656d</code> the first request was a 400 (<code>the body is not JSON: SyntaxError at line 1, column 15</code>). The next two ran at <code>d522c8d</code> on a plain build of the branch (port 4181, the demo's <code>/web/api/echo</code>). From <code>919656d</code> until <code>d522c8d</code> both were <code>411 a body needs a Content-Length</code>: a POST, PUT or PATCH with no length was refused, and that lost the iOS app's comment reports. Now 411 is only for <code>Transfer-Encoding</code>. The DELETE carries its session cookie and token and five stray bytes with no length. It has an empty body, so the stray bytes are ignored.</p>
+
+<h3 id="utf8">Invalid UTF-8 is Plug.Parsers' 400, before any plug</h3>
+<p>Phoenix refuses a request whose query string or form has a name or value that is not UTF-8, and a JSON body that does not parse, before its router runs. <code>Plug.Parsers</code> and <code>fetch_query_params</code> raise in the endpoint, and render_errors answers. Since <code>8e9c970</code>, <code>web_parse_body</code> does the same for every route here. It halts, so none of the route's plugs run: no CORS headers, no CSRF check, no session cookie. A bad form without a CSRF token is 400 here, not 403, as in Phoenix. Before, the bytes reached the handler. A handler that answered with <code>web_json</code> raised in <code>json_encode</code> and sent a 500. One that wrote to Postgres got <code>22021 invalid byte sequence</code>, and the Blinks writes chapter answered that as 503. Re-run on a plain build of <code>8e9c970</code> (port 4184, interpreter 896614f):</p>
+<pre><code><span class="cmd">$ curl -si -X POST -d 'message=%FF' localhost:4184/web/echo</span>
+HTTP/1.1 400 Bad Request
+Content-Type: text/html; charset=utf-8
+Content-Length: 11
+Cache-Control: max-age=0, private, must-revalidate
+X-Served-By: blimp
+Connection: close
+
+Bad Request
+<span class="cmd">$ curl -si -H 'accept: application/json' 'localhost:4184/web/echo?x=%E2%82'</span>
+HTTP/1.1 400 Bad Request
+Content-Type: application/json; charset=utf-8
+Content-Length: 35
+Cache-Control: max-age=0, private, must-revalidate
+X-Served-By: blimp
+Connection: close
+
+{"errors":{"detail":"Bad Request"}}
+<span class="cmd">$ curl -s -w ' (%{http_code})\n' -H 'content-type: application/json' --data-binary @rawff.json localhost:4184/web/api/echo</span>
+Bad Request (400)
+<span class="cmd">$ curl -s -w ' (%{http_code})\n' -H 'content-type: application/json' --data-binary @pair.json localhost:4184/web/api/echo</span>
+{"json":{"content":"😀"},"session":"none"} (200)
+<span class="cmd">$ curl -s -w ' (%{http_code})\n' -H 'content-type: application/json' -d '{"a":' localhost:4184/web/api/echo</span>
+Bad Request (400)</code></pre>
+<p class="caption"><code>rawff.json</code> is <code>{"content":"A\xffB"}</code> with a raw 0xFF byte. <code>pair.json</code> is <code>{"content":"\ud83d\ude00"}</code>. At <code>d522c8d</code> the form was <code>403 invalid CSRF token</code>, the query was a 200 page, and both JSON failures were <code>400 text/plain the body is not JSON: SyntaxError at line 1, column 14</code>.</p>
+<p><strong>The body follows Accept.</strong> Phoenix 1.7.19's render_errors picks between <code>[html, json]</code> with <code>Controller.accepts/2</code>, and <code>web_error_format</code> is a port of it. Any <code>*/*</code> in the header means a browser and html. Otherwise the first entry at q=1 that names html or json decides, then the highest q, then html. <code>text/*</code> counts as html and <code>application/*</code> as json. A <code>_format</code> in a query that could be read wins over the header. Measured against Phoenix run with <code>debug_errors: false</code>, which is production's setting. With it on, dev sends a 73 KB Plug.Debugger page. The test has 22 Accept headers, each with Phoenix's answer: <code>application/json</code> and <code>application/*</code> get json, while <code>"application/json, */*"</code>, <code>text/plain</code> and <code>application/vnd.api+json</code> get html.</p>
+<p><strong>What is checked.</strong> For a query or a form, the whole text is decoded and checked once. <code>&amp;</code> and <code>=</code> are ASCII, and no valid multi-byte sequence contains an ASCII byte. So the one check covers every name and value: <code>a=%C3&amp;b=%A9</code> is refused, because each half is broken, and so is <code>a=%FF&amp;a=ok</code>, although <code>web_decode_form</code> keeps only <code>ok</code>. A stray <code>%</code> is kept as written, and <code>a=%ZZ</code> is a 200 from Phoenix too. For JSON, Blimp's <code>json_decode</code> (Zig's std.json) already refuses raw invalid bytes, overlongs, <code>ED A0 80</code>, anything past U+10FFFF and a lone <code>\ud800</code>. Phoenix answers every JSON that does not parse, UTF-8 or not, with the same 400. <code>\u0000</code> is accepted by both.</p>
+<p><strong>Path parameters are not checked, because Phoenix does not check them.</strong> Its router decodes a segment with <code>URI.decode</code> and gives the controller the bytes: <code>DELETE /api/blinks/1/tags/%FF</code> with the token is a 200 that removes nothing, and <code>GET /api/blinks/%FF/comments</code> is the controller's own <code>{"error":"bad id"}</code>. Refusing them here would turn both into a <code>Bad Request</code> that Phoenix never sends. A handler that stores a path parameter must handle bytes that are not UTF-8 itself.</p>
+<p><strong>Why <code>json_encode</code>.</strong> <code>web_utf8_valid</code> calls <code>utf8_valid</code> (Blimp #72) when the interpreter has it. The interpreter in production (896614f) has neither <code>utf8_valid</code> nor <code>utf8_scrub</code>. There the check is <code>json_encode</code>, which runs <code>std.unicode.utf8ValidateSlice</code> on every string and raises <code>TypeError</code> when it fails, and its comment in builtins.zig says so. An unknown function fails at the call, not at load, and it can be caught, so <code>WEB_UTF8_NATIVE</code> asks once. Both are native. The obvious alternative, a UTF-8 state machine in Blimp or Temper, takes one interpreted step per byte of a body that may be 1 MiB. The two give the same answer on 21 byte strings in the test. The decoding is what costs: on 896614f, 852 KB of <code>ab%E2%9C%93cd</code> takes 585 ms to check and then 630 ms in <code>web_decode_form</code>, so a body that is nearly all <code>%XX</code> costs twice what it did. Text with no <code>%</code> is checked as it is: 1.3 MB of raw UTF-8 takes 5 ms.</p>
+<p><strong>What is still different.</strong> Only requests a route here matches are checked. <code>GET /blog?x=%FF</code> goes to the fixed table and is a 200, where Phoenix answers 400. <code>POST /blog -d a=%FF</code> is 405 here and 400 there, because Phoenix's parsers run before its router.</p>
 
 <h2 id="sessions">Sessions<a class="anchor" href="#sessions">#</a></h2>
 
@@ -328,7 +365,7 @@ POST /api/notes 415 1ms</code></pre>
 <div class="table-wrap"><table>
 <tr><th>status</th><th>body</th><th>when</th></tr>
 <tr><td>400</td><td><code>Content-Length is not a number</code></td><td>a non-GET whose <code>Content-Length</code> is not 1 to 12 digits</td></tr>
-<tr><td>400</td><td><code>the body is not JSON: UnexpectedEndOfInput at line 1, column 9</code></td><td><code>application/json</code> that does not parse. The parser's message follows the colon.</td></tr>
+<tr><td>400</td><td><code>Bad Request</code> as <code>text/html; charset=utf-8</code>, or <code>{"errors":{"detail":"Bad Request"}}</code> as <code>application/json; charset=utf-8</code> by Accept; <code>Cache-Control: max-age=0, private, must-revalidate</code></td><td>invalid UTF-8 in the query or a form, or <code>application/json</code> that does not parse, on a routed request, before any plug (<a href="#utf8">above</a>; until <code>8e9c970</code> bad JSON was <code>the body is not JSON: ...</code> as text/plain)</td></tr>
 <tr><td>403</td><td><code>invalid CSRF token</code></td><td><code>web_protect_from_forgery</code></td></tr>
 <tr><td>405</td><td><code>method not allowed</code> + <code>Allow</code></td><td>see <a href="#routing">routing</a></td></tr>
 <tr><td>408</td><td><code>the body did not all arrive</code></td><td>fewer than <code>Content-Length</code> bytes within 2 s (measured: 2.006 s)</td></tr>
@@ -391,12 +428,14 @@ real 0.00                                                                  <span
 <tr><td><code>WEB_SESSION_COOKIE</code></td><td><code>"_blimp_session"</code></td><td></td></tr>
 <tr><td><code>WEB_COOKIE_ATTRS</code></td><td><code>"; Path=/; HttpOnly; SameSite=Lax"</code></td><td>with <code>Secure</code> before <code>SameSite</code> when <code>DATABASE_URL</code> is set (<code>web_cookie_attrs</code>)</td></tr>
 <tr><td><code>WEB_MAX_COOKIE</code></td><td><code>4000</code></td><td>longest <code>Set-Cookie</code> value allowed: the name, the signed session and the attributes together</td></tr>
+<tr><td><code>WEB_UTF8_NATIVE</code></td><td><code>true</code> with Blimp #72</td><td>whether this interpreter has <code>utf8_valid</code>. It is asked once, at load.</td></tr>
+<tr><td><code>WEB_PLUG_CACHE</code></td><td><code>"max-age=0, private, must-revalidate"</code></td><td>the <code>Cache-Control</code> Plug puts on a response it answers itself</td></tr>
 <tr><td><code>WEB_DEV_SECRET</code></td><td>fixed string</td><td>the secret when neither <code>SESSION_SECRET</code> nor <code>DATABASE_URL</code> is set</td></tr>
 </table></div>
 
 <h2 id="internals">Internal names<a class="anchor" href="#internals">#</a></h2>
 <p>These are global too. Do not define your own with these names. Blimp lets a later <code>def</code> replace an earlier one, and the error then points at the call, not at the duplicate.</p>
-<p><code>web_read_rest</code>, <code>web_read_more</code>, <code>web_read_wait</code>, <code>web_headers_in</code>, <code>web_all_digits</code>, <code>web_cookies_in</code>, <code>web_unescape_piece</code>, <code>web_form_in</code>, <code>web_url_encode_from</code>, <code>web_match_path</code>, <code>web_find_in</code>, <code>web_allow</code>, <code>has_string</code>, <code>web_conn</code>, <code>web_parse_body</code>, <code>web_run_plugs</code>, <code>web_frame_error</code>, <code>web_body_error</code>, <code>web_plain</code>, <code>web_run</code>, <code>web_crashed</code>, <code>web_finish</code>, <code>web_cookie_attrs</code>, <code>web_bad_header</code>, <code>web_splice</code>, and the demo: <code>web_demo_routes</code>, <code>web_echo_page</code>, <code>web_echo_post</code>, <code>web_echo_item</code>, <code>web_echo_api</code>.</p>
+<p><code>web_read_rest</code>, <code>web_read_more</code>, <code>web_read_wait</code>, <code>web_headers_in</code>, <code>web_all_digits</code>, <code>web_cookies_in</code>, <code>web_unescape_piece</code>, <code>web_form_in</code>, <code>web_url_encode_from</code>, <code>web_match_path</code>, <code>web_find_in</code>, <code>web_allow</code>, <code>has_string</code>, <code>web_conn</code>, <code>web_parse_body</code>, <code>web_run_plugs</code>, <code>web_frame_error</code>, <code>web_body_error</code>, <code>web_plain</code>, <code>web_run</code>, <code>web_crashed</code>, <code>web_finish</code>, <code>web_cookie_attrs</code>, <code>web_bad_header</code>, <code>web_splice</code>, <code>web_utf8_valid_json</code>, <code>web_has_utf8_valid</code>, <code>web_error_format</code>, <code>web_accept_format</code>, <code>web_accept_pick</code>, <code>web_accept_best</code>, <code>web_media_format</code>, <code>web_q_param</code>, <code>web_q_number</code>, <code>web_number_prefix</code>, and the demo: <code>web_demo_routes</code>, <code>web_echo_page</code>, <code>web_echo_post</code>, <code>web_echo_item</code>, <code>web_echo_api</code>.</p>
 
 </main>
 <footer>
