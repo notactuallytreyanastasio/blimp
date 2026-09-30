@@ -143,7 +143,7 @@ WEB_SECRET = web_session_secret()</code></pre>
 
 <p>From then on, <code>handle()</code> sends a request to the framework in two cases:</p>
 <ul>
-  <li><strong>Any method but GET and HEAD: always, and first.</strong> The prebuilt pages and <code>dynamic()</code> answer only GET and HEAD, so nothing else is asked. If no route matches, the answer is <code>405</code> with <code>Allow: GET, HEAD</code>, which is what every POST got before. That holds whatever the body looks like: an empty <code>curl -X POST</code> to <code>/blog</code> is 405, not 411. Body framing (411, 413, 408, 431) is judged only for a request a route will hand to a handler.</li>
+  <li><strong>Any method but GET and HEAD: always, and first.</strong> The prebuilt pages and <code>dynamic()</code> answer only GET and HEAD, so nothing else is asked. If no route matches, the answer is <code>405</code> with <code>Allow: GET, HEAD</code>, which is what every POST got before. That holds whatever the body looks like: a chunked <code>POST</code> to <code>/blog</code> is 405, not 411. Body framing (411, 413, 408, 431) is judged only for a request a route will hand to a handler.</li>
   <li><strong>A GET or HEAD for a path that is not one of the site's prebuilt pages</strong> is checked against <code>WEB_ROUTES</code> before <code>dynamic()</code>. Only a GET route claims it. <code>web_handle</code> returns <code>nil</code> when no GET route matches that path, and the request goes on to <code>dynamic()</code> the same as before.</li>
 </ul>
 
@@ -259,8 +259,8 @@ http://192.168.1.238:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt
 <ol>
   <li><strong>Read.</strong> For anything but GET and HEAD, <code>web_read_rest</code> keeps reading until it has the headers and <code>Content-Length</code> bytes of body, for up to 2 seconds. It answers <code>Expect: 100-continue</code> on the way.</li>
   <li><strong>Route.</strong> The first route whose pattern and method match wins. A GET or HEAD is claimed only by a GET route, and otherwise falls through to <code>dynamic()</code>. Any other method with no route for it gets 405 with <code>Allow</code>, before its body is looked at.</li>
-  <li><strong>Frame.</strong> A request a route matched is refused before the handler sees it for: a header block over 16 KiB, whether it is still arriving or came whole (431), a chunked body (411), a POST, PUT or PATCH with no <code>Content-Length</code> (411), a <code>Content-Length</code> that is not a number (400), a body over 1 MiB (413, not read), and a body that did not all arrive (408).</li>
-  <li><strong>Conn.</strong> The request becomes a map: headers, cookies, query, and the body, which is exactly <code>Content-Length</code> bytes, parsed by its content type. A form or a JSON object becomes <code>body_params</code>. Bad JSON is 400, multipart is 415.</li>
+  <li><strong>Frame.</strong> A request a route matched is refused before the handler sees it for: a header block over 16 KiB, whether it is still arriving or came whole (431), a chunked body (411), a <code>Content-Length</code> that is not a number (400), a body over 1 MiB (413, not read), and a body that did not all arrive (408).</li>
+  <li><strong>Conn.</strong> The request becomes a map: headers, cookies, query, and the body, which is exactly <code>Content-Length</code> bytes (empty when there is no <code>Content-Length</code>), parsed by its content type. A form or a JSON object becomes <code>body_params</code>. Bad JSON is 400, multipart is 415.</li>
   <li><strong>Pipeline.</strong> The plugs run in order, and one that sets <code>halted</code> ends the pipeline.</li>
   <li><strong>Handler.</strong> It runs if nothing halted. If a plug or the handler crashes, the answer is a plain <code>500 internal server error</code> and the log gets one line naming the request.</li>
   <li><strong>Finish.</strong> The conn becomes bytes. If the session changed, it is re-signed into <code>Set-Cookie</code>. A header value with a CR or LF is a 500, not a split response. A session cookie over 4000 bytes is also a 500. So is a conn that cannot be turned into bytes at all, such as one whose body is <code>nil</code>.</li>
@@ -287,7 +287,7 @@ http://192.168.1.238:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt
 
 <h2 id="fixed">Fixed since the first draft of this page<a class="anchor" href="#fixed">#</a></h2>
 
-<p>The first version of this page listed six bugs, and a second pass found two more: one of the fixes made an empty POST to any path a 411, and a <code>+</code> in a path became a space. PR #100 now has a commit for each, with a test that fails before it. Each is re-run here against the fixed build.</p>
+<p>The first version of this page listed six bugs, and later passes found three more: one of the fixes made an empty POST to any path a 411, a <code>+</code> in a path became a space, and the same fix still refused a bodiless POST to a route that takes POST, which HTTP allows. PR #100 now has a commit for each, with a test that fails before it. Each is re-run here against the fixed build.</p>
 
 <p><strong>A handler that crashes answers 500.</strong> It used to leave the client waiting and the socket in <code>CLOSE_WAIT</code>. The obvious fix, a <code>try</code> around the handler, is not enough. A handler that returns a conn whose body is <code>nil</code> returns normally, and the failure comes later, when the conn is turned into bytes. So the framework has two <code>try</code> blocks: one around the pipeline and handler, one around building the response. These are two probe routes. One divides 100 by <code>?n=</code>, and the other answers <code>web_text(conn, 200, head([]))</code>, which is <code>nil</code>:</p>
 <pre><code class="blimp">def crash_handler(conn: Map) -&gt; Map do
@@ -331,7 +331,7 @@ GET /nil 500 0ms</code></pre>
 
 <p><strong>A POST route no longer takes the GET for its path away from <code>dynamic()</code>.</strong> <code>GET /directory</code> with <code>POST /directory</code> registered used to be 405. It is the directory page again. The transcript is under <a href="reference.html#routing">routing</a>.</p>
 
-<p><strong>The body is exactly <code>Content-Length</code> bytes.</strong> Extra bytes used to stay in the body and could make valid JSON fail to parse. A POST with no length used to take whatever the first read returned. Now the extra bytes are dropped, and a POST, PUT or PATCH with no length is 411 (<a href="reference.html#bodies">reading bodies</a>).</p>
+<p><strong>The body is exactly <code>Content-Length</code> bytes.</strong> Extra bytes used to stay in the body and could make valid JSON fail to parse. A POST with no length used to take whatever the first read returned. Now the extra bytes are dropped. This fix also made a POST, PUT or PATCH with no length a 411, and that part was wrong; see the last fix below (<a href="reference.html#bodies">reading bodies</a>).</p>
 
 <p><strong>431 holds for a complete header block.</strong> A 17,000-byte header that arrived in one read used to be accepted (<a href="reference.html#refusals">refusals</a>).</p>
 
@@ -344,7 +344,7 @@ Allow: GET, HEAD
 <span class="cmd">$ curl -si -X PUT localhost:4177/web/echo | grep -E '^HTTP|^Allow'</span>
 HTTP/1.1 405 Method Not Allowed
 Allow: GET, POST, HEAD
-<span class="cmd">$ curl -si -X POST localhost:4177/web/api/echo | sed -n '1p;$p'</span>     <span class="note"># a route that takes POST</span>
+<span class="cmd">$ curl -si -X POST localhost:4177/web/api/echo | sed -n '1p;$p'</span>     <span class="note"># a route that takes POST; at 5d4d55b, and wrong: see below</span>
 HTTP/1.1 411 Length Required
 a body needs a Content-Length</code></pre>
 <p class="caption">Chunked is still 411 and a declared 2 MB body still 413 without being read, on routes that take them (<a href="reference.html#refusals">refusals</a>). GET pages are byte-identical to origin/main's build for the 14 paths checked.</p>
@@ -353,6 +353,13 @@ a body needs a Content-Length</code></pre>
 <pre><code><span class="cmd">$ curl -s -b jar -X PATCH -H "x-csrf-token: $TOKEN" -H 'Content-Length: 0' 'localhost:4177/web/echo/c++?q=a+b'</span>
 {"method":"PATCH","id":"c++","params":{"q":"a b","id":"c++"}}
 <span class="note"># at 2d5dfbd: {"method":"PATCH","id":"c  ","params":{"q":"a b","id":"c  "}}</span></code></pre>
+
+<p><strong>A request with no <code>Content-Length</code> has an empty body</strong> (<code>d522c8d</code>, found by the Blinks comments chapter's parity run against Phoenix). The body fix made a POST, PUT or PATCH with no length a 411 on a route that takes it. HTTP says otherwise: with neither <code>Content-Length</code> nor <code>Transfer-Encoding</code>, the body has length zero (RFC 9112 §6.3). And the iOS app reports a comment with exactly that, a POST with no body, which Phoenix answers 200 and this answered 411. Now the handler runs with an empty body, and 411 is only for <code>Transfer-Encoding</code>. Bytes after the head of such a request would be the next request, and with no keep-alive they are dropped unread. Re-run at <code>d522c8d</code> (at <code>5d4d55b</code> both were <code>411 a body needs a Content-Length</code>):</p>
+<pre><code><span class="cmd">$ curl -si -X POST -H 'Content-Type: application/json' localhost:4181/web/api/echo | sed -n '1p;$p'</span>
+HTTP/1.1 200 OK
+{"json":null,"session":"none"}
+<span class="cmd">$ curl -s -b jar -X PATCH -H "x-csrf-token: $TOKEN" 'localhost:4181/web/echo/c++?q=a+b'</span>     <span class="note"># no Content-Length: 0 needed now</span>
+{"method":"PATCH","id":"c++","params":{"q":"a b","id":"c++"}}</code></pre>
 
 <p><strong>The boot refusals print plainly.</strong> They used <code>print()</code>, which quotes a string the way source code writes it (<a href="reference.html#sessions">SESSION_SECRET</a>).</p>
 

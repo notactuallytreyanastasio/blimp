@@ -185,7 +185,7 @@ word word word word word word","words":60000}
   <li><strong>The first match wins</strong>, in the order of the <code>WEB_ROUTES</code> list.</li>
   <li><strong>HEAD is answered by the GET route.</strong> The handler runs, and the response has the GET's headers, including its <code>Content-Length</code>, with no body. A handler with side effects has them on HEAD too.</li>
   <li><strong>405 with <code>Allow</code>.</strong> A method other than GET and HEAD, on a path that matches only routes for other methods, is 405. <code>Allow</code> lists those methods, and HEAD is added when there is a GET. <code>OPTIONS</code> is not special. It is a 405 too. <code>Allow</code> does not list the GET and HEAD that <code>dynamic()</code> may serve for the same path: the framework cannot know them without running <code>dynamic()</code>.</li>
-  <li><strong>Routing comes before framing.</strong> A method the path does not take is 405 with <code>Allow</code>, whatever its body looks like. 411, 413, 408 and 431 apply only to a request a route will hand to a handler. Until <code>2d5dfbd</code> it was the other way round: a POST, PUT or PATCH without <code>Content-Length</code> was 411 before any route was looked at, so an empty <code>curl -X POST</code> to <code>/blog</code> was 411.</li>
+  <li><strong>Routing comes before framing.</strong> A method the path does not take is 405 with <code>Allow</code>, whatever its body looks like. 411, 413, 408 and 431 apply only to a request a route will hand to a handler. Until <code>2d5dfbd</code> it was the other way round: a POST, PUT or PATCH without <code>Content-Length</code> was 411 before any route was looked at, so an empty <code>curl -X POST</code> to <code>/blog</code> was 411. Since <code>d522c8d</code> a request with no length is not refused at all, on any path: its body is empty.</li>
   <li><strong>Precedence over <code>dynamic()</code>.</strong> The prebuilt pages, <code>/</code> and the posts, are answered before the framework is asked. Then, for a GET or HEAD, <code>WEB_ROUTES</code> is checked before <code>dynamic()</code>, and only a GET route claims it. A route for another method on the same path does not: the GET goes on to <code>dynamic()</code>. Every other method goes to the framework first and only there, because the prebuilt pages and <code>dynamic()</code> answer nothing but GET and HEAD.</li>
 </ul>
 <pre><code><span class="cmd">$ curl -si -X PUT -H 'Content-Length: 0' localhost:4176/notes | grep -E '^HTTP|^Allow'</span>          <span class="note"># GET and POST routes exist</span>
@@ -237,16 +237,19 @@ Allow: POST</code></pre>
 &lt; HTTP/1.1 100 Continue
 &lt; HTTP/1.1 201 Created</code></pre>
 
-<p><strong>The body is exactly <code>Content-Length</code> bytes.</strong> What comes after them is dropped, not read as a second request: every response closes its connection, so there is no pipelining for those bytes to belong to. <strong>Why the obvious version is wrong:</strong> taking everything after the blank line as the body is right only when the client sent exactly what it said it would, and a POST with no length would end wherever the socket read happened to stop. If the headers and body arrive in two packets, that is an empty body, and the handler answers as if nothing was sent. So a POST, PUT or PATCH with no <code>Content-Length</code> is refused:</p>
+<p><strong>The body is exactly <code>Content-Length</code> bytes, and a request with no <code>Content-Length</code> has an empty body</strong>, whatever its method. That is what HTTP says (RFC 9112 §6.3: neither <code>Content-Length</code> nor <code>Transfer-Encoding</code> means a body of length zero), and it is what a real client sends: the Blinks iOS app reports a comment with a bodiless POST. What comes after the body is dropped, not read as a second request: every response closes its connection, so there is no pipelining for those bytes to belong to. <strong>Why the obvious version is wrong:</strong> taking everything after the blank line as the body is right only when the client sent exactly what it said it would, and a request with no length would end wherever the socket read happened to stop. If the headers and body arrive in two packets, that is an empty body, and the handler answers as if nothing was sent. Bytes after the head of a request with no length are, by the RFC, the next request, so they are dropped with the rest:</p>
 <pre><code><span class="cmd">$ printf 'POST /api/notes HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{"text":"abc"}GARBAGE' | nc -w 3 localhost 4176 | tail -1</span>
 {"saved":"abc","words":1}
-<span class="cmd">$ printf 'POST /api/notes HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n{"text":"no length"}' | nc -w 3 localhost 4176 | sed -n '1p;$p'</span>
-HTTP/1.1 411 Length Required
-a body needs a Content-Length
+<span class="cmd">$ printf 'POST /web/api/echo HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n[1,2]' | nc -w 3 localhost 4181 | sed -n '1p;$p'</span>
+HTTP/1.1 200 OK
+{"json":null,"session":"none"}                                   <span class="note"># no length: empty body; [1,2] dropped</span>
+<span class="cmd">$ curl -si -X POST -H 'Content-Type: application/json' localhost:4181/web/api/echo | sed -n '1p;$p'</span>
+HTTP/1.1 200 OK
+{"json":null,"session":"none"}
 <span class="cmd">$ printf "DELETE /web/echo/3 HTTP/1.1\r\nHost: x\r\nCookie: _blimp_session=$C\r\nX-CSRF-Token: $T\r\n\r\nstray" | nc -w 3 localhost 4176 | sed -n '1p;$p'</span>
 HTTP/1.1 200 OK
 {"method":"DELETE","id":"3","params":{"id":"3"}}</code></pre>
-<p class="caption">Before <code>919656d</code> the first request was a 400 (<code>the body is not JSON: SyntaxError at line 1, column 15</code>) and the second a 201. The DELETE carries its session cookie and token and five stray bytes with no length. It has an empty body, so the stray bytes are ignored.</p>
+<p class="caption">Before <code>919656d</code> the first request was a 400 (<code>the body is not JSON: SyntaxError at line 1, column 15</code>). The next two ran at <code>d522c8d</code> on a plain build of the branch (port 4181, the demo's <code>/web/api/echo</code>). From <code>919656d</code> until <code>d522c8d</code> both were <code>411 a body needs a Content-Length</code>: a POST, PUT or PATCH with no length was refused, and that lost the iOS app's comment reports. Now 411 is only for <code>Transfer-Encoding</code>. The DELETE carries its session cookie and token and five stray bytes with no length. It has an empty body, so the stray bytes are ignored.</p>
 
 <h2 id="sessions">Sessions<a class="anchor" href="#sessions">#</a></h2>
 
@@ -331,7 +334,6 @@ POST /api/notes 415 1ms</code></pre>
 <tr><td>408</td><td><code>the body did not all arrive</code></td><td>fewer than <code>Content-Length</code> bytes within 2 s (measured: 2.006 s)</td></tr>
 <tr><td>408</td><td><code>the request headers did not all arrive</code></td><td>no blank line after the headers within 2 s (non-GET)</td></tr>
 <tr><td>411</td><td><code>chunked bodies are not accepted; send Content-Length</code></td><td>any <code>Transfer-Encoding</code></td></tr>
-<tr><td>411</td><td><code>a body needs a Content-Length</code></td><td>POST, PUT or PATCH with no <code>Content-Length</code>, to a route that takes that method. Anywhere else it is 405.</td></tr>
 <tr><td>413</td><td><code>the body is over 1048576 bytes</code></td><td><code>Content-Length</code> over <code>WEB_MAX_BODY</code>. The body is not read.</td></tr>
 <tr><td>415</td><td><code>multipart bodies are not supported</code></td><td><code>multipart/*</code>, on any route</td></tr>
 <tr><td>415</td><td><code>this route takes Content-Type: application/json</code></td><td><code>web_require_json</code></td></tr>
@@ -354,7 +356,7 @@ HTTP/1.1 201 Created
 <span class="cmd">$ curl -si -X POST localhost:4176/blog | sed -n '1p;$p'</span>                <span class="note"># at c75fced; 405 since 2d5dfbd, below</span>
 HTTP/1.1 411 Length Required
 a body needs a Content-Length</code></pre>
-<p class="caption">Re-run at <code>5d4d55b</code> on a plain build of the branch (port 4177, no notes app; the demo's <code>/web/echo</code> takes GET and POST, <code>/web/api/echo</code> POST only). At <code>c75fced</code> the first four were all <code>411</code>:</p>
+<p class="caption">Re-run at <code>5d4d55b</code> on a plain build of the branch (port 4177, no notes app; the demo's <code>/web/echo</code> takes GET and POST, <code>/web/api/echo</code> POST only), and the last four again at <code>d522c8d</code> (port 4181). At <code>c75fced</code> the first four were all <code>411</code>:</p>
 <pre><code><span class="cmd">$ curl -si -X POST localhost:4177/blog</span>
 HTTP/1.1 405 Method Not Allowed
 Allow: GET, HEAD
@@ -366,13 +368,16 @@ HTTP/1.1 405 Method Not Allowed
 Allow: GET, POST, HEAD
 <span class="cmd">$ curl -si -X POST -H 'Transfer-Encoding: chunked' --data-binary abc localhost:4177/blog</span>
 HTTP/1.1 405 Method Not Allowed
-<span class="cmd">$ curl -si -X POST localhost:4177/web/api/echo</span>                      <span class="note"># a route that takes POST: still 411</span>
-HTTP/1.1 411 Length Required
-a body needs a Content-Length
-<span class="cmd">$ curl -si -X POST -H 'Content-Type: application/json' -H 'Transfer-Encoding: chunked' --data-binary '[1]' localhost:4177/web/api/echo</span>
+<span class="cmd">$ curl -si -X POST localhost:4181/web/api/echo</span>                      <span class="note"># no length, no Content-Type</span>
+HTTP/1.1 415 Unsupported Media Type                                    <span class="note"># 411 before d522c8d; now the route's plugs judge it</span>
+this route takes Content-Type: application/json
+<span class="cmd">$ curl -si -X POST -H 'Content-Type: application/json' localhost:4181/web/api/echo</span>
+HTTP/1.1 200 OK
+{"json":null,"session":"none"}
+<span class="cmd">$ curl -si -X POST -H 'Content-Type: application/json' -H 'Transfer-Encoding: chunked' --data-binary '[1]' localhost:4181/web/api/echo</span>
 HTTP/1.1 411 Length Required
 chunked bodies are not accepted; send Content-Length
-<span class="cmd">$ time curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Length: 2000000' localhost:4177/web/api/echo</span>
+<span class="cmd">$ time curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Length: 2000000' localhost:4181/web/api/echo</span>
 413
 real 0.00                                                                  <span class="note"># not waited for</span></code></pre>
 <p class="caption"><code>big17k</code> and <code>big15k</code> hold 17,000 and 15,000 <code>x</code>s. Before <code>e6be45f</code> the first request was a 200: the limit was checked only while the blank line had not arrived yet.</p>
@@ -391,11 +396,11 @@ real 0.00                                                                  <span
 
 <h2 id="internals">Internal names<a class="anchor" href="#internals">#</a></h2>
 <p>These are global too. Do not define your own with these names. Blimp lets a later <code>def</code> replace an earlier one, and the error then points at the call, not at the duplicate.</p>
-<p><code>web_read_rest</code>, <code>web_read_more</code>, <code>web_read_wait</code>, <code>web_headers_in</code>, <code>web_all_digits</code>, <code>web_cookies_in</code>, <code>web_unescape_piece</code>, <code>web_form_in</code>, <code>web_url_encode_from</code>, <code>web_match_path</code>, <code>web_find_in</code>, <code>web_allow</code>, <code>has_string</code>, <code>web_conn</code>, <code>web_parse_body</code>, <code>web_run_plugs</code>, <code>web_frame_error</code>, <code>web_body_error</code>, <code>web_has_body</code>, <code>web_method_of</code>, <code>web_plain</code>, <code>web_run</code>, <code>web_crashed</code>, <code>web_finish</code>, <code>web_cookie_attrs</code>, <code>web_bad_header</code>, <code>web_splice</code>, and the demo: <code>web_demo_routes</code>, <code>web_echo_page</code>, <code>web_echo_post</code>, <code>web_echo_item</code>, <code>web_echo_api</code>.</p>
+<p><code>web_read_rest</code>, <code>web_read_more</code>, <code>web_read_wait</code>, <code>web_headers_in</code>, <code>web_all_digits</code>, <code>web_cookies_in</code>, <code>web_unescape_piece</code>, <code>web_form_in</code>, <code>web_url_encode_from</code>, <code>web_match_path</code>, <code>web_find_in</code>, <code>web_allow</code>, <code>has_string</code>, <code>web_conn</code>, <code>web_parse_body</code>, <code>web_run_plugs</code>, <code>web_frame_error</code>, <code>web_body_error</code>, <code>web_plain</code>, <code>web_run</code>, <code>web_crashed</code>, <code>web_finish</code>, <code>web_cookie_attrs</code>, <code>web_bad_header</code>, <code>web_splice</code>, and the demo: <code>web_demo_routes</code>, <code>web_echo_page</code>, <code>web_echo_post</code>, <code>web_echo_item</code>, <code>web_echo_api</code>.</p>
 
 </main>
 <footer>
-  Written against blog commit <code>c75fced</code> (PR #100), and re-run at <code>5d4d55b</code> for the 405-before-411 and path-decoding fixes. If the code and this page disagree, the code is right and this page has a bug.
+  Written against blog commit <code>c75fced</code> (PR #100), re-run at <code>5d4d55b</code> for the 405-before-411 and path-decoding fixes, and at <code>d522c8d</code> for bodies with no length. If the code and this page disagree, the code is right and this page has a bug.
 </footer>
 <script src="/tutorial/blimp-highlight.js"></script>
 <script>
