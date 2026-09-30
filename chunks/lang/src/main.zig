@@ -563,12 +563,19 @@ const ValueHeap = struct {
     /// A failed copy leaves the evaluator on the heap it already has, so the
     /// session keeps working and merely keeps the garbage.
     fn compact(self: *ValueHeap, eval: *Evaluator) void {
+        _ = self.compactWith(eval, .keep_all);
+    }
+
+    /// The same, saying how many unreachable actors it dropped (always 0
+    /// with .keep_all, and when the copy fails).
+    fn compactWith(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) usize {
         const next = 1 - self.live;
-        gc.compact(eval, self.halves[next].allocator(), self.scratch) catch return;
+        const dropped = gc.compactWith(eval, self.halves[next].allocator(), self.scratch, actors) catch return 0;
         _ = self.halves[self.live].reset(.free_all);
         self.live = next;
         // Its details have already been formatted for the user.
         eval.last_error = null;
+        return dropped;
     }
 };
 
@@ -1419,6 +1426,7 @@ const ServeStats = struct {
     compactions: u64 = 0,
     compact_ms: i64 = 0,
     live_after_compact: usize = 0,
+    actors_dropped: u64 = 0,
     started_ms: i64 = 0,
 };
 
@@ -1454,7 +1462,7 @@ fn serve(allocator: std.mem.Allocator, heap_limit: *HeapLimit, opts: ServeOpts) 
 
     var stats = ServeStats{ .started_ms = nowMillis() };
     serveResetToTop(&evaluator);
-    heap.compact(&evaluator);
+    stats.actors_dropped += heap.compactWith(&evaluator, .drop_unreachable);
     stats.live_after_compact = heap_limit.used;
     std.debug.print("[serve] booted {s}; live heap {d} bytes; control socket {s}\n", .{ opts.path, heap_limit.used, opts.control });
 
@@ -1477,7 +1485,11 @@ fn serve(allocator: std.mem.Allocator, heap_limit: *HeapLimit, opts: ServeOpts) 
         const grown = heap_limit.used -| stats.live_after_compact;
         if (grown >= @max(stats.live_after_compact, 16 * 1024 * 1024)) {
             const c0 = nowMillis();
-            heap.compact(&evaluator);
+            // A served program's only host is the tick, so an actor no value
+            // can name will never get another message: drop it. Temper's
+            // classes are actors, and a page that builds a query from them
+            // made thirty that nothing ever freed.
+            stats.actors_dropped += heap.compactWith(&evaluator, .drop_unreachable);
             stats.compact_ms += nowMillis() - c0;
             stats.compactions += 1;
             stats.live_after_compact = heap_limit.used;
@@ -1605,8 +1617,8 @@ fn writeAll(fd: c_int, bytes: []const u8) void {
 fn controlEval(src: []const u8, code: std.mem.Allocator, evaluator: *Evaluator, heap_limit: *HeapLimit, stats: *ServeStats, w: *std.Io.Writer) void {
     const trimmed = std.mem.trim(u8, src, " \t\r\n");
     if (std.mem.eql(u8, trimmed, ":stats")) {
-        w.print("ticks {d}, errors {d}, compactions {d} ({d}ms), heap {d} bytes, live after last compaction {d}, up {d}s\n", .{
-            stats.ticks, stats.errors, stats.compactions, stats.compact_ms, heap_limit.used, stats.live_after_compact, @divTrunc(nowMillis() - stats.started_ms, 1000),
+        w.print("ticks {d}, errors {d}, compactions {d} ({d}ms), heap {d} bytes, live after last compaction {d}, actors {d} ({d} unreachable dropped), up {d}s\n", .{
+            stats.ticks, stats.errors, stats.compactions, stats.compact_ms, heap_limit.used, stats.live_after_compact, evaluator.registry.instances.items.len, stats.actors_dropped, @divTrunc(nowMillis() - stats.started_ms, 1000),
         }) catch {};
         return;
     }

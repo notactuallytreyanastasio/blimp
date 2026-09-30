@@ -37,20 +37,61 @@ pub const CompactError = error{OutOfMemory};
 /// left clean.  On error the evaluator is untouched (everything already
 /// copied into `to` is simply abandoned there).
 pub fn compact(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocator) CompactError!void {
+    _ = try compactWith(eval, to, scratch, .keep_all);
+}
+
+/// What a compaction does with actors nothing can reach.
+pub const Actors = enum {
+    /// Copy every instance, reachable or not. The REPL and the browser keep
+    /// this: a host (blimp.js) may hold an actor's id where no Blimp value
+    /// does, so "unreachable from Blimp" does not mean unreachable.
+    keep_all,
+    /// Copy only the instances a live value can still name, and those with
+    /// work pending. `blimp --serve` uses this: its only host is the tick,
+    /// and every actor a program means to keep is bound somewhere.
+    drop_unreachable,
+};
+
+/// The same, and the number of actor instances left behind.
+///
+/// An actor instance is kept when:
+///   - some value copied from a root (the top-level scope, the templates'
+///     defaults, the pending bubble) or from a kept actor's state or mailbox
+///     holds its ref, or
+///   - it has messages waiting, is not idle, or is on the scheduler's run
+///     queue: it has work to do whether or not anyone holds it.
+/// Everything else can never receive another message, so it is dropped with
+/// the rest of the garbage. Ids are never reused (`next_id` only grows), so
+/// a ref printed before the drop still names nothing rather than someone
+/// else.
+pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocator, actors: Actors) CompactError!usize {
     var copier = Copier{
         .to = to,
         .values = std.AutoHashMap(usize, *const Value).init(scratch),
         .handlers = std.AutoHashMap(usize, []const Value.HandlerDef).init(scratch),
+        .seen = std.AutoHashMap(u64, void).init(scratch),
+        .pending = .{ .items = &.{}, .capacity = 0 },
+        .scratch = scratch,
     };
     defer copier.values.deinit();
     defer copier.handlers.deinit();
+    defer copier.seen.deinit();
+    defer copier.pending.deinit(scratch);
 
     // Build every replacement first, then swap them in, so a failure
     // part-way leaves the evaluator consistent.
     const scopes = try copier.scopes(eval.env.scopes.items);
     const templates = try copier.templates(eval.registry.templates.items);
-    const instances = try copier.instances(eval.registry.instances.items);
     const bubble_reason: ?*const Value = if (eval.bubble_reason) |r| try copier.value(r) else null;
+    if (eval.scheduler) |sched| {
+        for (sched.run_queue.items) |id| try copier.see(id);
+    }
+    const old_instances = eval.registry.instances.items;
+    const instances = switch (actors) {
+        .keep_all => try copier.instances(old_instances),
+        .drop_unreachable => try copier.reachableInstances(old_instances),
+    };
+    const dropped = old_instances.len - instances.items.len;
     // One slot per entry the evaluator can hold.  The WASM host drains the
     // log after every eval so 64 was enough there; a REPL that never reads it
     // fills all 256 and used to walk off the end of this buffer.
@@ -76,12 +117,22 @@ pub fn compact(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocat
     for (0..eval.msg_log_count) |i| eval.msg_log[i] = msg_log[i];
     eval.builtins = BuiltinRegistry.init(to);
     eval.allocator = to;
+    return dropped;
 }
 
 const Copier = struct {
     to: std.mem.Allocator,
     values: std.AutoHashMap(usize, *const Value),
     handlers: std.AutoHashMap(usize, []const Value.HandlerDef),
+    /// Every actor id a copied value holds, and those not yet visited.
+    seen: std.AutoHashMap(u64, void),
+    pending: std.ArrayList(u64),
+    scratch: std.mem.Allocator,
+
+    fn see(self: *Copier, id: u64) CompactError!void {
+        const got = try self.seen.getOrPut(id);
+        if (!got.found_existing) try self.pending.append(self.scratch, id);
+    }
 
     fn str(self: *Copier, s: []const u8) CompactError![]const u8 {
         return self.to.dupe(u8, s);
@@ -104,7 +155,10 @@ const Copier = struct {
             .list => |items| .{ .list = try self.valueList(items) },
             .tuple => |items| .{ .tuple = try self.valueList(items) },
             .map => |entries| .{ .map = try self.mapEntries(entries) },
-            .actor_ref => |r| .{ .actor_ref = .{ .id = r.id, .type_name = try self.str(r.type_name) } },
+            .actor_ref => |r| blk: {
+                try self.see(r.id);
+                break :blk .{ .actor_ref = .{ .id = r.id, .type_name = try self.str(r.type_name) } };
+            },
             .closure => |c| .{ .closure = try self.closure(c) },
             .view_node => |n| .{ .view_node = try self.viewNode(n) },
         };
@@ -220,18 +274,49 @@ const Copier = struct {
     fn instances(self: *Copier, old: []const *registry_mod.ActorEntry) CompactError!std.ArrayList(*registry_mod.ActorEntry) {
         var out: std.ArrayList(*registry_mod.ActorEntry) = .{ .items = &.{}, .capacity = 0 };
         try out.ensureTotalCapacity(self.to, old.len);
+        for (old) |e| out.appendAssumeCapacity(try self.entry(e));
+        return out;
+    }
+
+    fn entry(self: *Copier, e: *const registry_mod.ActorEntry) CompactError!*registry_mod.ActorEntry {
+        const ne = try self.to.create(registry_mod.ActorEntry);
+        ne.* = .{
+            .ref = .{ .id = e.ref.id, .type_name = try self.str(e.ref.type_name) },
+            .state_fields = try self.mapEntries(e.state_fields),
+            .handlers = try self.handlerDefs(e.handlers),
+            .status = e.status,
+            .mailbox = try self.mailbox(e.mailbox),
+            .reductions = e.reductions,
+        };
+        return ne;
+    }
+
+    /// The instances something can still reach, in their original order.
+    /// A worklist, not repeated passes: copying one actor's state can name
+    /// another, and a chain of actors each holding the next (a Temper
+    /// ListBuilder's nodes, say) would otherwise take a pass per link.
+    fn reachableInstances(self: *Copier, old: []const *registry_mod.ActorEntry) CompactError!std.ArrayList(*registry_mod.ActorEntry) {
+        var index = std.AutoHashMap(u64, usize).init(self.scratch);
+        defer index.deinit();
+        try index.ensureTotalCapacity(@intCast(old.len));
+        for (old, 0..) |e, i| index.putAssumeCapacity(e.ref.id, i);
+
+        // Work pending makes an actor a root of its own.
         for (old) |e| {
-            const ne = try self.to.create(registry_mod.ActorEntry);
-            ne.* = .{
-                .ref = .{ .id = e.ref.id, .type_name = try self.str(e.ref.type_name) },
-                .state_fields = try self.mapEntries(e.state_fields),
-                .handlers = try self.handlerDefs(e.handlers),
-                .status = e.status,
-                .mailbox = try self.mailbox(e.mailbox),
-                .reductions = e.reductions,
-            };
-            out.appendAssumeCapacity(ne);
+            if (e.mailbox.messages.items.len > 0 or (e.status != .idle and e.status != .dead)) try self.see(e.ref.id);
         }
+
+        const copies = try self.scratch.alloc(?*registry_mod.ActorEntry, old.len);
+        defer self.scratch.free(copies);
+        @memset(copies, null);
+        while (self.pending.pop()) |id| {
+            const i = index.get(id) orelse continue; // a ref to an actor already gone
+            if (copies[i] != null) continue;
+            copies[i] = try self.entry(old[i]);
+        }
+
+        var out: std.ArrayList(*registry_mod.ActorEntry) = .{ .items = &.{}, .capacity = 0 };
+        for (copies) |c| if (c) |ne| try out.append(self.to, ne);
         return out;
     }
 
@@ -594,4 +679,96 @@ test "redefining an actor updates its running instances and keeps their state" {
     try std.testing.expectEqual(@as(i64, 17), (try run(code.allocator(), &eval, "t <- :add(1)")).integer);
     // a new instance gets the new definition too
     try std.testing.expectEqualStrings("total: 0", (try run(code.allocator(), &eval, "u = spawn Tally\nu <- :show")).string);
+}
+
+test "drop_unreachable keeps every actor a value can name, and only those" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    _ = try run(code.allocator(), &eval,
+        \\actor Box do
+        \\  state held: Any :: nil
+        \\  state n: Int :: 0
+        \\  on :hold(x: Any) do become held: x end
+        \\  on :held do reply held end
+        \\  on :bump do become n: n + 1 end
+        \\  on :n do reply n end
+        \\end
+        \\def scratch(i: Int) -> Int do
+        \\  b = spawn Box
+        \\  b <- :bump
+        \\  b <- :n
+        \\end
+        \\def many(i: Int) -> Int do
+        \\  case i >= 50 do
+        \\    true -> i
+        \\    false ->
+        \\      scratch(i)
+        \\      many(i + 1)
+        \\  end
+        \\end
+        \\bound = spawn Box
+        \\outer = spawn Box
+        \\inner = spawn Box
+        \\outer <- :hold(inner)
+        \\inner = nil
+        \\chain = spawn Box
+        \\c2 = spawn Box
+        \\c3 = spawn Box
+        \\c2 <- :hold(%{next: [c3]})
+        \\chain <- :hold({c2})
+        \\c2 = nil
+        \\c3 = nil
+        \\in_closure = fn() do spawn Box end
+        \\kept_by_fn = spawn Box
+        \\f = fn() do kept_by_fn end
+        \\kept_by_fn = nil
+        \\many(0)
+    );
+    // 7 kept (bound, outer, the one outer holds, chain, c2, c3, kept_by_fn)
+    // plus 50 that scratch/1 spawned and let go.
+    try std.testing.expectEqual(@as(usize, 57), eval.registry.instances.items.len);
+
+    const dropped = try compactWith(&eval, heap_b.allocator(), std.testing.allocator, .drop_unreachable);
+    _ = heap_a.reset(.free_all);
+    try std.testing.expectEqual(@as(usize, 50), dropped);
+    try std.testing.expectEqual(@as(usize, 7), eval.registry.instances.items.len);
+
+    // What was kept still works, including what is reachable only through
+    // another actor's state, a tuple, a map inside a list, or a closure.
+    _ = try run(code.allocator(), &eval, "(outer <- :held) <- :bump");
+    try std.testing.expectEqual(@as(i64, 1), (try run(code.allocator(), &eval, "(outer <- :held) <- :n")).integer);
+    try std.testing.expectEqual(@as(i64, 0), (try run(code.allocator(), &eval, "(head(lookup(elem(chain <- :held, 0) <- :held, :next))) <- :n")).integer);
+    try std.testing.expectEqual(@as(i64, 0), (try run(code.allocator(), &eval, "f() <- :n")).integer);
+    try std.testing.expectEqual(@as(i64, 0), (try run(code.allocator(), &eval, "bound <- :n")).integer);
+}
+
+test "keep_all still keeps every actor" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    _ = try run(code.allocator(), &eval,
+        \\actor Box do
+        \\  state n: Int :: 0
+        \\end
+        \\def one(i: Int) -> Int do
+        \\  b = spawn Box
+        \\  i
+        \\end
+        \\one(1)
+        \\one(2)
+    );
+    try std.testing.expectEqual(@as(usize, 0), try compactWith(&eval, heap_b.allocator(), std.testing.allocator, .keep_all));
+    _ = heap_a.reset(.free_all);
+    try std.testing.expectEqual(@as(usize, 2), eval.registry.instances.items.len);
 }
