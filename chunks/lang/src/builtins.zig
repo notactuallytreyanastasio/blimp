@@ -4094,6 +4094,23 @@ const HttpBadServer = struct {
             // connection open so a client that waits for it is caught
             send(c, "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n");
             httpTestNap(3000);
+        } else if (std.mem.startsWith(u8, path, "/drip")) {
+            // a head at once, then a byte of body every 200ms for 4s: the
+            // response has started when the deadline comes
+            const head = if (eq(u8, path, "/drip"))
+                "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\n"
+            else if (eq(u8, path, "/drip-chunked"))
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            else if (eq(u8, path, "/drip-redirect"))
+                "HTTP/1.1 302 Found\r\nLocation: /ok\r\nContent-Length: 20\r\nConnection: close\r\n\r\n"
+            else
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+            send(c, head);
+            const byte = if (eq(u8, path, "/drip-chunked")) "1\r\nx\r\n" else "x";
+            for (0..20) |_| {
+                httpTestNap(200);
+                if (std.c.write(c, byte.ptr, byte.len) <= 0) return;
+            }
         } else if (eq(u8, path, "/bad-status")) {
             send(c, "HTTP/1.1 2x0 Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         } else {
@@ -4229,6 +4246,45 @@ test "http_start: a User-Agent (any case) replaces the client's, and a header th
         entries[0] = .{ .key = kv[0], .val = try make(a, .{ .string = kv[1] }) };
         try std.testing.expectError(error.TypeError, builtinHttpStart(a, &.{ try make(a, .{ .string = "GET" }), try make(a, .{ .string = url }), try make(a, .{ .map = entries }), try make(a, .{ .string = "" }) }));
     }
+    for (http_slots) |slot| try std.testing.expect(slot.job == null);
+}
+
+test "http_start: a deadline that comes while the body is arriving is {:error, \"timeout\"}, and the worker ends without a panic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+    const hang = try HttpTestServer.start();
+    var url_buf: [96]u8 = undefined;
+
+    // At 35-http-timeout's first commit (bc90267) each of the first four
+    // answered timeout on time and then the worker panicked on std's
+    // `bodyErr().?` as the cancelled read unwound through `fetch`, killing
+    // the process a moment after the program had its answer. The fifth is
+    // a TLS handshake the server never answers: cancelled mid-handshake.
+    const cases = [_][]const u8{ "/drip", "/drip-chunked", "/drip-none", "/drip-redirect" };
+    var urls: [cases.len + 1][]const u8 = undefined;
+    for (cases, 0..) |path, k| urls[k] = try a.dupe(u8, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}{s}", .{ srv.port, path }));
+    urls[cases.len] = try a.dupe(u8, try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/hang", .{hang.port}));
+    for (urls) |url| {
+        const t0 = monoMs();
+        const r = try httpTestFetch(a, url, try httpTestOpts(a, "timeout_ms", 500));
+        const took = monoMs() - t0;
+        std.testing.expectEqualStrings("timeout", r.tuple[1].string) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ url, r.tuple[1].string });
+            return err;
+        };
+        try std.testing.expect(took >= 500 and took < 1500);
+    }
+    // the workers finish unwinding after the answers; give them the time
+    // the panic used to take, then the next request is answered as usual
+    httpTestNap(1000);
+    const ok = try httpTestFetch(a, try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/ok", .{srv.port}), null);
+    try std.testing.expectEqualStrings("arrived", ok.tuple[2].string);
     for (http_slots) |slot| try std.testing.expect(slot.job == null);
 }
 
