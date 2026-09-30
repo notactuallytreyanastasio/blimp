@@ -1,0 +1,101 @@
+# The Bluesky firehose, the way a long-running Blimp server holds it.
+#
+#   blimp --serve examples/jetstream_serve.blimp --tick "hose <- :tick"
+#
+# examples/jetstream.blimp is a script, and a script's heap only grows: every
+# frame it was handed is still there when it ends. Under --serve the heap is
+# compacted between ticks, so this is the shape to measure memory with, and
+# the shape the site uses.
+#
+# It also reconnects, which is the program's job and not ws_open's: when
+# ws_recv answers {:closed, reason}, open again with ?cursor= set to the
+# time_us of the last event seen, and Jetstream replays from there.
+#
+#   blimp --attach    then    hose <- :drop
+#
+# closes the connection from this side, to watch that happen.
+
+actor Hose do
+  state ws: Int :: 0
+  state url: String :: "wss://bsky-relay.c.theo.io/subscribe?wantedCollections=app.bsky.feed.post"
+  state started: Int :: 0
+  state ticks: Int :: 0
+  state frames: Int :: 0
+  state most: Int :: 0
+  state cursor: Int :: 0
+  state reconnects: Int :: 0
+  state last_text: Any :: nil
+
+  on :start do
+    become ws: ws_open(url, %{}), started: now_ms()
+    reply :ok
+  end
+
+  # Close from this side, and carry on as if the server had.
+  on :drop do
+    ws_close(ws)
+    become ws: reopen(url, cursor), reconnects: reconnects + 1
+    reply :ok
+  end
+
+  on :tick do
+    got = ws_recv(ws)
+    case got do
+      {:closed, why} ->
+        print(concat("closed: ", why, "; reopening at cursor ", to_string(cursor)))
+        become ws: reopen(url, cursor), reconnects: reconnects + 1
+      _ ->
+        k = length(got)
+        seen = reduce(got, {cursor, last_text}, fn(acc: Any, f: String) do
+          r = case json_decode(f) do
+            {:ok, ev} -> {lookup(ev, "time_us"), text_or(ev, elem(acc, 1))}
+            _ -> acc
+          end
+          r
+        end)
+        m = case k > most do
+          true -> k
+          _ -> most
+        end
+        become frames: frames + k, most: m, cursor: elem(seen, 0), last_text: elem(seen, 1), ticks: ticks + 1
+        case rem(ticks + 1, 100) == 0 do
+          true -> report(ws, started, frames + k, m, reconnects, elem(seen, 1))
+          _ -> nil
+        end
+    end
+    sleep_ms(100)
+    reply :ok
+  end
+end
+
+def reopen(url: String, cursor: Int) -> Int do
+  r = case cursor > 0 do
+    true -> ws_open(concat(url, "&cursor=", to_string(cursor)), %{})
+    _ -> ws_open(url, %{})
+  end
+  r
+end
+
+def text_or(ev: Any, fallback: Any) -> Any do
+  commit = lookup(ev, "commit")
+  r = case commit do
+    nil -> fallback
+    _ -> case lookup(commit, "record") do
+      nil -> fallback
+      rec -> lookup(rec, "text")
+    end
+  end
+  r
+end
+
+def report(ws: Int, started: Int, frames: Int, most: Int, reconnects: Int, text: Any) -> Any do
+  st = ws_stats(ws)
+  secs = (now_ms() - started) / 1000.0
+  print(concat("t=", to_string(round(secs)), "s frames=", to_string(frames),
+    " (", to_string(round(frames / secs)), "/s) dropped=", to_string(lookup(st, "dropped")),
+    " most-in-one-poll=", to_string(most), " reconnects=", to_string(reconnects),
+    " last: ", to_string(text)))
+end
+
+hose = spawn Hose
+hose <- :start

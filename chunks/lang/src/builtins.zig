@@ -169,6 +169,11 @@ pub const BuiltinRegistry = struct {
         reg.register("tcp_connect", &builtinTcpConnectNative);
         reg.register("http_start", &builtinHttpStart);
         reg.register("http_result", &builtinHttpResult);
+        reg.register("ws_open", &builtinWsOpen_impl);
+        reg.register("ws_recv", &builtinWsRecv_impl);
+        reg.register("ws_send", &builtinWsSend_impl);
+        reg.register("ws_close", &builtinWsClose_impl);
+        reg.register("ws_stats", &builtinWsStats_impl);
         reg.register("tcp_accept", &builtinTcpAccept_impl);
         reg.register("tcp_read", &builtinTcpRead_impl);
         reg.register("tcp_write", &builtinTcpWrite_impl);
@@ -3617,6 +3622,123 @@ fn builtinHttpResult(allocator: std.mem.Allocator, args: []const *const Value) E
     httpFree(slot);
     if (items[0].atom[0] == 'e') return make(allocator, .{ .tuple = items[0..2] });
     return make(allocator, .{ .tuple = items });
+}
+
+// ── A WebSocket client, without stopping the program ─────────────────────
+//
+// ws_open(url, headers) -> handle
+// ws_recv(handle)       -> [text | {:binary, bytes}, ...] | {:closed, reason}
+// ws_send(handle, text) -> :ok | {:error, reason}
+// ws_close(handle)      -> :ok
+// ws_stats(handle)      -> %{received:, dropped:, bytes:, queued:, state:}
+//
+// The connection is a thread of its own (see websocket.zig); these only move
+// things between its queue and the program. A handle that is not an open
+// connection -- never opened, already closed, or already reported closed --
+// is a TypeError, not a nil: a program that keeps polling a dead handle has
+// a bug, and should hear about it. The WebAssembly build has no threads and
+// no sockets, and refuses all five.
+
+const websocket = @import("websocket.zig");
+
+const builtinWsOpen_impl = if (is_wasm) native_stub.stub else builtinWsOpenNative;
+const builtinWsRecv_impl = if (is_wasm) native_stub.stub else builtinWsRecvNative;
+const builtinWsSend_impl = if (is_wasm) native_stub.stub else builtinWsSendNative;
+const builtinWsClose_impl = if (is_wasm) native_stub.stub else builtinWsCloseNative;
+const builtinWsStats_impl = if (is_wasm) native_stub.stub else builtinWsStatsNative;
+
+fn wsHandle(args: []const *const Value, n: usize) EvalError!i64 {
+    if (args.len != n or args[0].* != .integer) return error.TypeError;
+    return args[0].integer;
+}
+
+fn wsError(err: websocket.Error) EvalError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.BadUrl, error.BadHandle => error.TypeError,
+        error.NoFreeSlot => blk: {
+            std.debug.print("ws_open: all {d} connections are in use; ws_close one first\n", .{websocket.slots_max});
+            break :blk error.NotSupported;
+        },
+        error.ThreadSpawn => error.NotSupported,
+    };
+}
+
+fn builtinWsOpenNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len < 1 or args.len > 2 or args[0].* != .string) return error.TypeError;
+    const entries: []const Value.MapEntry = if (args.len == 1) &.{} else switch (args[1].*) {
+        .map => |m| m,
+        .nil => &.{},
+        else => return error.TypeError,
+    };
+    var headers_buf: [32]websocket.Header = undefined;
+    if (entries.len > headers_buf.len) return error.TypeError;
+    for (entries, 0..) |e, i| {
+        if (e.val.* != .string) return error.TypeError;
+        headers_buf[i] = .{ .name = e.key, .value = e.val.string };
+    }
+    const h = websocket.open(args[0].string, headers_buf[0..entries.len]) catch |err| return wsError(err);
+    return make(allocator, .{ .integer = h });
+}
+
+fn builtinWsRecvNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    const h = try wsHandle(args, 1);
+    switch (websocket.recv(h) catch |err| return wsError(err)) {
+        .closed => |why| {
+            const items = try allocator.alloc(*const Value, 2);
+            items[0] = try make(allocator, .{ .atom = "closed" });
+            items[1] = try make(allocator, .{ .string = allocator.dupe(u8, why) catch return error.OutOfMemory });
+            return make(allocator, .{ .tuple = items });
+        },
+        .frames => |frames| {
+            defer websocket.freeFrames(frames);
+            const items = try allocator.alloc(*const Value, frames.len);
+            for (frames, items) |f, *item| {
+                const data = try make(allocator, .{ .string = allocator.dupe(u8, f.data) catch return error.OutOfMemory });
+                if (!f.binary) {
+                    item.* = data;
+                    continue;
+                }
+                const pair = try allocator.alloc(*const Value, 2);
+                pair[0] = try make(allocator, .{ .atom = "binary" });
+                pair[1] = data;
+                item.* = try make(allocator, .{ .tuple = pair });
+            }
+            return make(allocator, .{ .list = items });
+        },
+    }
+}
+
+fn builtinWsSendNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    const h = try wsHandle(args, 2);
+    if (args[1].* != .string) return error.TypeError;
+    const why = switch (websocket.send(h, args[1].string) catch |err| return wsError(err)) {
+        .ok => return make(allocator, .{ .atom = "ok" }),
+        .closed => "closed",
+        .full => "SendQueueFull",
+    };
+    const items = try allocator.alloc(*const Value, 2);
+    items[0] = try make(allocator, .{ .atom = "error" });
+    items[1] = try make(allocator, .{ .string = why });
+    return make(allocator, .{ .tuple = items });
+}
+
+fn builtinWsCloseNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    const h = try wsHandle(args, 1);
+    websocket.close(h) catch |err| return wsError(err);
+    return make(allocator, .{ .atom = "ok" });
+}
+
+fn builtinWsStatsNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    const h = try wsHandle(args, 1);
+    const st = websocket.stats(h) catch |err| return wsError(err);
+    const entries = try allocator.alloc(Value.MapEntry, 5);
+    entries[0] = .{ .key = "received", .val = try make(allocator, .{ .integer = @intCast(st.received) }) };
+    entries[1] = .{ .key = "dropped", .val = try make(allocator, .{ .integer = @intCast(st.dropped) }) };
+    entries[2] = .{ .key = "bytes", .val = try make(allocator, .{ .integer = @intCast(st.bytes) }) };
+    entries[3] = .{ .key = "queued", .val = try make(allocator, .{ .integer = @intCast(st.queued) }) };
+    entries[4] = .{ .key = "state", .val = try make(allocator, .{ .atom = @tagName(st.state) }) };
+    return make(allocator, .{ .map = entries });
 }
 
 fn builtinTcpConnectNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {

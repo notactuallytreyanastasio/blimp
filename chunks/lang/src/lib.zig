@@ -26,4 +26,5 @@ test {
     // Pull in tests from all modules
     @import("std").testing.refAllDecls(@This());
     _ = @import("memory_test.zig");
+    _ = @import("websocket.zig");
 }

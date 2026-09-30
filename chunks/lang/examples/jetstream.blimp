@@ -1,0 +1,101 @@
+# The Bluesky firehose, read from Blimp without stopping the program.
+#
+#   blimp examples/jetstream.blimp            # 30 seconds
+#   blimp examples/jetstream.blimp 300        # five minutes
+#
+# ws_open connects on a thread of its own; ws_recv hands back whatever
+# arrived since the last call and never waits. This polls every 100ms, the
+# way a `blimp --serve FILE --tick ...` program would from its tick, and
+# says what came: frames and bytes a second, what was dropped, and the
+# text of one post.
+#
+# Jetstream's frames are JSON, one event each:
+#   {"did": ..., "time_us": ..., "kind": "commit",
+#    "commit": {"operation": "create", "collection": "app.bsky.feed.post",
+#               "record": {"text": "...", ...}, ...}}
+# A program that reconnects after {:closed, reason} can pass the last
+# time_us it saw as ?cursor= to pick up where it left off.
+
+url = "wss://bsky-relay.c.theo.io/subscribe?wantedCollections=app.bsky.feed.post"
+
+def text_of(frame: Any) -> Any do
+  r = case frame do
+    {:binary, _} -> nil
+    _ -> case json_decode(frame) do
+      {:ok, ev} -> record_text(lookup(ev, "commit"))
+      _ -> nil
+    end
+  end
+  r
+end
+
+def record_text(commit: Any) -> Any do
+  r = case commit do
+    nil -> nil
+    _ -> case lookup(commit, "record") do
+      nil -> nil
+      rec -> lookup(rec, "text")
+    end
+  end
+  r
+end
+
+def first_text(frames: List, found: Any) -> Any do
+  reduce(frames, found, fn(acc: Any, f: Any) do
+    r = case acc do
+      nil -> text_of(f)
+      _ -> acc
+    end
+    r
+  end)
+end
+
+def report(ws: Int, started: Int, frames: Int, most: Int) -> Any do
+  st = ws_stats(ws)
+  secs = (now_ms() - started) / 1000.0
+  print(concat("t=", to_string(round(secs)), "s frames=", to_string(frames),
+    " (", to_string(round(frames / secs)), "/s) bytes=", to_string(lookup(st, "bytes")),
+    " (", to_string(round(lookup(st, "bytes") / secs / 1024.0)), " KiB/s) dropped=",
+    to_string(lookup(st, "dropped")), " most-in-one-poll=", to_string(most)))
+end
+
+# n polls left; the counts so far. Returns the first post text found.
+def poll(ws: Int, started: Int, n: Int, frames: Int, most: Int, text: Any) -> Any do
+  r = case n == 0 do
+    true ->
+      report(ws, started, frames, most)
+      text
+    _ ->
+      got = ws_recv(ws)
+      case got do
+        {:closed, why} ->
+          print(concat("closed: ", why))
+          text
+        _ ->
+          k = length(got)
+          m = case k > most do
+            true -> k
+            _ -> most
+          end
+          case rem(n - 1, 50) == 0 do
+            true -> report(ws, started, frames + k, m)
+            _ -> nil
+          end
+          sleep_ms(100)
+          poll(ws, started, n - 1, frames + k, m, first_text(got, text))
+      end
+  end
+  r
+end
+
+# argv() is the whole command line: the binary, this file, then ours.
+seconds = case length(argv()) > 2 do
+  true -> to_int(elem(argv(), 2))
+  _ -> 30
+end
+
+ws = ws_open(url, %{"User-Agent": "blimp"})
+started = now_ms()
+text = poll(ws, started, seconds * 10, 0, 0, nil)
+print(concat("one post: ", to_string(text)))
+ws_close(ws)
