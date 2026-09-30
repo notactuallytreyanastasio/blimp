@@ -6,6 +6,7 @@ const HttpClient = @import("vendor/zig_std/http_client.zig");
 const builtin = @import("builtin");
 const Value = @import("value.zig").Value;
 const interned = @import("value.zig").interned;
+const unicode_builtins = @import("unicode_builtins.zig");
 const is_wasm = builtin.target.cpu.arch == .wasm32;
 
 pub const EvalError = error{
@@ -98,6 +99,17 @@ pub const BuiltinRegistry = struct {
         reg.register("slice", &builtinSlice);
         reg.register("upcase", &builtinUpcase);
         reg.register("downcase", &builtinDowncase);
+        // Character-aware counterparts of the byte builtins above (unicode_builtins.zig)
+        reg.register("utf8_valid", &unicode_builtins.utf8Valid);
+        reg.register("utf8_scrub", &unicode_builtins.utf8Scrub);
+        reg.register("utf8_length", &unicode_builtins.utf8Length);
+        reg.register("utf8_slice", &unicode_builtins.utf8Slice);
+        reg.register("utf8_upcase", &unicode_builtins.utf8Upcase);
+        reg.register("utf8_downcase", &unicode_builtins.utf8Downcase);
+        reg.register("graphemes", &unicode_builtins.graphemes);
+        reg.register("grapheme_length", &unicode_builtins.graphemeLength);
+        reg.register("grapheme_slice", &unicode_builtins.graphemeSlice);
+        reg.register("grapheme_take", &unicode_builtins.graphemeTake);
         reg.register("range", &builtinRange);
         reg.register("head", &builtinHead);
         reg.register("tail", &builtinTail);

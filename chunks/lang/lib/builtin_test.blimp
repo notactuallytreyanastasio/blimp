@@ -1243,6 +1243,60 @@ def raises(code: String) -> Bool do
   end
 end
 
+actor Utf8Tests do
+  # length, slice and upcase stay byte operations; these count characters.
+  test "length stays bytes; utf8_length counts code points; grapheme_length counts what a reader sees" do
+    assert_eq(length("❤️"), 6)
+    assert_eq(utf8_length("❤️"), 2)
+    assert_eq(grapheme_length("❤️"), 1)
+    assert_eq(grapheme_length("👨‍👩‍👧‍👦"), 1)
+    assert_eq(grapheme_length("🇺🇸🇫🇷"), 2)
+    assert_eq(grapheme_length(""), 0)
+  end
+
+  test "graphemes keeps combining marks, skin tones and flags whole" do
+    assert_eq(graphemes("éa"), ["é", "a"])
+    assert_eq(graphemes("👍🏽🇯🇵!"), ["👍🏽", "🇯🇵", "!"])
+    assert_eq(graphemes(""), [])
+  end
+
+  test "utf8_slice cuts by code point, grapheme_slice and grapheme_take by cluster" do
+    assert_eq(utf8_slice("héllo", 1, 3), "éll")
+    assert_eq(utf8_slice("héllo", 3, 99), "lo")
+    assert_eq(utf8_slice("héllo", 9, 1), "")
+    assert_eq(grapheme_slice("a👨‍👩‍👧b", 1, 1), "👨‍👩‍👧")
+    assert_eq(grapheme_take("Hi 👋🏽 there", 4), "Hi 👋🏽")
+    assert_eq(grapheme_take("ab", 5), "ab")
+    assert_eq(slice("❤️", 0, 2), concat(from_char_code(226), from_char_code(157)))
+  end
+
+  test "utf8_upcase and utf8_downcase map beyond ASCII" do
+    assert_eq(utf8_upcase("straße"), "STRASSE")
+    assert_eq(utf8_upcase("éxito ñandú"), "ÉXITO ÑANDÚ")
+    assert_eq(utf8_downcase("ΑΘΗΝΑ МОСКВА"), "αθηνα москва")
+    assert_eq(upcase("é"), "é")
+  end
+
+  test "utf8_valid and utf8_scrub" do
+    assert_eq(utf8_valid("日本語"), true)
+    assert_eq(utf8_valid(slice("❤️", 0, 2)), false)
+    assert_eq(utf8_scrub(slice("❤️", 0, 2)), "�")
+    assert_eq(utf8_scrub(concat("a", from_char_code(255))), "a�")
+  end
+
+  test "invalid UTF-8 and negative counts raise" do
+    refute(raises("utf8_length(\"ok\")"))
+    refute(raises("grapheme_take(\"abc\", 0)"))
+    assert(raises("utf8_length(from_char_code(255))"))
+    assert(raises("grapheme_length(slice(\"❤️\", 0, 2))"))
+    assert(raises("graphemes(from_char_code(200))"))
+    assert(raises("utf8_upcase(from_char_code(255))"))
+    assert(raises("grapheme_take(\"abc\", -1)"))
+    assert(raises("utf8_slice(\"abc\", -1, 1)"))
+    assert(raises("utf8_length(42)"))
+  end
+end
+
 actor JsonTests do
   # -- json_encode --
   test "json_encode scalars" do

@@ -469,6 +469,8 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         "lookup",  "put",     "keys",     "now",     "concat",
         "split",   "join",    "contains", "to_string", "to_int", "slice",
         "upcase",  "downcase", "range",    "head",    "tail",
+        "utf8_valid", "utf8_scrub", "utf8_length", "utf8_slice", "utf8_upcase", "utf8_downcase",
+        "graphemes", "grapheme_length", "grapheme_slice", "grapheme_take",
         "sort",    "merge",   "values",   "type_of",  "print",
         "rem",     "abs",     "nil?",     "elem",    "floor",
         "ceil",    "round",   "not",      "size",    "empty?",

@@ -1,0 +1,46 @@
+# blimp blimp_side.blimp corpus.tsv > blimp.tsv
+# One row per corpus line: valid | scrub | utf8_length | grapheme_length |
+# graphemes | utf8_upcase | utf8_downcase | grapheme_take 3 |
+# utf8_slice 1,2 | grapheme_slice 1,2 -- strings in hex. On a string that is
+# not UTF-8 every field after scrub is RAISE when the builtin raised.
+
+def raised(call: String, h: String) -> String do
+  r = blimp_eval(concat(concat(concat(call, "(hex_decode(\""), h), "\"))"))
+  case type_of(r) == :map do
+    true -> case lookup(r, "error") == "runtime error" do
+      true -> "RAISE"
+      false -> "NO-RAISE"
+    end
+    false -> "NO-RAISE"
+  end
+end
+
+def valid_row(s: String) -> List do
+  [to_string(utf8_length(s)), to_string(grapheme_length(s)),
+   join(map(graphemes(s), fn(g: String) do hex_encode(g) end), ","),
+   hex_encode(utf8_upcase(s)), hex_encode(utf8_downcase(s)),
+   hex_encode(grapheme_take(s, 3)), hex_encode(utf8_slice(s, 1, 2)),
+   hex_encode(grapheme_slice(s, 1, 2))]
+end
+
+def invalid_row(h: String) -> List do
+  [raised("utf8_length", h), raised("grapheme_length", h), raised("graphemes", h),
+   raised("utf8_upcase", h), raised("utf8_downcase", h), raised("grapheme_take", h),
+   raised("utf8_slice", h), raised("grapheme_slice", h)]
+end
+
+def row(line: String) -> String do
+  parts = split(line, "\t")
+  label = head(parts)
+  h = head(tail(parts))
+  s = hex_decode(h)
+  v = utf8_valid(s)
+  rest = case v do
+    true -> valid_row(s)
+    false -> invalid_row(h)
+  end
+  concat(concat(label, "\t"), join([to_string(v), hex_encode(utf8_scrub(s)), join(rest, "|")], "|"))
+end
+
+lines = filter(split(read_file(head(tail(tail(argv())))), "\n"), fn(l: String) do l != "" end)
+each(lines, fn(l: String) do puts(row(l)) end)
