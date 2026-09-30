@@ -39,6 +39,11 @@ tls_buffer_size: if (disable_tls) u0 else usize = if (disable_tls) 0 else TlsCli
 /// allows other processes with access to that stream to decrypt all
 /// traffic over connections created with this `Client`.
 ssl_key_log: ?*TlsClient.SslKeyLog = null,
+/// Blimp: why the last TLS handshake failed. `connectTcp` answers every
+/// handshake failure as `error.TlsInitializationFailed`, which says the same
+/// thing for an expired certificate and for a server with no cipher suite in
+/// common; this keeps the error the TLS client actually returned.
+tls_init_error: ?anyerror = null,
 
 /// The time used to decide whether certificates are expired.
 ///
@@ -1464,12 +1469,18 @@ pub fn connectTcpOptions(client: *Client, options: ConnectTcpOptions) ConnectTcp
 
     switch (protocol) {
         .tls => {
-            if (disable_tls) return error.TlsInitializationFailed;
+            if (disable_tls) {
+                client.tls_init_error = error.TlsDisabled; // Blimp
+                return error.TlsInitializationFailed;
+            }
             const tc = Connection.Tls.create(client, proxied_host, proxied_port, stream) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.Unexpected => |e| return e,
                 error.Canceled => |e| return e,
-                else => return error.TlsInitializationFailed,
+                else => {
+                    client.tls_init_error = err; // Blimp
+                    return error.TlsInitializationFailed;
+                },
             };
             client.connection_pool.addUsed(io, &tc.connection);
             return &tc.connection;

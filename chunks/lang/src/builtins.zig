@@ -3500,6 +3500,7 @@ const HttpSlot = struct {
     status: u16 = 0,
     body: []u8 = &.{},
     reason: []const u8 = "",
+    reason_buf: [96]u8 = undefined,
 };
 
 var http_slots: [http_slots_max]HttpSlot = [_]HttpSlot{.{}} ** http_slots_max;
@@ -3518,7 +3519,12 @@ fn httpWorker(slot: *HttpSlot) void {
         .response_writer = &out.writer,
         .keep_alive = false,
     }) catch |err| {
-        slot.reason = @errorName(err);
+        slot.reason = switch (err) {
+            // which handshake failure: an expired certificate and a server
+            // with no cipher suite in common are both TlsInitializationFailed
+            error.TlsInitializationFailed => std.fmt.bufPrint(&slot.reason_buf, "TlsInitializationFailed: {s}", .{@errorName(client.tls_init_error.?)}) catch @errorName(err),
+            else => @errorName(err),
+        };
         slot.state.store(3, .release);
         return;
     };

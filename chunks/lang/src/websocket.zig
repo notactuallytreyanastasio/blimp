@@ -330,7 +330,12 @@ fn run(s: *Slot) !void {
         client.now = now;
     }
     const host = std.Io.net.HostName.init(url.host) catch return error.BadUrl;
-    const conn = try client.connect(host, url.port, if (url.tls) .tls else .plain);
+    const conn = client.connect(host, url.port, if (url.tls) .tls else .plain) catch |err| switch (err) {
+        // which handshake failure: an expired certificate and a server with
+        // no cipher suite in common are both TlsInitializationFailed
+        error.TlsInitializationFailed => return fail(s, "TlsInitializationFailed: {s}", .{@errorName(client.tls_init_error.?)}),
+        else => |e| return e,
+    };
     defer {
         conn.closing = true;
         client.connection_pool.release(conn, io);
