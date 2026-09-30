@@ -3488,7 +3488,11 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
 //
 // Nothing the remote end does may stop the process: this is one thread of a
 // server that answers everyone. Every failure in the worker is an
-// {:error, reason}.
+// {:error, reason}. A header named User-Agent, Host, Authorization,
+// Connection, Accept-Encoding or Content-Type (any case) replaces the one
+// the client would send, rather than going out as a second copy of it; a
+// header name or value that would split the request (CR, LF, a ':' in the
+// name, an empty name) is refused by http_start.
 
 const http_slots_max = 32;
 const http_body_max = 8 * 1024 * 1024;
@@ -3500,7 +3504,11 @@ const HttpSlot = struct {
     url: []u8 = &.{},
     body_in: []u8 = &.{},
     headers: []std.http.Header = &.{},
+    // what was allocated for `headers`, which may be fewer
+    headers_all: []std.http.Header = &.{},
     header_bytes: []u8 = &.{},
+    // the standard headers the program named, which replace the client's own
+    std_headers: HttpClient.Request.Headers = .{},
     status: u16 = 0,
     body: []u8 = &.{},
     reason: []const u8 = "",
@@ -3519,6 +3527,7 @@ fn httpWorker(slot: *HttpSlot) void {
         .location = .{ .url = slot.url },
         .method = slot.method,
         .payload = if (slot.body_in.len > 0) slot.body_in else null,
+        .headers = slot.std_headers,
         .extra_headers = slot.headers,
         .response_writer = &out.writer,
         .response_limit = http_body_max,
@@ -3550,10 +3559,33 @@ fn httpFree(slot: *HttpSlot) void {
     const pa = std.heap.page_allocator;
     if (slot.url.len > 0) pa.free(slot.url);
     if (slot.body_in.len > 0) pa.free(slot.body_in);
-    if (slot.headers.len > 0) pa.free(slot.headers);
+    if (slot.headers_all.len > 0) pa.free(slot.headers_all);
     if (slot.header_bytes.len > 0) pa.free(slot.header_bytes);
     if (slot.body.len > 0) pa.free(slot.body);
     slot.* = .{};
+}
+
+/// std's client asserts these (a panic in a safe build); a program passing
+/// a user-supplied header through should get a TypeError instead, and a
+/// value with a CRLF in it must never reach the wire.
+fn httpHeaderOk(name: []const u8, value: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| if (c == ':' or c == '\r' or c == '\n') return false;
+    for (value) |c| if (c == '\r' or c == '\n') return false;
+    return true;
+}
+
+/// The client writes these six itself; a program's own goes in their place
+/// (`.override`) rather than beside them as a second copy.
+fn httpStdHeader(h: *HttpClient.Request.Headers, name: []const u8) ?*HttpClient.Request.Headers.Value {
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(name, "user-agent")) return &h.user_agent;
+    if (eq(name, "host")) return &h.host;
+    if (eq(name, "authorization")) return &h.authorization;
+    if (eq(name, "connection")) return &h.connection;
+    if (eq(name, "accept-encoding")) return &h.accept_encoding;
+    if (eq(name, "content-type")) return &h.content_type;
+    return null;
 }
 
 fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
@@ -3581,26 +3613,36 @@ fn builtinHttpStart(allocator: std.mem.Allocator, args: []const *const Value) Ev
     var total: usize = 0;
     for (entries) |e| {
         if (e.val.* != .string) return error.TypeError;
+        if (!httpHeaderOk(e.key, e.val.string)) return error.TypeError;
         total += e.key.len + e.val.string.len;
     }
     const bytes = pa.alloc(u8, total) catch return error.OutOfMemory;
     const headers = pa.alloc(std.http.Header, entries.len) catch return error.OutOfMemory;
+    var std_headers: HttpClient.Request.Headers = .{};
     var at: usize = 0;
-    for (entries, 0..) |e, h| {
+    var n_extra: usize = 0;
+    for (entries) |e| {
         @memcpy(bytes[at .. at + e.key.len], e.key);
         const name = bytes[at .. at + e.key.len];
         at += e.key.len;
         @memcpy(bytes[at .. at + e.val.string.len], e.val.string);
         const value = bytes[at .. at + e.val.string.len];
         at += e.val.string.len;
-        headers[h] = .{ .name = name, .value = value };
+        if (httpStdHeader(&std_headers, name)) |field| {
+            field.* = .{ .override = value };
+        } else {
+            headers[n_extra] = .{ .name = name, .value = value };
+            n_extra += 1;
+        }
     }
     slot.* = .{
         .method = method,
         .url = pa.dupe(u8, url) catch return error.OutOfMemory,
         .body_in = pa.dupe(u8, args[3].string) catch return error.OutOfMemory,
-        .headers = headers,
+        .headers = headers[0..n_extra],
+        .headers_all = headers,
         .header_bytes = bytes,
+        .std_headers = std_headers,
     };
     slot.state.store(1, .release);
     const thread = std.Thread.spawn(.{}, httpWorker, .{slot}) catch {
@@ -3706,6 +3748,7 @@ const HttpBadServer = struct {
             got += @intCast(n);
             if (buf[0] == 0x16) return; // a TLS ClientHello: hang up on it
         }
+        const head_end = std.mem.indexOf(u8, buf[0..got], "\r\n\r\n").?;
         const line_end = std.mem.indexOf(u8, buf[0..got], "\r\n").?;
         var parts = std.mem.splitScalar(u8, buf[0..line_end], ' ');
         _ = parts.next();
@@ -3714,6 +3757,11 @@ const HttpBadServer = struct {
         const eq = std.mem.eql;
         if (eq(u8, path, "/ok")) {
             send(c, "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\narrived");
+        } else if (eq(u8, path, "/headers")) {
+            // the request's header lines, as the body
+            const hs = buf[line_end + 2 .. head_end];
+            send(c, std.fmt.bufPrint(&out, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{hs.len}) catch return);
+            send(c, hs);
         } else if (eq(u8, path, "/to-https")) {
             // this same port, as https: the handshake fails, but first the
             // client has to get as far as starting one
@@ -3837,6 +3885,52 @@ test "http_start: an http:// url that redirects to https:// reaches the TLS hand
         std.debug.print("got {s}\n", .{r.tuple[1].string});
         return err;
     };
+}
+
+test "http_start: a User-Agent (any case) replaces the client's, and a header that would split the request raises" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    const srv = try HttpBadServer.start();
+    var url_buf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/headers", .{srv.port});
+
+    for ([_][]const u8{ "User-Agent", "user-agent", "USER-AGENT" }) |name| {
+        const entries = try a.alloc(Value.MapEntry, 2);
+        entries[0] = .{ .key = name, .val = try make(a, .{ .string = "blinks/1.0" }) };
+        entries[1] = .{ .key = "X-Other", .val = try make(a, .{ .string = "yes" }) };
+        const r = try httpTestRequest(a, "GET", url, try make(a, .{ .map = entries }));
+        const sent = r.tuple[2].string;
+        // one user-agent line, and it is ours
+        var lines = std.mem.splitSequence(u8, sent, "\r\n");
+        var uas: usize = 0;
+        while (lines.next()) |line| {
+            if (std.ascii.startsWithIgnoreCase(line, "user-agent:")) {
+                uas += 1;
+                try std.testing.expectEqualStrings("user-agent: blinks/1.0", line);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), uas);
+        try std.testing.expect(std.mem.indexOf(u8, sent, "X-Other: yes") != null);
+    }
+
+    const bad = [_][2][]const u8{
+        .{ "X-A", "a\r\nX-Injected: 1" },
+        .{ "X-A", "a\nb" },
+        .{ "X-A\r\nX-B", "c" },
+        .{ "X:A", "c" },
+        .{ "", "c" },
+    };
+    for (bad) |kv| {
+        const entries = try a.alloc(Value.MapEntry, 1);
+        entries[0] = .{ .key = kv[0], .val = try make(a, .{ .string = kv[1] }) };
+        try std.testing.expectError(error.TypeError, builtinHttpStart(a, &.{ try make(a, .{ .string = "GET" }), try make(a, .{ .string = url }), try make(a, .{ .map = entries }), try make(a, .{ .string = "" }) }));
+    }
+    for (http_slots) |slot| try std.testing.expectEqual(@as(u8, 0), slot.state.load(.acquire));
 }
 
 // ── A WebSocket client, without stopping the program ─────────────────────
