@@ -12,6 +12,28 @@ pub const Environment = struct {
     /// binding buffer in the allocator for the rest of the run.
     free_scopes: std.ArrayList(std.ArrayList(Binding)),
     allocator: std.mem.Allocator,
+    /// The top-level scope by name: each name to the index of its latest
+    /// binding in `scopes[0].bindings`.
+    ///
+    /// The top-level scope is where a program's every `def` lives, so it is
+    /// the one scope that is large -- several thousand names once the site
+    /// carries the Temper library -- and it is the scope every call of a
+    /// global function resolves in. Scanning it from the end made a call
+    /// cost time in proportion to how many definitions came after the one
+    /// being called: 200k calls of a function followed by 3000 other defs
+    /// took 1408ms, against 35ms with none. The name mask does not help
+    /// there, because 3000 names set all 64 of its bits.
+    globals: std.StringHashMapUnmanaged(u32) = .{},
+    /// For each binding in the top-level scope, the index of the binding of
+    /// the same name before it, or `no_prev`. The top-level scope is
+    /// append-only -- redefining a name adds a binding rather than
+    /// overwriting one -- so a closure can see the top level as it was when
+    /// the closure was made (Closure.globals_mark) by walking this chain.
+    global_prev: std.ArrayList(u32) = .{ .items = &.{}, .capacity = 0 },
+
+    pub const no_prev: u32 = std.math.maxInt(u32);
+    /// A `globals_mark` that reads the top-level scope as it is now.
+    pub const live: u32 = std.math.maxInt(u32);
 
     pub const Binding = struct {
         name: []const u8,
@@ -43,13 +65,23 @@ pub const Environment = struct {
         /// It used to be told by the captured slice's address, but every
         /// top-level def now captures the same empty slice.
         lent_to: usize = 0,
-        /// The frame of a top-level def (Closure.top_level): after its own
-        /// bindings and captures, lookup reads the top-level scope as it is
-        /// now, then goes on to the caller's frames as usual. A top-level def
-        /// used to capture a snapshot of every top-level binding, which sat
-        /// in exactly that place in the order; reading the live scope instead
-        /// changes only how fresh the answer is.
-        globals_next: bool = false,
+        /// How much of the top-level scope the current callee sees, read
+        /// right after its captures and before anything an earlier callee
+        /// left in the frame. 0 is none.
+        ///
+        /// A top-level def (Closure.top_level) reads the top-level scope as
+        /// it is now (`live`). Any other closure reads it as it was when the
+        /// closure was made: the bindings below its Closure.globals_mark.
+        /// That is exactly the snapshot it used to copy into its captures,
+        /// without the copy -- and the copy was every top-level name, so a
+        /// `fn(z) do z + 1 end` with 3000 defs in the file cost 410KB and
+        /// 77us to make.
+        globals_mark: u32 = 0,
+        /// The globals_mark of callees that ran earlier in this frame (a tail
+        /// call hands the frame on), read after everything they left behind.
+        /// Their captures are folded into `bindings`; their view of the top
+        /// level is kept as this mark instead of as thousands of bindings.
+        left_mark: u32 = 0,
         /// Where the current callee's own bindings start.
         ///
         /// A tail call reuses its frame, so `bindings` below this index belong
@@ -117,11 +149,12 @@ pub const Environment = struct {
     /// They are visible to lookup but are not in `bindings`, so a parameter or
     /// a local defined afterwards shadows a capture of the same name, which is
     /// the order `define` gave before.
-    pub fn lendCaptured(self: *Environment, captured: []const Value.CapturedBinding, names: u64, closure_id: usize, top_level: bool) void {
+    pub fn lendCaptured(self: *Environment, captured: []const Value.CapturedBinding, names: u64, closure_id: usize, globals_mark: u32) void {
         if (self.scopes.items.len == 0) return;
         const index = self.scopes.items.len - 1;
         const existing = self.scopes.items[index].captured;
-        self.scopes.items[index].globals_next = top_level;
+        const outgoing_mark = self.scopes.items[index].globals_mark;
+        self.scopes.items[index].globals_mark = globals_mark;
         // A tail call reuses the frame, so the scope may already have been
         // lent the previous callee's captures. A Blimp closure sees its
         // caller's frame, so those cannot simply be dropped: they are folded
@@ -137,6 +170,14 @@ pub const Environment = struct {
             const scope = &self.scopes.items[index];
             scope.bindings.shrinkRetainingCapacity(scope.own_base);
             return;
+        }
+        // A different callee taking over the frame. Its view of the top level
+        // stays visible below what it leaves, as its captured snapshot of the
+        // top level used to. A live view is not kept: a top-level def's frame
+        // never folded the top level into what it left, and keeping it would
+        // put the top level ahead of the caller's frames.
+        if (outgoing_mark != live and outgoing_mark > self.scopes.items[index].left_mark) {
+            self.scopes.items[index].left_mark = outgoing_mark;
         }
         if (existing.len != 0) {
             // A different callee taking over the frame. What the last one
@@ -175,15 +216,48 @@ pub const Environment = struct {
     /// The current top-level binding of `name`, the latest if it was defined
     /// more than once.
     pub fn lookupTop(self: *const Environment, name: []const u8) ?*const Value {
+        return self.lookupTopAt(name, live);
+    }
+
+    /// The top-level binding of `name` among the first `mark` top-level
+    /// bindings: what a closure made when there were `mark` of them saw.
+    pub fn lookupTopAt(self: *const Environment, name: []const u8, mark: u32) ?*const Value {
         if (self.scopes.items.len == 0) return null;
-        const top = self.scopes.items[0];
-        if (top.names & nameBit(name) == 0) return null;
-        var j: usize = top.bindings.items.len;
-        while (j > 0) {
-            j -= 1;
-            if (std.mem.eql(u8, top.bindings.items[j].name, name)) return top.bindings.items[j].val;
+        var idx = self.globals.get(name) orelse return null;
+        while (idx >= mark) {
+            idx = self.global_prev.items[idx];
+            if (idx == no_prev) return null;
         }
-        return null;
+        return self.scopes.items[0].bindings.items[idx].val;
+    }
+
+    /// How many top-level bindings there are now: the mark for a closure
+    /// being made, which sees these and no later ones.
+    pub fn globalsMark(self: *const Environment) u32 {
+        if (self.scopes.items.len == 0) return 0;
+        return @intCast(self.scopes.items[0].bindings.items.len);
+    }
+
+    /// Rebuild `globals` and `global_prev` from the top-level scope, for
+    /// anything that replaces `scopes` wholesale (gc.compact).
+    pub fn reindexGlobals(self: *Environment) void {
+        self.globals = .{};
+        self.global_prev = .{ .items = &.{}, .capacity = 0 };
+        if (self.scopes.items.len == 0) return;
+        for (self.scopes.items[0].bindings.items, 0..) |b, i| {
+            self.indexGlobal(b.name, @intCast(i));
+        }
+    }
+
+    fn indexGlobal(self: *Environment, name: []const u8, index: u32) void {
+        const got = self.globals.getOrPut(self.allocator, name) catch {
+            @panic("out of memory indexing a top-level binding");
+        };
+        const prev: u32 = if (got.found_existing) got.value_ptr.* else no_prev;
+        got.value_ptr.* = index;
+        self.global_prev.append(self.allocator, prev) catch {
+            @panic("out of memory indexing a top-level binding");
+        };
     }
 
     /// Pop the current scope (leaving a block).
@@ -228,6 +302,12 @@ pub const Environment = struct {
             for (scope.captured) |b| {
                 self.defineIn(base, b.name, b.val);
             }
+            // Only a call frame is lent a view of the top level, and a call
+            // frame is popped before its caller collapses anything; were one
+            // here, its snapshot view would go where its captures went.
+            for ([_]u32{ scope.globals_mark, scope.left_mark }) |m| {
+                if (m != live and m > self.scopes.items[base].left_mark) self.scopes.items[base].left_mark = m;
+            }
             for (scope.bindings.items) |b| {
                 self.defineIn(base, b.name, b.val);
             }
@@ -246,6 +326,16 @@ pub const Environment = struct {
     fn defineIn(self: *Environment, index: usize, name: []const u8, value: *const Value) void {
         const scope = &self.scopes.items[index];
         scope.names |= nameBit(name);
+        if (index == 0) {
+            // Appended, never overwritten, so closures made earlier still see
+            // the value they were made with (see `global_prev`). And no scan
+            // for an existing binding: that made loading N defs N^2/2 string
+            // comparisons.
+            const at: u32 = @intCast(scope.bindings.items.len);
+            scope.bindings.append(self.allocator, .{ .name = name, .val = value }) catch return;
+            self.indexGlobal(name, at);
+            return;
+        }
         // Only the current callee's own region is searched for an existing
         // binding. Reaching below `own_base` would update an entry a previous
         // callee left in this frame, and it would stay at that low index --
@@ -267,14 +357,35 @@ pub const Environment = struct {
     /// through here, and with the ~400-definition prelude in the file the
     /// linear search made one `fn(x) do x end` cost 3ms.
     pub fn allBindings(self: *const Environment, allocator: std.mem.Allocator) []const Binding {
+        return self.bindingsDownTo(allocator, 0);
+    }
+
+    /// What a closure made here captures: every visible binding except the
+    /// top-level ones. Those it reads in place, through Closure.globals_mark.
+    /// With the top level in the snapshot, making a closure cost time and
+    /// memory in proportion to the number of top-level definitions.
+    pub fn capturableBindings(self: *const Environment, allocator: std.mem.Allocator) []const Binding {
+        return self.bindingsDownTo(allocator, 1);
+    }
+
+    fn bindingsDownTo(self: *const Environment, allocator: std.mem.Allocator, lowest: usize) []const Binding {
         var seen: std.StringHashMapUnmanaged(void) = .{};
         var result = std.ArrayList(Binding){ .items = &.{}, .capacity = 0 };
 
         // Walk from innermost to outermost
         var i: usize = self.scopes.items.len;
-        while (i > 0) {
+        while (i > lowest) {
             i -= 1;
             const scope = self.scopes.items[i];
+            if (i == 0) {
+                // Append-only: only the latest binding of each name counts.
+                for (scope.bindings.items, 0..) |binding, j| {
+                    if (self.globals.get(binding.name) != @as(u32, @intCast(j))) continue;
+                    const got = seen.getOrPut(allocator, binding.name) catch continue;
+                    if (!got.found_existing) result.append(allocator, binding) catch {};
+                }
+                continue;
+            }
             // `seen` keeps the first of a name, so these are walked in the
             // order `lookup` resolves them: the callee's own bindings, then
             // what it captured, then what an earlier callee left behind.
@@ -304,7 +415,7 @@ pub const Environment = struct {
     pub fn lookup(self: *const Environment, name: []const u8) ?*const Value {
         const bit = nameBit(name);
         var i: usize = self.scopes.items.len;
-        while (i > 0) {
+        while (i > 1) {
             i -= 1;
             const scope = self.scopes.items[i];
             // Three tiers, in the order copying the captures in used to
@@ -328,8 +439,8 @@ pub const Environment = struct {
                     }
                 }
             }
-            if (scope.globals_next and i > 0) {
-                if (self.lookupTop(name)) |v| return v;
+            if (scope.globals_mark != 0) {
+                if (self.lookupTopAt(name, scope.globals_mark)) |v| return v;
             }
             if (scope.names & bit != 0) {
                 var j: usize = scope.own_base;
@@ -340,8 +451,11 @@ pub const Environment = struct {
                     }
                 }
             }
+            if (scope.left_mark != 0) {
+                if (self.lookupTopAt(name, scope.left_mark)) |v| return v;
+            }
         }
-        return null;
+        return self.lookupTop(name);
     }
 };
 
@@ -533,7 +647,7 @@ test "a call does not pay for what the closure captured" {
     }
 
     env.pushScope();
-    env.lendCaptured(captured, names, @intFromPtr(captured.ptr), false);
+    env.lendCaptured(captured, names, @intFromPtr(captured.ptr), 0);
     // Lending is what a call does. Nothing was written into the scope, so the
     // cost does not grow with how much was captured.
     try std.testing.expectEqual(@as(usize, 0), env.scopes.items[env.scopes.items.len - 1].bindings.items.len);
@@ -557,7 +671,7 @@ test "a parameter shadows a capture of the same name" {
     captured[0] = .{ .name = "x", .val = captured_val };
 
     env.pushScope();
-    env.lendCaptured(captured, Environment.nameBit("x"), @intFromPtr(captured.ptr), false);
+    env.lendCaptured(captured, Environment.nameBit("x"), @intFromPtr(captured.ptr), 0);
     try std.testing.expect(env.lookup("x").?.eql(Value{ .integer = 1 }));
     // A call lends the captures and then binds its parameters, so the
     // parameter has to win -- which it does because lookup reads `bindings`
@@ -579,7 +693,7 @@ test "collapsing a scope keeps what it was lent" {
 
     const base = env.depth();
     env.pushScope();
-    env.lendCaptured(captured, Environment.nameBit("helper"), @intFromPtr(captured.ptr), false);
+    env.lendCaptured(captured, Environment.nameBit("helper"), @intFromPtr(captured.ptr), 0);
     env.pushScope();
     // A tail call collapses the frames it is leaving. A capture that only the
     // collapsed scope was lent has to survive, or the callee cannot see what
@@ -606,13 +720,13 @@ test "a callee's capture beats what an earlier callee left in the frame" {
 
     env.pushScope();
     // One callee runs in the frame and binds `k`...
-    env.lendCaptured(first, Environment.nameBit("other"), @intFromPtr(first.ptr), false);
+    env.lendCaptured(first, Environment.nameBit("other"), @intFromPtr(first.ptr), 0);
     env.define("k", stale);
     // ...then tail-calls another, which captured its own `k`. The one left
     // behind must not shadow it. This is the regex engine's continuation:
     // when it did, `temper_rx_seq_at` ran off the end of its node list and
     // kept calling itself, because the `k` it reached was the wrong one.
-    env.lendCaptured(second, Environment.nameBit("k"), @intFromPtr(second.ptr), false);
+    env.lendCaptured(second, Environment.nameBit("k"), @intFromPtr(second.ptr), 0);
     try std.testing.expect(env.lookup("k").?.eql(Value{ .integer = 2 }));
     // What the outgoing callee captured is still reachable, below both.
     try std.testing.expect(env.lookup("other") != null);
@@ -634,10 +748,65 @@ test "the same closure re-entering its frame does not grow it" {
     while (i < 50) : (i += 1) {
         // What a tail-recursive loop does: lend the same captures, bind the
         // same parameter names again.
-        env.lendCaptured(captured, Environment.nameBit("g"), @intFromPtr(captured.ptr), false);
+        env.lendCaptured(captured, Environment.nameBit("g"), @intFromPtr(captured.ptr), 0);
         env.define("n", val);
         env.define("acc", val);
     }
     const scope = env.scopes.items[env.scopes.items.len - 1];
     try std.testing.expectEqual(@as(usize, 2), scope.bindings.items.len);
+}
+
+test "the top level is found by name, not by scanning it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const first = try alloc.create(Value);
+    first.* = Value{ .integer = 1 };
+    const second = try alloc.create(Value);
+    second.* = Value{ .integer = 2 };
+
+    env.define("called", first);
+    for (0..5000) |i| {
+        env.define(try std.fmt.allocPrint(alloc, "def_{d}", .{i}), first);
+    }
+    try std.testing.expectEqual(@as(usize, 5001), env.globals.count());
+    try std.testing.expectEqual(@as(i64, 1), env.lookup("called").?.integer);
+
+    // Redefining appends, and the latest wins for a live read...
+    const before = env.globalsMark();
+    env.define("called", second);
+    try std.testing.expectEqual(@as(i64, 2), env.lookup("called").?.integer);
+    // ...while a read at an earlier mark sees the value it had then.
+    try std.testing.expectEqual(@as(i64, 1), env.lookupTopAt("called", before).?.integer);
+    try std.testing.expect(env.lookupTopAt("def_10", 1) == null);
+    // allBindings reports a redefined name once, with its latest value.
+    var n_called: usize = 0;
+    for (env.allBindings(alloc)) |b| {
+        if (std.mem.eql(u8, b.name, "called")) {
+            n_called += 1;
+            try std.testing.expectEqual(@as(i64, 2), b.val.integer);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), n_called);
+}
+
+test "what a closure captures does not include the top level" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const val = try alloc.create(Value);
+    val.* = Value{ .integer = 3 };
+    for (0..3000) |i| {
+        env.define(try std.fmt.allocPrint(alloc, "def_{d}", .{i}), val);
+    }
+    env.pushScope();
+    env.define("local", val);
+    // A closure made here used to copy 3001 bindings; it needs one.
+    const got = env.capturableBindings(alloc);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("local", got[0].name);
 }

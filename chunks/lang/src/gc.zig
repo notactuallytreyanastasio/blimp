@@ -68,6 +68,7 @@ pub fn compact(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocat
     // The recycled binding lists belong to the allocator being dropped.
     eval.env.free_scopes = .{ .items = &.{}, .capacity = 0 };
     eval.env.allocator = to;
+    eval.env.reindexGlobals();
     eval.registry.templates = templates;
     eval.registry.instances = instances;
     eval.registry.allocator = to;
@@ -131,6 +132,9 @@ const Copier = struct {
             // captured name falls through to whatever the caller has bound.
             .env_names = c.env_names,
             .top_level = c.top_level,
+            // The top-level scope is copied whole and in order, so the mark
+            // still counts the same bindings.
+            .globals_mark = c.globals_mark,
             .return_type = try self.optStr(c.return_type),
         };
         return out;
@@ -466,6 +470,81 @@ test "a def inside a function still keeps what it captured" {
         \\k = 100
     );
     try std.testing.expectEqual(@as(i64, 6), (try run(code.allocator(), &eval, "f(1)")).integer);
+}
+
+test "a fn literal sees the top level as it was when it was made, and globals defined later" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+        std.heap.ArenaAllocator.init(std.testing.allocator),
+    };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+
+    var eval = Evaluator.init(heaps[0].allocator());
+    eval.code_allocator = code.allocator();
+    // A fn literal no longer copies the top level into its captures; it reads
+    // the top level in place, as far as it went when the fn was made. These
+    // are the answers the copy gave.
+    _ = try run(code.allocator(), &eval,
+        \\x = 1
+        \\f = fn() -> Int do x end
+        \\x = 2
+        \\def g() -> Int do 10 end
+        \\h = fn() -> Int do g() end
+        \\def g() -> Int do 20 end
+        \\k = fn() -> Int do later() end
+        \\def later() -> Int do 99 end
+        \\def outer() -> Any do fn() -> Int do later2() end end
+        \\kk = outer()
+        \\def later2() -> Int do 7 end
+        \\def shadow_caller(cb: Fn) -> Int do
+        \\  x = 100
+        \\  cb()
+        \\end
+        \\def uses_x() -> Int do x end
+    );
+    for (0..2) |round| {
+        // the snapshot: the x and the g there were when the fn was made
+        try std.testing.expectEqual(@as(i64, 1), (try run(code.allocator(), &eval, "f()")).integer);
+        try std.testing.expectEqual(@as(i64, 10), (try run(code.allocator(), &eval, "h()")).integer);
+        // a name the top level did not have yet is found when it is called
+        try std.testing.expectEqual(@as(i64, 99), (try run(code.allocator(), &eval, "k()")).integer);
+        try std.testing.expectEqual(@as(i64, 7), (try run(code.allocator(), &eval, "kk()")).integer);
+        // what the fn saw of the top level beats the caller's local of that name
+        try std.testing.expectEqual(@as(i64, 1), (try run(code.allocator(), &eval, "shadow_caller(f)")).integer);
+        // a top-level def reads the top level live: last definition wins
+        try std.testing.expectEqual(@as(i64, 2), (try run(code.allocator(), &eval, "uses_x()")).integer);
+        try std.testing.expectEqual(@as(i64, 20), (try run(code.allocator(), &eval, "g()")).integer);
+        if (round == 0) {
+            // and all of it survives compaction, which rebuilds the index
+            try compact(&eval, heaps[1].allocator(), std.testing.allocator);
+            _ = heaps[0].reset(.free_all);
+        }
+    }
+}
+
+test "a fn literal tail-calling another keeps seeing what it saw of the top level" {
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap.deinit();
+    var eval = Evaluator.init(heap.allocator());
+    eval.code_allocator = code.allocator();
+    // `b` is made before `w` exists, `a` while it is 5, and `a` tail-calls
+    // `b`, handing it the frame. `b` has no `w` of its own, so it reads the
+    // `w` that `a` saw -- which used to sit in the frame as one of `a`'s
+    // copied captures, and is now `a`'s mark (Scope.left_mark). Without it
+    // `b` falls through to the live top level and answers 51.
+    _ = try run(code.allocator(), &eval,
+        \\b = fn(n: Int) -> Int do n + w end
+        \\w = 5
+        \\a = fn(n: Int) -> Int do b(n) end
+        \\w = 50
+    );
+    try std.testing.expectEqual(@as(i64, 6), (try run(code.allocator(), &eval, "a(1)")).integer);
+    try std.testing.expectEqual(@as(i64, 51), (try run(code.allocator(), &eval, "b(1)")).integer);
 }
 
 test "redefining an actor updates its running instances and keeps their state" {
