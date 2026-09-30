@@ -15,6 +15,10 @@ extern "env" fn blimp_js_error(ptr: [*]const u8, len: u32) void;
 const allocator = std.heap.wasm_allocator;
 const gc = @import("gc.zig");
 const wasm_bufs = @import("wasm_bufs.zig");
+const wasm_json = @import("wasm_json.zig");
+const Guard = wasm_json.Guard;
+const writeViewJson = wasm_json.writeViewJson;
+const writeJsonString = wasm_json.writeJsonString;
 
 var evaluator: ?Evaluator = null;
 
@@ -51,7 +55,7 @@ fn compactHeap() void {
     gc.compact(eval, heaps[next].allocator(), allocator) catch return;
     _ = heaps[live_heap].reset(.free_all);
     live_heap = next;
-    // Error details were already formatted into error_buf.
+    // Error details were already formatted into err_out.
     eval.last_error = null;
 }
 
@@ -67,15 +71,57 @@ export fn blimp_heap_bytes() u32 {
 // boards on one page "did not produce a view". A buffer that grows moves,
 // so the pointer is only good until the next call; blimp.js asks for it
 // after every call.
-var result_buf: std.ArrayListUnmanaged(u8) = .empty;
+//
+// A buffer that grows can fail to: an allocation fails and the write with
+// it. Every write used to be `catch {}`, which after the buffers grew meant
+// out of memory cut the output exactly as a full buffer had. Each buffer is
+// now written through a Guard, and when a write fails it hands JS a fixed
+// message that says so (and the call returns 3, out of memory, where it
+// returns a status).
+const Out = struct {
+    list: std.ArrayListUnmanaged(u8) = .empty,
+    /// Set when writing failed: what JS reads instead of the list.
+    failed: ?[]const u8 = null,
+
+    fn clear(self: *Out) void {
+        self.list.clearRetainingCapacity();
+        self.failed = null;
+    }
+
+    fn ptr(self: *const Out) [*]const u8 {
+        return if (self.failed) |f| f.ptr else self.list.items.ptr;
+    }
+
+    fn len(self: *const Out) u32 {
+        return @intCast(if (self.failed) |f| f.len else self.list.items.len);
+    }
+
+    /// Start writing it over: clear it, and hand back the writer.
+    fn begin(self: *Out, aw: *std.Io.Writer.Allocating, g: *Guard) *std.Io.Writer {
+        self.clear();
+        aw.* = std.Io.Writer.Allocating.fromArrayList(allocator, &self.list);
+        g.* = Guard.init(&aw.writer, false);
+        return g.start();
+    }
+
+    /// Take the list back; if any write failed, hand out `message` instead.
+    /// Returns whether the write got through whole.
+    fn end(self: *Out, aw: *std.Io.Writer.Allocating, g: *Guard, message: []const u8) bool {
+        const ok = if (g.finish()) true else |_| false;
+        self.list = aw.toArrayList();
+        if (!ok) self.failed = message;
+        return ok;
+    }
+};
+
+var result: Out = .{};
 // An error keeps a cap, and says when it hit it (see wasm_bufs.capError).
-var error_buf: std.ArrayListUnmanaged(u8) = .empty;
+var err_out: Out = .{};
 // The state JSON grows with the program. It was a fixed 256 KiB, and a
 // write past the end was dropped without a word, so a big program -- Snake
 // compiled from Temper makes an actor of every point, 800 after a few
 // frames -- got cut-off JSON, and getState() answered with nothing at all.
-var state_buf: std.ArrayListUnmanaged(u8) = .empty;
-var state_len: u32 = 0;
+var state: Out = .{};
 // Messages accumulate here, already serialized, across evals and sends until
 // JS reads the state (a view host runs two evals per send and reads once).
 // Value pointers in eval.msg_log only live for one eval, so the text is
@@ -86,38 +132,48 @@ var messages: wasm_bufs.MessageLog = .init(messages_cap);
 var message_entry: std.ArrayListUnmanaged(u8) = .empty;
 var messages_read: bool = false;
 var last_status: i32 = 0;
-var view_buf: std.ArrayListUnmanaged(u8) = .empty;
+var view: Out = .{};
 var has_view: bool = false;
+
+const oom_error = "Out of memory writing the error message";
+const oom_state = "{\"vars\":[],\"actors\":[],\"messages\":[],\"messages_dropped\":0,\"error\":\"out of memory writing the state JSON\"}";
 
 /// Replace the error text with `fmt` and `args`, cut and marked at the cap.
 fn setError(comptime fmt: []const u8, args: anytype) void {
-    error_buf.clearRetainingCapacity();
-    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &error_buf);
-    aw.writer.print(fmt, args) catch {};
-    error_buf = aw.toArrayList();
-    wasm_bufs.capError(&error_buf, wasm_bufs.error_cap);
+    var aw: std.Io.Writer.Allocating = undefined;
+    var g: Guard = undefined;
+    const w = err_out.begin(&aw, &g);
+    w.print(fmt, args) catch {};
+    if (err_out.end(&aw, &g, oom_error)) wasm_bufs.capError(&err_out.list, wasm_bufs.error_cap);
 }
 
 /// The evaluator's error as the error text, or `fallback` when there is none.
 fn setEvalError(eval: *Evaluator, fallback: []const u8) void {
     const err = eval.last_error orelse return setError("{s}", .{fallback});
-    error_buf.clearRetainingCapacity();
-    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &error_buf);
-    err.formatPlain(&aw.writer);
-    error_buf = aw.toArrayList();
-    wasm_bufs.capError(&error_buf, wasm_bufs.error_cap);
+    var aw: std.Io.Writer.Allocating = undefined;
+    var g: Guard = undefined;
+    const w = err_out.begin(&aw, &g);
+    err.formatPlain(w);
+    if (err_out.end(&aw, &g, oom_error)) wasm_bufs.capError(&err_out.list, wasm_bufs.error_cap);
 }
 
-/// Write `val` into `buf`, replacing what was there, as view JSON or as the
-/// REPL's text.
-fn writeValueInto(buf: *std.ArrayListUnmanaged(u8), val: *const Value, comptime as: enum { view_json, text }) void {
-    buf.clearRetainingCapacity();
-    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, buf);
+/// Write `val` into `out`, replacing what was there, as view JSON or as the
+/// REPL's text. False, with the error set, if it could not be written whole.
+fn writeValueInto(out: *Out, val: *const Value, comptime as: enum { view_json, text }) bool {
+    var aw: std.Io.Writer.Allocating = undefined;
+    var g: Guard = undefined;
+    const w = out.begin(&aw, &g);
     switch (as) {
-        .view_json => writeViewJson(&aw.writer, val),
-        .text => val.format(&aw.writer),
+        .view_json => writeViewJson(w, val) catch {},
+        .text => val.format(w),
     }
-    buf.* = aw.toArrayList();
+    const what = switch (as) {
+        .view_json => "view JSON",
+        .text => "result",
+    };
+    if (out.end(&aw, &g, "")) return true;
+    setError("Out of memory writing the {s}", .{what});
+    return false;
 }
 
 // Message log - track recent sends for canvas rays
@@ -136,14 +192,16 @@ var message_count: u32 = 0;
 /// Initialize the Blimp interpreter. Call once before eval.
 export fn blimp_init() void {
     evaluator = freshEvaluator();
-    result_buf.clearRetainingCapacity();
-    error_buf.clearRetainingCapacity();
-    state_len = 0;
+    result.clear();
+    err_out.clear();
+    state.clear();
     last_status = 0;
 }
 
 /// Evaluate a Blimp source string.
-/// Returns 0 on success, 1 on parse error, 2 on eval error.
+/// Returns 0 on success, 1 on parse error, 2 on eval error, 3 when there is
+/// no evaluator or the result could not be written (out of memory; the
+/// error text says which).
 export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     var eval = &(evaluator orelse return 3);
 
@@ -168,7 +226,7 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
             parser.current.line,
             parser.current.col,
         });
-        result_buf.clearRetainingCapacity();
+        result.clear();
         last_status = 1;
         return 1;
     };
@@ -178,7 +236,7 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     for (nodes) |node| {
         last_value = eval.eval(node) catch {
             setEvalError(eval, "Evaluation error");
-            result_buf.clearRetainingCapacity();
+            result.clear();
             last_status = 2;
             compactHeap();
             return 2;
@@ -188,21 +246,25 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     // Format result
     if (last_value) |val| {
         // Check if result is a view_node -- serialize as JSON for DOM rendering
-        if (val.* == .view_node) {
-            has_view = true;
-            writeValueInto(&view_buf, val, .view_json);
-        } else {
+        has_view = val.* == .view_node;
+        view.clear();
+        // The text result for the REPL, a view's too; the view as JSON.
+        if (!writeValueInto(&result, val, .text) or
+            (has_view and !writeValueInto(&view, val, .view_json)))
+        {
             has_view = false;
-            view_buf.clearRetainingCapacity();
+            view.clear();
+            result.clear();
+            last_status = 3;
+            compactHeap();
+            return 3;
         }
-        // The text result, for the REPL, a view's too
-        writeValueInto(&result_buf, val, .text);
     } else {
         has_view = false;
-        view_buf.clearRetainingCapacity();
-        result_buf.clearRetainingCapacity();
+        view.clear();
+        result.clear();
     }
-    error_buf.clearRetainingCapacity();
+    err_out.clear();
     last_status = 0;
 
     // Update state JSON for sidebar
@@ -310,25 +372,29 @@ fn writeJsonEscaped(w: anytype, val: *const Value) void {
 /// string holding a `"` -- any HTML at all -- made the whole state invalid
 /// JSON, and a host reading it got nothing.
 const state_value_cap = 2048;
-fn writeStateValue(w: anytype, val: *const Value) void {
+fn writeStateValue(g: *Guard, val: *const Value) void {
+    const w = &g.writer;
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    writeJsonEscaped(&aw.writer, val);
+    var tg = Guard.init(&aw.writer, false);
+    writeJsonEscaped(tg.start(), val);
+    tg.finish() catch {
+        g.failed = true;
+        return;
+    };
     const text = aw.written();
     const cut = text.len > state_value_cap;
-    writeJsonString(w, if (cut) text[0..state_value_cap] else text) catch {};
-    if (cut) {
-        // Replace the closing quote with an ellipsis inside the string.
-        w.undo(1);
-        w.writeAll("...\"") catch {};
-    }
+    w.writeAll("\"") catch {};
+    wasm_json.writeJsonStringBody(w, if (cut) text[0..state_value_cap] else text) catch {};
+    if (cut) w.writeAll("...") catch {};
+    w.writeAll("\"") catch {};
 }
 
 fn updateStateJson() void {
     var eval = &(evaluator orelse return);
-    state_buf.clearRetainingCapacity();
-    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &state_buf);
-    const w = &aw.writer;
+    var aw: std.Io.Writer.Allocating = undefined;
+    var g: Guard = undefined;
+    const w = state.begin(&aw, &g);
 
     w.writeAll("{\"vars\":[") catch {};
     const bindings = eval.env.allBindings(allocator);
@@ -337,7 +403,7 @@ fn updateStateJson() void {
         w.writeAll("{\"name\":\"") catch {};
         w.writeAll(b.name) catch {};
         w.writeAll("\",\"value\":") catch {};
-        writeStateValue(w, b.val);
+        writeStateValue(&g, b.val);
         w.writeAll("}") catch {};
     }
 
@@ -355,7 +421,7 @@ fn updateStateJson() void {
             w.writeAll("\"") catch {};
             w.writeAll(field.key) catch {};
             w.writeAll("\":") catch {};
-            writeStateValue(w, field.val);
+            writeStateValue(&g, field.val);
         }
         w.writeAll("}}") catch {};
         actor_idx += 1;
@@ -375,8 +441,7 @@ fn updateStateJson() void {
 
     eval.msg_log_count = 0;
 
-    state_buf = aw.toArrayList();
-    state_len = @intCast(state_buf.items.len);
+    _ = state.end(&aw, &g, oom_state);
 }
 
 /// A send's messages go where an eval's do, into the text getState hands
@@ -397,7 +462,8 @@ fn appendMessagesJson(eval: *Evaluator) void {
         const msg = eval.msg_log[mi];
         message_entry.clearRetainingCapacity();
         var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &message_entry);
-        const w = &aw.writer;
+        var g = Guard.init(&aw.writer, false);
+        const w = g.start();
         w.writeAll("{\"target\":\"ref<") catch {};
         w.writeAll(msg.target_type) catch {};
         w.writeAll(":") catch {};
@@ -426,73 +492,10 @@ fn appendMessagesJson(eval: *Evaluator) void {
             w.writeAll("null") catch {};
         }
         w.writeAll("}") catch {};
+        const ok = if (g.finish()) true else |_| false;
         message_entry = aw.toArrayList();
-        messages.push(allocator, message_entry.items);
-    }
-}
-
-/// Serialize a view_node tree as JSON for the JS renderer.
-fn writeViewJson(w: anytype, val: *const Value) void {
-    switch (val.*) {
-        .view_node => |node| {
-            w.writeAll("{\"tag\":\"") catch {};
-            w.writeAll(node.tag) catch {};
-            w.writeAll("\",\"attrs\":{") catch {};
-            for (node.attrs, 0..) |attr, i| {
-                if (i > 0) w.writeAll(",") catch {};
-                w.writeAll("\"") catch {};
-                w.writeAll(attr.key) catch {};
-                w.writeAll("\":") catch {};
-                writeViewJson(w, attr.val);
-            }
-            w.writeAll("},\"children\":[") catch {};
-            for (node.children, 0..) |child, i| {
-                if (i > 0) w.writeAll(",") catch {};
-                writeViewJson(w, child);
-            }
-            w.writeAll("]}") catch {};
-        },
-        .string => |s| {
-            w.writeAll("{\"text\":\"") catch {};
-            // Escape JSON special chars in string values
-            for (s) |c| {
-                switch (c) {
-                    '"' => w.writeAll("\\\"") catch {},
-                    '\\' => w.writeAll("\\\\") catch {},
-                    '\n' => w.writeAll("\\n") catch {},
-                    '\t' => w.writeAll("\\t") catch {},
-                    else => w.writeByte(c) catch {},
-                }
-            }
-            w.writeAll("\"}") catch {};
-        },
-        .integer => |n| {
-            w.writeAll("{\"text\":\"") catch {};
-            w.print("{d}", .{n}) catch {};
-            w.writeAll("\"}") catch {};
-        },
-        .float => |f| {
-            w.writeAll("{\"text\":\"") catch {};
-            w.print("{d}", .{f}) catch {};
-            w.writeAll("\"}") catch {};
-        },
-        .atom => |a| {
-            w.writeAll("\"") catch {};
-            w.writeAll(a) catch {};
-            w.writeAll("\"") catch {};
-        },
-        .boolean => |b| {
-            if (b) w.writeAll("true") catch {} else w.writeAll("false") catch {};
-        },
-        // An attr that is nil is left off (el's contract; to_html does it).
-        // It used to fall through to the text "nil", and an attribute that
-        // is present at all -- data-full="nil" -- matches [data-full] in CSS.
-        .nil => w.writeAll("null") catch {},
-        else => {
-            w.writeAll("{\"text\":\"") catch {};
-            val.format(w);
-            w.writeAll("\"}") catch {};
-        },
+        // an entry that could not be written whole is dropped, and counted
+        if (ok) messages.push(allocator, message_entry.items) else messages.dropped += 1;
     }
 }
 
@@ -511,7 +514,7 @@ fn writeViewJson(w: anytype, val: *const Value) void {
 // and the message log), and it writes the reply as real JSON, into a buffer
 // that grows, rather than into a fixed one.
 
-var reply_buf: std.ArrayListUnmanaged(u8) = .empty;
+var reply_out: Out = .{};
 
 /// blimp_send(target, message, args) -> 0 ok, 1 parse error, 2 eval error,
 /// 3 no evaluator or out of memory, 4 a reply JSON cannot represent.
@@ -566,88 +569,36 @@ export fn blimp_send(
         return 2;
     };
 
-    reply_buf.clearRetainingCapacity();
-    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &reply_buf);
-    const ok = writeReplyJson(&aw.writer, value);
-    reply_buf = aw.toArrayList();
+    var aw: std.Io.Writer.Allocating = undefined;
+    var g: Guard = undefined;
+    const w = reply_out.begin(&aw, &g);
+    const written = wasm_json.writeReplyJson(w, value);
+    const whole = reply_out.end(&aw, &g, "");
+    // Set the error before compacting: it quotes `src`, which is on the heap.
+    const status: i32 = if (written) |_|
+        (if (whole) 0 else 3)
+    else |e| switch (e) {
+        error.Unrepresentable => 4,
+        error.WriteFailed => 3,
+    };
+    switch (status) {
+        0 => err_out.clear(),
+        3 => setError("Out of memory writing the reply to {s}", .{src}),
+        else => setError("The reply to {s} cannot be written as JSON", .{src}),
+    }
+    if (status != 0) reply_out.clear();
     keepSendMessages(eval);
     eval.msg_log_count = 0;
     compactHeap();
-    if (!ok) {
-        setError("The reply to {s} cannot be written as JSON", .{src});
-        return 4;
-    }
-    error_buf.clearRetainingCapacity();
-    return 0;
+    return status;
 }
 
 export fn blimp_get_reply_ptr() [*]const u8 {
-    return reply_buf.items.ptr;
+    return reply_out.ptr();
 }
 
 export fn blimp_get_reply_len() u32 {
-    return @intCast(reply_buf.items.len);
-}
-
-/// JSON for a reply: numbers, strings, true/false/null; atoms as strings;
-/// lists and tuples as arrays; maps as objects; a view node as the object
-/// writeViewJson makes. Anything else (a closure, an actor ref, a hole)
-/// returns false, so the host gets an error instead of a guess.
-fn writeReplyJson(w: *std.Io.Writer, val: *const Value) bool {
-    switch (val.*) {
-        .integer => |n| w.print("{d}", .{n}) catch return false,
-        .float => |f| {
-            if (std.math.isFinite(f)) {
-                w.print("{d}", .{f}) catch return false;
-            } else {
-                w.writeAll("null") catch return false;
-            }
-        },
-        .boolean => |b| w.writeAll(if (b) "true" else "false") catch return false,
-        .nil => w.writeAll("null") catch return false,
-        .string => |s| writeJsonString(w, s) catch return false,
-        .atom => |a| writeJsonString(w, a) catch return false,
-        .list, .tuple => |items| {
-            w.writeAll("[") catch return false;
-            for (items, 0..) |item, i| {
-                if (i > 0) w.writeAll(",") catch return false;
-                if (!writeReplyJson(w, item)) return false;
-            }
-            w.writeAll("]") catch return false;
-        },
-        .map => |entries| {
-            w.writeAll("{") catch return false;
-            for (entries, 0..) |entry, i| {
-                if (i > 0) w.writeAll(",") catch return false;
-                writeJsonString(w, entry.key) catch return false;
-                w.writeAll(":") catch return false;
-                if (!writeReplyJson(w, entry.val)) return false;
-            }
-            w.writeAll("}") catch return false;
-        },
-        .view_node => writeViewJson(w, val),
-        else => return false,
-    }
-    return true;
-}
-
-fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
-    try w.writeAll("\"");
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => if (c < 0x20) {
-                try w.print("\\u{x:0>4}", .{c});
-            } else {
-                try w.writeByte(c);
-            },
-        }
-    }
-    try w.writeAll("\"");
+    return reply_out.len();
 }
 
 /// Returns 1 if the last eval result was a view_node, 0 otherwise.
@@ -657,32 +608,32 @@ export fn blimp_has_view() i32 {
 
 /// Get the view JSON pointer.
 export fn blimp_get_view_ptr() [*]const u8 {
-    return view_buf.items.ptr;
+    return view.ptr();
 }
 
 /// Get the view JSON length.
 export fn blimp_get_view_len() u32 {
-    return @intCast(view_buf.items.len);
+    return view.len();
 }
 
 /// Get the result string pointer.
 export fn blimp_get_result_ptr() [*]const u8 {
-    return result_buf.items.ptr;
+    return result.ptr();
 }
 
 /// Get the result string length.
 export fn blimp_get_result_len() u32 {
-    return @intCast(result_buf.items.len);
+    return result.len();
 }
 
 /// Get the error string pointer.
 export fn blimp_get_error_ptr() [*]const u8 {
-    return error_buf.items.ptr;
+    return err_out.ptr();
 }
 
 /// Get the error string length.
 export fn blimp_get_error_len() u32 {
-    return @intCast(error_buf.items.len);
+    return err_out.len();
 }
 
 /// Rebuild the state JSON from the program as it is now. eval rebuilds it
@@ -696,31 +647,35 @@ export fn blimp_refresh_state() void {
 /// Get the state JSON pointer (for introspection sidebar).
 export fn blimp_get_state_ptr() [*]const u8 {
     messages_read = true;
-    return state_buf.items.ptr;
+    return state.ptr();
 }
 
 /// Get the state JSON length.
 export fn blimp_get_state_len() u32 {
-    return state_len;
+    return state.len();
 }
 
 /// Reset the interpreter to a clean state.
 export fn blimp_reset() void {
     evaluator = freshEvaluator();
-    result_buf.clearRetainingCapacity();
-    error_buf.clearRetainingCapacity();
-    state_len = 0;
+    result.clear();
+    err_out.clear();
+    state.clear();
     messages.clear();
     messages_read = false;
-    view_buf.clearRetainingCapacity();
+    view.clear();
     has_view = false;
     last_status = 0;
 }
 
 // ── Completion ──────────────────────────────────────────
 
-var complete_buf: [32768]u8 = undefined;
-var complete_len: u32 = 0;
+// Grows, like the rest. It was a fixed 32 KiB: ten completions are small
+// until one of them is a long name, and then the JSON came out cut and the
+// page's parse answered "no completions". A cap buys nothing here -- the
+// list is ten entries by construction.
+var completions_out: Out = .{};
+const oom_complete = "[{\"label\":\"(out of memory listing completions)\",\"insert\":\"\",\"kind\":\"error\"}]";
 
 /// Get completions for a prefix string. Returns JSON array.
 export fn blimp_complete(prefix_ptr: [*]const u8, prefix_len: u32) u32 {
@@ -731,17 +686,18 @@ export fn blimp_complete(prefix_ptr: [*]const u8, prefix_len: u32) u32 {
     var engine = CompletionEngine.init(allocator);
     const completions = engine.complete(prefix, eval);
 
-    var fbs = std.Io.Writer.fixed(&complete_buf);
-    const w = &fbs;
+    var aw: std.Io.Writer.Allocating = undefined;
+    var g: Guard = undefined;
+    const w = completions_out.begin(&aw, &g);
     w.writeAll("[") catch {};
     const max_results = @min(completions.len, 10);
     for (completions[0..max_results], 0..) |comp, i| {
         if (i > 0) w.writeAll(",") catch {};
-        w.writeAll("{\"label\":\"") catch {};
-        w.writeAll(comp.label) catch {};
-        w.writeAll("\",\"insert\":\"") catch {};
-        w.writeAll(comp.insert) catch {};
-        w.writeAll("\",\"kind\":\"") catch {};
+        w.writeAll("{\"label\":") catch {};
+        writeJsonString(w, comp.label) catch {};
+        w.writeAll(",\"insert\":") catch {};
+        writeJsonString(w, comp.insert) catch {};
+        w.writeAll(",\"kind\":\"") catch {};
         const kind_name: []const u8 = switch (comp.kind) {
             .variable => "variable",
             .function => "function",
@@ -755,16 +711,16 @@ export fn blimp_complete(prefix_ptr: [*]const u8, prefix_len: u32) u32 {
     }
     w.writeAll("]") catch {};
 
-    complete_len = @intCast(fbs.buffered().len);
-    return complete_len;
+    _ = completions_out.end(&aw, &g, oom_complete);
+    return completions_out.len();
 }
 
 export fn blimp_get_complete_ptr() [*]const u8 {
-    return &complete_buf;
+    return completions_out.ptr();
 }
 
 export fn blimp_get_complete_len() u32 {
-    return complete_len;
+    return completions_out.len();
 }
 
 /// Allocate memory in WASM linear memory (for JS to write source strings).
@@ -780,8 +736,12 @@ export fn blimp_free(ptr: [*]u8, len: u32) void {
 
 // ── Test runner (for in-browser tutorials) ──────────────
 
-var test_report_buf: [65536]u8 = undefined;
-var test_report_len: u32 = 0;
+// Grows. It was a fixed 64 KiB, and a tutorial with enough tests (or long
+// enough names) got a report cut mid-string. A report is one JSON document,
+// so a cut with a marker would still not parse; growing is the only fix
+// that keeps it whole.
+var test_report: Out = .{};
+const oom_test_report = "{\"error\":\"out of memory writing the test report\",\"total\":0,\"passed\":0,\"failed\":0,\"tests\":[]}";
 
 fn writeJsonStr(w: anytype, s: []const u8) void {
     for (s) |c| {
@@ -798,8 +758,9 @@ fn writeJsonStr(w: anytype, s: []const u8) void {
 }
 
 /// Parse a source string, register actors/functions, then run every `test` block
-/// found inside any actor. Produces a JSON report in test_report_buf.
-/// Returns: 0 = all passed, 1 = at least one failure, 2 = parse error, 3 = not initialized.
+/// found inside any actor. Produces a JSON report in test_report.
+/// Returns: 0 = all passed, 1 = at least one failure, 2 = parse error, 3 = not initialized,
+/// 4 = out of memory writing the report (the report then says so in "error").
 export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
     // Start fresh each call so the tutorial's red/green cycle is clean.
     evaluator = freshEvaluator();
@@ -811,14 +772,15 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
 
     var parser = Parser.init(allocator, source);
     const nodes = parser.parseFile() catch {
-        var fbs = std.Io.Writer.fixed(&test_report_buf);
-        const w = &fbs;
+        var aw: std.Io.Writer.Allocating = undefined;
+        var g: Guard = undefined;
+        const w = test_report.begin(&aw, &g);
         w.writeAll("{\"error\":\"parse error at line ") catch {};
         w.print("{d}", .{parser.current.line}) catch {};
         w.writeAll(", col ") catch {};
         w.print("{d}", .{parser.current.col}) catch {};
         w.writeAll("\",\"total\":0,\"passed\":0,\"failed\":0,\"tests\":[]}") catch {};
-        test_report_len = @intCast(fbs.buffered().len);
+        if (!test_report.end(&aw, &g, oom_test_report)) return 4;
         return 2;
     };
 
@@ -827,8 +789,9 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
         _ = eval.eval(node) catch {};
     }
 
-    var fbs = std.Io.Writer.fixed(&test_report_buf);
-    const w = &fbs;
+    var aw: std.Io.Writer.Allocating = undefined;
+    var g: Guard = undefined;
+    const w = test_report.begin(&aw, &g);
     var total: u32 = 0;
     var passed: u32 = 0;
     var first_test = true;
@@ -905,14 +868,14 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
     w.print("{d}", .{total - passed}) catch {};
     w.writeAll("}") catch {};
 
-    test_report_len = @intCast(fbs.buffered().len);
+    if (!test_report.end(&aw, &g, oom_test_report)) return 4;
     return if (passed == total) 0 else 1;
 }
 
 export fn blimp_get_test_report_ptr() [*]const u8 {
-    return &test_report_buf;
+    return test_report.ptr();
 }
 
 export fn blimp_get_test_report_len() u32 {
-    return test_report_len;
+    return test_report.len();
 }

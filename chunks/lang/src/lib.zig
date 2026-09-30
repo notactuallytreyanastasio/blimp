@@ -20,6 +20,7 @@ pub const CompletionEngine = @import("complete.zig").CompletionEngine;
 pub const gc = @import("gc.zig");
 pub const HeapLimit = @import("heap_limit.zig").HeapLimit;
 pub const wasm_bufs = @import("wasm_bufs.zig");
+pub const wasm_json = @import("wasm_json.zig");
 
 test {
     // Pull in tests from all modules
