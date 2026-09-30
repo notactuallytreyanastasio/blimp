@@ -76,6 +76,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     // source, the argv and the ASTs do not: the ceiling is about the program's
     // appetite, not the tool's.
     var heap_limit = HeapLimit.fromEnv(allocator, environ);
+    @import("heap_limit.zig").current = &heap_limit;
     const program_heap = heap_limit.allocator();
 
     // Check for --repl flag

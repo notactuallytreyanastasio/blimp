@@ -84,6 +84,7 @@ pub const BuiltinRegistry = struct {
         reg.register("keys", &builtinKeys);
         reg.register("now", &builtinNow);
         reg.register("now_ms", &builtinNowMs);
+        reg.register("process_stats", &builtinProcessStats);
         reg.register("format_time", &builtinFormatTime);
         reg.register("concat", &builtinConcat);
         reg.register("split", &builtinSplit);
@@ -448,6 +449,64 @@ fn builtinNowMs(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
             break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
         };
     return make(allocator, .{ .integer = ms });
+}
+
+/// process_stats() -> %{cpu_ms: Int, rss_bytes: Int, heap_bytes: Int, cores: Int}
+///
+/// What this process has cost so far, for a program that wants to watch
+/// itself (bobbby.online graphs its own server).
+///   cpu_ms      user plus system CPU time since the process started, in ms
+///               (getrusage). CPU use over an interval is the difference
+///               of two readings over the wall time between them.
+///   rss_bytes   resident memory now: /proc/self/statm on Linux, the Mach
+///               task's resident_size on macOS, 0 where neither exists.
+///   heap_bytes  what Blimp's heap holds now, the number `:stats` calls
+///               heap: garbage included until the next compaction.
+///   cores       CPUs the machine has, so cpu_ms can be read as a share.
+/// In the browser there is no process to ask: it answers nil.
+fn builtinProcessStats(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    if (is_wasm) return make(allocator, .nil);
+    var ru: std.c.rusage = undefined;
+    const cpu_ms: i64 = if (std.c.getrusage(0, &ru) == 0)
+        @as(i64, @intCast(ru.utime.sec + ru.stime.sec)) * 1000 +
+            @divTrunc(@as(i64, @intCast(ru.utime.usec + ru.stime.usec)), 1000)
+    else
+        0;
+    const heap: i64 = if (@import("heap_limit.zig").current) |h| @intCast(h.used) else 0;
+    const cores: i64 = @intCast(std.Thread.getCpuCount() catch 1);
+    const entries = allocator.alloc(Value.MapEntry, 4) catch return error.OutOfMemory;
+    entries[0] = .{ .key = "cpu_ms", .val = try make(allocator, .{ .integer = cpu_ms }) };
+    entries[1] = .{ .key = "rss_bytes", .val = try make(allocator, .{ .integer = residentBytes() }) };
+    entries[2] = .{ .key = "heap_bytes", .val = try make(allocator, .{ .integer = heap }) };
+    entries[3] = .{ .key = "cores", .val = try make(allocator, .{ .integer = cores }) };
+    return make(allocator, .{ .map = entries });
+}
+
+fn residentBytes() i64 {
+    switch (builtin.os.tag) {
+        .linux => {
+            // statm: size resident shared text lib data dt, in pages.
+            const fd = std.c.open("/proc/self/statm", .{}, @as(std.c.mode_t, 0));
+            if (fd < 0) return 0;
+            defer _ = std.c.close(fd);
+            var buf: [128]u8 = undefined;
+            const n = std.c.read(fd, &buf, buf.len);
+            if (n <= 0) return 0;
+            var it = std.mem.tokenizeScalar(u8, buf[0..@intCast(n)], ' ');
+            _ = it.next() orelse return 0;
+            const pages = std.fmt.parseInt(i64, it.next() orelse return 0, 10) catch return 0;
+            return pages * @as(i64, @intCast(std.heap.pageSize()));
+        },
+        .macos => {
+            var info: std.c.mach_task_basic_info = undefined;
+            var count: std.c.mach_msg_type_number_t = std.c.MACH.TASK.BASIC.INFO_COUNT;
+            const kr = std.c.task_info(std.c.mach_task_self(), std.c.MACH.TASK.BASIC.INFO, @ptrCast(&info), &count);
+            if (kr != 0) return 0;
+            return @intCast(info.resident_size);
+        },
+        else => return 0,
+    }
 }
 
 const month_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
@@ -6032,4 +6091,22 @@ test "a signature from ecdsa_p256_sign verifies, and one flipped bit does not" {
     bad[63] ^= 1;
     const bad_sig = try make(a, .{ .string = bad });
     try std.testing.expect(!(try builtinEcdsaP256Verify(a, &.{ public, msg, bad_sig })).boolean);
+}
+
+test "process_stats answers what the process has used, all of it counted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const v = try builtinProcessStats(a, &.{});
+    const m = v.map;
+    try std.testing.expectEqual(@as(usize, 4), m.len);
+    try std.testing.expectEqualStrings("cpu_ms", m[0].key);
+    try std.testing.expectEqualStrings("rss_bytes", m[1].key);
+    try std.testing.expectEqualStrings("heap_bytes", m[2].key);
+    try std.testing.expectEqualStrings("cores", m[3].key);
+    try std.testing.expect(m[0].val.integer >= 0);
+    // A running process on the two systems it reads is resident somewhere.
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) try std.testing.expect(m[1].val.integer > 0);
+    try std.testing.expect(m[3].val.integer >= 1);
+    try std.testing.expectError(error.TypeError, builtinProcessStats(a, &.{v}));
 }
