@@ -1,3 +1,32 @@
+//! Zig 0.16.0's lib/std/crypto/tls/Client.zig, vendored into Blimp.
+//!
+//! Upstream offers TLS 1.2 only with ECDHE_RSA cipher suites, so a server
+//! that speaks TLS 1.2 and holds an ECDSA certificate (every Craigslist host,
+//! ecc256.badssl.com) gets a ClientHello it has nothing in common with;
+//! Craigslist answers it by resetting the connection. What differs from
+//! upstream, each marked "Blimp:" below:
+//!
+//!  1. `cipher_suites` also offers ECDHE_ECDSA_WITH_{AES_128_GCM_SHA256,
+//!     AES_256_GCM_SHA384,CHACHA20_POLY1305_SHA256}, and ServerHello accepts
+//!     them. They share their record protection with the ECDHE_RSA suites
+//!     upstream already has (`CipherSuite.with()`), so no new cipher code.
+//!  2. The TLS 1.2 ServerKeyExchange signature is verified on the curve of
+//!     the certificate's key, with the hash the SignatureScheme names. In
+//!     TLS 1.2 the codepoint 0x0503 means "ECDSA with SHA-384", on any curve
+//!     (RFC 5246 7.4.1.4.1); only TLS 1.3 binds it to P-384 (RFC 8446
+//!     4.2.3). Upstream took the curve from the name, so a P-256 key signing
+//!     with SHA-384 -- what ecc256.badssl.com does -- would fail to parse as
+//!     a P-384 key. TLS 1.3 CertificateVerify keeps the binding, and now
+//!     refuses a mismatch by name instead of by a parse error.
+//!  3. The TLS 1.2 cipher suite must match the certificate's key: an
+//!     ECDHE_ECDSA suite needs an EC key, an ECDHE_RSA suite an RSA key
+//!     (RFC 5246 7.4.2). Otherwise TlsIllegalParameter.
+//!  4. `@import("std")` instead of a path inside the std tree.
+//!
+//! Certificate chain verification is untouched: std.crypto.Certificate
+//! already verified ECDSA-signed certificates. A P-521 leaf key is refused
+//! (CertificateSignatureNamedCurveUnsupported); std has no P-521.
+
 const builtin = @import("builtin");
 const native_endian = builtin.cpu.arch.endian();
 
@@ -332,6 +361,8 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
     var handshake_cipher: tls.HandshakeCipher = undefined;
     var main_cert_pub_key: CertificatePublicKey = undefined;
     var tls12_negotiated_group: ?tls.NamedGroup = null;
+    // Blimp: which key the TLS 1.2 cipher suite says the certificate holds.
+    var tls12_auth: enum { rsa, ecdsa } = undefined;
     const now_sec = options.realtime_now.toSeconds();
 
     var cleartext_fragment_start: usize = 0;
@@ -511,6 +542,10 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                             .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
                             .ECDHE_RSA_WITH_AES_256_GCM_SHA384,
                             .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+                            // Blimp: same record protection as the RSA three.
+                            .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+                            .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+                            .ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
                             => |tag| {
                                 handshake_cipher = @unionInit(tls.HandshakeCipher, @tagName(tag.with()), .{
                                     .transcript_hash = .init(.{}),
@@ -570,7 +605,18 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                                 .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
                                 .ECDHE_RSA_WITH_AES_256_GCM_SHA384,
                                 .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-                                => handshake_state = .certificate,
+                                => {
+                                    tls12_auth = .rsa;
+                                    handshake_state = .certificate;
+                                },
+                                // Blimp
+                                .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+                                .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+                                .ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+                                => {
+                                    tls12_auth = .ecdsa;
+                                    handshake_state = .certificate;
+                                },
                                 else => return error.TlsIllegalParameter,
                             },
                             else => return error.TlsIllegalParameter,
@@ -721,7 +767,15 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                         const key_size = hsd.decode(u8);
                         try hsd.ensure(key_size);
                         const server_pub_key = hsd.slice(key_size);
-                        try main_cert_pub_key.verifySignature(&hsd, &.{ &client_hello_rand, &server_hello_rand, hsd.buf[0..hsd.idx] });
+                        // Blimp: the suite and the certificate's key must agree (RFC 5246 7.4.2).
+                        switch (tls12_auth) {
+                            .ecdsa => if (main_cert_pub_key.algo != .X9_62_id_ecPublicKey) return error.TlsIllegalParameter,
+                            .rsa => switch (main_cert_pub_key.algo) {
+                                .rsaEncryption, .rsassa_pss => {},
+                                else => return error.TlsIllegalParameter,
+                            },
+                        }
+                        try main_cert_pub_key.verifySignature(.tls_1_2, &hsd, &.{ &client_hello_rand, &server_hello_rand, hsd.buf[0..hsd.idx] });
                         try key_share.exchange(named_group, server_pub_key);
                         handshake_state = .server_hello_done;
                     },
@@ -830,7 +884,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                         }
                         switch (handshake_cipher) {
                             inline else => |*p| {
-                                try main_cert_pub_key.verifySignature(&hsd, &.{
+                                try main_cert_pub_key.verifySignature(.tls_1_3, &hsd, &.{
                                     " " ** 64 ++ "TLS 1.3, server CertificateVerify\x00",
                                     &p.transcript_hash.peek(),
                                 });
@@ -1428,6 +1482,15 @@ const KeyShare = struct {
     }
 };
 
+// Blimp: the curve a TLS 1.3 ecdsa_* scheme names.
+fn SchemeCurve(comptime scheme: tls.SignatureScheme) Certificate.NamedCurve {
+    return switch (scheme) {
+        .ecdsa_secp256r1_sha256 => .X9_62_prime256v1,
+        .ecdsa_secp384r1_sha384 => .secp384r1,
+        else => @compileError("bad scheme"),
+    };
+}
+
 fn SchemeEcdsa(comptime scheme: tls.SignatureScheme) type {
     return switch (scheme) {
         .ecdsa_secp256r1_sha256 => crypto.sign.ecdsa.EcdsaP256Sha256,
@@ -1486,13 +1549,15 @@ fn SchemeHash(comptime scheme: tls.SignatureScheme) type {
 }
 
 const CertificatePublicKey = struct {
-    algo: Certificate.AlgorithmCategory,
+    // Blimp: the whole PubKeyAlgo, which for an EC key carries its curve;
+    // upstream kept only the AlgorithmCategory.
+    algo: Certificate.Parsed.PubKeyAlgo,
     buf: [600]u8,
     len: u16,
 
     fn init(
         cert_pub_key: *CertificatePublicKey,
-        algo: Certificate.AlgorithmCategory,
+        algo: Certificate.Parsed.PubKeyAlgo,
         pub_key: []const u8,
     ) error{CertificatePublicKeyInvalid}!void {
         if (pub_key.len > cert_pub_key.buf.len) return error.CertificatePublicKeyInvalid;
@@ -1506,6 +1571,7 @@ const CertificatePublicKey = struct {
         crypto.errors.EncodingError ||
         crypto.errors.NotSquareError ||
         crypto.errors.NonCanonicalError ||
+        error{CertificateSignatureNamedCurveUnsupported} ||
         SchemeEcdsa(.ecdsa_secp256r1_sha256).Signature.VerifyError ||
         SchemeEcdsa(.ecdsa_secp384r1_sha384).Signature.VerifyError ||
         // rsa
@@ -1519,6 +1585,8 @@ const CertificatePublicKey = struct {
 
     fn verifySignature(
         cert_pub_key: *const CertificatePublicKey,
+        // Blimp: the version decides what an ecdsa_* scheme means.
+        version: tls.ProtocolVersion,
         sigd: *tls.Decoder,
         msg: []const []const u8,
     ) VerifyError!void {
@@ -1530,7 +1598,7 @@ const CertificatePublicKey = struct {
         try sigd.ensure(sig_len);
         const encoded_sig = sigd.slice(sig_len);
 
-        if (cert_pub_key.algo != @as(Certificate.AlgorithmCategory, switch (scheme) {
+        if (@as(Certificate.AlgorithmCategory, cert_pub_key.algo) != @as(Certificate.AlgorithmCategory, switch (scheme) {
             .ecdsa_secp256r1_sha256,
             .ecdsa_secp384r1_sha384,
             => .X9_62_id_ecPublicKey,
@@ -1553,12 +1621,24 @@ const CertificatePublicKey = struct {
             inline .ecdsa_secp256r1_sha256,
             .ecdsa_secp384r1_sha384,
             => |comptime_scheme| {
-                const Ecdsa = SchemeEcdsa(comptime_scheme);
-                const sig = try Ecdsa.Signature.fromDer(encoded_sig);
-                const key = try Ecdsa.PublicKey.fromSec1(pub_key);
-                var ver = try sig.verifier(key);
-                for (msg) |part| ver.update(part);
-                try ver.verify();
+                // Blimp: the curve is the certificate's. TLS 1.3 names the
+                // curve in the scheme and a mismatch is refused; TLS 1.2
+                // names only the hash (RFC 5246 7.4.1.4.1), so a P-256 key
+                // may sign with SHA-384.
+                const curve = cert_pub_key.algo.X9_62_id_ecPublicKey;
+                if (version == .tls_1_3 and curve != SchemeCurve(comptime_scheme)) return error.TlsBadSignatureScheme;
+                const Hash = SchemeHash(comptime_scheme);
+                switch (curve) {
+                    inline .X9_62_prime256v1, .secp384r1 => |comptime_curve| {
+                        const Ecdsa = crypto.sign.ecdsa.Ecdsa(Certificate.NamedCurve.Curve(comptime_curve), Hash);
+                        const sig = try Ecdsa.Signature.fromDer(encoded_sig);
+                        const key = try Ecdsa.PublicKey.fromSec1(pub_key);
+                        var ver = try sig.verifier(key);
+                        for (msg) |part| ver.update(part);
+                        try ver.verify();
+                    },
+                    .secp521r1 => return error.CertificateSignatureNamedCurveUnsupported,
+                }
             },
             inline .rsa_pkcs1_sha256,
             .rsa_pkcs1_sha384,
@@ -1652,19 +1732,132 @@ const cipher_suites = if (crypto.core.aes.has_hardware_support)
         .AEGIS_256_SHA512,
         .AES_128_GCM_SHA256,
         .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, // Blimp
         .AES_256_GCM_SHA384,
         .ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, // Blimp
         .CHACHA20_POLY1305_SHA256,
         .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        .ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, // Blimp
     })
 else
     array(u16, tls.CipherSuite, .{
         .CHACHA20_POLY1305_SHA256,
         .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        .ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, // Blimp
         .AEGIS_128L_SHA256,
         .AEGIS_256_SHA512,
         .AES_128_GCM_SHA256,
         .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, // Blimp
         .AES_256_GCM_SHA384,
         .ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, // Blimp
     });
+
+// -- Blimp: tests for what differs from upstream --
+
+/// A ServerKeyExchange-shaped signature block (scheme, length, DER
+/// signature) over `msg`, by the key `seed` makes on `Curve`, hashing with
+/// `Hash`. Returns the block and the key as a certificate would carry it.
+fn blimpSignedBlock(
+    comptime Curve: type,
+    comptime Hash: type,
+    scheme: tls.SignatureScheme,
+    msg: []const u8,
+    out: []u8,
+    seed: u8,
+) !struct { block: []u8, key: [1 + 2 * Curve.Fe.encoded_length]u8 } {
+    const Ecdsa = crypto.sign.ecdsa.Ecdsa(Curve, Hash);
+    const kp = try Ecdsa.KeyPair.generateDeterministic([_]u8{seed} ** Ecdsa.KeyPair.seed_length);
+    const sig = try kp.sign(msg, null);
+    var der_buf: [Ecdsa.Signature.der_encoded_length_max]u8 = undefined;
+    const der = sig.toDer(&der_buf);
+    mem.writeInt(u16, out[0..2], @intFromEnum(scheme), .big);
+    mem.writeInt(u16, out[2..4], @intCast(der.len), .big);
+    @memcpy(out[4..][0..der.len], der);
+    return .{ .block = out[0 .. 4 + der.len], .key = kp.public_key.toUncompressedSec1() };
+}
+
+fn blimpVerify(
+    curve: Certificate.NamedCurve,
+    key: []const u8,
+    version: tls.ProtocolVersion,
+    block: []u8,
+    msg: []const u8,
+) CertificatePublicKey.VerifyError!void {
+    var pk: CertificatePublicKey = undefined;
+    pk.init(.{ .X9_62_id_ecPublicKey = curve }, key) catch unreachable;
+    var d: tls.Decoder = .fromTheirSlice(block);
+    return pk.verifySignature(version, &d, &.{msg});
+}
+
+test "TLS 1.2: a P-256 key signing with SHA-384 verifies (ecc256.badssl.com does this)" {
+    var buf: [256]u8 = undefined;
+    const msg = "client_random server_random ServerECDHParams";
+    const s = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha384, .ecdsa_secp384r1_sha384, msg, &buf, 7);
+    try blimpVerify(.X9_62_prime256v1, &s.key, .tls_1_2, s.block, msg);
+}
+
+test "TLS 1.2: a P-384 key signing with SHA-256 verifies" {
+    var buf: [256]u8 = undefined;
+    const msg = "client_random server_random ServerECDHParams";
+    const s = try blimpSignedBlock(crypto.ecc.P384, crypto.hash.sha2.Sha256, .ecdsa_secp256r1_sha256, msg, &buf, 7);
+    try blimpVerify(.secp384r1, &s.key, .tls_1_2, s.block, msg);
+}
+
+test "TLS 1.2: the curve and hash the name agree on still verify" {
+    var buf: [256]u8 = undefined;
+    const msg = "client_random server_random ServerECDHParams";
+    const s = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha256, .ecdsa_secp256r1_sha256, msg, &buf, 7);
+    try blimpVerify(.X9_62_prime256v1, &s.key, .tls_1_2, s.block, msg);
+}
+
+test "TLS 1.3: a scheme naming another curve than the key's is refused by name" {
+    var buf: [256]u8 = undefined;
+    const msg = "TLS 1.3, server CertificateVerify";
+    const s = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha384, .ecdsa_secp384r1_sha384, msg, &buf, 7);
+    try std.testing.expectError(error.TlsBadSignatureScheme, blimpVerify(.X9_62_prime256v1, &s.key, .tls_1_3, s.block, msg));
+}
+
+test "TLS 1.2: a signature over other bytes is refused" {
+    var buf: [256]u8 = undefined;
+    const s = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha384, .ecdsa_secp384r1_sha384, "the params the server sent", &buf, 7);
+    try std.testing.expectError(error.SignatureVerificationFailed, blimpVerify(.X9_62_prime256v1, &s.key, .tls_1_2, s.block, "the params an attacker sent"));
+}
+
+test "TLS 1.2: a signature by another key is refused" {
+    var buf: [256]u8 = undefined;
+    var other_buf: [256]u8 = undefined;
+    const msg = "client_random server_random ServerECDHParams";
+    const s = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha256, .ecdsa_secp256r1_sha256, msg, &buf, 7);
+    const other = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha256, .ecdsa_secp256r1_sha256, msg, &other_buf, 8);
+    // another P-256 key's signature, checked against the certificate's key
+    try std.testing.expectError(error.SignatureVerificationFailed, blimpVerify(.X9_62_prime256v1, &s.key, .tls_1_2, other.block, msg));
+}
+
+test "an EC key with an RSA scheme is refused" {
+    var buf: [256]u8 = undefined;
+    const msg = "client_random server_random ServerECDHParams";
+    const s = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha256, .ecdsa_secp256r1_sha256, msg, &buf, 7);
+    mem.writeInt(u16, s.block[0..2], @intFromEnum(tls.SignatureScheme.rsa_pss_rsae_sha256), .big);
+    try std.testing.expectError(error.TlsBadSignatureScheme, blimpVerify(.X9_62_prime256v1, &s.key, .tls_1_2, s.block, msg));
+}
+
+test "a P-521 certificate key is refused by name" {
+    var buf: [256]u8 = undefined;
+    const msg = "client_random server_random ServerECDHParams";
+    const s = try blimpSignedBlock(crypto.ecc.P256, crypto.hash.sha2.Sha256, .ecdsa_secp256r1_sha256, msg, &buf, 7);
+    try std.testing.expectError(error.CertificateSignatureNamedCurveUnsupported, blimpVerify(.secp521r1, &s.key, .tls_1_2, s.block, msg));
+}
+
+test "ClientHello offers the three ECDHE_ECDSA suites" {
+    for ([_]tls.CipherSuite{
+        .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        .ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    }) |suite| {
+        const code = int(u16, @intFromEnum(suite));
+        try std.testing.expect(mem.indexOf(u8, &cipher_suites, &code) != null);
+    }
+}
