@@ -11,7 +11,7 @@
 //! that owns the socket outright -- it alone reads and it alone writes -- and
 //! the program only ever touches a queue under a lock.
 //!
-//! Why the worker alone writes: `std.crypto.tls.Client` rotates the *write*
+//! Why the worker alone writes: Zig's TLS client rotates the *write*
 //! keys from its *read* path when the server sends a KeyUpdate asking for
 //! one. A `ws_send` that wrote from the interpreter thread while the worker
 //! sat in a read would race that. So a send is queued, and the worker polls
@@ -24,7 +24,8 @@
 //! oldest frame goes, and `dropped` says how many have.
 //!
 //! The TLS is Zig's own (`std.http.Client.connect` for the socket, the CA
-//! bundle and the handshake). Zig 0.16's std has WebSocket framing only on
+//! bundle and the handshake; a copy vendored in src/vendor/zig_std, so that
+//! it also speaks TLS 1.2 to servers with ECDSA certificates). Zig 0.16's std has WebSocket framing only on
 //! the server side (`std.http.Server.Request.respondWebSocket`); the client
 //! has nothing for an Upgrade, and a `Request` treats what follows the head
 //! as an HTTP body. But `Client.connect` hands back a `Connection` whose
@@ -33,6 +34,7 @@
 
 const std = @import("std");
 const ioenv = @import("ioenv.zig");
+const HttpClient = @import("vendor/zig_std/http_client.zig");
 
 pub const slots_max = 8;
 pub const frames_max_default = 8192;
@@ -320,7 +322,7 @@ fn run(s: *Slot) !void {
     // once it is running, so reading it without the lock is safe.
     const url = try parseUrl(s.url);
 
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    var client: HttpClient = .{ .allocator = gpa, .io = io };
     defer client.deinit();
     if (url.tls) {
         const now = std.Io.Clock.real.now(io);
@@ -328,7 +330,12 @@ fn run(s: *Slot) !void {
         client.now = now;
     }
     const host = std.Io.net.HostName.init(url.host) catch return error.BadUrl;
-    const conn = try client.connect(host, url.port, if (url.tls) .tls else .plain);
+    const conn = client.connect(host, url.port, if (url.tls) .tls else .plain) catch |err| switch (err) {
+        // which handshake failure: an expired certificate and a server with
+        // no cipher suite in common are both TlsInitializationFailed
+        error.TlsInitializationFailed => return fail(s, "TlsInitializationFailed: {s}", .{@errorName(client.tls_init_error.?)}),
+        else => |e| return e,
+    };
     defer {
         conn.closing = true;
         client.connection_pool.release(conn, io);
