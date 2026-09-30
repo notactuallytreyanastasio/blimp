@@ -1515,6 +1515,10 @@ actor CryptoTests do
     assert(raises("http_start(\"GET\", \"https://example.com/\", %{\"Accept\": 1}, \"\")"))
     assert(raises("http_result(31)"))
     assert(raises("http_result(99)"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{timeout: 5})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{timeout_ms: 0})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", %{max_redirects: 21})"))
+    assert(raises("http_start(\"GET\", \"https://example.com/\", %{}, \"\", 5)"))
   end
 
   test "ws_open refuses what is not a ws(s) url, and the others a handle that is not open" do
