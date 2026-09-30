@@ -27,4 +27,6 @@ test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("memory_test.zig");
     _ = @import("websocket.zig");
+    _ = @import("vendor/zig_std/tls_client.zig");
+    _ = @import("vendor/zig_std/flate_decompress.zig");
 }
