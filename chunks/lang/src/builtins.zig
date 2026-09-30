@@ -1,5 +1,8 @@
 const std = @import("std");
 const ioenv = @import("ioenv.zig");
+// Zig 0.16's std.http.Client, pointed at a TLS client that also speaks
+// TLS 1.2 with ECDSA certificates. See src/vendor/zig_std/tls_client.zig.
+const HttpClient = @import("vendor/zig_std/http_client.zig");
 const builtin = @import("builtin");
 const Value = @import("value.zig").Value;
 const interned = @import("value.zig").interned;
@@ -3477,7 +3480,7 @@ fn builtinTcpListenNative(allocator: std.mem.Allocator, args: []const *const Val
 //
 // A program that serves a website from one process cannot wait on a remote
 // server: while it waits, nobody else gets an answer. So the request runs on
-// a thread of its own -- std.http.Client, TLS and all, with the runtime's
+// a thread of its own -- Zig's HTTP client (vendored), TLS and all, with the runtime's
 // Io -- and the program asks, from its own loop, whether it is done. The
 // answer is given once; the handle is free after it. Bodies are capped at
 // 8 MiB, and 32 requests may be in flight. The WebAssembly build has no
@@ -3503,7 +3506,7 @@ var http_slots: [http_slots_max]HttpSlot = [_]HttpSlot{.{}} ** http_slots_max;
 
 fn httpWorker(slot: *HttpSlot) void {
     const pa = std.heap.page_allocator;
-    var client: std.http.Client = .{ .allocator = pa, .io = ioenv.io };
+    var client: HttpClient = .{ .allocator = pa, .io = ioenv.io };
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(pa);
     defer out.deinit();

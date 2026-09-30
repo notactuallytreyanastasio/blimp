@@ -10,7 +10,9 @@ const Client = @This();
 
 const builtin = @import("builtin");
 
-const std = @import("../std.zig");
+const std = @import("std");
+// Blimp: the TLS client beside this file, not std.crypto.tls.Client (see tls_client.zig).
+const TlsClient = @import("tls_client.zig");
 const Io = std.Io;
 const testing = std.testing;
 const http = std.http;
@@ -32,11 +34,11 @@ io: Io,
 ca_bundle_lock: if (disable_tls) void else Io.RwLock = if (disable_tls) {} else .init,
 ca_bundle: if (disable_tls) void else std.crypto.Certificate.Bundle = if (disable_tls) {} else .empty,
 /// Used both for the reader and writer buffers.
-tls_buffer_size: if (disable_tls) u0 else usize = if (disable_tls) 0 else std.crypto.tls.Client.min_buffer_len,
+tls_buffer_size: if (disable_tls) u0 else usize = if (disable_tls) 0 else TlsClient.min_buffer_len,
 /// If non-null, ssl secrets are logged to a stream. Creating such a stream
 /// allows other processes with access to that stream to decrypt all
 /// traffic over connections created with this `Client`.
-ssl_key_log: ?*std.crypto.tls.Client.SslKeyLog = null,
+ssl_key_log: ?*TlsClient.SslKeyLog = null,
 
 /// The time used to decide whether certificates are expired.
 ///
@@ -297,7 +299,7 @@ pub const Connection = struct {
     };
 
     const Tls = struct {
-        client: std.crypto.tls.Client,
+        client: TlsClient,
         connection: Connection,
 
         /// Asserts that `client.now` is non-null.
@@ -324,7 +326,7 @@ pub const Connection = struct {
             assert(base.ptr + alloc_len == socket_read_buffer.ptr + socket_read_buffer.len);
             @memcpy(host_buffer, remote_host.bytes);
             const tls: *Tls = @ptrCast(base);
-            var random_buffer: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+            var random_buffer: [TlsClient.Options.entropy_len]u8 = undefined;
             io.random(&random_buffer);
             tls.* = .{
                 .connection = .{
@@ -339,7 +341,7 @@ pub const Connection = struct {
                     .protocol = .tls,
                 },
                 // TODO data race here on ca_bundle if the user sets `now` to null
-                .client = std.crypto.tls.Client.init(
+                .client = TlsClient.init(
                     &tls.connection.stream_reader.interface,
                     &tls.connection.stream_writer.interface,
                     .{
@@ -387,7 +389,7 @@ pub const Connection = struct {
         }
     };
 
-    pub const ReadError = std.crypto.tls.Client.ReadError || Io.net.Stream.Reader.Error;
+    pub const ReadError = TlsClient.ReadError || Io.net.Stream.Reader.Error;
 
     pub fn getReadError(c: *const Connection) ?ReadError {
         return switch (c.protocol) {

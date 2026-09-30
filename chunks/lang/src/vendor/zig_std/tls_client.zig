@@ -1,7 +1,7 @@
 const builtin = @import("builtin");
 const native_endian = builtin.cpu.arch.endian();
 
-const std = @import("../../std.zig");
+const std = @import("std");
 const tls = std.crypto.tls;
 const Client = @This();
 const mem = std.mem;
