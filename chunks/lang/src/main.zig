@@ -204,9 +204,13 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         return;
     }
 
-    // Default: evaluate the file
+    // Default: evaluate the file. --trace streams one line per spawn, send,
+    // cast and state change to stderr (scripts/trace_receipt.py reads it).
     var evaluator = Evaluator.init(arena.allocator());
     evaluator.setSource(source);
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "--trace")) {
+        evaluator.trace_fn = traceToStderr;
+    }
     // Store the absolute path so the Hole operator can patch the source file
     // `realpathAlloc` is gone from the Dir API; libc's realpath still answers
     // the same question, and the Hole operator only needs something it can
@@ -453,8 +457,16 @@ fn countDepthChange(line: []const u8) i32 {
     while (i < line.len) {
         const c = line[i];
         // Brackets, parens, braces all contribute to depth
-        if (c == '[' or c == '(' or c == '{') { delta += 1; i += 1; continue; }
-        if (c == ']' or c == ')' or c == '}') { delta -= 1; i += 1; continue; }
+        if (c == '[' or c == '(' or c == '{') {
+            delta += 1;
+            i += 1;
+            continue;
+        }
+        if (c == ']' or c == ')' or c == '}') {
+            delta -= 1;
+            i += 1;
+            continue;
+        }
         // Skip whitespace
         if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
             i += 1;
@@ -684,7 +696,10 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
             var is_comment = false;
             for (line) |ch| {
                 if (ch == ' ' or ch == '\t') continue;
-                if (ch == '#') { is_comment = true; break; }
+                if (ch == '#') {
+                    is_comment = true;
+                    break;
+                }
                 break;
             }
             if (is_comment) continue;
@@ -791,7 +806,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
 
             // Print actor instances
             for (evaluator.registry.instances.items) |instance| {
-                stdout.print("  │ {s}#{d} = %{{", .{instance.ref.type_name, instance.ref.id}) catch {};
+                stdout.print("  │ {s}#{d} = %{{", .{ instance.ref.type_name, instance.ref.id }) catch {};
                 for (instance.state_fields, 0..) |field, i| {
                     if (i > 0) stdout.writeAll(", ") catch {};
                     stdout.print("{s}: ", .{field.key}) catch {};
@@ -1229,7 +1244,7 @@ fn drawScreen(
     for (evaluator.registry.instances.items) |instance| {
         if (current_row >= content_rows) break;
         moveCursor(writer, current_row, left_cols + 3);
-        writer.print("\x1b[35m{s}#{d}\x1b[0m \x1b[90m=\x1b[0m %{{", .{instance.ref.type_name, instance.ref.id}) catch {};
+        writer.print("\x1b[35m{s}#{d}\x1b[0m \x1b[90m=\x1b[0m %{{", .{ instance.ref.type_name, instance.ref.id }) catch {};
 
         // Format state fields inline
         for (instance.state_fields, 0..) |field, i| {
@@ -1687,4 +1702,10 @@ fn parsesWhole(allocator: std.mem.Allocator, src: []const u8) bool {
     var parser = Parser.init(arena.allocator(), src);
     _ = parser.parseFilePublic() catch return false;
     return true;
+}
+
+fn traceToStderr(_: ?*anyopaque, line: []const u8) void {
+    const stderr = std.Io.File.stderr();
+    stderr.writeStreamingAll(ioenv.io, line) catch return;
+    stderr.writeStreamingAll(ioenv.io, "\n") catch {};
 }
