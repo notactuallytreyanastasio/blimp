@@ -89,6 +89,10 @@ pub const Value = union(enum) {
         /// which is what redefining one in a running program needs, and it
         /// no longer copies the whole top level every time one is defined.
         top_level: bool = false,
+        /// How many top-level bindings existed when the closure was made; it
+        /// sees those as they were then (Environment.Scope.globals_mark).
+        /// Its captures hold only what it closed over below the top level.
+        globals_mark: u32 = 0,
         return_type: ?[]const u8 = null,
     };
 

@@ -878,7 +878,7 @@ pub const Evaluator = struct {
         }
 
         // def is sugar for: name = fn(params) do body end
-        const bindings = self.env.allBindings(self.allocator);
+        const bindings = self.env.capturableBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
@@ -892,6 +892,7 @@ pub const Evaluator = struct {
             .body = ds.body,
             .env = captured,
             .env_names = captured_names,
+            .globals_mark = self.env.globalsMark(),
             .return_type = ds.return_type,
         };
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -974,7 +975,7 @@ pub const Evaluator = struct {
     }
 
     fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {
-        const bindings = self.env.allBindings(self.allocator);
+        const bindings = self.env.capturableBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
@@ -988,6 +989,7 @@ pub const Evaluator = struct {
             .body = fe.body,
             .env = captured,
             .env_names = captured_names,
+            .globals_mark = self.env.globalsMark(),
             .return_type = fe.return_type,
         };
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
@@ -1755,7 +1757,7 @@ pub const Evaluator = struct {
             }
 
             // Lent, not copied. See Environment.Scope.captured.
-            self.env.lendCaptured(c.env, c.env_names, @intFromPtr(c), c.top_level);
+            self.env.lendCaptured(c.env, c.env_names, @intFromPtr(c), if (c.top_level) Environment.live else c.globals_mark);
 
             // Bind parameters with runtime type checking
             for (c.params, 0..) |param, i| {
