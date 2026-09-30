@@ -117,6 +117,49 @@ test('a large body reaches a slow reader whole, on a non-blocking socket', { tim
   assert.strictEqual(got.n, 2940000); // 30,000 lines of 98 bytes
 });
 
+// Slow reader, read to the end, over a raw socket: the body length and whether
+// the connection ended in FIN (whole) or RST (ECONNRESET).
+function slowRead(port, { requestDelayMs = 0, pauseMs = 2 } = {}) {
+  return new Promise((resolve) => {
+    const c = net.connect(port, '127.0.0.1');
+    let head = null;
+    let got = 0;
+    let buf = Buffer.alloc(0);
+    c.on('connect', () => setTimeout(() => c.write('GET / HTTP/1.1\r\nHost: x\r\n\r\n'), requestDelayMs));
+    c.on('data', (d) => {
+      if (head === null) {
+        buf = Buffer.concat([buf, d]);
+        const end = buf.indexOf('\r\n\r\n');
+        if (end < 0) return;
+        head = buf.slice(0, end).toString();
+        got = buf.length - end - 4;
+      } else got += d.length;
+      c.pause();
+      setTimeout(() => c.resume(), pauseMs);
+    });
+    c.on('error', (e) => resolve({ got, expected: head && Number(head.match(/Content-Length: (\d+)/)[1]), error: e.code }));
+    c.on('end', () => resolve({ got, expected: Number(head.match(/Content-Length: (\d+)/)[1]), error: null }));
+  });
+}
+
+test('a request the server never read does not reset the response', { timeout: 20000 }, async (t) => {
+  // big.blimp reads once, as soon as it accepts. A request sent 20ms after
+  // the connection opens is not there yet: it arrives while the body is being
+  // written and is still unread when tcp_close runs. close() with unread input
+  // sends RST, which throws away what is left in the send buffer.
+  const s = await start(t, path.join(__dirname, '..', '..', 'test', 'serve', 'big.blimp'));
+  const r = await slowRead(s.port, { requestDelayMs: 20 });
+  assert.deepStrictEqual(r, { got: 2940000, expected: 2940000, error: null });
+});
+
+test('a 39MB body reaches a slow reader whole', { timeout: 60000 }, async (t) => {
+  // A reader that keeps reading gets all of it, however many times the socket
+  // buffer fills; tcp_write's deadline is real time since the last byte taken.
+  const s = await start(t, path.join(__dirname, '..', '..', 'test', 'serve', 'huge.blimp'));
+  const r = await slowRead(s.port);
+  assert.deepStrictEqual(r, { got: 39200000, expected: 39200000, error: null });
+});
+
 test('a reader that hangs up mid-body does not take the server down', { timeout: 20000 }, async (t) => {
   const s = await start(t, path.join(__dirname, '..', '..', 'test', 'serve', 'big.blimp'));
   await new Promise((resolve) => {

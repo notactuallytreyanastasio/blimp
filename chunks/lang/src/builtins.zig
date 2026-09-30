@@ -3793,6 +3793,7 @@ fn builtinTcpConnectNative(allocator: std.mem.Allocator, args: []const *const Va
 fn builtinTcpAcceptNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const server_fd: std.posix.socket_t = @intCast(args[0].integer);
+    sweepLingering();
     var client_addr: std.posix.sockaddr = undefined;
     var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
     const accepted = std.c.accept(server_fd, &client_addr, &addr_len);
@@ -3832,32 +3833,53 @@ fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value
     return result;
 }
 
+fn monoMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+}
+
+/// How long tcp_write waits on a reader that takes nothing at all before it
+/// gives up on it. Measured on the clock, from the last byte the kernel took.
+const write_stall_ms: i64 = 10_000;
+
 /// tcp_write(fd: Int, data: String) -> :ok or :error
 fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .integer or args[1].* != .string) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
     // All of it, or :error. One write() on a non-blocking socket takes what
-    // fits in the socket buffer and says how much; this used to ignore that
-    // number and answer :ok, so a page bigger than the buffer arrived cut
-    // off (327KB of a 900KB body, measured) and nothing said so. A full
-    // buffer is waited on, up to 10 seconds in all, for a reader that is
-    // slow; a reader that has gone is :error.
+    // fits in the socket buffer and says how much, so a full buffer is waited
+    // on. The wait used to be a counter that added 100ms for every full
+    // buffer, but poll() comes back as soon as the reader takes a few KB, so
+    // a counted "10 seconds" was about a hundred refills: 1100ms counted in
+    // 42ms of real time on a 2.9MB body, and a 37.7MB body cut off at 23-31MB.
+    // Now the deadline is real time since the reader last took a byte: a
+    // reader that keeps reading gets all of it however large, and one that
+    // stops for write_stall_ms is :error.
+    //
+    // What this does not fix: the wait blocks the calling thread, and
+    // `blimp --serve` runs every request on one. A reader that stops holds
+    // every other request for write_stall_ms; one that takes a byte every few
+    // seconds holds them for as long as it likes. Writes that park what did
+    // not fit and resume from tcp_poll are the fix for that, and a different
+    // contract for tcp_write.
     const bytes = args[1].string;
     var off: usize = 0;
-    var waited_ms: i32 = 0;
+    var last_progress = monoMs();
     while (off < bytes.len) {
         const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
         if (n > 0) {
             off += @intCast(n);
+            last_progress = monoMs();
             continue;
         }
         const e = std.c._errno().*;
         if (n < 0 and e == @intFromEnum(std.posix.E.INTR)) continue;
         if (n < 0 and e == @intFromEnum(std.posix.E.AGAIN)) { // EWOULDBLOCK is the same number
-            if (waited_ms >= 10_000) break;
+            const left = write_stall_ms - (monoMs() - last_progress);
+            if (left <= 0) break;
             var pfd = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
-            _ = std.posix.poll(&pfd, 100) catch break;
-            waited_ms += 100;
+            _ = std.posix.poll(&pfd, @intCast(@min(left, 1000))) catch break;
             continue;
         }
         break;
@@ -3867,11 +3889,97 @@ fn builtinTcpWriteNative(allocator: std.mem.Allocator, args: []const *const Valu
     return result;
 }
 
+// ------------------------------------------------------------
+// Closing a socket without resetting it
+// ------------------------------------------------------------
+//
+// close() on a TCP socket whose receive buffer still holds bytes the program
+// never read does not send FIN. It sends RST, on Linux and macOS alike, and
+// RST throws away whatever of the response is still in the send buffer; the
+// peer's next read() is ECONNRESET. A server that answers without reading
+// every byte of the request -- it read once before the request arrived, or
+// the request came in two segments, or it was bigger than one read -- loses
+// the tail of every response bigger than what the kernel has sent so far.
+// Measured: `blimp --serve test/serve/big.blimp`, 12 slow-reader runs; all 5
+// that failed had read nothing (EAGAIN) and closed with 60 request bytes
+// unread and 0.5-0.9MB unsent; all 7 that passed had read the 60 bytes.
+//
+// So tcp_close closes the way nginx's lingering_close does: read and discard
+// what has arrived, shutdown(SHUT_WR) so the peer gets FIN after the last
+// queued byte, and keep the fd open, reading and discarding, until the peer
+// closes its side or `linger_ms` passes. The fds kept are swept, never
+// waited on: every tcp_poll, tcp_accept and tcp_close drains them without
+// blocking, so a site that polls every tick closes them within a tick of
+// the peer hanging up. A program that never calls any of them again keeps
+// them open until it exits.
+
+const linger_ms: i64 = 30_000;
+const LingerFd = struct { fd: std.posix.fd_t, deadline: i64 };
+var lingering: [256]LingerFd = undefined;
+var lingering_len: usize = 0;
+
+const DrainResult = enum { open, gone };
+
+/// Reads and throws away what is waiting on a non-blocking fd. `gone` when
+/// the peer has closed its side or the socket has failed.
+fn drainInput(fd: std.posix.fd_t) DrainResult {
+    var buf: [16384]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &buf, buf.len);
+        if (n > 0) continue;
+        if (n == 0) return .gone;
+        const e = std.c._errno().*;
+        if (e == @intFromEnum(std.posix.E.INTR)) continue;
+        if (e == @intFromEnum(std.posix.E.AGAIN)) return .open;
+        return .gone;
+    }
+}
+
+/// Drains every lingering fd once; closes those whose peer has gone or whose
+/// time is up.
+fn sweepLingering() void {
+    if (lingering_len == 0) return;
+    const now = monoMs();
+    var i: usize = 0;
+    while (i < lingering_len) {
+        const l = lingering[i];
+        if (drainInput(l.fd) == .gone or now >= l.deadline) {
+            _ = std.c.close(l.fd);
+            lingering_len -= 1;
+            lingering[i] = lingering[lingering_len];
+        } else i += 1;
+    }
+}
+
 /// tcp_close(fd: Int) -> nil
 fn builtinTcpCloseNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
-    _ = std.c.close(fd);
+    sweepLingering();
+    for (lingering[0..lingering_len]) |l| if (l.fd == fd) return make(allocator, .nil); // closed already
+    // Not a socket (or not connected): nothing to protect, close it.
+    if (std.c.shutdown(fd, 1) != 0) { // SHUT_WR is 1 on Linux and macOS
+        _ = std.c.close(fd);
+        return make(allocator, .nil);
+    }
+    const fl = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+    const nonblock: c_int = @as(c_int, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK");
+    if (fl < 0 or std.c.fcntl(fd, std.posix.F.SETFL, fl | nonblock) < 0 or drainInput(fd) == .gone) {
+        _ = std.c.close(fd);
+        return make(allocator, .nil);
+    }
+    if (lingering_len == lingering.len) {
+        // Full: the one nearest its deadline goes now.
+        var oldest: usize = 0;
+        for (lingering[0..lingering_len], 0..) |l, j| if (l.deadline < lingering[oldest].deadline) {
+            oldest = j;
+        };
+        _ = std.c.close(lingering[oldest].fd);
+        lingering[oldest] = lingering[lingering_len - 1];
+        lingering_len -= 1;
+    }
+    lingering[lingering_len] = .{ .fd = fd, .deadline = monoMs() + linger_ms };
+    lingering_len += 1;
     return make(allocator, .nil);
 }
 
@@ -4326,6 +4434,7 @@ fn builtinTcpPollNative(allocator: std.mem.Allocator, args: []const *const Value
 
     const fd_list = args[0].list;
     const timeout_ms: i32 = @intCast(args[1].integer);
+    sweepLingering();
 
     // Build pollfd array
     const pollfds = allocator.alloc(std.posix.pollfd, fd_list.len) catch return error.OutOfMemory;
