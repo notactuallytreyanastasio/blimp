@@ -20,6 +20,12 @@ const ioenv = @import("ioenv.zig");
 /// ever touched.
 const eval_stack_bytes = 512 * 1024 * 1024;
 
+/// The largest program file blimp reads. It was 1 MiB, and bobbby.online's
+/// server program passed that once /blinks moved in (1.28 MB), so every run
+/// stopped with "error.StreamTooLong" before parsing a line. Same as
+/// read_file's ceiling in builtins.zig.
+pub const source_file_max = 64 * 1024 * 1024;
+
 /// zig 0.16 stopped letting a program help itself to argv: `main` is handed a
 /// capability instead, and `std.process.argsAlloc` is gone.  The vector is
 /// passed down to the worker thread because it is the thread that reads it.
@@ -127,8 +133,10 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         return;
     }
 
-    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, args[1], allocator, .limited(1024 * 1024)) catch |err| {
-        std.debug.print("Error reading '{s}': {}\n", .{ args[1], err });
+    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, args[1], allocator, .limited(source_file_max)) catch |err| {
+        if (err == error.StreamTooLong) {
+            std.debug.print("Error reading '{s}': larger than {d} bytes, the most blimp reads\n", .{ args[1], source_file_max });
+        } else std.debug.print("Error reading '{s}': {}\n", .{ args[1], err });
         std.process.exit(1);
     };
     defer allocator.free(source);
@@ -570,8 +578,10 @@ fn preloadInto(
 ) void {
     // Same ceiling as a file run directly, so the two entry points accept the
     // same files.
-    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, arena, .limited(1024 * 1024)) catch |err| {
-        std.debug.print("Error reading '{s}': {}\n", .{ path, err });
+    const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, arena, .limited(source_file_max)) catch |err| {
+        if (err == error.StreamTooLong) {
+            std.debug.print("Error reading '{s}': larger than {d} bytes, the most blimp reads\n", .{ path, source_file_max });
+        } else std.debug.print("Error reading '{s}': {}\n", .{ path, err });
         std.process.exit(1);
     };
     preloadSource(arena, evaluator, writer, source) catch std.process.exit(1);
@@ -835,7 +845,7 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
     };
 
     for (lib_files) |lib_path| {
-        const lib_source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, lib_path, gpa, .limited(1024 * 1024)) catch {
+        const lib_source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, lib_path, gpa, .limited(source_file_max)) catch {
             stderr.writeStreamingAll(ioenv.io, "Failed to load: ") catch {};
             stderr.writeStreamingAll(ioenv.io, lib_path) catch {};
             stderr.writeStreamingAll(ioenv.io, "\n") catch {};
@@ -944,7 +954,7 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
         stderr.writeStreamingAll(ioenv.io, filename) catch {};
         stderr.writeStreamingAll(ioenv.io, "\x1b[0m\n") catch {};
 
-        const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, full_path, allocator, .limited(1024 * 1024)) catch {
+        const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, full_path, allocator, .limited(source_file_max)) catch {
             stderr.writeStreamingAll(ioenv.io, "  \x1b[31mfailed to read file\x1b[0m\n") catch {};
             any_failed = true;
             continue;
