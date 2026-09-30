@@ -30,6 +30,29 @@ fn recordAssertionDetail(comptime fmt: []const u8, args: anytype) void {
     last_assertion_detail_len = @intCast(fbs.buffered().len);
 }
 
+// Why the last builtin failed, in words, when a bare EvalError would leave
+// the reader guessing which argument was wrong: "p256_ecdh: peer_public must
+// be 65 bytes (got 33)". A builtin sets it with `failArg` and returns the
+// error; the evaluator takes it (`takeFailure`) and puts it in the report.
+// One slot, not per-thread: builtins run on the interpreter thread.
+var failure_buf: [256]u8 = undefined;
+var failure_len: ?usize = null;
+
+/// Record why the call failed and answer TypeError, which is what a caller
+/// passing the wrong thing gets from every other builtin.
+fn failArg(comptime fmt: []const u8, args: anytype) EvalError {
+    const msg = std.fmt.bufPrint(&failure_buf, fmt, args) catch failure_buf[0..];
+    failure_len = msg.len;
+    return error.TypeError;
+}
+
+/// The message the last failing builtin left, once; null when it left none.
+pub fn takeFailure() ?[]const u8 {
+    const len = failure_len orelse return null;
+    failure_len = null;
+    return failure_buf[0..len];
+}
+
 /// Registry entry for a built-in function.
 const BuiltinEntry = struct {
     name: []const u8,
@@ -193,6 +216,14 @@ pub const BuiltinRegistry = struct {
         reg.register("random_token", &builtinRandomToken_impl);
         reg.register("getenv", &builtinGetenv_impl);
         reg.register("argv", &builtinArgv_impl);
+        // P-256 and AES-128-GCM, for Web Push (RFC 8291 / RFC 8292)
+        reg.register("p256_keypair", &builtinP256Keypair_impl);
+        reg.register("p256_public_key", &builtinP256PublicKey);
+        reg.register("p256_ecdh", &builtinP256Ecdh);
+        reg.register("ecdsa_p256_sign", &builtinEcdsaP256Sign);
+        reg.register("ecdsa_p256_verify", &builtinEcdsaP256Verify);
+        reg.register("aes128gcm_encrypt", &builtinAes128GcmEncrypt);
+        reg.register("aes128gcm_decrypt", &builtinAes128GcmDecrypt);
         return reg;
     }
 
@@ -4904,4 +4935,214 @@ test "poll waits when nothing is ready" {
 
     try std.testing.expectEqual(@as(usize, 0), ready.list.len);
     try std.testing.expect(after.integer - before.integer >= 60);
+}
+
+// ── P-256 and AES-128-GCM ─────────────────────────────────────────────
+//
+// What Web Push needs (RFC 8291 message encryption, RFC 8292 VAPID), as
+// functions over byte Strings: a private key is the 32-byte big-endian
+// scalar, a public key the 65-byte uncompressed SEC1 point (0x04 || x || y),
+// which is what a browser's PushSubscription hands over as `p256dh` and what
+// VAPID's `k=` carries. HKDF is not here: Web Push's HKDF is two HMACs and
+// hmac_sha256 already exists.
+//
+// A wrong-length argument is an error that names the argument. None of
+// these truncate, pad or reinterpret: a 31-byte "private key" is a bug in the
+// caller, and quietly left-padding it would sign with a key nobody chose.
+
+const P256 = std.crypto.ecc.P256;
+const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+
+/// The String argument `name` of builtin `func`, which must be `len` bytes.
+fn bytesArg(comptime func: []const u8, comptime name: []const u8, v: *const Value, comptime len: usize) EvalError!*const [len]u8 {
+    if (v.* != .string) return failArg(func ++ ": " ++ name ++ " must be a String of {d} bytes, got {s}", .{ len, @tagName(v.*) });
+    if (v.string.len != len) return failArg(func ++ ": " ++ name ++ " must be {d} bytes, got {d}", .{ len, v.string.len });
+    return v.string[0..len];
+}
+
+/// A String argument of any length, named when it is not a String.
+fn anyBytesArg(comptime func: []const u8, comptime name: []const u8, v: *const Value) EvalError![]const u8 {
+    if (v.* != .string) return failArg(func ++ ": " ++ name ++ " must be a String, got {s}", .{@tagName(v.*)});
+    return v.string;
+}
+
+/// A private key: 32 bytes, big-endian, in [1, n). Zero and anything at or
+/// past the group order are refused rather than reduced, because the key
+/// that would be used is not the one the caller holds.
+fn privateKeyArg(comptime func: []const u8, v: *const Value) EvalError![32]u8 {
+    const bytes = (try bytesArg(func, "private", v, 32)).*;
+    const s = P256.scalar.Scalar.fromBytes(bytes, .big) catch
+        return failArg(func ++ ": private is not below the P-256 group order", .{});
+    if (s.isZero()) return failArg(func ++ ": private is zero", .{});
+    return bytes;
+}
+
+/// A public key: 65-byte uncompressed SEC1 that is a point on the curve.
+fn publicKeyArg(comptime func: []const u8, comptime name: []const u8, v: *const Value) EvalError!P256 {
+    const bytes = try bytesArg(func, name, v, 65);
+    if (bytes[0] != 0x04) return failArg(func ++ ": " ++ name ++ " must start with 0x04 (uncompressed), got 0x{x:0>2}", .{bytes[0]});
+    const p = P256.fromSec1(bytes) catch
+        return failArg(func ++ ": " ++ name ++ " is not a point on P-256", .{});
+    p.rejectIdentity() catch return failArg(func ++ ": " ++ name ++ " is the point at infinity", .{});
+    return p;
+}
+
+fn bytesValue(allocator: std.mem.Allocator, bytes: []const u8) EvalError!*const Value {
+    const out = allocator.dupe(u8, bytes) catch return error.OutOfMemory;
+    return make(allocator, .{ .string = out });
+}
+
+fn publicFromPrivate(private: [32]u8) EvalError![65]u8 {
+    const kp = EcdsaP256.KeyPair.fromSecretKey(.{ .bytes = private }) catch return error.TypeError;
+    return kp.public_key.toUncompressedSec1();
+}
+
+/// p256_keypair() -> {private, public}: a 32-byte scalar from the OS CSPRNG
+/// and its 65-byte uncompressed point. Web Push wants a fresh one per
+/// message. Rejection sampling, not reduction mod n, so every key is equally
+/// likely. Native only, like random_bytes: WASM has no entropy to offer, and
+/// a key from a predictable source is worse than none.
+fn builtinP256KeypairNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return failArg("p256_keypair takes no arguments, got {d}", .{args.len});
+    var private: [32]u8 = undefined;
+    while (true) {
+        ioenv.io.randomSecure(&private) catch return error.NotSupported;
+        const s = P256.scalar.Scalar.fromBytes(private, .big) catch continue;
+        if (!s.isZero()) break;
+    }
+    const public = try publicFromPrivate(private);
+    const items = allocator.alloc(*const Value, 2) catch return error.OutOfMemory;
+    items[0] = try bytesValue(allocator, &private);
+    items[1] = try bytesValue(allocator, &public);
+    return make(allocator, .{ .tuple = items });
+}
+
+const builtinP256Keypair_impl = if (is_wasm) native_stub.stub else builtinP256KeypairNative;
+
+/// p256_public_key(private) -> the 65-byte uncompressed public key. What
+/// VAPID's `k=` is, derived from the one secret that has to be configured.
+fn builtinP256PublicKey(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return failArg("p256_public_key takes 1 argument (private), got {d}", .{args.len});
+    const public = try publicFromPrivate(try privateKeyArg("p256_public_key", args[0]));
+    return bytesValue(allocator, &public);
+}
+
+/// p256_ecdh(private, peer_public) -> the 32-byte shared secret: the x
+/// coordinate of private * peer_public (SEC1 / RFC 8291's ecdh_secret). The
+/// peer's key is checked to be on the curve first -- a point off it is how
+/// an invalid-curve attack reads a private key out one bit at a time.
+fn builtinP256Ecdh(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return failArg("p256_ecdh takes 2 arguments (private, peer_public), got {d}", .{args.len});
+    const private = try privateKeyArg("p256_ecdh", args[0]);
+    const peer = try publicKeyArg("p256_ecdh", "peer_public", args[1]);
+    const shared = peer.mul(private, .big) catch
+        return failArg("p256_ecdh: the shared point is the point at infinity", .{});
+    return bytesValue(allocator, &shared.affineCoordinates().x.toBytes(.big));
+}
+
+/// ecdsa_p256_sign(private, message) -> 64 bytes, r || s, each 32 bytes
+/// big-endian: ES256 as JWS wants it (RFC 7518 3.4), not DER. The message
+/// is hashed with SHA-256 here; pass the JWT signing input as-is.
+///
+/// Deterministic: the nonce is derived from the key and the message (Zig's
+/// std, the hedged-signature construction with its noise left empty), so the
+/// same key signs the same message the same way. That is not RFC 6979's
+/// derivation, so another library's deterministic signature of the same
+/// message will differ -- and both verify. It never needs the entropy WASM
+/// does not have, and a nonce reused across two messages is impossible.
+fn builtinEcdsaP256Sign(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2) return failArg("ecdsa_p256_sign takes 2 arguments (private, message), got {d}", .{args.len});
+    const private = try privateKeyArg("ecdsa_p256_sign", args[0]);
+    const message = try anyBytesArg("ecdsa_p256_sign", "message", args[1]);
+    const kp = EcdsaP256.KeyPair.fromSecretKey(.{ .bytes = private }) catch return error.TypeError;
+    const sig = kp.sign(message, null) catch return failArg("ecdsa_p256_sign: signing failed", .{});
+    return bytesValue(allocator, &sig.toBytes());
+}
+
+/// ecdsa_p256_verify(public, message, signature) -> true or false. The
+/// signature is r || s, 64 bytes. An r or s of zero or at/past the group
+/// order is false, as is any mismatch; a key that is not a curve point or a
+/// signature that is not 64 bytes is an error, because that is a caller
+/// passing the wrong thing, not a forgery.
+fn builtinEcdsaP256Verify(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3) return failArg("ecdsa_p256_verify takes 3 arguments (public, message, signature), got {d}", .{args.len});
+    const point = try publicKeyArg("ecdsa_p256_verify", "public", args[0]);
+    const message = try anyBytesArg("ecdsa_p256_verify", "message", args[1]);
+    const sig_bytes = try bytesArg("ecdsa_p256_verify", "signature", args[2], 64);
+    const sig = EcdsaP256.Signature.fromBytes(sig_bytes.*);
+    const ok = if (sig.verify(message, .{ .p = point })) true else |_| false;
+    return make(allocator, .{ .boolean = ok });
+}
+
+/// aes128gcm_encrypt(key, nonce, plaintext, aad) -> ciphertext || tag: the
+/// ciphertext is as long as the plaintext and the 16-byte tag follows, the
+/// layout RFC 8188's aes128gcm records use. key is 16 bytes, nonce 12.
+fn builtinAes128GcmEncrypt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 4) return failArg("aes128gcm_encrypt takes 4 arguments (key, nonce, plaintext, aad), got {d}", .{args.len});
+    const key = try bytesArg("aes128gcm_encrypt", "key", args[0], Aes128Gcm.key_length);
+    const nonce = try bytesArg("aes128gcm_encrypt", "nonce", args[1], Aes128Gcm.nonce_length);
+    const plaintext = try anyBytesArg("aes128gcm_encrypt", "plaintext", args[2]);
+    const aad = try anyBytesArg("aes128gcm_encrypt", "aad", args[3]);
+    const out = allocator.alloc(u8, plaintext.len + Aes128Gcm.tag_length) catch return error.OutOfMemory;
+    Aes128Gcm.encrypt(out[0..plaintext.len], out[plaintext.len..][0..Aes128Gcm.tag_length], plaintext, aad, nonce.*, key.*);
+    return make(allocator, .{ .string = out });
+}
+
+/// aes128gcm_decrypt(key, nonce, ciphertext_and_tag, aad) -> the plaintext,
+/// or nil when the tag does not authenticate it: a wrong key, another
+/// nonce, other AAD, or any changed byte. nil and not an error, because a
+/// message that fails to authenticate is data arriving, not a program bug.
+/// Input shorter than the 16-byte tag cannot be a message and is an error.
+fn builtinAes128GcmDecrypt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 4) return failArg("aes128gcm_decrypt takes 4 arguments (key, nonce, ciphertext, aad), got {d}", .{args.len});
+    const key = try bytesArg("aes128gcm_decrypt", "key", args[0], Aes128Gcm.key_length);
+    const nonce = try bytesArg("aes128gcm_decrypt", "nonce", args[1], Aes128Gcm.nonce_length);
+    const sealed = try anyBytesArg("aes128gcm_decrypt", "ciphertext", args[2]);
+    const aad = try anyBytesArg("aes128gcm_decrypt", "aad", args[3]);
+    if (sealed.len < Aes128Gcm.tag_length)
+        return failArg("aes128gcm_decrypt: ciphertext must be at least the 16-byte tag, got {d} bytes", .{sealed.len});
+    const n = sealed.len - Aes128Gcm.tag_length;
+    const out = allocator.alloc(u8, n) catch return error.OutOfMemory;
+    Aes128Gcm.decrypt(out, sealed[0..n], sealed[n..][0..Aes128Gcm.tag_length].*, aad, nonce.*, key.*) catch
+        return make(allocator, .nil);
+    return make(allocator, .{ .string = out });
+}
+
+test "p256 and aes128gcm name the argument that is the wrong length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const short = try make(a, .{ .string = "short" });
+    const key32 = try make(a, .{ .string = "\x01" ** 32 });
+    try std.testing.expectError(error.TypeError, builtinP256Ecdh(a, &.{ key32, short }));
+    try std.testing.expectEqualStrings("p256_ecdh: peer_public must be 65 bytes, got 5", takeFailure().?);
+    try std.testing.expectError(error.TypeError, builtinEcdsaP256Sign(a, &.{ short, short }));
+    try std.testing.expectEqualStrings("ecdsa_p256_sign: private must be 32 bytes, got 5", takeFailure().?);
+    const order = try make(a, .{ .string = &[_]u8{
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+    } });
+    try std.testing.expectError(error.TypeError, builtinP256PublicKey(a, &.{order}));
+    try std.testing.expectEqualStrings("p256_public_key: private is not below the P-256 group order", takeFailure().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), takeFailure());
+}
+
+test "a signature from ecdsa_p256_sign verifies, and one flipped bit does not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const private = try make(a, .{ .string = "\x07" ** 32 });
+    const msg = try make(a, .{ .string = "header.claims" });
+    const public = try builtinP256PublicKey(a, &.{private});
+    const sig = try builtinEcdsaP256Sign(a, &.{ private, msg });
+    try std.testing.expectEqual(@as(usize, 64), sig.string.len);
+    try std.testing.expect((try builtinEcdsaP256Verify(a, &.{ public, msg, sig })).boolean);
+
+    var bad = try a.dupe(u8, sig.string);
+    bad[63] ^= 1;
+    const bad_sig = try make(a, .{ .string = bad });
+    try std.testing.expect(!(try builtinEcdsaP256Verify(a, &.{ public, msg, bad_sig })).boolean);
 }

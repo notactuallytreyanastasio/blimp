@@ -1,0 +1,187 @@
+# Web Push from Blimp: RFC 8291 message encryption (aes128gcm) and an
+# RFC 8292 VAPID Authorization header.
+#
+#   blimp examples/web_push.blimp --test     # RFC 8291 Appendix A, byte for byte
+#
+# Every String below is raw bytes. A subscription from the browser's
+# PushSubscription.toJSON() carries two base64url fields:
+#   keys.p256dh  65 bytes: the browser's P-256 public key (0x04 || x || y)
+#   keys.auth    16 bytes: the auth secret
+# VAPID keys are a 32-byte P-256 private scalar and its 65-byte public point,
+# stored base64url (VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY). The public key is
+# derivable from the private one: p256_public_key(private). Check at boot
+# that base64url_encode(p256_public_key(private)) == VAPID_PUBLIC_KEY: a key
+# written by Erlang's :crypto can be 31 bytes when its top byte was zero,
+# and p256_public_key refuses anything but 32 rather than guess the padding.
+#
+# What the POST needs, for a body from web_push_body/3 and a header from
+# vapid_authorization/4:
+#   Content-Encoding: aes128gcm
+#   Content-Type: application/octet-stream
+#   TTL: 3600
+#   Authorization: vapid t=<jwt>, k=<public key, base64url>
+# 201 (or 200-202) is delivered; 404 and 410 mean the subscription is gone.
+
+# -- HKDF-SHA256 (RFC 5869), for outputs of at most 32 bytes -----------------
+#
+# Web Push only ever asks for 32, 16 and 12 bytes, so the expand step is one
+# HMAC block: T(1) = HMAC(PRK, info || 0x01). hmac_sha256 answers hex.
+def hkdf32(salt: String, ikm: String, info: String, n: Int) -> String do
+  prk = hex_decode(hmac_sha256(salt, ikm))
+  slice(hex_decode(hmac_sha256(prk, info ++ hex_decode("01"))), 0, n)
+end
+
+# -- RFC 8291 section 3.4 + RFC 8188 ----------------------------------------
+#
+# The whole encryption, deterministic in its two random inputs (salt and
+# the sender's ephemeral private key) so a test can pin it. One record: the
+# plaintext, the 0x02 last-record delimiter, no padding. The body is the
+# RFC 8188 header (salt, record size 4096 as 4 bytes, key id length 65, the
+# sender's public key) followed by ciphertext || tag.
+#
+# Refuses a subscription whose keys are the wrong size: p256_ecdh raises for
+# a p256dh that is not a 65-byte curve point; the auth length is checked
+# here because nothing below would notice it.
+def web_push_encrypt(plaintext: String, ua_public: String, auth_secret: String, salt: String, as_private: String) -> String do
+  case length(auth_secret) == 16 && length(salt) == 16 do
+    false -> bubble "web_push_encrypt: auth_secret and salt must be 16 bytes"
+    true -> web_push_seal(plaintext, ua_public, auth_secret, salt, as_private)
+  end
+end
+
+def web_push_seal(plaintext: String, ua_public: String, auth_secret: String, salt: String, as_private: String) -> String do
+  as_public = p256_public_key(as_private)
+  ecdh_secret = p256_ecdh(as_private, ua_public)
+  key_info = "WebPush: info" ++ hex_decode("00") ++ ua_public ++ as_public
+  ikm = hkdf32(auth_secret, ecdh_secret, key_info, 32)
+  cek = hkdf32(salt, ikm, "Content-Encoding: aes128gcm" ++ hex_decode("00"), 16)
+  nonce = hkdf32(salt, ikm, "Content-Encoding: nonce" ++ hex_decode("00"), 12)
+  header = salt ++ hex_decode("00001000") ++ hex_decode("41") ++ as_public
+  header ++ aes128gcm_encrypt(cek, nonce, plaintext ++ hex_decode("02"), "")
+end
+
+# What a real send calls: fresh salt and ephemeral key per message. p256dh
+# and auth as the subscription stores them (base64url, no padding).
+def web_push_body(plaintext: String, p256dh: String, auth: String) -> String do
+  web_push_encrypt(plaintext, base64url_decode(p256dh), base64url_decode(auth), random_bytes(16), elem(p256_keypair(), 0))
+end
+
+# -- RFC 8292 VAPID ----------------------------------------------------------
+
+# The push service's origin: scheme://host, with :port only when it is not
+# the scheme's default. That is what the JWT's aud must be.
+def vapid_audience(endpoint: String) -> String do
+  parts = split(endpoint, "/")
+  scheme = head(parts)
+  authority = elem(parts, 2)
+  hostport = split(authority, ":")
+  vapid_origin(scheme, authority, hostport)
+end
+
+def vapid_origin(scheme: String, authority: String, hostport: List) -> String do
+  case length(hostport) == 2 && ((scheme == "https:" && elem(hostport, 1) == "443") || (scheme == "http:" && elem(hostport, 1) == "80")) do
+    true -> scheme ++ "//" ++ head(hostport)
+    false -> scheme ++ "//" ++ authority
+  end
+end
+
+# An ES256 JWT: base64url(header).base64url(claims).base64url(r || s).
+# Apple refuses exp more than 24 hours out; send now() + 12 * 3600.
+def vapid_jwt(aud: String, exp: Int, sub: String, private: String) -> String do
+  header = base64url_encode(json_encode(%{typ: "JWT", alg: "ES256"}))
+  claims = base64url_encode(json_encode(%{aud: aud, exp: exp, sub: sub}))
+  signing_input = header ++ "." ++ claims
+  signing_input ++ "." ++ base64url_encode(ecdsa_p256_sign(private, signing_input))
+end
+
+# The Authorization header value. private_b64 is VAPID_PRIVATE_KEY.
+def vapid_authorization(endpoint: String, exp: Int, sub: String, private_b64: String) -> String do
+  private = base64url_decode(private_b64)
+  jwt = vapid_jwt(vapid_audience(endpoint), exp, sub, private)
+  "vapid t=" ++ jwt ++ ", k=" ++ base64url_encode(p256_public_key(private))
+end
+
+# -- The receiving side, for tests: what a browser does with the body --------
+
+def web_push_decrypt(body: String, ua_private: String, auth_secret: String) -> String do
+  salt = slice(body, 0, 16)
+  as_public = slice(body, 21, 65)
+  sealed = slice(body, 86, length(body) - 86)
+  ua_public = p256_public_key(ua_private)
+  ecdh_secret = p256_ecdh(ua_private, as_public)
+  ikm = hkdf32(auth_secret, ecdh_secret, "WebPush: info" ++ hex_decode("00") ++ ua_public ++ as_public, 32)
+  cek = hkdf32(salt, ikm, "Content-Encoding: aes128gcm" ++ hex_decode("00"), 16)
+  nonce = hkdf32(salt, ikm, "Content-Encoding: nonce" ++ hex_decode("00"), 12)
+  aes128gcm_decrypt(cek, nonce, sealed, "")
+end
+
+actor WebPushTests do
+  # RFC 5869 Appendix A.1 (test case 1), truncated to the 32 bytes hkdf32 makes.
+  test "hkdf32 is RFC 5869 test case 1" do
+    ikm = hex_decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
+    salt = hex_decode("000102030405060708090a0b0c")
+    info = hex_decode("f0f1f2f3f4f5f6f7f8f9")
+    assert_eq(hex_encode(hkdf32(salt, ikm, info, 32)), "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf")
+  end
+
+  # RFC 8291 Appendix A, every intermediate value and the final message.
+  test "RFC 8291 Appendix A, byte for byte" do
+    as_private = base64url_decode("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")
+    ua_public = base64url_decode("BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4")
+    salt = base64url_decode("DGv6ra1nlYgDCS1FRnbzlw")
+    auth = base64url_decode("BTBZMqHH6r4Tts7J_aSIgg")
+    as_public = p256_public_key(as_private)
+    assert_eq(base64url_encode(as_public), "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8")
+
+    ecdh_secret = p256_ecdh(as_private, ua_public)
+    assert_eq(base64url_encode(ecdh_secret), "kyrL1jIIOHEzg3sM2ZWRHDRB62YACZhhSlknJ672kSs")
+    assert_eq(base64url_encode(hex_decode(hmac_sha256(auth, ecdh_secret))), "Snr3JMxaHVDXHWJn5wdC52WjpCtd2EIEGBykDcZW32k")
+    key_info = "WebPush: info" ++ hex_decode("00") ++ ua_public ++ as_public
+    assert_eq(base64url_encode(key_info), "V2ViUHVzaDogaW5mbwAEJXGyvs3942BVGq8e0PTNNmwRzr5VX4m8t7GGpTM5FzFo7OLr4BhZe9MEebhuPI-OztV3ylkYfpJGmQ22ggCLDgT-M_SrDepxkU21WCP3O1SUj0EwbZIHMtu5pZpTKGSCIA5Zent7wmC6HCJ5mFgJkuk5cwAvMBKiiujwa7t45ewP")
+    ikm = hkdf32(auth, ecdh_secret, key_info, 32)
+    assert_eq(base64url_encode(ikm), "S4lYMb_L0FxCeq0WhDx813KgSYqU26kOyzWUdsXYyrg")
+    assert_eq(base64url_encode(hex_decode(hmac_sha256(salt, ikm))), "09_eUZGrsvxChDCGRCdkLiDXrReGOEVeSCdCcPBSJSc")
+    assert_eq(base64url_encode(hkdf32(salt, ikm, "Content-Encoding: aes128gcm" ++ hex_decode("00"), 16)), "oIhVW04MRdy2XN9CiKLxTg")
+    assert_eq(base64url_encode(hkdf32(salt, ikm, "Content-Encoding: nonce" ++ hex_decode("00"), 12)), "4h_95klXJ5E_qnoN")
+
+    body = web_push_encrypt("When I grow up, I want to be a watermelon", ua_public, auth, salt, as_private)
+    assert_eq(base64url_encode(body), "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN")
+  end
+
+  test "the RFC 8291 message decrypts with the user agent's private key" do
+    body = base64url_decode("DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN")
+    ua_private = base64url_decode("q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94")
+    auth = base64url_decode("BTBZMqHH6r4Tts7J_aSIgg")
+    assert_eq(web_push_decrypt(body, ua_private, auth), "When I grow up, I want to be a watermelon" ++ hex_decode("02"))
+  end
+
+  test "a random-key message round-trips, and each one is different" do
+    ua = p256_keypair()
+    auth = random_bytes(16)
+    p256dh = base64url_encode(elem(ua, 1))
+    one = web_push_body("{\"title\":\"new blink\"}", p256dh, base64url_encode(auth))
+    two = web_push_body("{\"title\":\"new blink\"}", p256dh, base64url_encode(auth))
+    assert_ne(one, two)
+    assert_eq(length(one), 86 + 21 + 1 + 16)
+    assert_eq(web_push_decrypt(one, elem(ua, 0), auth), "{\"title\":\"new blink\"}" ++ hex_decode("02"))
+  end
+
+  test "vapid_audience is the origin, default port dropped" do
+    assert_eq(vapid_audience("https://web.push.apple.com/QGuQyavXutnMH"), "https://web.push.apple.com")
+    assert_eq(vapid_audience("https://fcm.googleapis.com:443/fcm/send/x"), "https://fcm.googleapis.com")
+    assert_eq(vapid_audience("https://push.example.net:8443/send/abc"), "https://push.example.net:8443")
+  end
+
+  test "the VAPID JWT verifies against the key in k=" do
+    private = base64url_decode("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")
+    value = vapid_authorization("https://push.example.net/send/abc", 1700000000, "https://bobbby.online", "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw")
+    parts = split(slice(value, 8, length(value) - 8), ", k=")
+    jwt = head(parts)
+    assert_eq(elem(parts, 1), base64url_encode(p256_public_key(private)))
+    pieces = split(jwt, ".")
+    assert_eq(base64url_decode(head(pieces)), "{\"typ\":\"JWT\",\"alg\":\"ES256\"}")
+    assert_eq(base64url_decode(elem(pieces, 1)), "{\"aud\":\"https://push.example.net\",\"exp\":1700000000,\"sub\":\"https://bobbby.online\"}")
+    sig = base64url_decode(elem(pieces, 2))
+    assert(ecdsa_p256_verify(p256_public_key(private), head(pieces) ++ "." ++ elem(pieces, 1), sig))
+  end
+end

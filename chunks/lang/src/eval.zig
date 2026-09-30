@@ -1557,7 +1557,14 @@ pub const Evaluator = struct {
             args[i] = try self.eval(arg);
         }
 
-        return func(self.allocator, args);
+        return func(self.allocator, args) catch |err| {
+            // A builtin that can say which argument was wrong left it here;
+            // without this the report is a bare "TypeError while evaluating".
+            if (builtins_mod.takeFailure()) |why| {
+                if (self.last_error == null) self.last_error = errors.builtinFailure(why, self.source);
+            }
+            return err;
+        };
     }
 
     // ── Higher-order builtins ─────────────────────────────
@@ -3749,4 +3756,26 @@ test "an error nothing described still says where it happened" {
     const err = evaluator.last_error.?;
     try std.testing.expectEqualStrings("RUNTIME ERROR", err.title);
     try std.testing.expectEqual(@as(u32, 2), err.line.?);
+}
+
+test "a builtin that refuses an argument says which one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const source = "x = 1\naes128gcm_encrypt(\"0123456789abcdef\", \"short\", \"p\", \"\")";
+    evaluator.setSource(source);
+    const result = evalProgram(alloc, &evaluator, source);
+    try std.testing.expectError(error.TypeError, result);
+
+    const err = evaluator.last_error.?;
+    try std.testing.expectEqualStrings("BAD ARGUMENT", err.title);
+    try std.testing.expectEqualStrings("aes128gcm_encrypt: nonce must be 12 bytes, got 5", err.message);
+    try std.testing.expectEqual(@as(u32, 2), err.line.?);
+
+    // Taken once: the next failure without a message is not given this one.
+    var again = Evaluator.init(alloc);
+    try std.testing.expectError(error.TypeError, evalProgram(alloc, &again, "concat(\"a\")"));
+    try std.testing.expectEqualStrings("RUNTIME ERROR", again.last_error.?.title);
 }
