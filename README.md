@@ -13,37 +13,48 @@ The whole language also runs in the browser as a 184KB WASM module.
 
 **[Try it](https://blimp.bobbby.online/blog/playground.html)** -- nothing to install.
 
-**[Tutorial](https://blimp.bobbby.online/tutorial/)** -- build a bike-share simulation with an embedded REPL in every chapter.
+**[Tutorial](https://blimp.bobbby.online/tutorial/)** -- build Tetris, one actor a chapter, with the tests and the game running in the page.
 
 ## What it looks like
 
+The falling piece in Tetris, from chapter 1 of the tutorial:
+
 ```
-actor Bike do
-  state id: String :: "unknown"
-  state status: Atom :: :available
+actor Tetris.Piece do
+  state kind: Int :: 1
+  state rot: Int :: 0
+  state x: Int :: 3
+  state y: Int :: 0
 
-  on :rent when status == :available do
-    become status: :rented
-    reply {:ok, id}
-  end
-
-  on :rent do
-    reply {:error, "already rented"}
-  end
-
-  on :return do
-    become status: :available
+  on :move(dx: Int, dy: Int) do
+    become x: x + dx, y: y + dy
     reply :ok
+  end
+
+  on :rotate(dir: Int) do
+    become rot: rem(rot + dir + 4, 4)
+    reply :ok
+  end
+
+  on :info do
+    reply %{kind: kind, x: x, y: y, rot: rot}
   end
 end
 
-b = spawn Bike, id: "b-001"
-b <- :rent      # => {:ok, "b-001"}
-b <- :rent      # => {:error, "already rented"}
-b <- :return    # => :ok
+piece = spawn Tetris.Piece
+piece <- :move(-2, 5)   # => :ok
+piece <- :rotate(-1)    # => :ok
+piece <- :info          # => %{kind: 1, x: 1, y: 5, rot: 3}
 ```
 
-Multi-clause handlers with guards.
+Multi-clause handlers with guards, first match wins. The game drops input
+while it is paused or over with one clause in front of the real one:
+
+```
+on :left when over or paused do reply :ok end
+on :left do reply self <- :nudge(-1, 0) end
+```
+
 The mailbox serializes messages.
 Each handler runs to completion before the next starts.
 No locks, no races, by construction.
@@ -348,13 +359,20 @@ Runs entirely client-side.
 
 ### Tutorial
 
-A [bike-share simulation](https://blimp.bobbby.online/tutorial/) that builds from a single Bike actor to a multi-actor system with supervision.
-Each chapter has an embedded REPL with a Monaco editor, a test runner, and canvas visualization.
+[Build Tetris in Blimp](https://blimp.bobbby.online/tutorial/), one actor a chapter.
+Each chapter has a Monaco editor with the chapter's exercise, a test runner, and the solution; chapter 8 plays the game you wrote in the page.
+The finished game is [`chunks/lang/examples/tetris.blimp`](chunks/lang/examples/tetris.blimp).
 
-- Ch 0: Why actors?
-- Ch 1: Your first actor
-- Ch 2: State, `become`, and the free lock
-- Ch 3: Actors talking to actors
+- Ch 0: What you are building
+- Ch 1: The falling piece (`Tetris.Piece`)
+- Ch 2: Shapes are data (`Tetris.Shapes`)
+- Ch 3: The board (`Tetris.Board`)
+- Ch 4: Clearing lines, keeping score (`Tetris.Score`)
+- Ch 5: The bag (`Tetris.Bag`)
+- Ch 6: The game takes input (`Tetris.Game`)
+- Ch 7: Gravity, landing, game over
+- Ch 8: The screen, and playing it (`Tetris.Screen`)
+- Ch 9: Where to take it
 
 ### Tree-sitter grammar
 
@@ -369,7 +387,7 @@ chunks/lang/examples/    30 example programs
 chunks/lang/bench/       Benchmarks (C, Zig, Rust, Python, Ruby)
 chunks/lang/web/         Chat server, concurrent server, DOM playground
 chunks/repl_tui/         Split-pane terminal REPL (Rust)
-docs/tutorial/           Bike-share tutorial with embedded REPL
+docs/tutorial/           Build-Tetris tutorial, exercises in exercises/
 docs/lang_design/        Design documents
 docs/blog/               Design journal
 ```
@@ -377,7 +395,7 @@ docs/blog/               Design journal
 ## Links
 
 - [Playground](https://blimp.bobbby.online/blog/playground.html) -- run Blimp in your browser
-- [Tutorial](https://blimp.bobbby.online/tutorial/) -- bike-share simulation, chapters 0-3
+- [Tutorial](https://blimp.bobbby.online/tutorial/) -- build Tetris, chapters 0-9
 - [Design journal](https://blimp.bobbby.online/blog/)
 - [Tree-sitter grammar](https://github.com/notactuallytreyanastasio/tree-sitter-blimp)
 - [Landing page](https://blimp.bobbby.online)
