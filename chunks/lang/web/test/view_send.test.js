@@ -19,6 +19,13 @@ function fakeDocument() {
     appendChild(c) { this.children.push(c); return c; },
     replaceChild(n, o) { this.children[this.children.indexOf(o)] = n; return o; },
     removeChild(c) { this.children.splice(this.children.indexOf(c), 1); return c; },
+    insertBefore(n, ref) {
+      const at = this.children.indexOf(n); if (at >= 0) this.children.splice(at, 1);
+      this.moves = (this.moves || 0) + (at >= 0 ? 1 : 0);
+      const i = ref ? this.children.indexOf(ref) : -1;
+      if (i < 0) this.children.push(n); else this.children.splice(i, 0, n);
+      return n;
+    },
     setAttribute(k, v) { this.attrs[k] = v; },
     removeAttribute(k) { delete this.attrs[k]; },
     // every listener of a type, as a real element keeps them
@@ -589,6 +596,47 @@ test('class: as a list or a map of toggles, style: as a map, arrive as text', as
   assert.strictEqual(BlimpView.attrVal(v.attrs.style), 'translate: 25px 15px; z-index: 4;');
   assert.strictEqual(BlimpView.attrVal(v.children[0].attrs.class), "active");
   assert.strictEqual(b.eval('el("div", %{class: [1]})').ok, false);
+});
+
+const FEED = `
+actor Fd do
+  state rows: List :: [2, 1]
+  on :put(r: List) do
+    become rows: r
+  end
+  on :view do
+    reply el("ul", %{}, map(rows, fn(n: Int) -> Any do el("li", %{key: n}, "#{n}") end))
+  end
+end
+fd = spawn Fd
+fd <- :view`;
+
+test('key: a row added at the top is one new element; the others keep theirs and do not move', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(FEED, 'fd').ok);
+  const ul = container.children[0];
+  const [two, one] = ul.children;
+  assert.ok(!('key' in two.attrs), 'key leaked into the attributes');
+  view.send('put', '[3, 2, 1]');
+  assert.strictEqual(textOf(ul), '321');
+  assert.strictEqual(ul.children[1], two);
+  assert.strictEqual(ul.children[2], one);
+  assert.strictEqual(ul.moves || 0, 0, 'kept rows were moved');
+  // one goes from the middle, one comes at the end
+  view.send('put', '[3, 1, 4]');
+  assert.strictEqual(textOf(ul), '314');
+  assert.strictEqual(ul.children[1], one);
+  // a reorder moves what it has to
+  view.send('put', '[4, 3, 1]');
+  assert.strictEqual(textOf(ul), '431');
+  assert.strictEqual(ul.children[2], one);
+  // two children with one key is an error, not a guess
+  view.send('put', '[5, 5]');
+  assert.ok(view.error && /two children have key: 5/.test(view.error), view.error);
+  view.unmount();
 });
 
 const LISTER = `
