@@ -190,6 +190,12 @@ var message_count: u32 = 0;
 // ── WASM exports ────────────────────────────────────────
 
 /// Initialize the Blimp interpreter. Call once before eval.
+/// The page's clock, for now(), now_ms() and utc_offset(): WebAssembly has
+/// none. blimp.js calls this before every eval and send.
+export fn blimp_set_clock(epoch_ms: f64, mono_ms: f64, utc_offset_s: i32) void {
+    builtins.wasm_clock = .{ .epoch_ms = epoch_ms, .mono_ms = mono_ms, .utc_offset_s = utc_offset_s };
+}
+
 export fn blimp_init() void {
     evaluator = freshEvaluator();
     result.clear();
