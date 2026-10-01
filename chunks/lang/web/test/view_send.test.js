@@ -532,6 +532,62 @@ end
 songs = spawn Songs
 songs <- :view`;
 
+const KEEPER = `
+actor Kp do
+  state name: String :: "?"
+  state reads: Int :: 0
+  state ask: Bool :: true
+  on :recalled(v: String) do
+    become name: v, reads: reads + 1
+  end
+  on :rename(v: String) do
+    become name: v
+  end
+  on :forget do
+    become ask: false
+  end
+  on :view do
+    asking = case ask do
+      true -> [stored("kp.name", :recalled)]
+      false -> []
+    end
+    reply el("div", %{}, el("span", %{}, "#{name}/#{reads}"), asking, store("kp.name", name))
+  end
+end
+kp = spawn Kp
+kp <- :view`;
+
+test('stored() reads localStorage once and sends it; store() writes what the view says', async () => {
+  global.document = fakeDocument();
+  const mem = { 'kp.name': 'alice' };
+  global.localStorage = {
+    getItem: (k) => (k in mem ? mem[k] : null),
+    setItem: (k, v) => { mem[k] = String(v); },
+    removeItem: (k) => { delete mem[k]; },
+  };
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(KEEPER, 'kp').ok);
+  await new Promise((r) => setTimeout(r, 10));
+  const root = container.children[0];
+  // read once, after the first render; not again on the next renders
+  assert.strictEqual(textOf(root.children[0]), 'alice/1');
+  view.send('rename', '"bob"');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.strictEqual(textOf(root.children[0]), 'bob/1');
+  assert.strictEqual(mem['kp.name'], 'bob');
+  // "" removes it
+  view.send('rename', '""');
+  assert.ok(!('kp.name' in mem));
+  // storage that refuses (a private window) reads "" and drops writes
+  global.localStorage = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); }, removeItem() {} };
+  view.send('rename', '"carol"');
+  assert.strictEqual(textOf(root.children[0]), 'carol/1');
+  view.unmount();
+  delete global.localStorage;
+});
+
 test('fetch() asks the host once while it is in the view; location_query() keeps the URL', async () => {
   global.document = fakeDocument();
   const asked = [];
