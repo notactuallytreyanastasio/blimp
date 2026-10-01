@@ -166,12 +166,12 @@ footer { border-top: 1px solid var(--rule); margin-top: 48px; padding: 22px 0 48
   <div class="wrap">
     <a class="brand" href="/">BLIMP</a>
     <nav>
+      <a href="#tetris">build tetris</a>
       <a href="#server">server</a>
       <a href="#browser">browser</a>
       <a href="#temper">temper</a>
       <a href="#web">web</a>
       <a href="#gaps">gaps</a>
-      <a href="/tutorial/">tutorial</a>
       <a href="https://github.com/notactuallytreyanastasio/blimp">github</a>
     </nav>
   </div>
@@ -194,6 +194,37 @@ footer { border-top: 1px solid var(--rule); margin-top: 48px; padding: 22px 0 48
   </div>
   <p class="facts-note">Measured on an Apple M4 Pro with blimp <code>896614f</code> and the blog at <code>9ef753a</code>, the site built by its own <code>build.sh</code> and booted with <code>FIREHOSE=off</code> and no database (the museum then comes from <code>data/*.tsv</code>). The Caddy count is from <code>deploy/Caddyfile.snippet</code>.</p>
 </header>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="tetris">
+  <h2><span class="num">0</span>Start here: build Tetris</h2>
+  <p>The way to learn Blimp is the <a href="/tutorial/">tutorial</a>, which builds the Tetris that runs on <a href="https://bobbby.online/tetris">bobbby.online/tetris</a> (the same program), one actor a chapter. Each chapter has an exercise in the page: an editor holding the chapter's file with the handlers left for you, the tests that say when you are done, and the answer behind a tab. Nothing to install: the interpreter runs in the page as WebAssembly. In chapter 8 the game you wrote plays there too.</p>
+  <pre><span class="k">actor</span> Tetris.Piece <span class="k">do</span>
+  <span class="k">state</span> kind: Int :: 1
+  <span class="k">state</span> rot: Int :: 0
+  <span class="k">state</span> x: Int :: 3
+  <span class="k">state</span> y: Int :: 0
+
+  <span class="k">on</span> <span class="a">:rotate</span>(dir: Int) <span class="k">do</span>
+    <span class="k">become</span> rot: rem(rot + dir + 4, 4)
+    <span class="k">reply</span> <span class="a">:ok</span>
+  <span class="k">end</span>
+<span class="k">end</span></pre>
+  <p class="cap">Chapter 1's piece. It does not know its shape yet; chapter 2 gives it a <code>Tetris.Shapes</code> to ask.</p>
+  <div class="cards">
+    <a class="card wide" href="/tutorial/#ch00"><div class="p">0. What you are building</div><div class="d">Play the finished game, meet its seven actors and who sends what to whom, and run an exercise locally with <code>blimp FILE --test</code>.</div></a>
+    <a class="card" href="/tutorial/#ch01"><div class="p">1. The falling piece</div><div class="d"><code>Tetris.Piece</code>: state, <code>become</code>, <code>reply</code>, your first tests.</div></a>
+    <a class="card" href="/tutorial/#ch02"><div class="p">2. Shapes are data</div><div class="d"><code>Tetris.Shapes</code>: 7 kinds, 4 rotations, 4 cells. An actor that holds another.</div></a>
+    <a class="card" href="/tutorial/#ch03"><div class="p">3. The board</div><div class="d"><code>Tetris.Board</code>: a 10x20 grid of lists, guards, <code>reduce</code>, <code>set_at</code>.</div></a>
+    <a class="card" href="/tutorial/#ch04"><div class="p">4. Lines and score</div><div class="d">Sweeping full rows; <code>Tetris.Score</code> pays for them and sets the speed.</div></a>
+    <a class="card" href="/tutorial/#ch05"><div class="p">5. The bag</div><div class="d"><code>Tetris.Bag</code>: seven pieces shuffled, and how to test something random.</div></a>
+    <a class="card" href="/tutorial/#ch06"><div class="p">6. The game takes input</div><div class="d"><code>Tetris.Game</code> coordinates the rest: moves, rotation, wall kicks, pause.</div></a>
+    <a class="card" href="/tutorial/#ch07"><div class="p">7. Gravity</div><div class="d">A tick is one row. Landing, locking, clearing, game over.</div></a>
+    <a class="card" href="/tutorial/#ch08"><div class="p">8. The screen</div><div class="d"><code>Tetris.Screen</code>: views are values. Then play what you built.</div></a>
+    <a class="card" href="/tutorial/#ch09"><div class="p">9. Where to take it</div><div class="d">Hold, a longer queue, and the other things the game does not do yet.</div></a>
+  </div>
+  <p class="cap">The finished program is <a href="https://github.com/notactuallytreyanastasio/blimp/blob/main/chunks/lang/examples/tetris.blimp"><code>examples/tetris.blimp</code></a>, 801 lines with 34 tests. Chapters 3 to 8 are cut from it by <code>exercises/build_tetris.py</code>, so a change to the game reaches the exercises by running one script.</p>
+</section>
 
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="server">
@@ -400,9 +431,9 @@ site tests          29240 ms -&gt; 3020 ms</pre>
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="archive">
   <h2><span class="num">7</span>Learn it, and where it came from</h2>
-  <p>The tutorial runs Blimp in the page and still works. The rest was written in March, before the site, and describes a language that has changed since: the March posts talk about reference counting and LLVM compilation, while the interpreter serving the site frees nothing while it evaluates and compacts its heap between ticks.</p>
+  <p>The tutorial is <a href="#tetris">above</a>. The rest was written in March, before the site, and describes a language that has changed since: the March posts talk about reference counting and LLVM compilation, while the interpreter serving the site frees nothing while it evaluates and compacts its heap between ticks.</p>
   <div class="archive">
-    <div><a href="/tutorial/">tutorial</a><span class="d">Eight chapters on actors, from the first one to supervision, with exercises you run in the page.</span></div>
+    <div><a href="/tutorial/">tutorial</a><span class="d">Build Tetris: ten chapters, one actor each, with exercises and the game running in the page.</span></div>
     <div><a href="/manifesto/">manifesto</a><span class="d">Why actors are the only abstraction. Live examples.</span></div>
     <div><a href="/blog/">design journal</a><span class="d">Four posts from March, and Tetris from September.</span></div>
     <div><a href="/blog/playground.html">playground</a><span class="d">A REPL in the browser.</span></div>
