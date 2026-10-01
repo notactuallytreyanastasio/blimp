@@ -448,6 +448,61 @@ test('el: focus: true takes the focus whenever it is free and the field is enabl
   view.unmount();
 });
 
+const DIALOGUE = `
+actor Dg do
+  state closes: Int :: 0
+  on :close do
+    become closes: closes + 1
+  end
+  on :view do
+    reply el("div", %{}, el("span", %{}, "#{closes}"),
+      el("dialog", %{class: "d", modal: true, dismiss: :close}, el("p", %{}, "inside")))
+  end
+end
+dg = spawn Dg
+dg <- :view`;
+
+test('el("dialog"): modal opens with showModal, Escape and the backdrop dismiss, a click inside does not', async () => {
+  global.document = fakeDocument();
+  const realCreate = document.createElement;
+  document.createElement = (tag) => {
+    const e = realCreate(tag);
+    e.tagName = tag.toUpperCase();
+    if (tag === 'dialog') {
+      e.showModal = () => { e.open = true; e.modal = true; };
+      e.show = () => { e.open = true; };
+      e.getBoundingClientRect = () => ({ left: 100, right: 300, top: 100, bottom: 200 });
+    }
+    return e;
+  };
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(DIALOGUE, 'dg').ok);
+  const root = container.children[0];
+  const dlg = root.children[1];
+  const count = () => textOf(root.children[0]);
+  assert.strictEqual(dlg.modal, true, 'not opened with showModal');
+  assert.ok(!('modal' in dlg.attrs) && !('dismiss' in dlg.attrs), 'instructions leaked into attributes');
+  // a click inside its box, even on the dialog's own padding: nothing
+  dlg.on.click({ target: dlg, clientX: 150, clientY: 150 });
+  // a click on something inside it: nothing
+  dlg.on.click({ target: dlg.children[0], clientX: 5, clientY: 5 });
+  assert.strictEqual(count(), '0');
+  // the backdrop: outside the box, on the dialog itself
+  dlg.on.click({ target: dlg, clientX: 20, clientY: 20 });
+  assert.strictEqual(count(), '1');
+  // Escape: the program is asked, and the browser is told not to close it
+  let prevented = false;
+  dlg.on.cancel({ preventDefault() { prevented = true; } });
+  assert.ok(prevented);
+  assert.strictEqual(count(), '2');
+  // still the same element, opened once
+  assert.strictEqual(root.children[1], dlg);
+  document.createElement = realCreate;
+  view.unmount();
+});
+
 const LISTER = `
 actor Li do
   state n: Int :: 3

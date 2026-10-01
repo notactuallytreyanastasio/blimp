@@ -2455,10 +2455,17 @@ const el_tags = [_][]const u8{
     "summary", "kbd",   "sup",    "sub",     "dl",      "dt",     "dd",       "time",       "mark",    "abbr",
     "canvas", "video",  "audio",  "source",  "svg",     "g",      "path",     "circle",     "rect",    "line",
     "polyline", "polygon", "text", "tspan",  "defs",    "linearGradient", "radialGradient", "stop", "ellipse", "title",
+    "dialog",
 };
 
 /// Attr keys el() takes as instructions for the host, not as HTML.
-const el_event_keys = [_][]const u8{ "click", "with", "input", "change", "submit", "swipe", "select", "selection", "debounce", "shortcut", "shortcut_keys", "paste_image", "inner_html" };
+/// Kept in step with EL_EVENTS in web/blimp-view.js: one missing here is
+/// printed into to_html's markup as if it were an attribute.
+const el_event_keys = [_][]const u8{
+    "click",  "with",  "input",           "change", "submit", "swipe",   "drag",    "select",  "selection",
+    "debounce", "shortcut", "shortcut_keys", "paste_image", "inner_html", "submit_on_enter", "scroll", "focus",
+    "modal",  "dismiss",
+};
 
 fn isElEventKey(key: []const u8) bool {
     for (el_event_keys) |k| if (std.mem.eql(u8, k, key)) return true;
