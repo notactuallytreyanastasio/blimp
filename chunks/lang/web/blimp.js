@@ -35,7 +35,18 @@ class Blimp {
     return this;
   }
 
+  // now(), now_ms() and utc_offset() read the page's clock: WebAssembly has
+  // none of its own, so it is handed in before every eval and send. A
+  // module from before blimp_set_clock reads zeros, as it always did.
+  _clock() {
+    const x = this.instance.exports;
+    if (!x.blimp_set_clock) return;
+    const mono = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    x.blimp_set_clock(Date.now(), mono, -new Date().getTimezoneOffset() * 60);
+  }
+
   eval(source) {
+    this._clock();
     const encoded = new TextEncoder().encode(source);
     const ptr = this.instance.exports.blimp_alloc(encoded.length);
     if (!ptr) return { ok: false, error: 'Failed to allocate memory' };
@@ -79,6 +90,7 @@ class Blimp {
   // a page that sends on every tick and key press cannot afford. It also
   // keeps its messages for getState(), which rebuilds the actors when read.
   send(target, message, args) {
+    this._clock();
     const x = this.instance.exports;
     if (!x.blimp_send) return { ok: false, error: 'this blimp.wasm has no blimp_send' };
     const put = (s) => {

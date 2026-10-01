@@ -84,6 +84,7 @@ pub const BuiltinRegistry = struct {
         reg.register("keys", &builtinKeys);
         reg.register("now", &builtinNow);
         reg.register("now_ms", &builtinNowMs);
+        reg.register("utc_offset", &builtinUtcOffset);
         reg.register("process_stats", &builtinProcessStats);
         reg.register("format_time", &builtinFormatTime);
         reg.register("concat", &builtinConcat);
@@ -418,11 +419,17 @@ fn builtinKeys(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     }
 }
 
+/// The browser's clock. WebAssembly has none of its own, so the page hands
+/// it in (blimp_set_clock in wasm_api.zig) before every eval and send: the
+/// wall clock and a monotonic one in milliseconds, and the local zone's
+/// offset from UTC in seconds. A host that never sets it reads zeros.
+pub var wasm_clock: struct { epoch_ms: f64 = 0, mono_ms: f64 = 0, utc_offset_s: i64 = 0 } = .{};
+
 fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
     // zig 0.16 removed `std.time.timestamp`; libc still has the call it was.
     const timestamp: i64 = if (is_wasm)
-        0 // TODO: import JS Date.now() via extern
+        @intFromFloat(@floor(wasm_clock.epoch_ms / 1000))
     else
         blk: {
             var ts: std.c.timespec = undefined;
@@ -441,7 +448,7 @@ fn builtinNow(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
 fn builtinNowMs(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 0) return error.TypeError;
     const ms: i64 = if (is_wasm)
-        0 // TODO: import JS performance.now() via extern
+        @intFromFloat(@floor(wasm_clock.mono_ms))
     else
         blk: {
             var ts: std.c.timespec = undefined;
@@ -449,6 +456,34 @@ fn builtinNowMs(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
             break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
         };
     return make(allocator, .{ .integer = ms });
+}
+
+/// The C library's struct tm, as macOS, glibc and musl all lay it out:
+/// nine ints, then the offset east of UTC and the zone's name.
+const CTm = extern struct {
+    sec: c_int, min: c_int, hour: c_int, mday: c_int, mon: c_int, year: c_int,
+    wday: c_int, yday: c_int, isdst: c_int, gmtoff: c_long, zone: ?[*:0]const u8,
+};
+const libc_tz = struct {
+    extern "c" fn time(t: ?*c_long) c_long;
+    extern "c" fn localtime_r(t: *const c_long, out: *CTm) ?*CTm;
+};
+
+/// utc_offset() -- seconds the local time zone is ahead of UTC, now
+/// (-14400 in New York in summer), so format_time(now() + utc_offset(), ..)
+/// is the local time. In a browser it is the page's zone; on a server,
+/// the process's (TZ), which in a container is usually UTC: 0.
+fn builtinUtcOffset(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 0) return error.TypeError;
+    const offset: i64 = if (is_wasm)
+        wasm_clock.utc_offset_s
+    else blk: {
+        const t = libc_tz.time(null);
+        var tm: CTm = undefined;
+        if (libc_tz.localtime_r(&t, &tm) == null) break :blk 0;
+        break :blk @intCast(tm.gmtoff);
+    };
+    return make(allocator, .{ .integer = offset });
 }
 
 /// process_stats() -> %{cpu_ms: Int, rss_bytes: Int, heap_bytes: Int, cores: Int}
