@@ -2592,6 +2592,15 @@ fn viewEl(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*c
     for (entries, 0..) |e, i| {
         if (e.key.len >= 2 and std.ascii.eqlIgnoreCase(e.key[0..2], "on")) return error.TypeError;
         if (e.key.len == 0 or e.key[0] == '@') return error.TypeError;
+        // class: and style: may be data; they arrive in the tree as text
+        if (std.mem.eql(u8, e.key, "class") and (e.val.* == .list or e.val.* == .map)) {
+            attrs[i + 1] = .{ .key = e.key, .val = try classText(allocator, e.val) };
+            continue;
+        }
+        if (std.mem.eql(u8, e.key, "style") and e.val.* == .map) {
+            attrs[i + 1] = .{ .key = e.key, .val = try styleText(allocator, e.val) };
+            continue;
+        }
         switch (e.val.*) {
             .string => |v| if (isUrlAttr(e.key) and isScriptUrl(v)) return error.TypeError,
             .integer, .float, .boolean, .nil, .atom => {},
@@ -2606,6 +2615,66 @@ fn viewEl(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*c
         }
     }
     return makeViewNode(allocator, "el", attrs, args[2..]);
+}
+
+/// class: as data. A list is its names, leaving out nil, false and "" (so
+/// ["aim-buddy", show(unread, "unread")] works); a map is the names whose
+/// value is true (%{online: true, unread: is_unread}). Either way, text:
+/// "aim-buddy unread".
+fn classText(allocator: std.mem.Allocator, val: *const Value) EvalError!*const Value {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    switch (val.*) {
+        .list => |items| for (items) |item| {
+            const name: []const u8 = switch (item.*) {
+                .string => |v| v,
+                .atom => |a| a,
+                .nil => continue,
+                .boolean => |b| if (b) return error.TypeError else continue,
+                else => return error.TypeError,
+            };
+            if (name.len == 0) continue;
+            if (out.items.len > 0) out.append(allocator, ' ') catch return error.OutOfMemory;
+            out.appendSlice(allocator, name) catch return error.OutOfMemory;
+        },
+        .map => |entries| for (entries) |e| {
+            switch (e.val.*) {
+                .boolean => |b| if (!b) continue,
+                .nil => continue,
+                else => return error.TypeError,
+            }
+            if (out.items.len > 0) out.append(allocator, ' ') catch return error.OutOfMemory;
+            out.appendSlice(allocator, e.key) catch return error.OutOfMemory;
+        },
+        else => return error.TypeError,
+    }
+    return make(allocator, .{ .string = out.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
+
+/// style: as a map, %{translate: "25px 15px", "z-index": 4}: one
+/// "name: value;" each, numbers as they are (z-index: 4; a width needs its
+/// unit, "12px"), and a property that is nil or false left out.
+fn styleText(allocator: std.mem.Allocator, val: *const Value) EvalError!*const Value {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (val.map) |e| {
+        switch (e.val.*) {
+            .nil => continue,
+            .boolean => |b| if (!b) continue else return error.TypeError,
+            .string, .integer, .float, .atom => {},
+            else => return error.TypeError,
+        }
+        if (out.items.len > 0) out.append(allocator, ' ') catch return error.OutOfMemory;
+        out.appendSlice(allocator, e.key) catch return error.OutOfMemory;
+        out.appendSlice(allocator, ": ") catch return error.OutOfMemory;
+        switch (e.val.*) {
+            .string => |v| out.appendSlice(allocator, v) catch return error.OutOfMemory,
+            .atom => |a| out.appendSlice(allocator, a) catch return error.OutOfMemory,
+            .integer => |n| out.print(allocator, "{d}", .{n}) catch return error.OutOfMemory,
+            .float => |f| out.print(allocator, "{d}", .{f}) catch return error.OutOfMemory,
+            else => unreachable,
+        }
+        out.append(allocator, ';') catch return error.OutOfMemory;
+    }
+    return make(allocator, .{ .string = out.toOwnedSlice(allocator) catch return error.OutOfMemory });
 }
 
 /// button("label", sends_atom) — clickable button that sends a message to the actor

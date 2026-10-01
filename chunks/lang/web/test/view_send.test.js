@@ -580,6 +580,17 @@ test('a form sends its fields as a map; a radio group is its checked value; rese
   view.unmount();
 });
 
+test('class: as a list or a map of toggles, style: as a map, arrive as text', async () => {
+  const b = await blimp();
+  const r = b.eval('u = true\nel("div", %{class: ["w", show(u, "unread"), nil, ""], style: %{translate: "25px 15px", "z-index": 4, color: nil}}, el("i", %{class: %{active: true, hidden: false}}, "x"))');
+  assert.ok(r.ok, r.error);
+  const v = typeof r.view === 'string' ? JSON.parse(r.view) : r.view;
+  assert.strictEqual(BlimpView.attrVal(v.attrs.class), 'w unread');
+  assert.strictEqual(BlimpView.attrVal(v.attrs.style), 'translate: 25px 15px; z-index: 4;');
+  assert.strictEqual(BlimpView.attrVal(v.children[0].attrs.class), "active");
+  assert.strictEqual(b.eval('el("div", %{class: [1]})').ok, false);
+});
+
 const LISTER = `
 actor Li do
   state n: Int :: 3
