@@ -1,15 +1,20 @@
-# Tetris in Blimp, browser edition.
-# The host mounts this file with actorVar "game". Every key press, button
-# tap and timer fire becomes a message to `game`, and `game <- :view` is the
-# whole screen as a value. All the game logic lives here, none in the host.
-# Tests: ./zig-out/bin/blimp examples/tetris.blimp --test
+# Chapter 8 -- The screen, and playing it
+# Run: blimp exercises/ch08_screen/01_screen.blimp --test
+#
+# The last actor draws. Tetris.Screen gets one map describing the game and
+# replies with a view: a value made of heading, text, row, stack, button,
+# key and timer. The page renders the value and turns your key presses and
+# the timer back into messages to the game. Press Play when the tests pass.
+
+# ---------------------------------------------------------------------
+# Finished in earlier chapters. Nothing to change here. They come first
+# because defining an actor runs its state defaults, and some of those
+# spawn one of these.
 
 actor Tetris do
   state name: String :: "blimp tetris"
 end
 
-# Shape table: kinds 1..7 are I O T S Z J L, each a list of 4 rotations,
-# each rotation a list of 4 {x, y} offsets inside a 4x4 box.
 actor Tetris.Shapes do
   state table: List :: [
     [[{0, 1}, {1, 1}, {2, 1}, {3, 1}], [{2, 0}, {2, 1}, {2, 2}, {2, 3}], [{0, 2}, {1, 2}, {2, 2}, {3, 2}], [{1, 0}, {1, 1}, {1, 2}, {1, 3}]],
@@ -28,84 +33,48 @@ actor Tetris.Shapes do
   on :kinds do
     reply length(table)
   end
-
-  test "seven kinds" do
-    shapes = spawn Tetris.Shapes
-    assert_eq(shapes <- :kinds, 7)
-  end
-
-  test "every rotation of every kind is 4 cells inside the 4x4 box" do
-    shapes = spawn Tetris.Shapes
-    counts = for kind in range(1, 7) do
-      for rot in range(0, 3) do
-        offs = shapes <- :offsets(kind, rot)
-        inside = filter(offs, fn(o: Tuple) do
-          case o do
-            {x, y} -> x >= 0 and x <= 3 and y >= 0 and y <= 3
-          end
-        end)
-        length(inside)
-      end
-    end
-    assert_eq(flat(counts), for i in range(1, 28) do 4 end)
-  end
-
-  test "O looks the same in every rotation" do
-    shapes = spawn Tetris.Shapes
-    assert_eq(shapes <- :offsets(2, 0), shapes <- :offsets(2, 3))
-  end
-
-  test "I stands up in rotation 1" do
-    shapes = spawn Tetris.Shapes
-    assert_eq(shapes <- :offsets(1, 1), [{2, 0}, {2, 1}, {2, 2}, {2, 3}])
-  end
 end
 
-# 7-bag randomizer: every 7 draws is a permutation of 1..7
-actor Tetris.Bag do
-  state bag: List :: []
+actor Tetris.Piece do
+  state kind: Int :: 1
+  state rot: Int :: 0
+  state x: Int :: 3
+  state y: Int :: 0
+  state shapes: Tetris.Shapes :: spawn Tetris.Shapes
 
-  on :next do
-    full = case bag do
-      [] -> self <- :shuffled
-      _ -> bag
-    end
-    become bag: tail(full)
-    reply head(full)
-  end
-
-  # fisher-yates with set_at, no shuffle builtin
-  on :shuffled do
-    mixed = reduce(reverse(range(1, 6)), range(1, 7), fn(acc: List, i: Int) do
-      j = random(0, i)
-      a = elem(acc, i)
-      b = elem(acc, j)
-      set_at(set_at(acc, i, b), j, a)
-    end)
-    reply mixed
-  end
-
-  on :reset do
-    become bag: []
+  on :spawn(new_kind: Int) do
+    become kind: new_kind, rot: 0, x: 3, y: 0
     reply :ok
   end
 
-  test "seven draws are a permutation of 1..7" do
-    bag = spawn Tetris.Bag
-    draws = for i in range(1, 7) do bag <- :next end
-    assert_eq(sort(draws), [1, 2, 3, 4, 5, 6, 7])
+  on :info do
+    reply %{kind: kind, x: x, y: y, rot: rot}
   end
 
-  test "the second bag is a permutation too" do
-    bag = spawn Tetris.Bag
-    first = for i in range(1, 7) do bag <- :next end
-    second = for i in range(1, 7) do bag <- :next end
-    assert_eq(sort(first), [1, 2, 3, 4, 5, 6, 7])
-    assert_eq(sort(second), [1, 2, 3, 4, 5, 6, 7])
+  on :cells do
+    reply self <- :cells_for(0, 0, 0)
+  end
+
+  on :cells_for(dx: Int, dy: Int, drot: Int) do
+    offs = shapes <- :offsets(kind, rem(rot + drot + 4, 4))
+    reply map(offs, fn(o: Tuple) do
+      case o do
+        {ox, oy} -> {x + dx + ox, y + dy + oy}
+      end
+    end)
+  end
+
+  on :move(dx: Int, dy: Int) do
+    become x: x + dx, y: y + dy
+    reply :ok
+  end
+
+  on :rotate(dir: Int) do
+    become rot: rem(rot + dir + 4, 4)
+    reply :ok
   end
 end
 
-# 20 rows x 10 cols, 0 is empty, 1..7 is a locked piece kind
 actor Tetris.Board do
   state rows: List :: for y in range(1, 20) do for x in range(1, 10) do 0 end end
 
@@ -162,150 +131,6 @@ actor Tetris.Board do
     become rows: reduce(kept, empties, fn(acc: List, row: List) do append(acc, row) end)
     reply cleared
   end
-
-  test "starts as 20 rows of 10 zeros" do
-    board = spawn Tetris.Board
-    got = board <- :rows
-    assert_eq(length(got), 20)
-    assert_eq(elem(got, 0), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-    assert_eq(elem(got, 19), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-  end
-
-  test "fits inside, above the top, but not through the walls or floor" do
-    board = spawn Tetris.Board
-    assert(board <- :fits?([{0, 0}, {9, 19}]))
-    assert(board <- :fits?([{4, -1}, {4, 0}]))
-    refute(board <- :fits?([{4, 4}, {-1, 0}]))
-    refute(board <- :fits?([{10, 0}]))
-    refute(board <- :fits?([{0, 20}]))
-  end
-
-  test "lock fills cells and blocks them" do
-    board = spawn Tetris.Board
-    board <- :lock([{0, 19}, {1, 19}], 5)
-    assert_eq(elem(board <- :rows, 19), [5, 5, 0, 0, 0, 0, 0, 0, 0, 0])
-    refute(board <- :fits?([{0, 19}]))
-    assert(board <- :fits?([{2, 19}]))
-  end
-
-  test "lock ignores cells above the top" do
-    board = spawn Tetris.Board
-    board <- :lock([{5, -1}, {0, 0}], 2)
-    got = board <- :rows
-    assert_eq(length(got), 20)
-    assert_eq(elem(got, 0), [2, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-  end
-
-  test "sweep clears full rows and adds empty rows on top" do
-    board = spawn Tetris.Board
-    full = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
-    part = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
-    stacked = for y in range(0, 19) do
-      case y do
-        17 -> part
-        18 -> full
-        19 -> full
-        _ -> [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-      end
-    end
-    board <- :load(stacked)
-    assert_eq(board <- :sweep, 2)
-    swept = board <- :rows
-    assert_eq(length(swept), 20)
-    assert_eq(elem(swept, 19), part)
-    assert_eq(elem(swept, 18), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-    assert_eq(elem(swept, 0), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-  end
-
-  test "sweep on a clean board clears nothing, reset wipes it" do
-    board = spawn Tetris.Board
-    assert_eq(board <- :sweep, 0)
-    board <- :lock([{3, 3}], 1)
-    refute(board <- :fits?([{3, 3}]))
-    board <- :reset
-    assert(board <- :fits?([{3, 3}]))
-  end
-end
-
-# the falling piece
-actor Tetris.Piece do
-  state kind: Int :: 1
-  state rot: Int :: 0
-  state x: Int :: 3
-  state y: Int :: 0
-  state shapes: Tetris.Shapes :: spawn Tetris.Shapes
-
-  on :spawn(new_kind: Int) do
-    become kind: new_kind, rot: 0, x: 3, y: 0
-    reply :ok
-  end
-
-  on :info do
-    reply %{kind: kind, x: x, y: y, rot: rot}
-  end
-
-  on :cells do
-    reply self <- :cells_for(0, 0, 0)
-  end
-
-  on :cells_for(dx: Int, dy: Int, drot: Int) do
-    offs = shapes <- :offsets(kind, rem(rot + drot + 4, 4))
-    reply map(offs, fn(o: Tuple) do
-      case o do
-        {ox, oy} -> {x + dx + ox, y + dy + oy}
-      end
-    end)
-  end
-
-  on :move(dx: Int, dy: Int) do
-    become x: x + dx, y: y + dy
-    reply :ok
-  end
-
-  on :rotate(dir: Int) do
-    become rot: rem(rot + dir + 4, 4)
-    reply :ok
-  end
-
-  test "spawns at the top center in rotation 0" do
-    piece = spawn Tetris.Piece
-    piece <- :spawn(3)
-    info = piece <- :info
-    assert_eq(lookup(info, :kind), 3)
-    assert_eq(lookup(info, :x), 3)
-    assert_eq(lookup(info, :y), 0)
-    assert_eq(lookup(info, :rot), 0)
-  end
-
-  test "T cells at spawn" do
-    piece = spawn Tetris.Piece
-    piece <- :spawn(3)
-    assert_eq(piece <- :cells, [{4, 0}, {3, 1}, {4, 1}, {5, 1}])
-  end
-
-  test "cells_for shifts and rotates without moving the piece" do
-    piece = spawn Tetris.Piece
-    piece <- :spawn(3)
-    assert_eq(piece <- :cells_for(1, 2, 1), [{5, 2}, {5, 3}, {6, 3}, {5, 4}])
-    assert_eq(piece <- :cells_for(0, 0, -1), [{4, 0}, {3, 1}, {4, 1}, {4, 2}])
-    info = piece <- :info
-    assert_eq(lookup(info, :x), 3)
-    assert_eq(lookup(info, :y), 0)
-    assert_eq(lookup(info, :rot), 0)
-  end
-
-  test "move adds to x and y, rotate wraps both ways" do
-    piece = spawn Tetris.Piece
-    piece <- :spawn(1)
-    piece <- :move(-2, 5)
-    info = piece <- :info
-    assert_eq(lookup(info, :x), 1)
-    assert_eq(lookup(info, :y), 5)
-    piece <- :rotate(-1)
-    assert_eq(lookup(piece <- :info, :rot), 3)
-    piece <- :rotate(1)
-    assert_eq(lookup(piece <- :info, :rot), 0)
-  end
 end
 
 actor Tetris.Score do
@@ -343,93 +168,65 @@ actor Tetris.Score do
     become score: 0, lines: 0, level: 1
     reply :ok
   end
+end
 
-  test "starts at zero on level 1" do
-    score = spawn Tetris.Score
-    s = score <- :summary
-    assert_eq(lookup(s, :score), 0)
-    assert_eq(lookup(s, :lines), 0)
-    assert_eq(lookup(s, :level), 1)
+actor Tetris.Bag do
+  state bag: List :: []
+
+  on :next do
+    full = case bag do
+      [] -> self <- :shuffled
+      _ -> bag
+    end
+    become bag: tail(full)
+    reply head(full)
   end
 
-  test "line values on level 1" do
-    score = spawn Tetris.Score
-    assert_eq(score <- :cleared(0), 0)
-    assert_eq(score <- :cleared(1), 100)
-    assert_eq(score <- :cleared(2), 400)
-    assert_eq(score <- :cleared(3), 900)
-    assert_eq(score <- :cleared(4), 1700)
+  # fisher-yates with set_at, no shuffle builtin
+  on :shuffled do
+    mixed = reduce(reverse(range(1, 6)), range(1, 7), fn(acc: List, i: Int) do
+      j = random(0, i)
+      a = elem(acc, i)
+      b = elem(acc, j)
+      set_at(set_at(acc, i, b), j, a)
+    end)
+    reply mixed
   end
 
-  test "level climbs every 10 lines and multiplies" do
-    score = spawn Tetris.Score
-    score <- :cleared(4)
-    score <- :cleared(4)
-    assert_eq(score <- :cleared(2), 1900)
-    assert_eq(lookup(score <- :summary, :level), 2)
-    assert_eq(score <- :cleared(1), 2100)
-  end
-
-  test "drops pay 1 and 2 per row" do
-    score = spawn Tetris.Score
-    assert_eq(score <- :soft_drop, 1)
-    assert_eq(score <- :hard_drop(5), 11)
-  end
-
-  test "drop interval speeds up with level and floors at 120" do
-    score = spawn Tetris.Score
-    assert_eq(score <- :drop_interval, 800)
-    score <- :cleared(4)
-    score <- :cleared(4)
-    score <- :cleared(4)
-    assert_eq(score <- :drop_interval, 730)
-    for i in range(1, 30) do score <- :cleared(4) end
-    assert_eq(score <- :drop_interval, 120)
-  end
-
-  test "reset goes back to zero" do
-    score = spawn Tetris.Score
-    score <- :cleared(4)
-    score <- :reset
-    assert_eq(lookup(score <- :summary, :score), 0)
-    assert_eq(lookup(score <- :summary, :level), 1)
+  on :reset do
+    become bag: []
+    reply :ok
   end
 end
 
-# the renderer. a frame is a map, the reply is a view tree.
-# board cells are emoji squares, 0 empty, 1..7 a kind, 8 the ghost
+# ---------------------------------------------------------------------
+# This chapter. Fill in the handlers marked Exercise.
+
 actor Tetris.Screen do
   state glyphs: List :: ["⬛", "🟦", "🟨", "🟪", "🟩", "🟥", "🟧", "🟫", "⬜"]
   state shapes: Tetris.Shapes :: spawn Tetris.Shapes
 
   on :glyph(v: Int) do reply elem(glyphs, v) end
 
-  # write v into the grid at every cell, skipping the ones above the top
+  # Exercise: write v into the grid at each {x, y}, skipping cells
+  # above the top. Reply the new grid.
   on :paint(grid: List, cells: List, v: Int) do
-    reply reduce(cells, grid, fn(acc: List, c: Tuple) do
-      case c do
-        {x, y} ->
-          case y < 0 do
-            true -> acc
-            _ -> set_at(acc, y, set_at(elem(acc, y), x, v))
-          end
-      end
-    end)
+    reply :TODO
   end
 
+  # Exercise: one row of numbers as one string of glyphs.
   on :line(cells: List) do
-    reply reduce(cells, "", fn(acc: String, v: Int) do concat(acc, elem(glyphs, v)) end)
+    reply :TODO
   end
 
   on :join(lines: List) do
     reply reduce(tail(lines), head(lines), fn(acc: String, l: String) do concat(acc, "\n", l) end)
   end
 
-  # ghost first so the piece paints over it where they overlap
+  # Exercise: paint the ghost (8) and then the piece over the
+  # board rows, and reply with 20 strings.
   on :board_lines(frame: Map) do
-    grid = self <- :paint(lookup(frame, :rows), lookup(frame, :ghost), 8)
-    grid = self <- :paint(grid, lookup(frame, :piece), lookup(frame, :kind))
-    reply map(grid, fn(row: List) do self <- :line(row) end)
+    reply :TODO
   end
 
   # the next piece in its spawn rotation, 4 wide and 2 tall
@@ -473,21 +270,10 @@ actor Tetris.Screen do
     )
   end
 
-  # keys always listen. the timer only exists while the game is running,
-  # so pausing is just leaving it out of the view
+  # Exercise: the keys, always, and a timer that sends :tick every
+  # interval ms, only while the game is neither over nor paused.
   on :effects(frame: Map) do
-    keys = [
-      key("ArrowLeft", :left), key("ArrowRight", :right),
-      key("ArrowUp", :rotate), key("x", :rotate),
-      key("ArrowDown", :down), key(" ", :drop),
-      key("p", :pause), key("r", :restart)
-    ]
-    running = not(lookup(frame, :over)) and not(lookup(frame, :paused))
-    ticker = case running do
-      true -> [timer(lookup(frame, :interval), :tick)]
-      _ -> []
-    end
-    reply flat([keys, ticker])
+    reply :TODO
   end
 
   on :view(frame: Map) do
@@ -539,8 +325,6 @@ actor Tetris.Screen do
   end
 end
 
-# coordinator. the children come in through spawn, the inputs come in as
-# messages. the input handlers mostly self-send to small handlers that become
 actor Tetris.Game do
   state bag: Tetris.Bag :: nil
   state board: Tetris.Board :: nil
@@ -677,69 +461,14 @@ actor Tetris.Game do
     reply :ok
   end
 
-  # everything the screen needs, as one map
+  # Exercise: everything the screen needs, as one map: rows, piece,
+  # ghost (the piece's cells dropped as far as they go), kind, next, score,
+  # interval, paused, over.
   on :frame do
-    info = piece <- :info
-    dist = self <- :drop_distance(0)
-    reply %{rows: board <- :rows, piece: piece <- :cells, ghost: piece <- :cells_for(0, dist, 0), kind: lookup(info, :kind), next: next_kind, score: score <- :summary, interval: score <- :drop_interval, paused: paused, over: over}
+    reply :TODO
   end
 
   on :view do reply screen <- :view(self <- :frame) end
-
-  test "start spawns a piece at the top, not over, not paused" do
-    game = new_game()
-    refute(game <- :over?)
-    refute(game <- :paused?)
-    piece = game <- :piece
-    assert_eq(lookup(piece <- :info, :y), 0)
-    # a bag deals seven different kinds, so the next one is not this one
-    refute(lookup(piece <- :info, :kind) == (game <- :next_kind))
-  end
-
-  test "left and right move the piece, the walls stop it" do
-    game = new_game()
-    assert_eq(game <- :left, :ok)
-    piece = game <- :piece
-    assert_eq(lookup(piece <- :info, :x), 2)
-    game <- :right
-    game <- :right
-    assert_eq(lookup(piece <- :info, :x), 4)
-    for i in range(1, 12) do game <- :left end
-    assert_eq(game <- :left, :blocked)
-    board = game <- :board
-    assert(board <- :fits?(piece <- :cells))
-  end
-
-  test "rotate turns the piece" do
-    game = new_game()
-    game <- :rotate
-    piece = game <- :piece
-    assert_eq(lookup(piece <- :info, :rot), 1)
-  end
-
-  test "tick drops one row, down drops one row and scores a point" do
-    game = new_game()
-    game <- :tick
-    piece = game <- :piece
-    assert_eq(lookup(piece <- :info, :y), 1)
-    game <- :down
-    assert_eq(lookup(piece <- :info, :y), 2)
-    assert_eq(lookup(game <- :summary, :score), 1)
-  end
-
-  test "hard drop locks the piece and spawns the next one" do
-    game = new_game()
-    upcoming = game <- :next_kind
-    game <- :drop
-    piece = game <- :piece
-    info = piece <- :info
-    assert_eq(lookup(info, :kind), upcoming)
-    assert_eq(lookup(info, :y), 0)
-    board = game <- :board
-    filled = filter(flat(board <- :rows), fn(v: Int) do v != 0 end)
-    assert_eq(length(filled), 4)
-    assert(lookup(game <- :summary, :score) > 0)
-  end
 
   test "pause freezes gravity and movement and drops the timer" do
     game = new_game()
@@ -768,18 +497,6 @@ actor Tetris.Game do
     assert(contains(elem(lines, 19), "⬜"))
     assert_eq(type_of(game <- :view), :view_node)
   end
-
-  test "stacking to the top ends the game, restart clears it" do
-    game = new_game()
-    for i in range(1, 60) do game <- :drop end
-    assert(game <- :over?)
-    assert_eq(game <- :left, :ok)
-    assert(lookup(game <- :frame, :over))
-    game <- :restart
-    refute(game <- :over?)
-    board = game <- :board
-    assert(empty?(filter(flat(board <- :rows), fn(v: Int) do v != 0 end)))
-  end
 end
 
 # the tests build their own game this way. the real one is below, spawned
@@ -795,6 +512,8 @@ def new_game() -> Any do
   game
 end
 
+# The game itself. The page runs this file, and the last line, game <- :view,
+# is the first screen it draws.
 spawn Tetris
 bag = spawn Tetris.Bag
 board = spawn Tetris.Board
