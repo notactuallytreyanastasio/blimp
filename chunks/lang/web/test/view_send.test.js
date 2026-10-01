@@ -282,6 +282,49 @@ test('el: a swipe sends its direction as an atom, and a new id is a new element'
   view.unmount();
 });
 
+const DRAGGER = `
+actor Dr do
+  state x: Int :: 0
+  state y: Int :: 0
+  state who: String :: ""
+  on :moved(w: String, dx: Int, dy: Int) do
+    become x: x + dx, y: y + dy, who: w
+  end
+  on :view do
+    reply el("div", %{class: "win", style: "translate: #{x}px #{y}px"},
+      el("div", %{class: "bar", drag: :moved, with: "inbox"}, el("button", %{click: :moved}, "x")),
+      el("span", %{}, "#{who} #{x},#{y}"))
+  end
+end
+dr = spawn Dr
+dr <- :view`;
+
+test('el: a drag sends what the pointer moved, with its with, and not from a button inside', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(DRAGGER, 'dr').ok);
+  const win = container.children[0];
+  const bar = win.children[0];
+  const ev = (x, y, target) => ({ button: 0, clientX: x, clientY: y, target: target || bar, preventDefault() {} });
+  bar.on.pointerdown(ev(100, 100));
+  bar.on.pointermove(ev(130, 90));
+  bar.on.pointermove(ev(140, 120));
+  bar.on.pointerup(ev(140, 120));
+  assert.strictEqual(textOf(win.children[1]), 'inbox 40,20');
+  assert.strictEqual(win.attrs.style, 'translate: 40px 20px');
+  // after the pointer is up, moving it is not a drag
+  bar.on.pointermove(ev(500, 500));
+  assert.strictEqual(textOf(win.children[1]), 'inbox 40,20');
+  // pressing the button inside the bar is the button's, not a drag
+  const button = Object.assign(bar.children[0], { tagName: 'BUTTON', parentNode: bar });
+  bar.on.pointerdown(ev(10, 10, button));
+  bar.on.pointermove(ev(60, 60));
+  assert.strictEqual(textOf(win.children[1]), 'inbox 40,20');
+  view.unmount();
+});
+
 const TYPER = `
 actor Typer do
   state text: String :: ""
