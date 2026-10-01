@@ -639,6 +639,15 @@ test('key: a row added at the top is one new element; the others keep theirs and
   view.unmount();
 });
 
+test('show(cond, node) evaluates node only when cond is true', async () => {
+  const b = await blimp();
+  const r = b.eval('q = nil\nel("div", %{}, show(q != nil, el("p", %{}, q.content)), "ok")');
+  assert.ok(r.ok, r.error);
+  const v = typeof r.view === 'string' ? JSON.parse(r.view) : r.view;
+  assert.strictEqual(v.children.length, 1);
+  assert.strictEqual(b.eval('show(1, "x")').ok, false);
+});
+
 const LISTER = `
 actor Li do
   state n: Int :: 3

@@ -2318,7 +2318,9 @@ fn makeViewNode(allocator: std.mem.Allocator, tag: []const u8, attrs: []const Vi
 ///     true -> [el(...)]
 ///     false -> []
 ///   end
-/// node is built either way (a view has no side effects to skip).
+/// The evaluator handles show itself (evalShow in eval.zig) and evaluates
+/// node only when cond is true. This builtin is what a call reaches when
+/// both arguments are already values.
 fn viewShow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .boolean) return error.TypeError;
     if (args[0].boolean) return args[1];
