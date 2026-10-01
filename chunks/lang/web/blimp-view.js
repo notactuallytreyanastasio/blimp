@@ -35,7 +35,16 @@
 // actor gets :msg(dx, dy), or :msg(with, dx, dy), the pixels moved since
 // the last one, at most once a frame. The pointer is held inside the
 // window, so whatever was grabbed can always be grabbed again. A press on
-// a button, link or field inside it is that control's, not a drag. An el
+// a button, link or field inside it is that control's, not a drag.
+//
+// Three more say how an element behaves, and send nothing themselves:
+//   submit_on_enter: true  a field whose Enter submits its form (so the
+//                          form's submit: runs); Shift+Enter is a new line
+//   scroll: :end           kept scrolled to the bottom as it grows, unless
+//                          the reader has scrolled up to read
+//   focus: true            focused when it appears, if nothing else has
+//                          focus and the device has a mouse (on a phone
+//                          it would throw the keyboard up) An el
 // whose id changes is a new element: a CSS animation keyed to it starts
 // again, as it did when LiveView replaced the node.
 //
@@ -58,7 +67,7 @@
   var SVGNS = 'http://www.w3.org/2000/svg';
   var SVG_TAGS = { svg: 1, g: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, text: 1, tspan: 1,
     defs: 1, linearGradient: 1, radialGradient: 1, stop: 1, ellipse: 1, title: 0 };
-  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, drag: 1, select: 1, selection: 1,
+  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, drag: 1, submit_on_enter: 1, scroll: 1, focus: 1, select: 1, selection: 1,
     debounce: 1, shortcut: 1, shortcut_keys: 1, paste_image: 1, inner_html: 1 };
 
   // Blimp strings count bytes (UTF-8); a field's selection counts UTF-16
@@ -150,6 +159,8 @@
     this._held = {};    // KeyboardEvent.key -> true while a held key is down
     this._root = null;  // the element render() put in the container
     this._sending = false;
+    this._scrollers = [];  // scroll: :end elements, kept at their end
+    this._focusing = [];   // focus: true elements created since the last render
     var self = this;
     this._onKeydown = function (e) { self._handleKey(e); };
     this._onKeyup = function (e) { self._handleKeyUp(e); };
@@ -243,6 +254,7 @@
       return this._fail(e.message || String(e));
     }
     this.view = view;
+    this._settle();
     var fx = { timers: {}, keys: {}, fetches: {}, query: null };
     this._collectEffects(view, fx);
     this._reconcileTimers(fx.timers);
@@ -253,6 +265,24 @@
     }
     this.keys = fx.keys;
     if (this.opts.onRender) this.opts.onRender(view, fx);
+  };
+
+  // After a render, with every element in the page: scroll: :end elements
+  // that grew go back to their end, and focus: true ones that just appeared
+  // take the focus if nobody has it.
+  BlimpView.prototype._settle = function () {
+    var on = function (el) { return el.isConnected !== false; };
+    this._scrollers = this._scrollers.filter(on);
+    this._scrollers.forEach(function (el) {
+      if (el._blimpOn && el._blimpOn.scroll === 'end' && el._blimpAtEnd !== false) el.scrollTop = el.scrollHeight;
+    });
+    var focusing = this._focusing.filter(on);
+    this._focusing = [];
+    if (!focusing.length || typeof document === 'undefined') return;
+    var active = document.activeElement;
+    var idle = !active || active === document.body || active === document.documentElement;
+    var touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+    if (idle && !touch && focusing[0].focus) focusing[0].focus();
   };
 
   BlimpView.prototype.renderView = function (node) {
@@ -462,6 +492,24 @@
       el.addEventListener('pointerup', drop);
       el.addEventListener('pointercancel', drop);
     }
+    if (el._blimpOn.submit_on_enter) el.addEventListener('keydown', function (e) {
+      if (!el._blimpOn.submit_on_enter || e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+      var form = el.form;
+      if (!form) return;
+      e.preventDefault();
+      if (form.requestSubmit) form.requestSubmit();
+      else form.dispatchEvent(new Event('submit', { cancelable: true }));
+    });
+    if (el._blimpOn.scroll) {
+      if (el._blimpOn.scroll !== 'end') throw new Error('el: scroll: :end is the only scroll there is, not ' + el._blimpOn.scroll);
+      // at the end until the reader scrolls up; back at the end, it sticks again
+      el._blimpAtEnd = true;
+      el.addEventListener('scroll', function () {
+        el._blimpAtEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+      });
+      self._scrollers.push(el);
+    }
+    if (el._blimpOn.focus) self._focusing.push(el);
     if (el._blimpOn.submit) el.addEventListener('submit', function (e) {
       e.preventDefault();
       var fields = {};
@@ -507,22 +555,29 @@
         var want = {};
         Object.keys(EL_EVENTS).forEach(function (k) { if (b.attrs[k] !== undefined) want[k] = attrVal(b.attrs[k]); });
         // a kind of event it had no listener for needs a new element
-        var passive = { 'with': 1, selection: 1, debounce: 1, shortcut_keys: 1, inner_html: 1 };
+        var passive = { 'with': 1, selection: 1, debounce: 1, shortcut_keys: 1, inner_html: 1, focus: 1 };
         if (Object.keys(want).some(function (k) { return !passive[k] && !had[k]; })) return this.renderView(b);
         el._blimpOn = want;
         applyInstructions(el, b.attrs, a.attrs);
       }
       if (b.attrs.inner_html !== undefined) return el;
-      if (ac.length !== bc.length) return this._rebuild(el, b);
+      // The children both trees have are patched; the new tree's extra ones
+      // are added, the old one's removed. A chat log that grows by a line
+      // keeps its element, and with it where it was scrolled, what had
+      // focus, and an <audio> that has played. (It used to be rebuilt
+      // whenever its number of children changed.)
       var nodes = el.childNodes;
       var outerNs = this._inSvg;
       this._inSvg = el.namespaceURI === SVGNS;
       try {
-        for (var j = 0; j < bc.length; j++) {
+        var both = Math.min(ac.length, bc.length);
+        for (var j = 0; j < both; j++) {
           var c = nodes[j];
           var n = this._patch(c, ac[j], bc[j]);
           if (n !== c) el.replaceChild(n, c);
         }
+        for (var k = both; k < bc.length; k++) el.appendChild(this.renderView(bc[k]));
+        while (nodes.length > bc.length) el.removeChild(nodes[nodes.length - 1]);
       } finally {
         this._inSvg = outerNs;
       }

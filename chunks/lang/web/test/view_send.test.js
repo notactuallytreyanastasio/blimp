@@ -18,6 +18,7 @@ function fakeDocument() {
     get childNodes() { return this.children; },
     appendChild(c) { this.children.push(c); return c; },
     replaceChild(n, o) { this.children[this.children.indexOf(o)] = n; return o; },
+    removeChild(c) { this.children.splice(this.children.indexOf(c), 1); return c; },
     setAttribute(k, v) { this.attrs[k] = v; },
     removeAttribute(k) { delete this.attrs[k]; },
     // every listener of a type, as a real element keeps them
@@ -322,6 +323,98 @@ test('el: a drag sends what the pointer moved, with its with, and not from a but
   bar.on.pointerdown(ev(10, 10, button));
   bar.on.pointermove(ev(60, 60));
   assert.strictEqual(textOf(win.children[1]), 'inbox 40,20');
+  view.unmount();
+});
+
+const CHATTER = `
+actor Ch do
+  state said: List :: []
+  on :said(fields: String) do
+    become said: [fields | said]
+  end
+  on :view do
+    reply el("div", %{},
+      el("div", %{class: "log", scroll: :end}, map(reverse(said), fn(s: String) -> Any do el("p", %{}, s) end)),
+      el("form", %{submit: :said},
+        el("textarea", %{name: "m", submit_on_enter: true}),
+        el("input", %{name: "q", focus: true})))
+  end
+end
+ch = spawn Ch
+ch <- :view`;
+
+test('el: submit_on_enter submits the form on Enter, not Shift+Enter; scroll: :end follows; focus: true focuses', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  let focused = null;
+  const realCreate = document.createElement;
+  document.createElement = (tag) => { const e = realCreate(tag); e.focus = () => { focused = e; }; return e; };
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(CHATTER, 'ch').ok);
+  const root = container.children[0];
+  const log = root.children[0], form = root.children[1], area = form.children[0], input = form.children[1];
+  // focus: true took the focus, nothing else having it
+  assert.strictEqual(focused, input);
+  // a real field belongs to its form, and a form submits itself
+  area.form = form;
+  area.value = 'hello';
+  form.elements = [Object.assign(area, { name: 'm', type: 'textarea' })];
+  form.requestSubmit = () => form.on.submit({ preventDefault() {} });
+  let prevented = 0;
+  area.on.keydown({ key: 'Enter', shiftKey: true, preventDefault() { prevented++; } });
+  assert.strictEqual(textOf(log), '', 'Shift+Enter submitted');
+  // the log is 500px of text in a 100px box, at its end
+  Object.assign(log, { scrollHeight: 500, clientHeight: 100 });
+  area.on.keydown({ key: 'Enter', shiftKey: false, preventDefault() { prevented++; } });
+  assert.strictEqual(prevented, 1);
+  assert.ok(textOf(log).includes('hello'));
+  // the log grew a line and kept its element, and the one before is untouched
+  assert.strictEqual(root.children[0], log);
+  assert.strictEqual(log.scrollTop, 500);
+  // the reader scrolls up to read: the next line does not pull them down
+  Object.assign(log, { scrollTop: 0, scrollHeight: 600 });
+  log.on.scroll();
+  form.on.submit({ preventDefault() {} });
+  assert.strictEqual(log.scrollTop, 0);
+  // back at the end, it sticks again
+  Object.assign(log, { scrollTop: 520, scrollHeight: 620 });
+  log.on.scroll();
+  form.on.submit({ preventDefault() {} });
+  assert.strictEqual(log.scrollTop, 620);
+  document.createElement = realCreate;
+  view.unmount();
+});
+
+const LISTER = `
+actor Li do
+  state n: Int :: 3
+  on :set(k: Int) do
+    become n: k
+  end
+  on :view do
+    reply el("ul", %{}, map(range(1, n), fn(i: Int) -> Any do el("li", %{id: "i#{i}"}, "#{i}") end))
+  end
+end
+li = spawn Li
+li <- :view`;
+
+test('el: a list that grows or shrinks keeps its element and the children it still has', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(LISTER, 'li').ok);
+  const ul = container.children[0];
+  const [one, two] = ul.children;
+  view.send('set', '5');
+  assert.strictEqual(container.children[0], ul);
+  assert.strictEqual(ul.children.length, 5);
+  assert.strictEqual(ul.children[0], one);
+  assert.strictEqual(textOf(ul), '12345');
+  view.send('set', '2');
+  assert.strictEqual(container.children[0], ul);
+  assert.deepStrictEqual(ul.children, [one, two]);
   view.unmount();
 });
 
