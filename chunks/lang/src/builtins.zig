@@ -189,6 +189,7 @@ pub const BuiltinRegistry = struct {
         reg.register("location_query", &viewLocationQuery);
         reg.register("stored", &viewStored);
         reg.register("store", &viewStore);
+        reg.register("socket", &viewSocket);
         reg.register("key", &viewKey);
         reg.register("input", &viewInput);
         reg.register("textarea", &viewTextarea);
@@ -2626,6 +2627,44 @@ fn viewStore(allocator: std.mem.Allocator, args: []const *const Value) EvalError
     return makeViewNode(allocator, "store", attrs, &.{});
 }
 
+/// socket("/live/chat", %{frame: :frame, open: :up, closed: :down, sent: :sent}, first, frames)
+/// — effect node: the host holds a WebSocket to `path` on the page's own
+/// server for as long as this node is in the view, reconnecting when it
+/// drops. Every text frame that arrives is :frame(text); each connection
+/// is :up, each drop :down (both optional). `frames` is the program's
+/// outbox and `first` the number of its first frame: the host sends each
+/// number once, in order, while connected, then says :sent(n), the last
+/// number it has sent, so the program can let those go. Frames waiting
+/// while it is down go when it is back, unless the program drops them.
+fn viewSocket(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 4 or args[0].* != .string or args[2].* != .integer or args[3].* != .list) return error.TypeError;
+    const path = args[0].string;
+    if (path.len == 0 or path[0] != '/' or (path.len > 1 and path[1] == '/')) return error.TypeError;
+    const entries: []const Value.MapEntry = switch (args[1].*) {
+        .map => |m| m,
+        else => return error.TypeError,
+    };
+    const names = [_][]const u8{ "frame", "open", "closed", "sent" };
+    var has_frame = false;
+    var has_sent = false;
+    const attrs = try allocator.alloc(ViewAttr, 2 + entries.len);
+    attrs[0] = .{ .key = "path", .val = args[0] };
+    attrs[1] = .{ .key = "first", .val = args[2] };
+    for (entries, 0..) |e, i| {
+        var known = false;
+        for (names) |n| if (std.mem.eql(u8, n, e.key)) {
+            known = true;
+        };
+        if (!known or e.val.* != .atom) return error.TypeError;
+        if (std.mem.eql(u8, e.key, "frame")) has_frame = true;
+        if (std.mem.eql(u8, e.key, "sent")) has_sent = true;
+        attrs[2 + i] = .{ .key = e.key, .val = e.val };
+    }
+    if (!has_frame or !has_sent) return error.TypeError;
+    for (args[3].list) |f| if (f.* != .string) return error.TypeError;
+    return makeViewNode(allocator, "socket", attrs, args[3..4]);
+}
+
 /// location_query("year=2023&song=Tweezer") — effect node: the page's URL
 /// carries this query string (replaced, not pushed: no history entry per
 /// click), so the page can be linked to in the state it is in.
@@ -3444,7 +3483,8 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
             // Effect nodes (timer, key) are host instructions, not markup.
             if (std.mem.eql(u8, node.tag, "timer") or std.mem.eql(u8, node.tag, "key") or
                 std.mem.eql(u8, node.tag, "fetch") or std.mem.eql(u8, node.tag, "location_query") or
-                std.mem.eql(u8, node.tag, "stored") or std.mem.eql(u8, node.tag, "store")) return;
+                std.mem.eql(u8, node.tag, "stored") or std.mem.eql(u8, node.tag, "store") or
+                std.mem.eql(u8, node.tag, "socket")) return;
             if (std.mem.eql(u8, node.tag, "el")) return renderElHtml(allocator, node, buf);
             const tag = blimpTagToHtml(node.tag);
             try buf.appendSlice(allocator, "<");

@@ -14,6 +14,11 @@
 //   key("*", :msg)              -> every key: :msg("a"), :msg("Enter"), ...
 //   stored("k", :msg)          -> :msg(value) once, from localStorage ("" if none)
 //   store("k", "v")            -> localStorage holds "v" under "k" ("" removes it)
+//   socket("/live/x", %{frame: :f, open: :o, closed: :c, sent: :s}, first, frames)
+//                              -> a WebSocket to /live/x while it is in the view:
+//                                 :f(text) per frame in, :o and :c as it connects
+//                                 and drops (it reconnects), frames numbered
+//                                 from `first` sent once each, then :s(n)
 //   key("ArrowUp", :down, :up) -> the same with "up":"up": a held key, sent
 //                                 once when it goes down and once when it
 //                                 comes up; auto-repeat is not sent
@@ -226,6 +231,7 @@
 
   BlimpView.prototype.unmount = function () {
     this._stopTimers();
+    this._reconcileSockets({});
     document.removeEventListener('keydown', this._onKeydown);
     document.removeEventListener('keyup', this._onKeyup);
     if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('blur', this._onBlur);
@@ -257,11 +263,12 @@
     }
     this.view = view;
     this._settle();
-    var fx = { timers: {}, keys: {}, fetches: {}, stored: {}, stores: {}, query: null };
+    var fx = { timers: {}, keys: {}, fetches: {}, stored: {}, stores: {}, sockets: {}, query: null };
     this._collectEffects(view, fx);
     this._reconcileTimers(fx.timers);
     this._reconcileFetches(fx.fetches);
     this._reconcileStorage(fx.stored, fx.stores);
+    this._reconcileSockets(fx.sockets);
     if (fx.query !== null && typeof location !== 'undefined' && typeof history !== 'undefined') {
       var want = fx.query === '' ? location.pathname : '?' + fx.query;
       if (location.search !== (fx.query === '' ? '' : '?' + fx.query)) history.replaceState(null, '', want);
@@ -365,6 +372,7 @@
       case 'location_query':
       case 'stored':
       case 'store':
+      case 'socket':
         // effects render nothing; they are picked up by _collectEffects
         return document.createTextNode('');
       default: el = document.createElement('div');
@@ -595,7 +603,7 @@
       else if (b.tag === 'heading' && attrVal((a.attrs || {}).level) !== attrVal((b.attrs || {}).level)) return this.renderView(b);
     }
     // a list wraps each child in an <li>, and an effect node is a text node
-    if (b.tag === 'list' || b.tag === 'timer' || b.tag === 'key') {
+    if (b.tag === 'list' || b.tag === 'timer' || b.tag === 'key' || b.tag === 'socket') {
       return b.tag === 'list' && JSON.stringify(ac) !== JSON.stringify(bc) ? this.renderView(b) : el;
     }
     if (ac.length !== bc.length) return this.renderView(b);
@@ -702,6 +710,14 @@
       if (skey && ssends) fx.stored[skey + '|' + ssends] = { key: String(skey), sends: ssends };
     } else if (node.tag === 'store') {
       if (attrVal(attrs.key)) fx.stores[String(attrVal(attrs.key))] = String(attrVal(attrs.value));
+    } else if (node.tag === 'socket') {
+      var path = attrVal(attrs.path);
+      if (path) fx.sockets[path] = {
+        path: String(path), first: attrInt(attrs.first, 1),
+        frame: attrVal(attrs.frame), open: attrVal(attrs.open), closed: attrVal(attrs.closed), sent: attrVal(attrs.sent),
+        frames: (node.children || []).map(function (c) { return c && c.text !== undefined ? String(c.text) : ''; }),
+      };
+      return;   // its children are frames to send, not view
     } else if (node.tag === 'location_query') {
       fx.query = String(attrVal(attrs.query));
     } else if (node.tag === 'key') {
@@ -748,6 +764,88 @@
     Object.keys(writes).forEach(function (k) {
       if (!self._unread[k] && storageGet(k) !== writes[k]) storageSet(k, writes[k]);
     });
+  };
+
+  // A message from outside a render (a frame, a connection, a timer): sent
+  // when the view is free, so it never lands in the middle of one.
+  // They queue, and go in the order they came: frames from a server must
+  // reach the program in the order the server sent them.
+  BlimpView.prototype._later = function (msg, args) {
+    var self = this;
+    (this._queue = this._queue || []).push([msg, args]);
+    if (this._draining) return;
+    this._draining = true;
+    var drain = function () {
+      if (self._sending) return setTimeout(drain, 0);
+      self._draining = false;
+      var q = self._queue;
+      self._queue = [];
+      for (var i = 0; i < q.length; i++) {
+        if (!self.mounted || self.error) return;
+        self.send(q[i][0], q[i][1]);
+      }
+    };
+    setTimeout(drain, 0);
+  };
+
+  // socket(): one WebSocket per path while the view has the node. Each
+  // render hands over the latest spec; frames numbered above the last sent
+  // go out in order while it is open, and :sent(n) says how far it got.
+  // A drop is retried, 0.5s doubling to 10s, until the view lets it go.
+  BlimpView.prototype._reconcileSockets = function (wanted) {
+    var self = this;
+    this.sockets = this.sockets || {};
+    Object.keys(this.sockets).forEach(function (p) {
+      if (wanted[p]) return;
+      var gone = self.sockets[p];
+      delete self.sockets[p];
+      gone.wanted = false;
+      clearTimeout(gone.retry);
+      if (gone.ws) { gone.ws.onclose = null; gone.ws.close(); }
+    });
+    Object.keys(wanted).forEach(function (p) {
+      var s = self.sockets[p];
+      if (!s) {
+        s = self.sockets[p] = { spec: wanted[p], ws: null, sentUpTo: wanted[p].first - 1, wait: 500, wanted: true, retry: null };
+        self._connect(s);
+      } else s.spec = wanted[p];
+      self._flush(s);
+    });
+  };
+
+  BlimpView.prototype._connect = function (s) {
+    var self = this;
+    if (typeof WebSocket === 'undefined' || !s.wanted) return;
+    var scheme = typeof location !== 'undefined' && location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var host = typeof location !== 'undefined' ? location.host : '';
+    var ws = s.ws = new WebSocket(scheme + host + s.spec.path);
+    ws.onopen = function () {
+      s.wait = 500;
+      if (s.spec.open) self._later(s.spec.open);
+      self._flush(s);
+    };
+    ws.onmessage = function (ev) {
+      if (typeof ev.data === 'string' && s.spec.frame) self._later(s.spec.frame, literal(ev.data));
+    };
+    ws.onclose = function () {
+      s.ws = null;
+      if (!s.wanted) return;
+      if (s.spec.closed) self._later(s.spec.closed);
+      s.retry = setTimeout(function () { self._connect(s); }, s.wait);
+      s.wait = Math.min(s.wait * 2, 10000);
+    };
+  };
+
+  BlimpView.prototype._flush = function (s) {
+    if (!s.ws || s.ws.readyState !== 1) return;
+    var before = s.sentUpTo;
+    for (var i = 0; i < s.spec.frames.length; i++) {
+      var n = s.spec.first + i;
+      if (n <= s.sentUpTo) continue;
+      s.ws.send(s.spec.frames[i]);
+      s.sentUpTo = n;
+    }
+    if (s.sentUpTo !== before && s.spec.sent) this._later(s.spec.sent, String(s.sentUpTo));
   };
 
   BlimpView.prototype._reconcileTimers = function (wanted) {
