@@ -34,7 +34,7 @@
     'flat', 'zip', 'uniq', 'slice', 'elem', 'range',
     'map', 'filter', 'reduce', 'each',
     // maps
-    'lookup', 'put', 'keys', 'values',
+    'lookup', 'put', 'keys', 'values', 'set_at',
     // strings
     'concat', 'split', 'contains', 'upcase', 'downcase', 'to_string',
     'char_at', 'char_code', 'from_char_code',
@@ -46,6 +46,7 @@
     // view primitives
     'stack', 'row', 'grid', 'heading', 'text', 'bold', 'italic', 'code',
     'code_block', 'blockquote', 'button', 'divider', 'list', 'link', 'image',
+    'key', 'timer', 'seed',
   ]);
 
   function escapeHtml(s) {
