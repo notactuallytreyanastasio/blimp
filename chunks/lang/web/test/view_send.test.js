@@ -356,7 +356,8 @@ test('el: submit_on_enter submits the form on Enter, not Shift+Enter; scroll: :e
   const log = root.children[0], form = root.children[1], area = form.children[0], input = form.children[1];
   // focus: true took the focus, nothing else having it
   assert.strictEqual(focused, input);
-  // taken once: a later render does not take it back
+  // something else has the focus now: it is left there
+  document.activeElement = area;
   focused = null;
   // a real field belongs to its form, and a form submits itself
   area.form = form;
@@ -407,7 +408,7 @@ end
 wt = spawn Wt
 wt <- :view`;
 
-test('el: focus: true waits while something else has the focus, then takes it once', async () => {
+test('el: focus: true takes the focus whenever it is free and the field is enabled', async () => {
   global.document = fakeDocument();
   let focused = null;
   const realCreate = document.createElement;
@@ -431,10 +432,18 @@ test('el: focus: true waits while something else has the focus, then takes it on
   box.disabled = false;
   view.send('tick');
   assert.strictEqual(focused, box);
-  // once: after the reader moves on, it is not pulled back
-  document.activeElement = null; focused = null;
+  // typed in elsewhere: left alone
+  const other = { isConnected: true };
+  document.activeElement = other; focused = null;
   view.send('tick');
   assert.strictEqual(focused, null);
+  // disabled a while (someone typing to you) and back: the box has it again
+  document.activeElement = null; box.disabled = true;
+  view.send('tick');
+  assert.strictEqual(focused, null);
+  box.disabled = false;
+  view.send('tick');
+  assert.strictEqual(focused, box);
   document.createElement = realCreate;
   view.unmount();
 });

@@ -49,11 +49,11 @@
 //                          form's submit: runs); Shift+Enter is a new line
 //   scroll: :end           kept scrolled to the bottom as it grows, unless
 //                          the reader has scrolled up to read
-//   focus: true            focused once, as soon as nothing else has the
-//                          focus and it is not disabled (when it appears,
-//                          or after the button that made it appear has gone),
-//                          on a device with a mouse (on a phone it would
-//                          throw the keyboard up) An el
+//   focus: true            has the focus whenever nothing else does and it
+//                          is not disabled: when it appears, after the
+//                          button that opened it has gone, after it was
+//                          disabled for a while. A chat's message box. Not
+//                          on a touch screen, where it throws a keyboard up. An el
 // whose id changes is a new element: a CSS animation keyed to it starts
 // again, as it did when LiveView replaced the node.
 //
@@ -169,7 +169,7 @@
     this._root = null;  // the element render() put in the container
     this._sending = false;
     this._scrollers = [];  // scroll: :end elements, kept at their end
-    this._focusing = [];   // focus: true elements created since the last render
+    this._focusing = [];   // focus: true elements, which take the focus when it is free
     var self = this;
     this._onKeydown = function (e) { self._handleKey(e); };
     this._onKeyup = function (e) { self._handleKeyUp(e); };
@@ -288,22 +288,20 @@
     this._scrollers.forEach(function (el) {
       if (el._blimpOn && el._blimpOn.scroll === 'end' && el._blimpAtEnd !== false) el.scrollTop = el.scrollHeight;
     });
-    // A field waits for the focus while something else has it: the button
-    // just clicked to open its window usually does, and is gone a render
-    // later. It takes it once, then is left alone.
-    this._focusing = this._focusing.filter(on);
+    // focus: true is a standing claim, not a one-off: whatever has the focus
+    // keeps it (the button just clicked, a field being typed in), and when
+    // nothing has it the first enabled claimant takes it. A disabled field
+    // loses the focus (someone is typing to you) and gets it back after.
+    this._focusing = this._focusing.filter(function (el) { return on(el) && el._blimpOn && el._blimpOn.focus; });
     if (!this._focusing.length || typeof document === 'undefined') return;
-    var touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
-    if (touch) { this._focusing = []; return; }
+    if (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches) return;
     var active = document.activeElement;
     var idle = !active || active === document.body || active === document.documentElement || active.isConnected === false;
     if (!idle) return;
-    // a disabled field cannot take it (focus() does nothing): it waits too
     for (var i = 0; i < this._focusing.length; i++) {
       var el = this._focusing[i];
       if (el.disabled || !el.focus) continue;
-      el.focus();
-      if (document.activeElement === undefined || document.activeElement === el) this._focusing.splice(i, 1);
+      el.focus({ preventScroll: true });
       return;
     }
   };
