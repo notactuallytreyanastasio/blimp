@@ -356,6 +356,8 @@ test('el: submit_on_enter submits the form on Enter, not Shift+Enter; scroll: :e
   const log = root.children[0], form = root.children[1], area = form.children[0], input = form.children[1];
   // focus: true took the focus, nothing else having it
   assert.strictEqual(focused, input);
+  // taken once: a later render does not take it back
+  focused = null;
   // a real field belongs to its form, and a form submits itself
   area.form = form;
   area.value = 'hello';
@@ -382,6 +384,52 @@ test('el: submit_on_enter submits the form on Enter, not Shift+Enter; scroll: :e
   log.on.scroll();
   form.on.submit({ preventDefault() {} });
   assert.strictEqual(log.scrollTop, 620);
+  document.createElement = realCreate;
+  view.unmount();
+});
+
+const WAITER = `
+actor Wt do
+  state open: Bool :: false
+  on :open do
+    become open: true
+  end
+  on :tick do
+  end
+  on :view do
+    box = case open do
+      true -> [el("textarea", %{name: "m", focus: true})]
+      false -> []
+    end
+    reply el("div", %{}, el("button", %{click: :open}, "Open"), box)
+  end
+end
+wt = spawn Wt
+wt <- :view`;
+
+test('el: focus: true waits while something else has the focus, then takes it once', async () => {
+  global.document = fakeDocument();
+  let focused = null;
+  const realCreate = document.createElement;
+  document.createElement = (tag) => { const e = realCreate(tag); e.focus = () => { focused = e; document.activeElement = e; }; return e; };
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(WAITER, 'wt').ok);
+  const button = container.children[0].children[0];
+  // the click that opens the box leaves the focus on the button
+  document.activeElement = button;
+  button.on.click({ preventDefault() {} });
+  const box = container.children[0].children[1];
+  assert.strictEqual(focused, null, 'took the focus from the button');
+  // the button goes (here: the focus is on nothing); the next render gives it to the box
+  document.activeElement = null;
+  view.send('tick');
+  assert.strictEqual(focused, box);
+  // once: after the reader moves on, it is not pulled back
+  document.activeElement = null; focused = null;
+  view.send('tick');
+  assert.strictEqual(focused, null);
   document.createElement = realCreate;
   view.unmount();
 });

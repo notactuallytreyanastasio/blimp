@@ -49,9 +49,10 @@
 //                          form's submit: runs); Shift+Enter is a new line
 //   scroll: :end           kept scrolled to the bottom as it grows, unless
 //                          the reader has scrolled up to read
-//   focus: true            focused when it appears, if nothing else has
-//                          focus and the device has a mouse (on a phone
-//                          it would throw the keyboard up) An el
+//   focus: true            focused once, as soon as nothing else has the
+//                          focus (when it appears, or after the button that
+//                          made it appear has gone), on a device with a
+//                          mouse (on a phone it would throw the keyboard up) An el
 // whose id changes is a new element: a CSS animation keyed to it starts
 // again, as it did when LiveView replaced the node.
 //
@@ -286,13 +287,18 @@
     this._scrollers.forEach(function (el) {
       if (el._blimpOn && el._blimpOn.scroll === 'end' && el._blimpAtEnd !== false) el.scrollTop = el.scrollHeight;
     });
-    var focusing = this._focusing.filter(on);
-    this._focusing = [];
-    if (!focusing.length || typeof document === 'undefined') return;
-    var active = document.activeElement;
-    var idle = !active || active === document.body || active === document.documentElement;
+    // A field waits for the focus while something else has it: the button
+    // just clicked to open its window usually does, and is gone a render
+    // later. It takes it once, then is left alone.
+    this._focusing = this._focusing.filter(on);
+    if (!this._focusing.length || typeof document === 'undefined') return;
     var touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
-    if (idle && !touch && focusing[0].focus) focusing[0].focus();
+    if (touch) { this._focusing = []; return; }
+    var active = document.activeElement;
+    var idle = !active || active === document.body || active === document.documentElement || active.isConnected === false;
+    if (!idle) return;
+    var el = this._focusing.shift();
+    if (el.focus) el.focus();
   };
 
   BlimpView.prototype.renderView = function (node) {
