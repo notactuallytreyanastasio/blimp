@@ -356,6 +356,9 @@ test('el: submit_on_enter submits the form on Enter, not Shift+Enter; scroll: :e
   const log = root.children[0], form = root.children[1], area = form.children[0], input = form.children[1];
   // focus: true took the focus, nothing else having it
   assert.strictEqual(focused, input);
+  // something else has the focus now: it is left there
+  document.activeElement = area;
+  focused = null;
   // a real field belongs to its form, and a form submits itself
   area.form = form;
   area.value = 'hello';
@@ -382,6 +385,65 @@ test('el: submit_on_enter submits the form on Enter, not Shift+Enter; scroll: :e
   log.on.scroll();
   form.on.submit({ preventDefault() {} });
   assert.strictEqual(log.scrollTop, 620);
+  document.createElement = realCreate;
+  view.unmount();
+});
+
+const WAITER = `
+actor Wt do
+  state open: Bool :: false
+  on :open do
+    become open: true
+  end
+  on :tick do
+  end
+  on :view do
+    box = case open do
+      true -> [el("textarea", %{name: "m", focus: true})]
+      false -> []
+    end
+    reply el("div", %{}, el("button", %{click: :open}, "Open"), box)
+  end
+end
+wt = spawn Wt
+wt <- :view`;
+
+test('el: focus: true takes the focus whenever it is free and the field is enabled', async () => {
+  global.document = fakeDocument();
+  let focused = null;
+  const realCreate = document.createElement;
+  document.createElement = (tag) => { const e = realCreate(tag); e.focus = () => { focused = e; document.activeElement = e; }; return e; };
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(WAITER, 'wt').ok);
+  const button = container.children[0].children[0];
+  // the click that opens the box leaves the focus on the button
+  document.activeElement = button;
+  button.on.click({ preventDefault() {} });
+  const box = container.children[0].children[1];
+  assert.strictEqual(focused, null, 'took the focus from the button');
+  // the button goes, but the box is disabled (someone is typing to you): it waits
+  document.activeElement = null;
+  box.disabled = true;
+  view.send('tick');
+  assert.strictEqual(focused, null);
+  // enabled, the next render gives it the focus
+  box.disabled = false;
+  view.send('tick');
+  assert.strictEqual(focused, box);
+  // typed in elsewhere: left alone
+  const other = { isConnected: true };
+  document.activeElement = other; focused = null;
+  view.send('tick');
+  assert.strictEqual(focused, null);
+  // disabled a while (someone typing to you) and back: the box has it again
+  document.activeElement = null; box.disabled = true;
+  view.send('tick');
+  assert.strictEqual(focused, null);
+  box.disabled = false;
+  view.send('tick');
+  assert.strictEqual(focused, box);
   document.createElement = realCreate;
   view.unmount();
 });
@@ -416,6 +478,103 @@ test('el: a list that grows or shrinks keeps its element and the children it sti
   assert.strictEqual(container.children[0], ul);
   assert.deepStrictEqual(ul.children, [one, two]);
   view.unmount();
+});
+
+const WIRE = `
+def wdrop(l: List, k: Int) -> List do
+  case k <= 0 or l == [] do
+    true -> l
+    false -> wdrop(tail(l), k - 1)
+  end
+end
+
+actor Wire do
+  state got: List :: []
+  state ups: Int :: 0
+  state downs: Int :: 0
+  state first: Int :: 1
+  state out: List :: []
+  on :say(t: String) do
+    become out: append(out, t)
+  end
+  on :frame(t: String) do
+    become got: append(got, t)
+  end
+  on :up do
+    become ups: ups + 1
+  end
+  on :down do
+    become downs: downs + 1
+  end
+  on :sent(n: Int) do
+    become out: wdrop(out, n - first + 1), first: n + 1
+  end
+  on :view do
+    reply el("div", %{},
+      socket("/live/w", %{frame: :frame, open: :up, closed: :down, sent: :sent}, first, out),
+      el("span", %{}, concat("#{ups}/#{downs} got=", join(got, ","), " out=#{length(out)} first=#{first}")))
+  end
+end
+w = spawn Wire
+w <- :view`;
+
+test('socket(): frames out once each and in order, frames in in order, a drop redials, unmount hangs up', async () => {
+  global.document = fakeDocument();
+  const made = [];
+  global.WebSocket = class {
+    constructor(url) { this.url = url; this.readyState = 0; this.sent = []; made.push(this); }
+    send(d) { this.sent.push(d); }
+    close() { this.readyState = 3; this.closed = true; }
+  };
+  const tick = (ms) => new Promise((r) => setTimeout(r, ms || 5));
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(WIRE, 'w').ok);
+  const status = () => textOf(container.children[0].children[1]);
+  assert.strictEqual(made.length, 1);
+  assert.strictEqual(made[0].url, 'ws:///live/w');
+  // said before it is open: it waits
+  view.send('say', '"a"');
+  assert.deepStrictEqual(made[0].sent, []);
+  made[0].readyState = 1;
+  made[0].onopen();
+  assert.deepStrictEqual(made[0].sent, ['a']);
+  await tick();
+  assert.strictEqual(status(), '1/0 got= out=0 first=2');
+  // open: straight out, and never twice, however often it renders
+  view.send('say', '"b"');
+  view.send('say', '"c"');
+  await tick();
+  view.send('say', '"d"');
+  await tick();
+  assert.deepStrictEqual(made[0].sent, ['a', 'b', 'c', 'd']);
+  assert.strictEqual(status(), '1/0 got= out=0 first=5');
+  // frames in, in the order they came
+  made[0].onmessage({ data: 'x' });
+  made[0].onmessage({ data: 'y' });
+  made[0].onmessage({ data: 'z' });
+  await tick();
+  assert.strictEqual(status(), '1/0 got=x,y,z out=0 first=5');
+  // a drop: said, and redialled; what was said meanwhile goes on reconnect
+  made[0].readyState = 3;
+  made[0].onclose();
+  view.send('say', '"e"');
+  await tick();
+  assert.strictEqual(status(), '1/1 got=x,y,z out=1 first=5');
+  await tick(560);
+  assert.strictEqual(made.length, 2);
+  made[1].readyState = 1;
+  made[1].onopen();
+  assert.deepStrictEqual(made[1].sent, ['e']);
+  await tick();
+  assert.strictEqual(status(), '2/1 got=x,y,z out=0 first=6');
+  // unmount hangs up and does not redial
+  view.unmount();
+  assert.ok(made[1].closed);
+  await tick(600);
+  assert.strictEqual(made.length, 2);
+  delete global.WebSocket;
 });
 
 const TYPER = `
