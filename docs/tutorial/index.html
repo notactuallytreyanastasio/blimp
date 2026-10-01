@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Blimp Tutorial</title>
+<title>Build Tetris in Blimp</title>
 <style>
 :root {
   --bg: #fafafa;
@@ -170,6 +170,20 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
 .test .detail { margin-left: 1.3rem; color: var(--red); font-size: 11px; margin-top: 0.15rem; font-style: italic; }
 .parse-error { color: var(--red); padding: 0.5rem; background: var(--red-dim); border-radius: 4px; white-space: pre-wrap; }
 
+/* -- play pane: BlimpView renders the game's view here -- */
+.play-wrap { flex: 1; min-height: 0; overflow: auto; padding: 0.85rem 1rem; }
+.play-hint { color: var(--muted); max-width: 44ch; }
+.play-status { padding: 0.35rem 0.85rem; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); flex-shrink: 0; }
+.play-status:empty { display: none; }
+.play-status.error { color: var(--red); }
+#play h1, #play h2 { font-size: 1rem; margin: 0; }
+.blimp-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.blimp-row { display: flex; flex-direction: row; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.blimp-code-block { font-size: 17px; line-height: 1.05; background: #111; padding: 0.5rem 0.6rem; border-radius: 4px; margin: 0; white-space: pre; width: max-content; }
+.blimp-button { font-family: var(--font-mono); font-size: 13px; padding: 0.35rem 0.7rem; border: 1px solid var(--border); background: #fff; border-radius: 4px; cursor: pointer; }
+.blimp-button:hover { border-color: var(--blue); }
+.blimp-error { color: var(--red); background: var(--red-dim); padding: 0.5rem; border-radius: 4px; white-space: pre-wrap; font-size: 11px; }
+
 /* Tiny-screen fallback */
 @media (max-width: 900px) {
   .app { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
@@ -181,7 +195,7 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><a href="/">blimp</a> / tutorial</div>
+  <div class="brand"><a href="/">blimp</a> / tutorial: build Tetris</div>
   <div class="status" id="status">loading wasm…</div>
 </div>
 
@@ -200,6 +214,7 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
     <div class="repl-tabs">
       <button data-tab="editor" class="active">Editor</button>
       <button data-tab="cheat">Cheat</button>
+      <button data-tab="play">Play</button>
     </div>
 
     <div class="tab-pane active" id="pane-editor">
@@ -209,6 +224,16 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
         <button id="reset-stub" disabled>Reset to stub</button>
       </div>
       <div id="results"></div>
+    </div>
+
+    <div class="tab-pane" id="pane-play">
+      <div class="play-wrap"><div id="play"><p class="play-hint">The finished game is what the chapters build, one actor at a time. In chapter 8, once the tests pass, <b>Play my code</b> runs yours.</p></div></div>
+      <div class="play-status" id="play-status"></div>
+      <div class="repl-controls">
+        <button id="play-finished" class="primary" disabled>Play the finished game</button>
+        <button id="play-mine" disabled>Play my code</button>
+        <button id="play-stop" disabled>Stop</button>
+      </div>
     </div>
 
     <div class="tab-pane" id="pane-cheat">
@@ -222,36 +247,37 @@ html, body { height: 100%; font-family: var(--font-mono); font-size: 13px; line-
 
 <script src="blimp.js"></script>
 <script src="blimp-highlight.js"></script>
+<script src="blimp-view.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.46.0/min/vs/loader.js"></script>
 <script>
 const CHAPTERS = [
-  { id: '00', title: 'Why actors?',                        md: '00-why-actors.md' },
-  { id: '01', title: 'Your first actor',                   md: '01-first-actor.md',
-    stub: './exercises/ch01_first_actor/01_bike.blimp',
-    solution: './exercises/ch01_first_actor/solutions/01_bike.blimp' },
-  { id: '02', title: 'State, become, and the free lock',   md: '02-state-and-locks.md',
-    stub: './exercises/ch02_state/01_rental.blimp',
-    solution: './exercises/ch02_state/solutions/01_rental.blimp' },
-  { id: '03', title: 'Actors talking to actors',           md: '03-actors-talking.md',
-    stub: './exercises/ch03_actors/01_station.blimp',
-    solution: './exercises/ch03_actors/solutions/01_station.blimp' },
-  { id: '04', title: 'Zoom out',                           md: '04-zoom-out.md',
-    stub: './exercises/ch04_zoom_out/01_bikeshare.blimp',
-    solution: './exercises/ch04_zoom_out/solutions/01_bikeshare.blimp' },
-  { id: '05', title: 'The supervision tree',               md: '05-supervision.md',
-    stub: './exercises/ch05_supervision/01_supervision.blimp',
-    solution: './exercises/ch05_supervision/solutions/01_supervision.blimp' },
-  { id: '06', title: 'The Rider',                          md: '06-rider.md',
-    stub: './exercises/ch06_rider/01_rider.blimp',
-    solution: './exercises/ch06_rider/solutions/01_rider.blimp' },
-  { id: '07', title: 'The Clock',                          md: '07-clock.md',
-    stub: './exercises/ch07_clock/01_clock.blimp',
-    solution: './exercises/ch07_clock/solutions/01_clock.blimp' },
-  { id: '08', title: 'Stale rentals',                      md: null },
-  { id: '09', title: 'GPS phone-home',                     md: null },
-  { id: '10', title: 'The dashboard',                      md: null },
-  { id: '11', title: 'Where to go next',                   md: null },
+  { id: '00', title: 'What you are building',              md: '00-what-you-are-building.md' },
+  { id: '01', title: 'The falling piece',                  md: '01-the-falling-piece.md',
+    stub: './exercises/ch01_piece/01_piece.blimp',
+    solution: './exercises/ch01_piece/solutions/01_piece.blimp' },
+  { id: '02', title: 'Shapes are data',                    md: '02-shapes-are-data.md',
+    stub: './exercises/ch02_shapes/01_shapes.blimp',
+    solution: './exercises/ch02_shapes/solutions/01_shapes.blimp' },
+  { id: '03', title: 'The board',                          md: '03-the-board.md',
+    stub: './exercises/ch03_board/01_board.blimp',
+    solution: './exercises/ch03_board/solutions/01_board.blimp' },
+  { id: '04', title: 'Clearing lines, keeping score',      md: '04-lines-and-score.md',
+    stub: './exercises/ch04_lines_and_score/01_score.blimp',
+    solution: './exercises/ch04_lines_and_score/solutions/01_score.blimp' },
+  { id: '05', title: 'The bag',                            md: '05-the-bag.md',
+    stub: './exercises/ch05_bag/01_bag.blimp',
+    solution: './exercises/ch05_bag/solutions/01_bag.blimp' },
+  { id: '06', title: 'The game takes input',               md: '06-the-game.md',
+    stub: './exercises/ch06_game/01_game.blimp',
+    solution: './exercises/ch06_game/solutions/01_game.blimp' },
+  { id: '07', title: 'Gravity, landing, game over',        md: '07-gravity.md',
+    stub: './exercises/ch07_gravity/01_gravity.blimp',
+    solution: './exercises/ch07_gravity/solutions/01_gravity.blimp' },
+  { id: '08', title: 'The screen, and playing it',         md: '08-the-screen.md',
+    stub: './exercises/ch08_screen/01_screen.blimp',
+    solution: './exercises/ch08_screen/solutions/01_screen.blimp', play: true },
+  { id: '09', title: 'Where to take it',                   md: '09-where-to-take-it.md' },
 ];
 
 const statusEl = document.getElementById('status');
@@ -353,6 +379,7 @@ async function loadChapter(id) {
   }
 
   resultsEl.innerHTML = '';
+  playMineBtn.disabled = !ch.play;
   if (ch.stub) {
     try {
       currentStubSource = await fetchText(ch.stub);
@@ -443,8 +470,67 @@ for (const btn of document.querySelectorAll('[data-tab]')) {
   btn.addEventListener('click', () => {
     for (const b of document.querySelectorAll('[data-tab]')) b.classList.toggle('active', b === btn);
     for (const p of document.querySelectorAll('.tab-pane')) p.classList.toggle('active', p.id === 'pane-' + btn.dataset.tab);
+    if (btn.dataset.tab !== 'play' && playView) { stopPlay(); playStatus('stopped when you left the Play tab'); }
   });
 }
+
+// ---- Play ------------------------------------------------------------------
+// A second interpreter, so a game never shares actors with a test run. The
+// source must end with `game <- :view`, like chapter 8's file does.
+const playEl = document.getElementById('play');
+const playStatusEl = document.getElementById('play-status');
+const playFinishedBtn = document.getElementById('play-finished');
+const playMineBtn = document.getElementById('play-mine');
+const playStopBtn = document.getElementById('play-stop');
+let playView = null;
+let finishedSource = null;
+
+function playStatus(msg, isError) {
+  playStatusEl.textContent = msg;
+  playStatusEl.classList.toggle('error', !!isError);
+}
+
+function stopPlay() {
+  if (playView) { playView.unmount(); playView = null; }
+  playStopBtn.disabled = true;
+}
+
+async function play(source, label) {
+  stopPlay();
+  const b = new Blimp();
+  b.onPrint(() => {});
+  try {
+    await b.init('blimp.wasm');
+  } catch (e) {
+    playStatus('wasm failed to load: ' + e.message, true);
+    return;
+  }
+  // the wasm build has no clock of its own: without a seed every game deals
+  // the same pieces
+  b.eval('seed(' + Date.now() + ')');
+  // some failures come back from this wasm build as just "Evaluation error",
+  // with no handler or line; the test run does say what is wrong
+  playView = new BlimpView(b, playEl, { onError: (msg) => playStatus(
+    label + ' stopped: see the error above.' +
+    (/^\s*Evaluation error\s*$/.test(msg) ? ' The page\'s interpreter says no more than that; Run Tests in the Editor tab shows which handler is not done yet.' : ''), true) });
+  const r = playView.mount(source, 'game');
+  if (r && r.ok) {
+    playStatus(label + ': ← → move, ↑ or x rotates, ↓ drops a row, space drops, p pauses, r restarts');
+    playStopBtn.disabled = false;
+  }
+}
+
+playFinishedBtn.addEventListener('click', async () => {
+  try {
+    finishedSource = finishedSource || await fetchText('../blog/tetris.blimp');
+  } catch (e) {
+    playStatus('could not load the finished game: ' + e.message, true);
+    return;
+  }
+  play(finishedSource, 'the finished game');
+});
+playMineBtn.addEventListener('click', () => play(getEditorValue(), 'your code'));
+playStopBtn.addEventListener('click', () => { stopPlay(); playStatus('stopped'); });
 
 function idFromHash() {
   const h = window.location.hash.match(/^#ch(\d{2})/);
@@ -475,6 +561,7 @@ const BLIMP_BUILTINS = [
   'gen_int','gen_atom','gen_list','gen_boolean','gen_string','gen_one_of',
   'stack','row','grid','heading','text','bold','italic','code',
   'code_block','blockquote','button','divider','list','link','image',
+  'set_at','key','timer','seed',
 ];
 
 const BLIMP_MONARCH = {
@@ -592,6 +679,7 @@ async function initMonaco() {
   try {
     await Promise.all([blimp.init('blimp.wasm'), initMonaco()]);
     statusEl.textContent = 'ready';
+    playFinishedBtn.disabled = false;
     statusEl.classList.add('ready');
   } catch (e) {
     statusEl.textContent = 'init error: ' + e.message;
