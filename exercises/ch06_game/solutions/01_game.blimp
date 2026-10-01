@@ -1,0 +1,382 @@
+# Chapter 6 -- The game takes input
+# Run: blimp exercises/ch06_game/01_game.blimp --test
+#
+# Tetris.Game is handed the bag, the board, the piece and the score when it
+# is spawned, and turns a player's key presses into messages to them. It
+# owns only three things of its own: the next kind, and whether the game is
+# over or paused.
+
+# ---------------------------------------------------------------------
+# Finished in earlier chapters. Nothing to change here. They come first
+# because defining an actor runs its state defaults, and some of those
+# spawn one of these.
+
+actor Tetris do
+  state name: String :: "blimp tetris"
+end
+
+actor Tetris.Shapes do
+  state table: List :: [
+    [[{0, 1}, {1, 1}, {2, 1}, {3, 1}], [{2, 0}, {2, 1}, {2, 2}, {2, 3}], [{0, 2}, {1, 2}, {2, 2}, {3, 2}], [{1, 0}, {1, 1}, {1, 2}, {1, 3}]],
+    [[{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}]],
+    [[{1, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {1, 1}, {2, 1}, {1, 2}], [{0, 1}, {1, 1}, {2, 1}, {1, 2}], [{1, 0}, {0, 1}, {1, 1}, {1, 2}]],
+    [[{1, 0}, {2, 0}, {0, 1}, {1, 1}], [{1, 0}, {1, 1}, {2, 1}, {2, 2}], [{1, 1}, {2, 1}, {0, 2}, {1, 2}], [{0, 0}, {0, 1}, {1, 1}, {1, 2}]],
+    [[{0, 0}, {1, 0}, {1, 1}, {2, 1}], [{2, 0}, {1, 1}, {2, 1}, {1, 2}], [{0, 1}, {1, 1}, {1, 2}, {2, 2}], [{1, 0}, {0, 1}, {1, 1}, {0, 2}]],
+    [[{0, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {1, 2}], [{0, 1}, {1, 1}, {2, 1}, {2, 2}], [{1, 0}, {1, 1}, {0, 2}, {1, 2}]],
+    [[{2, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {1, 1}, {1, 2}, {2, 2}], [{0, 1}, {1, 1}, {2, 1}, {0, 2}], [{0, 0}, {1, 0}, {1, 1}, {1, 2}]]
+  ]
+
+  on :offsets(kind: Int, rot: Int) do
+    reply elem(elem(table, kind - 1), rot)
+  end
+
+  on :kinds do
+    reply length(table)
+  end
+end
+
+actor Tetris.Piece do
+  state kind: Int :: 1
+  state rot: Int :: 0
+  state x: Int :: 3
+  state y: Int :: 0
+  state shapes: Tetris.Shapes :: spawn Tetris.Shapes
+
+  on :spawn(new_kind: Int) do
+    become kind: new_kind, rot: 0, x: 3, y: 0
+    reply :ok
+  end
+
+  on :info do
+    reply %{kind: kind, x: x, y: y, rot: rot}
+  end
+
+  on :cells do
+    reply self <- :cells_for(0, 0, 0)
+  end
+
+  on :cells_for(dx: Int, dy: Int, drot: Int) do
+    offs = shapes <- :offsets(kind, rem(rot + drot + 4, 4))
+    reply map(offs, fn(o: Tuple) do
+      case o do
+        {ox, oy} -> {x + dx + ox, y + dy + oy}
+      end
+    end)
+  end
+
+  on :move(dx: Int, dy: Int) do
+    become x: x + dx, y: y + dy
+    reply :ok
+  end
+
+  on :rotate(dir: Int) do
+    become rot: rem(rot + dir + 4, 4)
+    reply :ok
+  end
+end
+
+actor Tetris.Board do
+  state rows: List :: for y in range(1, 20) do for x in range(1, 10) do 0 end end
+
+  on :rows do reply rows end
+
+  on :load(new_rows: List) do
+    become rows: new_rows
+    reply :ok
+  end
+
+  on :reset do
+    become rows: for y in range(1, 20) do for x in range(1, 10) do 0 end end
+    reply :ok
+  end
+
+  # above the top (y < 0) is open, though this game never puts a cell
+  # there. separate clauses keep elem away from the edges, because elem
+  # with -1 quietly reads position 0 and past the end gives nil. one guard
+  # like `x >= 0 and elem(...)` is not enough: the browser build does not
+  # short-circuit `and`/`or` (the native one does)
+  on :blocked?(x: Int, y: Int) when x < 0 or x > 9 or y > 19 do reply true end
+  on :blocked?(x: Int, y: Int) when y < 0 do reply false end
+  on :blocked?(x: Int, y: Int) do reply elem(elem(rows, y), x) != 0 end
+
+  on :fits?(cells: List) do
+    bad = filter(cells, fn(c: Tuple) do
+      case c do
+        {x, y} -> self <- :blocked?(x, y)
+      end
+    end)
+    reply empty?(bad)
+  end
+
+  on :lock(cells: List, colour: Int) do
+    painted = reduce(cells, rows, fn(acc: List, c: Tuple) do
+      case c do
+        {x, y} ->
+          case y < 0 do
+            true -> acc
+            _ -> set_at(acc, y, set_at(elem(acc, y), x, colour))
+          end
+      end
+    end)
+    become rows: painted
+    reply :ok
+  end
+
+  on :sweep do
+    kept = filter(rows, fn(row: List) do
+      not(empty?(filter(row, fn(v: Int) do v == 0 end)))
+    end)
+    cleared = 20 - length(kept)
+    empties = for i in range(1, cleared) do for x in range(1, 10) do 0 end end
+    become rows: reduce(kept, empties, fn(acc: List, row: List) do append(acc, row) end)
+    reply cleared
+  end
+end
+
+actor Tetris.Score do
+  state score: Int :: 0
+  state lines: Int :: 0
+  state level: Int :: 1
+
+  on :cleared(n: Int) do
+    gained = elem([0, 100, 300, 500, 800], n) * level
+    total = lines + n
+    become score: score + gained, lines: total, level: total / 10 + 1
+    reply score + gained
+  end
+
+  on :soft_drop do
+    become score: score + 1
+    reply score + 1
+  end
+
+  on :hard_drop(rows: Int) do
+    become score: score + 2 * rows
+    reply score + 2 * rows
+  end
+
+  # ms between gravity ticks
+  on :drop_interval do
+    reply max(120, 800 - (level - 1) * 70)
+  end
+
+  on :summary do
+    reply %{score: score, lines: lines, level: level}
+  end
+
+  on :reset do
+    become score: 0, lines: 0, level: 1
+    reply :ok
+  end
+end
+
+actor Tetris.Bag do
+  state bag: List :: []
+
+  on :next do
+    full = case bag do
+      [] -> self <- :shuffled
+      _ -> bag
+    end
+    become bag: tail(full)
+    reply head(full)
+  end
+
+  # fisher-yates with set_at, no shuffle builtin
+  on :shuffled do
+    mixed = reduce(reverse(range(1, 6)), range(1, 7), fn(acc: List, i: Int) do
+      j = random(0, i)
+      a = elem(acc, i)
+      b = elem(acc, j)
+      set_at(set_at(acc, i, b), j, a)
+    end)
+    reply mixed
+  end
+
+  on :reset do
+    become bag: []
+    reply :ok
+  end
+end
+
+# ---------------------------------------------------------------------
+# This chapter. Fill in the handlers marked Exercise.
+
+actor Tetris.Game do
+  state bag: Tetris.Bag :: nil
+  state board: Tetris.Board :: nil
+  state piece: Tetris.Piece :: nil
+  state score: Tetris.Score :: nil
+  state next_kind: Int :: 1
+  state over: Bool :: false
+  state paused: Bool :: false
+
+  # Exercise: reset the board, the score and the bag, spawn a piece of
+  # the bag's next kind, and remember the kind after that. Not over, not
+  # paused. Reply :ok.
+  on :start do
+    board <- :reset
+    score <- :reset
+    bag <- :reset
+    piece <- :spawn(bag <- :next)
+    upcoming = bag <- :next
+    become next_kind: upcoming, over: false, paused: false
+    reply :ok
+  end
+
+  on :over? do reply over end
+  on :paused? do reply paused end
+  on :next_kind do reply next_kind end
+  on :summary do reply score <- :summary end
+  on :piece do reply piece end
+  on :board do reply board end
+
+  # inputs. the guards drop moves while paused or over
+  on :left when over or paused do reply :ok end
+  on :left do reply self <- :nudge(-1, 0) end
+
+  on :right when over or paused do reply :ok end
+  on :right do reply self <- :nudge(1, 0) end
+
+  on :rotate when over or paused do reply :ok end
+  on :rotate do reply self <- :turn(1) end
+
+  on :down when over or paused do reply :ok end
+  on :down do reply self <- :soft_drop end
+
+  on :pause when over do reply :ok end
+  on :pause when paused do
+    become paused: false
+    reply :ok
+  end
+  on :pause do
+    become paused: true
+    reply :ok
+  end
+
+  on :restart do reply self <- :start end
+
+  # Exercise: move the piece by dx, dy if its cells there fit on the
+  # board, and reply what the move replied. Otherwise reply :blocked.
+  on :nudge(dx: Int, dy: Int) do
+    fits = board <- :fits?(piece <- :cells_for(dx, dy, 0))
+    outcome = case fits do
+      true -> piece <- :move(dx, dy)
+      _ -> :blocked
+    end
+    reply outcome
+  end
+
+  # Exercise: nudge down one row, and score a point if it moved.
+  # Reply what the nudge replied.
+  on :soft_drop do
+    moved = self <- :nudge(0, 1)
+    case moved do
+      :ok -> score <- :soft_drop
+      _ -> :ok
+    end
+    reply moved
+  end
+
+  # Exercise: rotate the piece by dir. If it does not fit, try
+  # shifting it 1 left, 1 right, 2 left, 2 right, and use the first that fits
+  # (self <- :kick(k, dir)). None fit: reply :blocked.
+  on :turn(dir: Int) do
+    kicks = filter([0, -1, 1, -2, 2], fn(k: Int) do
+      board <- :fits?(piece <- :cells_for(k, 0, dir))
+    end)
+    outcome = case kicks do
+      [k | _] -> self <- :kick(k, dir)
+      _ -> :blocked
+    end
+    reply outcome
+  end
+
+  on :kick(k: Int, dir: Int) do
+    piece <- :move(k, 0)
+    piece <- :rotate(dir)
+    reply :ok
+  end
+
+  test "start spawns a piece at the top, not over, not paused" do
+    game = new_game()
+    refute(game <- :over?)
+    refute(game <- :paused?)
+    piece = game <- :piece
+    assert_eq(lookup(piece <- :info, :y), 0)
+    # a bag deals seven different kinds, so the next one is not this one
+    refute(lookup(piece <- :info, :kind) == (game <- :next_kind))
+  end
+
+  test "left and right move the piece, the walls stop it" do
+    game = new_game()
+    assert_eq(game <- :left, :ok)
+    piece = game <- :piece
+    assert_eq(lookup(piece <- :info, :x), 2)
+    game <- :right
+    game <- :right
+    assert_eq(lookup(piece <- :info, :x), 4)
+    for i in range(1, 12) do game <- :left end
+    assert_eq(game <- :left, :blocked)
+    board = game <- :board
+    assert(board <- :fits?(piece <- :cells))
+  end
+
+  test "rotate turns the piece" do
+    game = new_game()
+    game <- :rotate
+    piece = game <- :piece
+    assert_eq(lookup(piece <- :info, :rot), 1)
+  end
+
+  test "down drops one row and scores a point" do
+    game = new_game()
+    assert_eq(game <- :down, :ok)
+    piece = game <- :piece
+    assert_eq(lookup(piece <- :info, :y), 1)
+    assert_eq(lookup(game <- :summary, :score), 1)
+  end
+
+  test "rotating against the wall kicks the piece back in" do
+    game = new_game()
+    piece = game <- :piece
+    piece <- :spawn(1)
+    game <- :rotate
+    for i in range(1, 6) do game <- :right end
+    assert_eq(lookup(piece <- :info, :x), 7)
+    assert_eq(game <- :rotate, :ok)
+    info = piece <- :info
+    assert_eq(lookup(info, :x), 6)
+    assert_eq(lookup(info, :rot), 2)
+    board = game <- :board
+    assert(board <- :fits?(piece <- :cells))
+  end
+
+  test "pause freezes the piece until it is pressed again" do
+    game = new_game()
+    game <- :pause
+    assert(game <- :paused?)
+    game <- :left
+    game <- :down
+    piece = game <- :piece
+    info = piece <- :info
+    assert_eq(lookup(info, :x), 3)
+    assert_eq(lookup(info, :y), 0)
+    game <- :pause
+    refute(game <- :paused?)
+    game <- :left
+    assert_eq(lookup(piece <- :info, :x), 2)
+  end
+end
+
+# The tests build a whole game this way: every part spawned, then handed
+# to the Game when it is spawned.
+def new_game() -> Any do
+  bag = spawn Tetris.Bag
+  board = spawn Tetris.Board
+  piece = spawn Tetris.Piece
+  score = spawn Tetris.Score
+  game = spawn Tetris.Game, bag: bag, board: board, piece: piece, score: score
+  game <- :start
+  game
+end
