@@ -190,6 +190,7 @@ pub const BuiltinRegistry = struct {
         reg.register("stored", &viewStored);
         reg.register("store", &viewStore);
         reg.register("socket", &viewSocket);
+        reg.register("show", &viewShow);
         reg.register("key", &viewKey);
         reg.register("input", &viewInput);
         reg.register("textarea", &viewTextarea);
@@ -2262,32 +2263,45 @@ const ViewAttr = Value.ViewNode.ViewAttr;
 /// Build a view_node with the given tag, attrs, and variadic children.
 /// If any child is a list, its elements are flattened into the children array.
 /// This allows `stack(map(items, fn(x) do text(x) end))` to work naturally.
+/// A child that is nil or false is nothing: show(cond, node) and a function
+/// that returns nil for "nothing here" leave no trace in the tree.
+fn isAbsentChild(v: *const Value) bool {
+    return switch (v.*) {
+        .nil => true,
+        .boolean => |b| !b,
+        else => false,
+    };
+}
+
 fn makeViewNode(allocator: std.mem.Allocator, tag: []const u8, attrs: []const ViewAttr, children: []const *const Value) EvalError!*const Value {
     const node_attrs = allocator.dupe(ViewAttr, attrs) catch return error.OutOfMemory;
-    // Count total children after flattening lists
+    // Count total children after flattening lists, leaving out the absent
     var total: usize = 0;
     for (children) |child| {
         switch (child.*) {
             .list => |items| {
-                total += items.len;
+                for (items) |item| {
+                    if (!isAbsentChild(item)) total += 1;
+                }
             },
             else => {
-                total += 1;
+                if (!isAbsentChild(child)) total += 1;
             },
         }
     }
-    // Build flattened children array
     const node_children = allocator.alloc(*const Value, total) catch return error.OutOfMemory;
     var idx: usize = 0;
     for (children) |child| {
         switch (child.*) {
             .list => |items| {
                 for (items) |item| {
+                    if (isAbsentChild(item)) continue;
                     node_children[idx] = item;
                     idx += 1;
                 }
             },
             else => {
+                if (isAbsentChild(child)) continue;
                 node_children[idx] = child;
                 idx += 1;
             },
@@ -2296,6 +2310,19 @@ fn makeViewNode(allocator: std.mem.Allocator, tag: []const u8, attrs: []const Vi
     const node = allocator.create(Value.ViewNode) catch return error.OutOfMemory;
     node.* = .{ .tag = tag, .attrs = node_attrs, .children = node_children };
     return make(allocator, .{ .view_node = node });
+}
+
+/// show(cond, node) -- node when cond is true, otherwise nil, which a view
+/// leaves out. The view's "maybe": what used to be
+///   case open do
+///     true -> [el(...)]
+///     false -> []
+///   end
+/// node is built either way (a view has no side effects to skip).
+fn viewShow(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .boolean) return error.TypeError;
+    if (args[0].boolean) return args[1];
+    return make(allocator, .nil);
 }
 
 /// stack(child, child, ...) — vertical flex container, variadic children

@@ -503,6 +503,45 @@ test('el("dialog"): modal opens with showModal, Escape and the backdrop dismiss,
   view.unmount();
 });
 
+const MAYBE = `
+def mb_extra(lit: Bool) -> Any do
+  case lit do
+    true -> el("em", %{}, "!")
+    false -> nil
+  end
+end
+
+actor Mb do
+  state lit: Bool :: false
+  on :flip do
+    become lit: not(lit)
+  end
+  on :view do
+    reply el("div", %{}, el("b", %{}, "a"), show(lit, el("i", %{}, "b")), mb_extra(lit), [nil, false, "c"])
+  end
+end
+mb = spawn Mb
+mb <- :view`;
+
+test('show(cond, node) and nil or false children leave nothing in the page', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(MAYBE, 'mb').ok);
+  const div = container.children[0];
+  assert.strictEqual(div.children.length, 2);
+  assert.strictEqual(textOf(div), 'ac');
+  const first = div.children[0];
+  view.send('flip');
+  assert.strictEqual(div.children.length, 4);
+  assert.strictEqual(textOf(div), 'ab!c');
+  assert.strictEqual(div.children[0], first);
+  view.send('flip');
+  assert.strictEqual(textOf(div), 'ac');
+  view.unmount();
+});
+
 const LISTER = `
 actor Li do
   state n: Int :: 3
