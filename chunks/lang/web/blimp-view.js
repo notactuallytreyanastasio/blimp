@@ -29,8 +29,13 @@
 //
 // el(tag, attrs, children...) is a real element with the page's own classes
 // and attributes: {"tag":"el","attrs":{"@tag":{"text":"div"},"class":...}}.
-// Six attrs are instructions, not HTML (see viewEl): click (+ with),
-// input, change, submit and swipe each send the actor a message. An el
+// Seven attrs are instructions, not HTML (see viewEl): click (+ with),
+// input, change, submit, swipe and drag each send the actor a message.
+// drag: :msg (+ with) is a pointer pressed on the element and moved: the
+// actor gets :msg(dx, dy), or :msg(with, dx, dy), the pixels moved since
+// the last one, at most once a frame. The pointer is held inside the
+// window, so whatever was grabbed can always be grabbed again. A press on
+// a button, link or field inside it is that control's, not a drag. An el
 // whose id changes is a new element: a CSS animation keyed to it starts
 // again, as it did when LiveView replaced the node.
 //
@@ -53,7 +58,7 @@
   var SVGNS = 'http://www.w3.org/2000/svg';
   var SVG_TAGS = { svg: 1, g: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, text: 1, tspan: 1,
     defs: 1, linearGradient: 1, radialGradient: 1, stop: 1, ellipse: 1, title: 0 };
-  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, select: 1, selection: 1,
+  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, drag: 1, select: 1, selection: 1,
     debounce: 1, shortcut: 1, shortcut_keys: 1, paste_image: 1, inner_html: 1 };
 
   // Blimp strings count bytes (UTF-8); a field's selection counts UTF-16
@@ -420,6 +425,42 @@
         var dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
         self.send(el._blimpOn.swipe, ':' + dir);
       }, { passive: false });
+    }
+    if (el._blimpOn.drag) {
+      var at = null, owed = [0, 0], queued = false;
+      var held = function (e) {
+        var w = root && root.innerWidth, h = root && root.innerHeight;
+        return [w ? Math.max(0, Math.min(w, e.clientX)) : e.clientX, h ? Math.max(0, Math.min(h, e.clientY)) : e.clientY];
+      };
+      var flush = function () {
+        queued = false;
+        var on = el._blimpOn;
+        if (!on.drag || (owed[0] === 0 && owed[1] === 0)) return;
+        var d = owed; owed = [0, 0];
+        self.send(on.drag, (on['with'] !== undefined ? on['with'] + ', ' : '') + Math.round(d[0]) + ', ' + Math.round(d[1]));
+      };
+      el.addEventListener('pointerdown', function (e) {
+        if (!el._blimpOn.drag || e.button !== 0) return;
+        var t = e.target;
+        for (; t && t !== el; t = t.parentNode) {
+          if (/^(BUTTON|A|INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '')) return;
+        }
+        at = held(e);
+        if (el.setPointerCapture && e.pointerId !== undefined) el.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      });
+      el.addEventListener('pointermove', function (e) {
+        if (!at) return;
+        var p = held(e);
+        owed = [owed[0] + p[0] - at[0], owed[1] + p[1] - at[1]];
+        at = p;
+        if (queued) return;
+        // a frame's worth of moves is one message; without frames (a test), each is one
+        if (root && root.requestAnimationFrame) { queued = true; root.requestAnimationFrame(flush); } else flush();
+      });
+      var drop = function () { if (!at) return; at = null; flush(); };
+      el.addEventListener('pointerup', drop);
+      el.addEventListener('pointercancel', drop);
     }
     if (el._blimpOn.submit) el.addEventListener('submit', function (e) {
       e.preventDefault();
