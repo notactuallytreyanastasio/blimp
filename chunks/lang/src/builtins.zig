@@ -2491,7 +2491,7 @@ const el_tags = [_][]const u8{
 const el_event_keys = [_][]const u8{
     "click",  "with",  "input",           "change", "submit", "swipe",   "drag",    "select",  "selection",
     "debounce", "shortcut", "shortcut_keys", "paste_image", "inner_html", "submit_on_enter", "scroll", "focus",
-    "modal",  "dismiss", "reset_on_submit",
+    "modal",  "dismiss", "reset_on_submit", "key",
 };
 
 fn isElEventKey(key: []const u8) bool {
