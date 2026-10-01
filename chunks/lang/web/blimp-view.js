@@ -49,6 +49,12 @@
 //                          form's submit: runs); Shift+Enter is a new line
 //   scroll: :end           kept scrolled to the bottom as it grows, unless
 //                          the reader has scrolled up to read
+//   el("dialog", %{modal: true, dismiss: :msg}, ...)
+//                          a dialog the browser runs: modal is showModal()
+//                          (a backdrop, the focus kept inside, the page
+//                          behind it inert), otherwise show(). dismiss is
+//                          sent on Escape and on a click on the backdrop.
+//                          Open while it is in the view; gone, it is closed.
 //   focus: true            has the focus whenever nothing else does and it
 //                          is not disabled: when it appears, after the
 //                          button that opened it has gone, after it was
@@ -76,7 +82,7 @@
   var SVGNS = 'http://www.w3.org/2000/svg';
   var SVG_TAGS = { svg: 1, g: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, text: 1, tspan: 1,
     defs: 1, linearGradient: 1, radialGradient: 1, stop: 1, ellipse: 1, title: 0 };
-  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, drag: 1, submit_on_enter: 1, scroll: 1, focus: 1, select: 1, selection: 1,
+  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, drag: 1, submit_on_enter: 1, scroll: 1, focus: 1, modal: 1, dismiss: 1, select: 1, selection: 1,
     debounce: 1, shortcut: 1, shortcut_keys: 1, paste_image: 1, inner_html: 1 };
 
   // Blimp strings count bytes (UTF-8); a field's selection counts UTF-16
@@ -170,6 +176,7 @@
     this._sending = false;
     this._scrollers = [];  // scroll: :end elements, kept at their end
     this._focusing = [];   // focus: true elements, which take the focus when it is free
+    this._dialogs = [];    // <dialog>s, opened once they are in the page
     var self = this;
     this._onKeydown = function (e) { self._handleKey(e); };
     this._onKeyup = function (e) { self._handleKeyUp(e); };
@@ -284,6 +291,13 @@
   // take the focus if nobody has it.
   BlimpView.prototype._settle = function () {
     var on = function (el) { return el.isConnected !== false; };
+    // a dialog opens once it is in the page (showModal needs that)
+    this._dialogs = this._dialogs.filter(on);
+    this._dialogs.forEach(function (el) {
+      if (el.open) return;
+      if (el._blimpOn && el._blimpOn.modal && el.showModal) el.showModal();
+      else if (el.show) el.show();
+    });
     this._scrollers = this._scrollers.filter(on);
     this._scrollers.forEach(function (el) {
       if (el._blimpOn && el._blimpOn.scroll === 'end' && el._blimpAtEnd !== false) el.scrollTop = el.scrollHeight;
@@ -534,6 +548,23 @@
       self._scrollers.push(el);
     }
     if (el._blimpOn.focus) self._focusing.push(el);
+    if ((el.tagName || el.tag || '').toLowerCase() === 'dialog') {
+      self._dialogs.push(el);
+      // Escape is the dialog's cancel: the program decides, so the browser
+      // does not close it behind the program's back
+      el.addEventListener('cancel', function (e) {
+        e.preventDefault();
+        if (el._blimpOn.dismiss) self.send(el._blimpOn.dismiss);
+      });
+      // a click on the backdrop lands on the dialog itself, outside its box;
+      // a click on its padding lands on it too, but inside
+      el.addEventListener('click', function (e) {
+        if (!el._blimpOn.dismiss || e.target !== el || !el.getBoundingClientRect) return;
+        var r = el.getBoundingClientRect();
+        var inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+        if (!inside) self.send(el._blimpOn.dismiss);
+      });
+    }
     if (el._blimpOn.submit) el.addEventListener('submit', function (e) {
       e.preventDefault();
       var fields = {};
@@ -579,7 +610,7 @@
         var want = {};
         Object.keys(EL_EVENTS).forEach(function (k) { if (b.attrs[k] !== undefined) want[k] = attrVal(b.attrs[k]); });
         // a kind of event it had no listener for needs a new element
-        var passive = { 'with': 1, selection: 1, debounce: 1, shortcut_keys: 1, inner_html: 1, focus: 1 };
+        var passive = { 'with': 1, selection: 1, debounce: 1, shortcut_keys: 1, inner_html: 1, focus: 1, modal: 1 };
         if (Object.keys(want).some(function (k) { return !passive[k] && !had[k]; })) return this.renderView(b);
         el._blimpOn = want;
         applyInstructions(el, b.attrs, a.attrs);
