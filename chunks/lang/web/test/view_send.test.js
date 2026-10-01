@@ -422,8 +422,13 @@ test('el: focus: true waits while something else has the focus, then takes it on
   button.on.click({ preventDefault() {} });
   const box = container.children[0].children[1];
   assert.strictEqual(focused, null, 'took the focus from the button');
-  // the button goes (here: the focus is on nothing); the next render gives it to the box
+  // the button goes, but the box is disabled (someone is typing to you): it waits
   document.activeElement = null;
+  box.disabled = true;
+  view.send('tick');
+  assert.strictEqual(focused, null);
+  // enabled, the next render gives it the focus
+  box.disabled = false;
   view.send('tick');
   assert.strictEqual(focused, box);
   // once: after the reader moves on, it is not pulled back

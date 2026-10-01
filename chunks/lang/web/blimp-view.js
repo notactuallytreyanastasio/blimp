@@ -50,9 +50,10 @@
 //   scroll: :end           kept scrolled to the bottom as it grows, unless
 //                          the reader has scrolled up to read
 //   focus: true            focused once, as soon as nothing else has the
-//                          focus (when it appears, or after the button that
-//                          made it appear has gone), on a device with a
-//                          mouse (on a phone it would throw the keyboard up) An el
+//                          focus and it is not disabled (when it appears,
+//                          or after the button that made it appear has gone),
+//                          on a device with a mouse (on a phone it would
+//                          throw the keyboard up) An el
 // whose id changes is a new element: a CSS animation keyed to it starts
 // again, as it did when LiveView replaced the node.
 //
@@ -297,8 +298,14 @@
     var active = document.activeElement;
     var idle = !active || active === document.body || active === document.documentElement || active.isConnected === false;
     if (!idle) return;
-    var el = this._focusing.shift();
-    if (el.focus) el.focus();
+    // a disabled field cannot take it (focus() does nothing): it waits too
+    for (var i = 0; i < this._focusing.length; i++) {
+      var el = this._focusing[i];
+      if (el.disabled || !el.focus) continue;
+      el.focus();
+      if (document.activeElement === undefined || document.activeElement === el) this._focusing.splice(i, 1);
+      return;
+    }
   };
 
   BlimpView.prototype.renderView = function (node) {
