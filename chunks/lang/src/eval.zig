@@ -1581,6 +1581,14 @@ pub const Evaluator = struct {
         }
     }
 
+    fn evalShow(self: *Evaluator, args: []const ast.Node) EvalError!*const Value {
+        if (args.len != 2) return error.TypeError;
+        const cond = try self.eval(args[0]);
+        if (cond.* != .boolean) return error.TypeError;
+        if (!cond.boolean) return self.make(.nil);
+        return self.eval(args[1]);
+    }
+
     fn evalFuncCall(self: *Evaluator, call: ast.Node.FuncCall) EvalError!*const Value {
         // First check if the name refers to a closure in the environment
         if (self.env.lookup(call.name)) |val| {
@@ -1594,6 +1602,10 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, call.name, "filter")) return self.builtinFilter(call.args);
         if (std.mem.eql(u8, call.name, "reduce")) return self.builtinReduce(call.args);
         if (std.mem.eql(u8, call.name, "each")) return self.builtinEach(call.args);
+        // show(cond, node) is lazy, like `and`: node is evaluated only when
+        // cond is true, so it may read what cond guards (show(q != nil,
+        // el("p", %{}, q.content))).
+        if (std.mem.eql(u8, call.name, "show")) return self.evalShow(call.args);
 
         // Runtime eval/test -- needs evaluator context, can't be a plain builtin
         if (std.mem.eql(u8, call.name, "blimp_eval")) return self.runtimeEval(call.args);
