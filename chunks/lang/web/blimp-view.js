@@ -44,6 +44,10 @@
 // window, so whatever was grabbed can always be grabbed again. A press on
 // a button, link or field inside it is that control's, not a drag.
 //
+// A form's submit: sends its fields as a map, %{"name": "amy", "agree": true}
+// (checkboxes true/false, a radio group its checked value), and
+// reset_on_submit: true empties the form once it has sent them.
+//
 // Three more say how an element behaves, and send nothing themselves:
 //   submit_on_enter: true  a field whose Enter submits its form (so the
 //                          form's submit: runs); Shift+Enter is a new line
@@ -82,7 +86,7 @@
   var SVGNS = 'http://www.w3.org/2000/svg';
   var SVG_TAGS = { svg: 1, g: 1, path: 1, circle: 1, rect: 1, line: 1, polyline: 1, polygon: 1, text: 1, tspan: 1,
     defs: 1, linearGradient: 1, radialGradient: 1, stop: 1, ellipse: 1, title: 0 };
-  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, drag: 1, submit_on_enter: 1, scroll: 1, focus: 1, modal: 1, dismiss: 1, select: 1, selection: 1,
+  var EL_EVENTS = { click: 1, 'with': 1, input: 1, change: 1, submit: 1, swipe: 1, drag: 1, submit_on_enter: 1, reset_on_submit: 1, scroll: 1, focus: 1, modal: 1, dismiss: 1, select: 1, selection: 1,
     debounce: 1, shortcut: 1, shortcut_keys: 1, paste_image: 1, inner_html: 1 };
 
   // Blimp strings count bytes (UTF-8); a field's selection counts UTF-16
@@ -132,6 +136,23 @@
   // A Blimp string literal holding `s`.
   function literal(s) {
     return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/#\{/g, '\\#{') + '"';
+  }
+
+  // A form's fields as a Blimp map, %{"name": "amy", "agree": true}: a
+  // checkbox is true or false, a radio group is the checked one's value (or
+  // absent), anything else its text. Field names may be anything ("x-y"),
+  // so the keys are quoted; lookup(f, :name) and f.name both read them.
+  function fieldsMap(form) {
+    var parts = [], seen = {};
+    Array.prototype.forEach.call(form.elements || [], function (f) {
+      if (!f.name || f.disabled) return;
+      if (f.type === 'radio' && !f.checked) return;
+      if (f.type === 'submit' || f.type === 'button' || f.type === 'reset') return;
+      var v = f.type === 'checkbox' ? (f.checked ? 'true' : 'false') : literal(f.value == null ? '' : f.value);
+      if (seen[f.name] !== undefined) parts[seen[f.name]] = literal(f.name) + ': ' + v;
+      else { seen[f.name] = parts.length; parts.push(literal(f.name) + ': ' + v); }
+    });
+    return '%{' + parts.join(', ') + '}';
   }
 
   // Set el's attributes to `attrs`, touching only what differs from `old`.
@@ -567,12 +588,9 @@
     }
     if (el._blimpOn.submit) el.addEventListener('submit', function (e) {
       e.preventDefault();
-      var fields = {};
-      Array.prototype.forEach.call(el.elements || [], function (f) {
-        if (!f.name) return;
-        fields[f.name] = f.type === 'checkbox' ? f.checked : f.value;
-      });
-      if (el._blimpOn.submit) self.send(el._blimpOn.submit, literal(JSON.stringify(fields)));
+      if (!el._blimpOn.submit) return;
+      self.send(el._blimpOn.submit, fieldsMap(el));
+      if (el._blimpOn.reset_on_submit && el.reset) el.reset();
     });
   };
 
@@ -610,7 +628,7 @@
         var want = {};
         Object.keys(EL_EVENTS).forEach(function (k) { if (b.attrs[k] !== undefined) want[k] = attrVal(b.attrs[k]); });
         // a kind of event it had no listener for needs a new element
-        var passive = { 'with': 1, selection: 1, debounce: 1, shortcut_keys: 1, inner_html: 1, focus: 1, modal: 1 };
+        var passive = { 'with': 1, selection: 1, debounce: 1, shortcut_keys: 1, inner_html: 1, focus: 1, modal: 1, reset_on_submit: 1 };
         if (Object.keys(want).some(function (k) { return !passive[k] && !had[k]; })) return this.renderView(b);
         el._blimpOn = want;
         applyInstructions(el, b.attrs, a.attrs);

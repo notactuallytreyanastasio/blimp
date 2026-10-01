@@ -329,8 +329,8 @@ test('el: a drag sends what the pointer moved, with its with, and not from a but
 const CHATTER = `
 actor Ch do
   state said: List :: []
-  on :said(fields: String) do
-    become said: [fields | said]
+  on :said(f: Map) do
+    become said: [f.m | said]
   end
   on :view do
     reply el("div", %{},
@@ -539,6 +539,44 @@ test('show(cond, node) and nil or false children leave nothing in the page', asy
   assert.strictEqual(div.children[0], first);
   view.send('flip');
   assert.strictEqual(textOf(div), 'ac');
+  view.unmount();
+});
+
+const FORMER = `
+actor Fm do
+  state got: String :: ""
+  on :sent(f: Map) do
+    become got: concat(f.name, "|", to_string(f.agree), "|", lookup(f, "size-pick"), "|", to_string(lookup(f, :none)))
+  end
+  on :view do
+    reply el("div", %{},
+      el("form", %{submit: :sent, reset_on_submit: true},
+        el("input", %{name: "name"}), el("input", %{name: "agree", type: "checkbox"}),
+        el("input", %{name: "size-pick", type: "radio", value: "s"}), el("input", %{name: "size-pick", type: "radio", value: "m"})),
+      el("span", %{}, got))
+  end
+end
+fm = spawn Fm
+fm <- :view`;
+
+test('a form sends its fields as a map; a radio group is its checked value; reset_on_submit empties it', async () => {
+  global.document = fakeDocument();
+  const b = await blimp();
+  const container = document.createElement('div');
+  const view = new BlimpView(b, container, { send: true });
+  assert.ok(view.mount(FORMER, 'fm').ok);
+  const root = container.children[0], form = root.children[0];
+  const [name, agree, s, m] = form.children;
+  Object.assign(name, { name: 'name', type: 'text', value: 'amy "the" #{x}' });
+  Object.assign(agree, { name: 'agree', type: 'checkbox', checked: true });
+  Object.assign(s, { name: 'size-pick', type: 'radio', value: 's', checked: false });
+  Object.assign(m, { name: 'size-pick', type: 'radio', value: 'm', checked: true });
+  form.elements = [name, agree, s, m];
+  let reset = 0;
+  form.reset = () => { reset++; };
+  form.on.submit({ preventDefault() {} });
+  assert.strictEqual(textOf(root.children[1]), 'amy "the" #{x}|true|m|nil');
+  assert.strictEqual(reset, 1);
   view.unmount();
 });
 
