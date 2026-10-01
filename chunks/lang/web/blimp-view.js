@@ -12,6 +12,8 @@
 //   timer(ms, :msg)   -> {"tag":"timer","attrs":{"ms":{"text":"500"},"sends":"msg"}}
 //   key("ArrowLeft", :msg) -> {"tag":"key","attrs":{"code":{"text":"ArrowLeft"},"sends":"msg"}}
 //   key("*", :msg)              -> every key: :msg("a"), :msg("Enter"), ...
+//   stored("k", :msg)          -> :msg(value) once, from localStorage ("" if none)
+//   store("k", "v")            -> localStorage holds "v" under "k" ("" removes it)
 //   key("ArrowUp", :down, :up) -> the same with "up":"up": a held key, sent
 //                                 once when it goes down and once when it
 //                                 comes up; auto-repeat is not sent
@@ -255,10 +257,11 @@
     }
     this.view = view;
     this._settle();
-    var fx = { timers: {}, keys: {}, fetches: {}, query: null };
+    var fx = { timers: {}, keys: {}, fetches: {}, stored: {}, stores: {}, query: null };
     this._collectEffects(view, fx);
     this._reconcileTimers(fx.timers);
     this._reconcileFetches(fx.fetches);
+    this._reconcileStorage(fx.stored, fx.stores);
     if (fx.query !== null && typeof location !== 'undefined' && typeof history !== 'undefined') {
       var want = fx.query === '' ? location.pathname : '?' + fx.query;
       if (location.search !== (fx.query === '' ? '' : '?' + fx.query)) history.replaceState(null, '', want);
@@ -360,6 +363,8 @@
       case 'key':
       case 'fetch':
       case 'location_query':
+      case 'stored':
+      case 'store':
         // effects render nothing; they are picked up by _collectEffects
         return document.createTextNode('');
       default: el = document.createElement('div');
@@ -692,6 +697,11 @@
     } else if (node.tag === 'fetch') {
       var url = attrVal(attrs.url), fsends = attrVal(attrs.sends);
       if (url && fsends) fx.fetches[url + '|' + fsends] = { url: url, sends: fsends };
+    } else if (node.tag === 'stored') {
+      var skey = attrVal(attrs.key), ssends = attrVal(attrs.sends);
+      if (skey && ssends) fx.stored[skey + '|' + ssends] = { key: String(skey), sends: ssends };
+    } else if (node.tag === 'store') {
+      if (attrVal(attrs.key)) fx.stores[String(attrVal(attrs.key))] = String(attrVal(attrs.value));
     } else if (node.tag === 'location_query') {
       fx.query = String(attrVal(attrs.query));
     } else if (node.tag === 'key') {
@@ -701,6 +711,43 @@
     }
     var children = node.children || [];
     for (var i = 0; i < children.length; i++) this._collectEffects(children[i], fx);
+  };
+
+  // localStorage, which a private window or a blocked site may refuse: then
+  // a read is "" and a write is dropped, and the page goes on.
+  function storageGet(k) {
+    try { var v = typeof localStorage === 'undefined' ? null : localStorage.getItem(k); return v === null || v === undefined ? '' : String(v); } catch (e) { return ''; }
+  }
+  function storageSet(k, v) {
+    try { if (typeof localStorage === 'undefined') return; if (v === '') localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {}
+  }
+
+  // stored(): read once while it is in the view, and sent after this render
+  // has finished, as a fetch's answer is. store(): written when it differs.
+  // Reads go first, and a key is not written while its read is on its way:
+  // otherwise a page's first render, before it knows what was stored,
+  // would overwrite it with its starting state.
+  BlimpView.prototype._reconcileStorage = function (reads, writes) {
+    var self = this;
+    this.reads = this.reads || {};
+    this._unread = this._unread || {};
+    Object.keys(this.reads).forEach(function (k) { if (!reads[k]) delete self.reads[k]; });
+    Object.keys(reads).forEach(function (k) {
+      if (self.reads[k]) return;
+      self.reads[k] = true;
+      var r = reads[k], value = storageGet(r.key);
+      self._unread[r.key] = (self._unread[r.key] || 0) + 1;
+      var go = function () {
+        if (self._sending) return setTimeout(go, 0);
+        if (--self._unread[r.key] <= 0) delete self._unread[r.key];
+        if (!self.mounted || self.error || !self.reads[k]) return;
+        self.send(r.sends, literal(value));
+      };
+      setTimeout(go, 0);
+    });
+    Object.keys(writes).forEach(function (k) {
+      if (!self._unread[k] && storageGet(k) !== writes[k]) storageSet(k, writes[k]);
+    });
   };
 
   BlimpView.prototype._reconcileTimers = function (wanted) {

@@ -187,6 +187,8 @@ pub const BuiltinRegistry = struct {
         reg.register("timer", &viewTimer);
         reg.register("fetch", &viewFetch);
         reg.register("location_query", &viewLocationQuery);
+        reg.register("stored", &viewStored);
+        reg.register("store", &viewStore);
         reg.register("key", &viewKey);
         reg.register("input", &viewInput);
         reg.register("textarea", &viewTextarea);
@@ -2600,6 +2602,30 @@ fn viewFetch(allocator: std.mem.Allocator, args: []const *const Value) EvalError
     return makeViewNode(allocator, "fetch", attrs, &.{});
 }
 
+/// stored("aim.name", :msg) — effect node: the host reads `key` from the
+/// browser's storage (localStorage) once while this node is in the view
+/// and sends :msg(value), "" if nothing is stored. How a page remembers
+/// something between visits; store() writes it.
+fn viewStored(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .atom or args[0].string.len == 0) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "key", .val = args[0] };
+    attrs[1] = .{ .key = "sends", .val = args[1] };
+    return makeViewNode(allocator, "stored", attrs, &.{});
+}
+
+/// store("aim.name", "alice") — effect node: the browser's storage holds
+/// `value` under `key` for as long as the view says so; "" removes it.
+/// Written when it differs from what is there, so rendering it every time
+/// costs nothing.
+fn viewStore(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .string or args[0].string.len == 0) return error.TypeError;
+    const attrs = try allocator.alloc(ViewAttr, 2);
+    attrs[0] = .{ .key = "key", .val = args[0] };
+    attrs[1] = .{ .key = "value", .val = args[1] };
+    return makeViewNode(allocator, "store", attrs, &.{});
+}
+
 /// location_query("year=2023&song=Tweezer") — effect node: the page's URL
 /// carries this query string (replaced, not pushed: no history entry per
 /// click), so the page can be linked to in the state it is in.
@@ -3417,7 +3443,8 @@ fn renderHtml(allocator: std.mem.Allocator, val: *const Value, buf: *std.ArrayLi
         .view_node => |node| {
             // Effect nodes (timer, key) are host instructions, not markup.
             if (std.mem.eql(u8, node.tag, "timer") or std.mem.eql(u8, node.tag, "key") or
-                std.mem.eql(u8, node.tag, "fetch") or std.mem.eql(u8, node.tag, "location_query")) return;
+                std.mem.eql(u8, node.tag, "fetch") or std.mem.eql(u8, node.tag, "location_query") or
+                std.mem.eql(u8, node.tag, "stored") or std.mem.eql(u8, node.tag, "store")) return;
             if (std.mem.eql(u8, node.tag, "el")) return renderElHtml(allocator, node, buf);
             const tag = blimpTagToHtml(node.tag);
             try buf.appendSlice(allocator, "<");
