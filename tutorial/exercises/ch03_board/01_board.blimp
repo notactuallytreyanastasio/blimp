@@ -1,0 +1,147 @@
+# Chapter 3 -- The board
+# Run: blimp exercises/ch03_board/01_board.blimp --test
+#
+# The well is 10 columns by 20 rows. Tetris.Board keeps it as a list of 20
+# rows, each a list of 10 numbers: 0 is empty, 1..7 is a locked piece of
+# that kind. It answers the question the whole game rests on: do these
+# cells fit?
+
+# ---------------------------------------------------------------------
+# Finished in earlier chapters. Nothing to change here. They come first
+# because defining an actor runs its state defaults, and some of those
+# spawn one of these.
+
+actor Tetris do
+  state name: String :: "blimp tetris"
+end
+
+actor Tetris.Shapes do
+  state table: List :: [
+    [[{0, 1}, {1, 1}, {2, 1}, {3, 1}], [{2, 0}, {2, 1}, {2, 2}, {2, 3}], [{0, 2}, {1, 2}, {2, 2}, {3, 2}], [{1, 0}, {1, 1}, {1, 2}, {1, 3}]],
+    [[{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}]],
+    [[{1, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {1, 1}, {2, 1}, {1, 2}], [{0, 1}, {1, 1}, {2, 1}, {1, 2}], [{1, 0}, {0, 1}, {1, 1}, {1, 2}]],
+    [[{1, 0}, {2, 0}, {0, 1}, {1, 1}], [{1, 0}, {1, 1}, {2, 1}, {2, 2}], [{1, 1}, {2, 1}, {0, 2}, {1, 2}], [{0, 0}, {0, 1}, {1, 1}, {1, 2}]],
+    [[{0, 0}, {1, 0}, {1, 1}, {2, 1}], [{2, 0}, {1, 1}, {2, 1}, {1, 2}], [{0, 1}, {1, 1}, {1, 2}, {2, 2}], [{1, 0}, {0, 1}, {1, 1}, {0, 2}]],
+    [[{0, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {1, 2}], [{0, 1}, {1, 1}, {2, 1}, {2, 2}], [{1, 0}, {1, 1}, {0, 2}, {1, 2}]],
+    [[{2, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {1, 1}, {1, 2}, {2, 2}], [{0, 1}, {1, 1}, {2, 1}, {0, 2}], [{0, 0}, {1, 0}, {1, 1}, {1, 2}]]
+  ]
+
+  on :offsets(kind: Int, rot: Int) do
+    reply elem(elem(table, kind - 1), rot)
+  end
+
+  on :kinds do
+    reply length(table)
+  end
+end
+
+actor Tetris.Piece do
+  state kind: Int :: 1
+  state rot: Int :: 0
+  state x: Int :: 3
+  state y: Int :: 0
+  state shapes: Tetris.Shapes :: spawn Tetris.Shapes
+
+  on :spawn(new_kind: Int) do
+    become kind: new_kind, rot: 0, x: 3, y: 0
+    reply :ok
+  end
+
+  on :info do
+    reply %{kind: kind, x: x, y: y, rot: rot}
+  end
+
+  on :cells do
+    reply self <- :cells_for(0, 0, 0)
+  end
+
+  on :cells_for(dx: Int, dy: Int, drot: Int) do
+    offs = shapes <- :offsets(kind, rem(rot + drot + 4, 4))
+    reply map(offs, fn(o: Tuple) do
+      case o do
+        {ox, oy} -> {x + dx + ox, y + dy + oy}
+      end
+    end)
+  end
+
+  on :move(dx: Int, dy: Int) do
+    become x: x + dx, y: y + dy
+    reply :ok
+  end
+
+  on :rotate(dir: Int) do
+    become rot: rem(rot + dir + 4, 4)
+    reply :ok
+  end
+end
+
+# ---------------------------------------------------------------------
+# This chapter. Fill in the handlers marked Exercise.
+
+actor Tetris.Board do
+  state rows: List :: for y in range(1, 20) do for x in range(1, 10) do 0 end end
+
+  on :rows do reply rows end
+
+  # Exercise: outside the walls or below the floor is blocked.
+  on :blocked?(x: Int, y: Int) when x < 0 or x > 9 or y > 19 do reply :TODO end
+  # Exercise: above the top is open. This game never puts a cell up
+  # there, but many Tetris games spawn their pieces above the well.
+  on :blocked?(x: Int, y: Int) when y < 0 do reply :TODO end
+  # Exercise: anywhere else, blocked when the cell is not 0.
+  on :blocked?(x: Int, y: Int) do reply :TODO end
+
+  # Exercise: true when none of the {x, y} cells is blocked. Ask
+  # yourself: self <- :blocked?(x, y).
+  on :fits?(cells: List) do
+    reply :TODO
+  end
+
+  # Exercise: write colour into every cell, skipping any above
+  # the top. Reply :ok.
+  on :lock(cells: List, colour: Int) do
+    reply :TODO
+  end
+
+  test "starts as 20 rows of 10 zeros" do
+    board = spawn Tetris.Board
+    got = board <- :rows
+    assert_eq(length(got), 20)
+    assert_eq(elem(got, 0), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    assert_eq(elem(got, 19), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+  end
+
+  test "fits inside, above the top, but not through the walls or floor" do
+    board = spawn Tetris.Board
+    assert(board <- :fits?([{0, 0}, {9, 19}]))
+    assert(board <- :fits?([{4, -1}, {4, 0}]))
+    refute(board <- :fits?([{4, 4}, {-1, 0}]))
+    refute(board <- :fits?([{10, 0}]))
+    refute(board <- :fits?([{0, 20}]))
+  end
+
+  test "lock fills cells and blocks them" do
+    board = spawn Tetris.Board
+    board <- :lock([{0, 19}, {1, 19}], 5)
+    assert_eq(elem(board <- :rows, 19), [5, 5, 0, 0, 0, 0, 0, 0, 0, 0])
+    refute(board <- :fits?([{0, 19}]))
+    assert(board <- :fits?([{2, 19}]))
+  end
+
+  test "lock ignores cells above the top" do
+    board = spawn Tetris.Board
+    board <- :lock([{5, -1}, {0, 0}], 2)
+    got = board <- :rows
+    assert_eq(length(got), 20)
+    assert_eq(elem(got, 0), [2, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+  end
+
+  test "a piece fits where it spawns, and not through the floor" do
+    board = spawn Tetris.Board
+    piece = spawn Tetris.Piece
+    piece <- :spawn(3)
+    assert(board <- :fits?(piece <- :cells))
+    assert(board <- :fits?(piece <- :cells_for(0, 18, 0)))
+    refute(board <- :fits?(piece <- :cells_for(0, 19, 0)))
+  end
+end

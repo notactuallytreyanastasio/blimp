@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blimp web framework</title>
+<meta name="description" content="Routes, request bodies, signed sessions and CSRF for a web server written in Blimp: what it does, a complete example with real curl output, and what does not work yet.">
+<meta property="og:title" content="Blimp web framework">
+<meta property="og:description" content="Routes, request bodies, signed sessions and CSRF for a web server written in Blimp.">
+<meta property="og:url" content="https://blimp.bobbby.online/web/">
+<link rel="stylesheet" href="web.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">BLIMP</a>
+  <nav>
+    <a href="/web/" aria-current="page">web: guide</a>
+    <a href="/web/reference.html">web: reference</a>
+    <a href="/web/rooms.html">web: rooms</a>
+    <a href="https://github.com/notactuallytreyanastasio/blimp">github</a>
+  </nav>
+</header>
+<main>
+
+<h1>A web framework in Blimp: routes, bodies, sessions, CSRF</h1>
+
+<p class="lede">Until this chapter, the Blimp server behind <a href="https://bobbby.online">bobbby.online</a> read each request with one <code>read(2)</code> of at most 64 KiB that does not wait, and answered every method except GET and HEAD with <code>405</code>. Nothing could be posted to it. <code>/blinks</code> saves links, comments and reactions, so it could not move off Phoenix.</p>
+
+<p><code>src/41_web.blimp</code> is the request side of a web framework, written in Blimp. It reads a body to its <code>Content-Length</code>. It routes any method to a pattern with <code>:params</code> and runs a pipeline of plugs before the handler. The session lives in an HMAC-signed cookie, and on a browser route anything that is not a GET or HEAD must carry a CSRF token. The file is 877 lines and has 20 tests. Every transcript on this page comes from a local server built from that branch, after the six fixes described <a href="#fixed">below</a>.</p>
+
+<dl class="facts">
+  <dt>Where it lives</dt>
+  <dd>The site repo, not this one: <a href="https://github.com/notactuallytreyanastasio/blog/pull/100">notactuallytreyanastasio/blog#100</a>, branch <code>blimp-blog/60-web-core</code>, files <code>blimp_site/src/41_web.blimp</code>, <code>blimp_site/test/web_test.blimp</code>, and the hooks in <code>blimp_site/main.blimp</code>. Documented at commit <code>c75fced</code>, re-run at <code>5d4d55b</code>.</dd>
+  <dt>Status</dt>
+  <dd>Open PR, not merged, not deployed. Nothing on bobbby.online answers a POST yet.</dd>
+  <dt>Shape</dt>
+  <dd>Plug's shape. A request is a map (the <em>conn</em>), plugs and handlers are <code>fn(conn: Map) -&gt; Map</code>, and a route is data.</dd>
+</dl>
+
+<nav class="toc" aria-label="On this page">
+<ol>
+  <li><a href="#example">A whole app: a form, a plug, a :param, a JSON API</a></li>
+  <li><a href="#wire">Wiring it into the server</a></li>
+  <li><a href="#run">Build it, run it, curl it</a></li>
+  <li><a href="#browser">In a browser</a></li>
+  <li><a href="#flow">What happens to one request</a></li>
+  <li><a href="#not-done">What does not work</a></li>
+  <li><a href="#fixed">Fixed since the first draft</a></li>
+  <li><a href="#rooms">Rooms and presence (chapter 61)</a></li>
+</ol>
+<p>Every function, the conn field by field, and the exact limits are on the <a href="reference.html">reference page</a>.</p>
+</nav>
+
+<h2 id="example">A whole app: a form, a plug, a :param, a JSON API<a class="anchor" href="#example">#</a></h2>
+
+<p>This is a notes page. The notes are kept in the session cookie, so it needs no database. It has four routes:</p>
+<ul>
+  <li>a page with a form, which carries the CSRF token in a hidden field</li>
+  <li>the form's POST, behind a plug of its own that refuses a fourth note</li>
+  <li>a GET with a <code>:n</code> path parameter that answers JSON</li>
+  <li>a JSON API route that opts out of the token</li>
+</ul>
+<p>Blimp has no imports, and the site builds into one file, so this is a file in <code>blimp_site/src/</code> that sorts after <code>41_web.blimp</code>.</p>
+
+<pre><code class="blimp"># notes: a page with a form, a route with a :param, a plug of our own,
+# and a JSON API. The notes live in the session cookie.
+
+def notes_routes() -&gt; List do
+  [
+    web_route("GET", "/notes", WEB_BROWSER, notes_page),
+    web_route("POST", "/notes", list_append(WEB_BROWSER, [notes_cap]), notes_add),
+    web_route("GET", "/notes/:n", WEB_BROWSER, notes_show),
+    web_route("POST", "/api/notes", WEB_API, notes_api)
+  ]
+end
+
+def notes_of(conn: Map) -&gt; List do
+  web_or(web_get_session(conn, "notes"), [])
+end
+
+# A plug: refuse a fourth note, and stop the pipeline.
+def notes_cap(conn: Map) -&gt; Map do
+  case length(notes_of(conn)) &gt;= 3 do
+    true -&gt; web_refuse(conn, 422, "three notes is the limit")
+    false -&gt; conn
+  end
+end
+
+def notes_page(conn: Map) -&gt; Map do
+  c = web_ensure_csrf(conn)
+  items = join(map(notes_of(c), fn(n: String) -&gt; String do
+    concat("&lt;li&gt;", escape_html(n), "&lt;/li&gt;")
+  end), "")
+  web_html(c, 200, join([
+    "&lt;!doctype html&gt;&lt;title&gt;notes&lt;/title&gt;&lt;ul&gt;", items, "&lt;/ul&gt;",
+    "&lt;form method=\"post\" action=\"/notes\"&gt;",
+    "&lt;input type=\"hidden\" name=\"_csrf_token\" value=\"", c.csrf_token, "\"&gt;",
+    "&lt;input name=\"text\"&gt; &lt;button&gt;Add&lt;/button&gt;&lt;/form&gt;"
+  ], ""))
+end
+
+def notes_add(conn: Map) -&gt; Map do
+  text = web_or(web_param(conn, "text"), "")
+  case text do
+    "" -&gt; web_refuse(conn, 422, "a note needs text")
+    _ -&gt; web_redirect(web_put_session(conn, "notes", list_append(notes_of(conn), [text])), "/notes")
+  end
+end
+
+def notes_show(conn: Map) -&gt; Map do
+  notes = notes_of(conn)
+  n = to_int(web_param(conn, "n"))
+  case n &gt;= 1 and n &lt;= length(notes) do
+    true -&gt; web_json(conn, 200, %{n: n, text: elem_at(notes, n - 1)})
+    false -&gt; web_json(conn, 404, %{error: "no such note"})
+  end
+end
+
+def notes_api(conn: Map) -&gt; Map do
+  text = lookup(conn.body_params, "text")
+  case type_of(text) == :string do
+    true -&gt; web_json(conn, 201, %{saved: text, words: length(split(text, " "))})
+    false -&gt; web_json(conn, 422, %{error: "send {\"text\": \"...\"}"})
+  end
+end</code></pre>
+
+<p>Some things in it that are easy to miss:</p>
+<ul>
+  <li><strong>A named <code>def</code> is a function value.</strong> <code>notes_page</code> goes into the route as it is. You can also write <code>fn(c: Map) -&gt; Map do ... end</code> inline.</li>
+  <li><strong>A pipeline is a plain list.</strong> <code>list_append(WEB_BROWSER, [notes_cap])</code> is the browser pipeline with one more plug on the end. <code>WEB_BROWSER</code> is <code>[web_fetch_session, web_protect_from_forgery]</code>, so the token is checked before <code>notes_cap</code> runs.</li>
+  <li><strong><code>web_refuse</code> writes the response and halts.</strong> No later plug runs, and neither does the handler.</li>
+  <li><strong>The conn is immutable.</strong> Every helper returns a new one. <code>web_ensure_csrf(conn)</code> returns a conn whose <code>csrf_token</code> is set, and the page has to use <em>that</em> conn (<code>c</code>). If it used the old one, the page would render with an empty token and the new session would never be saved.</li>
+  <li><strong>The session holds JSON.</strong> A list of strings is fine. An atom or a tuple does not survive the round trip.</li>
+</ul>
+
+<h2 id="wire">Wiring it into the server<a class="anchor" href="#wire">#</a></h2>
+
+<p>Routes are registered in one list, <code>WEB_ROUTES</code>, at boot in <code>main.blimp</code>. The PR sets it to the demo routes. To add yours, change that line:</p>
+
+<pre><code class="blimp"># main.blimp, after `routes = stack_routes(routes)`
+WEB_ROUTES = list_append(web_demo_routes(), notes_routes())
+WEB_SECRET = web_session_secret()</code></pre>
+
+<p>From then on, <code>handle()</code> sends a request to the framework in two cases:</p>
+<ul>
+  <li><strong>Any method but GET and HEAD: always, and first.</strong> The prebuilt pages and <code>dynamic()</code> answer only GET and HEAD, so nothing else is asked. If no route matches, the answer is <code>405</code> with <code>Allow: GET, HEAD</code>, which is what every POST got before. That holds whatever the body looks like: a chunked <code>POST</code> to <code>/blog</code> is 405, not 411. Body framing (411, 413, 408, 431) is judged only for a request a route will hand to a handler.</li>
+  <li><strong>A GET or HEAD for a path that is not one of the site's prebuilt pages</strong> is checked against <code>WEB_ROUTES</code> before <code>dynamic()</code>. Only a GET route claims it. <code>web_handle</code> returns <code>nil</code> when no GET route matches that path, and the request goes on to <code>dynamic()</code> the same as before.</li>
+</ul>
+
+<p>So a POST route can sit beside a page that <code>dynamic()</code> serves. With <code>POST /directory</code> registered, <code>GET /directory</code> is still the directory page. The one thing that is wrong there is the <code>405</code> for a third method: its <code>Allow</code> lists <code>POST</code> and not the GET and HEAD that <code>dynamic()</code> answers, because the framework cannot know what <code>dynamic()</code> serves without running it. See <a href="reference.html#routing">routing</a>.</p>
+
+<h2 id="run">Build it, run it, curl it<a class="anchor" href="#run">#</a></h2>
+
+<p>The build turns the Temper library into Blimp and concatenates <code>src/*.blimp</code> and <code>main.blimp</code> into <code>_build/site.blimp</code>. It needs a JVM for Temper and a <code>blimp</code> binary. For these transcripts I added the notes file and the route line to a copy of that build, with <code>PORT</code> set to 4176. The copy also has five probe routes that are not part of the notes app: <code>GET /crash</code> and <code>GET /nil</code> (<a href="#fixed">below</a>), <code>GET /x/headers</code> and <code>POST /x/logout</code> (<a href="reference.html#functions">reference</a>), and <code>POST /directory</code> (<a href="reference.html#routing">routing</a>).</p>
+
+<pre><code><span class="cmd">$ cd blimp_site</span>
+<span class="cmd">$ JAVA_HOME=/opt/homebrew/opt/openjdk@21 BLIMP=.../chunks/lang/zig-out/bin/blimp ./build.sh</span>
+<span class="cmd">$ FIREHOSE=off blimp --serve _build/site-4176.blimp --tick "site &lt;- :tick"</span>
+SESSION_SECRET is not set: sessions are signed with the dev secret (DATABASE_URL is unset, so this is not production)
+blimp blog: 16 posts rendered in 944ms, museum from data/*.tsv, listening on :4176
+[serve] booted _build/site-4176.blimp; live heap 33282262 bytes; control socket blimp.sock</code></pre>
+
+<h3>The form, with its token</h3>
+<p>The first GET creates the session, and with it the token. <code>web_ensure_csrf</code> changed the session, so the response sets the cookie. The token is in the page twice over: once in the hidden field, and once inside the cookie's payload.</p>
+<pre><code><span class="cmd">$ curl -si -c jar localhost:4176/notes</span>
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 219
+Cache-Control: no-store
+Set-Cookie: _blimp_session=eyJfY3NyZl90b2tlbiI6IktRMnhwd3M4dHZEbUVEdWZFZXhBczRMaF9HYk81SEVORGRzTnpRX3k3U2MifQ.14bc3bea98d4346b649687a57c0f36d6b435239d64ca555bf0561d77dee2feb9; Path=/; HttpOnly; SameSite=Lax
+X-Served-By: blimp
+Connection: close
+
+&lt;!doctype html&gt;&lt;title&gt;notes&lt;/title&gt;&lt;ul&gt;&lt;/ul&gt;&lt;form method="post" action="/notes"&gt;&lt;input type="hidden" name="_csrf_token" value="KQ2xpws8tvDmEDufEexAs4Lh_GbO5HENDdsNzQ_y7Sc"&gt;&lt;input name="text"&gt; &lt;button&gt;Add&lt;/button&gt;&lt;/form&gt;
+
+<span class="cmd">$ TOKEN=$(curl -s -b jar localhost:4176/notes | sed -n 's/.*name="_csrf_token" value="\([^"]*\)".*/\1/p')</span>
+
+<span class="cmd">$ curl -si -b jar -c jar -d "_csrf_token=$TOKEN" --data-urlencode 'text=buy milk &amp; eggs' localhost:4176/notes</span>
+HTTP/1.1 303 See Other
+Content-Type: text/plain; charset=utf-8
+Content-Length: 0
+Cache-Control: no-store
+Location: /notes
+Set-Cookie: _blimp_session=eyJfY3NyZl90b2tlbiI6IktRMnhwd3M4dHZEbUVEdWZFZXhBczRMaF9HYk81SEVORGRzTnpRX3k3U2MiLCJub3RlcyI6WyJidXkgbWlsayAmIGVnZ3MiXX0.2c539c88d5f34f3bfe2e04e80ffb87f88f25bfe104e83d46337cfa5a1017594c; Path=/; HttpOnly; SameSite=Lax
+X-Served-By: blimp
+Connection: close
+
+<span class="cmd">$ curl -s -b jar localhost:4176/notes</span>
+&lt;!doctype html&gt;&lt;title&gt;notes&lt;/title&gt;&lt;ul&gt;&lt;li&gt;buy milk &amp;amp; eggs&lt;/li&gt;&lt;/ul&gt;&lt;form method="post" action="/notes"&gt;&lt;input type="hidden" name="_csrf_token" value="KQ2xpws8tvDmEDufEexAs4Lh_GbO5HENDdsNzQ_y7Sc"&gt;&lt;input name="text"&gt; &lt;button&gt;Add&lt;/button&gt;&lt;/form&gt;
+
+<span class="cmd">$ curl -si -b jar localhost:4176/notes/1</span>
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 32
+Cache-Control: no-store
+X-Served-By: blimp
+Connection: close
+
+{"n":1,"text":"buy milk &amp; eggs"}</code></pre>
+<p class="caption">The redirect is <code>303 See Other</code>, not 302, so the browser follows it with a GET. The note comes back escaped in HTML and unescaped in JSON. The third request has no <code>Set-Cookie</code> because the session did not change.</p>
+
+<h3>No token, and a plug that halts</h3>
+<pre><code><span class="cmd">$ curl -si -b jar -d 'text=no token' localhost:4176/notes</span>
+HTTP/1.1 403 Forbidden
+Content-Type: text/plain; charset=utf-8
+Content-Length: 19
+Cache-Control: no-store
+X-Served-By: blimp
+Connection: close
+
+invalid CSRF token
+
+<span class="cmd">$ for t in two three four; do curl -s -o /dev/null -w '%{http_code} ' -b jar -c jar -d "_csrf_token=$TOKEN&amp;text=$t" localhost:4176/notes; done</span>
+303 303 422 
+
+<span class="cmd">$ curl -s -b jar -d "_csrf_token=$TOKEN&amp;text=four" localhost:4176/notes</span>
+three notes is the limit</code></pre>
+<p class="caption">A POST without the token never reaches the handler. The fourth note is refused by <code>notes_cap</code>, which halts the pipeline with a 422.</p>
+
+<h3>The JSON API</h3>
+<p>The <code>WEB_API</code> pipeline takes no token. It takes only <code>Content-Type: application/json</code>, and a form is <code>415</code>. The reason is on the <a href="reference.html#csrf">reference page</a>: a cross-site form cannot send that content type.</p>
+<pre><code><span class="cmd">$ curl -si -H 'Content-Type: application/json' -d '{"text":"from a script"}' localhost:4176/api/notes</span>
+HTTP/1.1 201 Created
+Content-Type: application/json
+Content-Length: 35
+Cache-Control: no-store
+X-Served-By: blimp
+Connection: close
+
+{"saved":"from a script","words":3}
+
+<span class="cmd">$ curl -si -d 'text=a form' localhost:4176/api/notes</span>
+HTTP/1.1 415 Unsupported Media Type
+Content-Type: text/plain; charset=utf-8
+Content-Length: 48
+Cache-Control: no-store
+X-Served-By: blimp
+Connection: close
+
+this route takes Content-Type: application/json</code></pre>
+
+<h3>Anyone can read a session</h3>
+<p>The cookie is signed, not encrypted. The part before the dot is base64url JSON:</p>
+<pre><code><span class="cmd">$ COOKIE=$(grep _blimp_session jar | awk '{print $7}')</span>
+<span class="cmd">$ python3 -c 'import base64,sys; p=sys.argv[1].split(".")[0]; print(base64.urlsafe_b64decode(p+"="*(-len(p)%4)).decode())' "$COOKIE"</span>
+{"_csrf_token":"KQ2xpws8tvDmEDufEexAs4Lh_GbO5HENDdsNzQ_y7Sc","notes":["buy milk &amp; eggs","two","three"]}</code></pre>
+<p class="caption">That is why a session should hold ids, not secrets. Change a byte and the MAC fails. The session is then dropped, the server logs a line, and the request runs with no session, so its CSRF check fails with a 403.</p>
+
+<h2 id="browser">In a browser<a class="anchor" href="#browser">#</a></h2>
+
+<p>The same flow in headless Chrome: read the hidden token out of the page, <code>fetch()</code> a form POST, then read the list.</p>
+<pre><code>http://127.0.0.1:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt;&lt;/ul&gt;
+http://localhost:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt;&lt;/ul&gt;
+http://192.168.1.238:4176/notes  200 | &lt;ul&gt;&lt;li&gt;from chrome&lt;/li&gt;&lt;/ul&gt;</code></pre>
+<p>The third line is the machine's LAN address, the one a phone on the same wifi would use, and it used to be a 403. The cookie used to be <code>Secure</code> everywhere, and a browser keeps a Secure cookie over plain HTTP only from <code>localhost</code>. From a LAN address the session never came back, so there was no token, so every form POST failed its CSRF check. The cookie is now <code>Secure</code> only when <code>DATABASE_URL</code> is set, the same test the site uses to decide it is production. Production is behind Caddy, which serves HTTPS, and there the cookie is still Secure (<a href="reference.html#sessions">sessions</a>).</p>
+
+<h2 id="flow">What happens to one request<a class="anchor" href="#flow">#</a></h2>
+
+<ol>
+  <li><strong>Read.</strong> For anything but GET and HEAD, <code>web_read_rest</code> keeps reading until it has the headers and <code>Content-Length</code> bytes of body, for up to 2 seconds. It answers <code>Expect: 100-continue</code> on the way.</li>
+  <li><strong>Route.</strong> The first route whose pattern and method match wins. A GET or HEAD is claimed only by a GET route, and otherwise falls through to <code>dynamic()</code>. Any other method with no route for it gets 405 with <code>Allow</code>, before its body is looked at.</li>
+  <li><strong>Frame.</strong> A request a route matched is refused before the handler sees it for: a header block over 16 KiB, whether it is still arriving or came whole (431), a chunked body (411), a <code>Content-Length</code> that is not a number (400), a body over 1 MiB (413, not read), and a body that did not all arrive (408).</li>
+  <li><strong>Conn.</strong> The request becomes a map: headers, cookies, query, and the body, which is exactly <code>Content-Length</code> bytes (empty when there is no <code>Content-Length</code>), parsed by its content type. A form or a JSON object becomes <code>body_params</code>. Invalid UTF-8 in the query or a form, and JSON that does not parse, get Plug.Parsers' 400 here, before any plug (<a href="reference.html#utf8">reference</a>). Multipart is 415.</li>
+  <li><strong>Pipeline.</strong> The plugs run in order, and one that sets <code>halted</code> ends the pipeline.</li>
+  <li><strong>Handler.</strong> It runs if nothing halted. If a plug or the handler crashes, the answer is a plain <code>500 internal server error</code> and the log gets one line naming the request.</li>
+  <li><strong>Finish.</strong> The conn becomes bytes. If the session changed, it is re-signed into <code>Set-Cookie</code>. A header value with a CR or LF is a 500, not a split response. A session cookie over 4000 bytes is also a 500. So is a conn that cannot be turned into bytes at all, such as one whose body is <code>nil</code>.</li>
+</ol>
+
+<h2 id="not-done">What does not work<a class="anchor" href="#not-done">#</a></h2>
+
+<p>Each item below was checked against the running server.</p>
+
+<div class="bad"><strong>A crash outside the framework still hangs the client.</strong> The framework now catches what its own routes do (<a href="#fixed">below</a>). A runtime error in <code>dynamic()</code> or in one of the prebuilt routes is not caught. It unwinds the server's tick as it did before this chapter: the client waits until it gives up, and the socket stays in <code>CLOSE_WAIT</code>. Only code that <code>41_web.blimp</code> calls is wrapped.</div>
+
+<ul>
+  <li><strong>No multipart, so no file uploads.</strong> A <code>multipart/*</code> body is refused with 415 "multipart bodies are not supported" before the pipeline runs.</li>
+  <li><strong>No chunked request bodies.</strong> They get 411. Clients that stream a body without a length must buffer it and send <code>Content-Length</code>.</li>
+  <li><strong>Sessions never expire.</strong> The cookie has no <code>Max-Age</code>, and the signed payload has no timestamp. A copied cookie is valid until <code>SESSION_SECRET</code> changes, and changing it logs everyone out.</li>
+  <li><strong>The CSRF token is not masked.</strong> The same 43 characters appear in every page for the life of the session. That makes it readable by a BREACH-style compression attack if the page is ever served compressed next to attacker-controlled text. Phoenix masks the token per render. This does not.</li>
+  <li><strong>One thread.</strong> The server answers one connection at a time. A POST whose body is slow holds everyone else for up to 2 seconds. With a client that sent its headers and then 7 of 20 body bytes, a GET made at the same moment took 1.79 s to answer. Then the slow client got <code>408 the body did not all arrive</code>.</li>
+  <li><strong><code>Allow</code> can be short.</strong> A path with a web route for POST and a <code>dynamic()</code> page for GET answers PUT with <code>405 Allow: POST</code>. The GET and HEAD are missing because only <code>dynamic()</code> knows about them.</li>
+  <li><strong>The 16 KiB header limit covers only requests a route here matches.</strong> A 405 is not held to it. A GET that goes on to a prebuilt page or <code>dynamic()</code> is read once, at most 64 KiB, as before: a 17,000-byte header on <code>GET /directory</code> is a 200, and on <code>GET /notes</code> a 431.</li>
+  <li><strong>HEAD runs the GET handler.</strong> Side effects happen. <code>HEAD /notes</code> with no cookie creates a session and returns its <code>Set-Cookie</code>.</li>
+  <li><strong>Invalid UTF-8 is refused only on routed requests.</strong> <code>GET /blog?x=%FF</code> is served by the fixed table (200), and <code>POST /blog -d a=%FF</code> is 405. Phoenix answers both with 400, because its parsers run before its router.</li>
+  <li><strong>No 404 for an unknown path on POST.</strong> A POST to a path no route knows is 405 <code>Allow: GET, HEAD</code>, as it was before this chapter, with or without a <code>Content-Length</code>.</li>
+  <li><strong>No response streaming, no WebSocket routes.</strong> A handler returns the whole body. WebSockets still go through the server's existing <code>upgrade()</code> path. They are not part of this.</li>
+</ul>
+
+<h2 id="fixed">Fixed since the first draft of this page<a class="anchor" href="#fixed">#</a></h2>
+
+<p>The first version of this page listed six bugs, and later passes found four more: one of the fixes made an empty POST to any path a 411, a <code>+</code> in a path became a space, and the same fix still refused a bodiless POST to a route that takes POST, which HTTP allows, and invalid UTF-8 reached handlers that Phoenix never lets it reach. PR #100 now has a commit for each, with a test that fails before it. Each is re-run here against the fixed build.</p>
+
+<p><strong>A handler that crashes answers 500.</strong> It used to leave the client waiting and the socket in <code>CLOSE_WAIT</code>. The obvious fix, a <code>try</code> around the handler, is not enough. A handler that returns a conn whose body is <code>nil</code> returns normally, and the failure comes later, when the conn is turned into bytes. So the framework has two <code>try</code> blocks: one around the pipeline and handler, one around building the response. These are two probe routes. One divides 100 by <code>?n=</code>, and the other answers <code>web_text(conn, 200, head([]))</code>, which is <code>nil</code>:</p>
+<pre><code class="blimp">def crash_handler(conn: Map) -&gt; Map do
+  n = to_int(web_or(web_param(conn, "n"), "0"))
+  web_text(conn, 200, to_string(100 / n))
+end
+def nil_handler(conn: Map) -&gt; Map do
+  web_text(conn, 200, head([]))
+end</code></pre>
+<pre><code><span class="cmd">$ curl -s -w ' (%{http_code})\n' 'localhost:4176/crash?n=4'</span>
+25 (200)
+<span class="cmd">$ curl -si -w '[%{time_total}s]\n' --max-time 5 'localhost:4176/crash?n=0'</span>
+HTTP/1.1 500 Internal Server Error
+Content-Type: text/plain; charset=utf-8
+Content-Length: 22
+Cache-Control: no-cache
+X-Served-By: blimp
+Connection: close
+
+internal server error
+[0.001020s]
+<span class="cmd">$ curl -si -w '[%{time_total}s]\n' --max-time 5 localhost:4176/nil</span>
+HTTP/1.1 500 Internal Server Error
+Content-Type: text/plain; charset=utf-8
+Content-Length: 22
+Cache-Control: no-cache
+X-Served-By: blimp
+Connection: close
+
+internal server error
+[0.000774s]
+<span class="cmd">$ lsof -nP -iTCP:4176 | grep -c CLOSE_WAIT</span>
+0
+<span class="note"># server log</span>
+GET /crash 200 0ms
+web: 500 on GET /crash: the pipeline or handler crashed (division_by_zero)
+GET /crash 500 1ms
+web: 500 on GET /nil: the pipeline or handler crashed (type_error)
+GET /nil 500 0ms</code></pre>
+<p class="caption">The body says nothing about the server. Blimp's <code>catch</code> gets an atom with no source location, so the log line names the request, not a file and line. The nil body failed inside <code>web_text</code> here, so it is reported as the handler's crash.</p>
+
+<p><strong>A POST route no longer takes the GET for its path away from <code>dynamic()</code>.</strong> <code>GET /directory</code> with <code>POST /directory</code> registered used to be 405. It is the directory page again. The transcript is under <a href="reference.html#routing">routing</a>.</p>
+
+<p><strong>The body is exactly <code>Content-Length</code> bytes.</strong> Extra bytes used to stay in the body and could make valid JSON fail to parse. A POST with no length used to take whatever the first read returned. Now the extra bytes are dropped. This fix also made a POST, PUT or PATCH with no length a 411, and that part was wrong; see the last fix below (<a href="reference.html#bodies">reading bodies</a>).</p>
+
+<p><strong>431 holds for a complete header block.</strong> A 17,000-byte header that arrived in one read used to be accepted (<a href="reference.html#refusals">refusals</a>).</p>
+
+<p><strong>The cookie is <code>Secure</code> only in production</strong>, so a LAN address over plain HTTP keeps its session (<a href="#browser">in a browser</a>).</p>
+
+<p><strong>A method the path does not take is 405 before its body is judged</strong> (<code>2d5dfbd</code>). The body fix above made framing run before routing, so an empty <code>curl -X POST</code> or <code>-X PUT</code> to any path, <code>/blog</code> included, became 411 where it had been 405. Now the route is found first. Re-run at <code>5d4d55b</code> (at <code>c75fced</code> each of the first two was <code>411 a body needs a Content-Length</code>):</p>
+<pre><code><span class="cmd">$ curl -si -X POST localhost:4177/blog | grep -E '^HTTP|^Allow'</span>
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD
+<span class="cmd">$ curl -si -X PUT localhost:4177/web/echo | grep -E '^HTTP|^Allow'</span>
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, POST, HEAD
+<span class="cmd">$ curl -si -X POST localhost:4177/web/api/echo | sed -n '1p;$p'</span>     <span class="note"># a route that takes POST; at 5d4d55b, and wrong: see below</span>
+HTTP/1.1 411 Length Required
+a body needs a Content-Length</code></pre>
+<p class="caption">Chunked is still 411 and a declared 2 MB body still 413 without being read, on routes that take them (<a href="reference.html#refusals">refusals</a>). GET pages are byte-identical to origin/main's build for the 14 paths checked.</p>
+
+<p><strong>A <code>+</code> in a path segment is a <code>+</code></strong> (<code>5d4d55b</code>, found by the blinks writes chapter). Path parameters were form-decoded, so the tag <code>c++</code> arrived as <code>"c  "</code>. Re-run at <code>5d4d55b</code>, a CSRF-carrying PATCH to the demo:</p>
+<pre><code><span class="cmd">$ curl -s -b jar -X PATCH -H "x-csrf-token: $TOKEN" -H 'Content-Length: 0' 'localhost:4177/web/echo/c++?q=a+b'</span>
+{"method":"PATCH","id":"c++","params":{"q":"a b","id":"c++"}}
+<span class="note"># at 2d5dfbd: {"method":"PATCH","id":"c  ","params":{"q":"a b","id":"c  "}}</span></code></pre>
+
+<p><strong>A request with no <code>Content-Length</code> has an empty body</strong> (<code>d522c8d</code>, found by the Blinks comments chapter's parity run against Phoenix). The body fix made a POST, PUT or PATCH with no length a 411 on a route that takes it. HTTP says otherwise: with neither <code>Content-Length</code> nor <code>Transfer-Encoding</code>, the body has length zero (RFC 9112 §6.3). And the iOS app reports a comment with exactly that, a POST with no body, which Phoenix answers 200 and this answered 411. Now the handler runs with an empty body, and 411 is only for <code>Transfer-Encoding</code>. Bytes after the head of such a request would be the next request, and with no keep-alive they are dropped unread. Re-run at <code>d522c8d</code> (at <code>5d4d55b</code> both were <code>411 a body needs a Content-Length</code>):</p>
+<pre><code><span class="cmd">$ curl -si -X POST -H 'Content-Type: application/json' localhost:4181/web/api/echo | sed -n '1p;$p'</span>
+HTTP/1.1 200 OK
+{"json":null,"session":"none"}
+<span class="cmd">$ curl -s -b jar -X PATCH -H "x-csrf-token: $TOKEN" 'localhost:4181/web/echo/c++?q=a+b'</span>     <span class="note"># no Content-Length: 0 needed now</span>
+{"method":"PATCH","id":"c++","params":{"q":"a b","id":"c++"}}</code></pre>
+
+<p><strong>Invalid UTF-8 in a query, a form or a JSON body is Plug.Parsers' 400, before any plug</strong> (<code>8e9c970</code>, raised by the Blinks comments chapter). It used to reach the handler, and a <code>web_json</code> answer then raised in <code>json_encode</code> and became a 500. Re-run at <code>8e9c970</code> on :4184:</p>
+<pre><code><span class="cmd">$ curl -si -X POST -d 'message=%FF' localhost:4184/web/echo | sed -n '1,2p;$p'</span>
+HTTP/1.1 400 Bad Request
+Content-Type: text/html; charset=utf-8
+Bad Request                                                    <span class="note"># at d522c8d: 403 invalid CSRF token</span>
+<span class="cmd">$ curl -s -H 'accept: application/json' 'localhost:4184/web/echo?x=%E2%82'</span>
+{"errors":{"detail":"Bad Request"}}                            <span class="note"># at d522c8d: 200, the page</span></code></pre>
+<p class="caption">Path parameters are left alone, because Phoenix leaves them alone. The details and the Accept rule are in the <a href="reference.html#utf8">reference</a>.</p>
+
+<p><strong>The boot refusals print plainly.</strong> They used <code>print()</code>, which quotes a string the way source code writes it (<a href="reference.html#sessions">SESSION_SECRET</a>).</p>
+
+<h2 id="rooms">Rooms and presence (chapter 61)<a class="anchor" href="#rooms">#</a></h2>
+
+<p>The push side lives in <a href="https://github.com/notactuallytreyanastasio/blog/pull/102">PR #102</a>, which is open and not merged. <code>src/89_rooms.blimp</code> is one actor that knows who is in each topic and what every WebSocket is owed. It writes each socket once per tick, and it sends presence as batched diffs keyed by ref. It is separate from this file: sockets still arrive through <code>upgrade()</code>. The <a href="rooms.html">rooms page</a> has its API and wire format. It also has the part that does not work yet. A peer that stops reading can still block the only thread for over 10 seconds, because the runtime has no non-blocking write.</p>
+
+</main>
+<footer>
+  Written against blog commit <code>c75fced</code> (PR #100). The transcripts are from a local build of that commit, except those marked as re-run at <code>5d4d55b</code>. If the code and this page disagree, the code is right and this page is a bug.
+</footer>
+<script src="/tutorial/blimp-highlight.js"></script>
+<script>
+  if (window.blimpHighlight) {
+    document.querySelectorAll('pre code.blimp').forEach(function (el) {
+      el.innerHTML = window.blimpHighlight(el.textContent);
+    });
+  }
+</script>
+</body>
+</html>

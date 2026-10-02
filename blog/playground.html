@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blimp Playground</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #0e0e1a;
+  color: #d4d4d4;
+  font-family: 'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: 13px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.toolbar {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #1a1a2e;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-shrink: 0;
+}
+
+.toolbar .logo { color: #a6e22e; font-weight: 500; font-size: 0.95rem; }
+.toolbar .sep { color: #333; }
+.toolbar .label { color: #666; font-size: 0.8rem; }
+.toolbar .spacer { flex: 1; }
+
+.toolbar .btn {
+  background: none;
+  border: 1px solid #333;
+  color: #888;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.toolbar .btn:hover { border-color: #a6e22e; color: #a6e22e; }
+.toolbar .btn.active { border-color: #a6e22e; color: #a6e22e; background: rgba(166,226,46,0.1); }
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Top half: canvas + state */
+.top-half {
+  height: 50%;
+  display: flex;
+  border-bottom: 1px solid #1a1a2e;
+  overflow: hidden;
+}
+
+.canvas-area {
+  flex: 1;
+  position: relative;
+}
+
+.canvas-area canvas { display: block; }
+
+.state-panel {
+  width: 260px;
+  border-left: 1px solid #1a1a2e;
+  padding: 0.75rem 1rem;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.state-panel h3 {
+  font-size: 0.7rem;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.5rem;
+  font-weight: 400;
+}
+
+.state-panel .entry { margin-bottom: 0.2rem; font-size: 11px; }
+.state-panel .vname { color: #a6e22e; }
+.state-panel .veq { color: #444; }
+.state-panel .vval { color: #d4d4d4; }
+.state-panel .actor-heading { color: #a6e22e; font-size: 11px; margin-top: 0.5rem; }
+.state-panel .field { padding-left: 0.75rem; font-size: 11px; color: #888; }
+
+/* Bottom half: REPL */
+.bottom-half {
+  height: 50%;
+  overflow: hidden;
+}
+
+/* Cheat sheet overlay */
+.cheatsheet-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; width: 100vw; height: 100vh;
+  background: rgba(0,0,0,0.7);
+  z-index: 100;
+  overflow-y: auto;
+  padding: 3rem;
+}
+
+.cheatsheet-overlay.open { display: flex; justify-content: center; }
+
+.cheatsheet {
+  background: #12121f;
+  border: 1px solid #1a1a2e;
+  border-radius: 8px;
+  max-width: 700px;
+  width: 100%;
+  padding: 2rem;
+  position: relative;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.cheatsheet .close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 1.5rem;
+  cursor: pointer;
+}
+.cheatsheet .close:hover { color: #fff; }
+
+.cheatsheet h2 { color: #a6e22e; font-size: 1rem; margin-bottom: 1.5rem; }
+.cheatsheet h3 { color: #888; font-size: 0.8rem; margin-top: 1.25rem; margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
+
+.cheatsheet pre {
+  background: #0e0e1a;
+  border: 1px solid #1a1a2e;
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  margin-bottom: 0.75rem;
+  font-size: 12px;
+  line-height: 1.5;
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.cheatsheet pre:hover { border-color: #a6e22e; }
+.cheatsheet pre::after {
+  content: 'click to copy';
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  font-size: 9px;
+  color: #444;
+}
+.cheatsheet pre.copied::after { content: 'copied!'; color: #a6e22e; }
+
+.cheatsheet .note { color: #555; font-size: 11px; margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <span class="logo">blimp</span>
+  <span class="sep">/</span>
+  <span class="label">playground</span>
+  <span class="spacer"></span>
+  <button class="btn" onclick="resetRepl()">Reset</button>
+  <button class="btn" id="cheatBtn" onclick="toggleCheatsheet()">Cheat Sheet</button>
+  <a class="btn" href="index.html" style="text-decoration:none;">Blog</a>
+</div>
+
+<div class="main">
+  <div class="top-half">
+    <div class="canvas-area">
+      <canvas id="viz"></canvas>
+    </div>
+    <div class="state-panel" id="state"></div>
+  </div>
+  <div style="padding:0.4rem 1rem;border-bottom:1px solid #1a1a2e;flex-shrink:0;">
+    <button class="btn" id="demoBtn" onclick="runDemo()" style="font-size:0.8rem;padding:0.25rem 1rem;">Demo</button>
+  </div>
+  <div class="bottom-half" id="repl"></div>
+</div>
+
+<!-- Cheat sheet -->
+<div class="cheatsheet-overlay" id="cheatOverlay" onclick="if(event.target===this)toggleCheatsheet()">
+<div class="cheatsheet">
+<button class="close" onclick="toggleCheatsheet()">&times;</button>
+<h2>Blimp Cheat Sheet</h2>
+
+<h3>Basics</h3>
+<pre>x = 42
+name = "hello"
+flag = true
+items = [1, 2, 3]
+data = %{name: "bob", age: 30}</pre>
+
+<h3>Pipes</h3>
+<pre>items |> length(_)
+items |> reverse(_)</pre>
+
+<h3>Actors</h3>
+<pre>actor Counter do
+  state count: Int :: 0
+
+  on :increment do
+    become count: count + 1
+    reply count + 1
+  end
+
+  on :get do
+    reply count
+  end
+end</pre>
+
+<h3>Spawn + Message Send</h3>
+<pre>c = spawn Counter
+c <- :increment
+c <- :increment
+c <- :get</pre>
+
+<h3>Guards</h3>
+<pre>actor Account do
+  state balance: Int :: 100
+
+  on :withdraw(amount) when amount > 0 do
+    become balance: balance - amount
+    reply balance - amount
+  end
+
+  on :withdraw(amount) when amount <= 0 do
+    reply :error
+  end
+end</pre>
+
+<h3>Closures</h3>
+<pre>double = fn(x) do x * 2 end
+double(5)</pre>
+
+<h3>Map / Filter / Reduce</h3>
+<pre>nums = [1, 2, 3, 4, 5]
+map(nums, fn(x) do x * 10 end)
+filter(nums, fn(x) do x > 2 end)
+reduce(nums, 0, fn(acc, x) do acc + x end)</pre>
+
+<h3>Spread Operators</h3>
+<pre>double = fn(x) do x * 2 end
+...[1, 2, 3], double
+..[1, 2, 3], fn(x) do x end</pre>
+<div class="note">... = map (returns list), .. = each (returns :ok)</div>
+
+<h3>For Loop</h3>
+<pre>for x in [10, 20, 30] do
+  x + 1
+end</pre>
+
+<h3>Situation (Pattern Matching)</h3>
+<pre>situation :green do
+  :red -> "stop"
+  :green -> "go"
+  :yellow -> "slow"
+end</pre>
+
+<h3>State Machine</h3>
+<pre>actor Light do
+  state color: Atom :: :red
+
+  on :next do
+    situation color do
+      :red -> become color: :green
+      :green -> become color: :yellow
+      :yellow -> become color: :red
+    end
+    reply color
+  end
+end
+
+l = spawn Light
+l <- :next
+l <- :next
+l <- :next</pre>
+
+<h3>Self Send</h3>
+<pre>actor Doubler do
+  state val: Int :: 0
+
+  on :set(n) do
+    become val: n
+    reply n
+  end
+
+  on :double do
+    self <- :set(val * 2)
+    reply val
+  end
+end</pre>
+
+<h3>Holes (Agent Directives)</h3>
+<pre>situation payment do
+  :valid -> charge(payment)
+  _ # Hole: handle invalid payment
+end</pre>
+<div class="note">The comment after _ is a directive to the AI agent</div>
+
+</div>
+</div>
+
+<script src="repl/blimp.js"></script>
+<script src="repl/canvas.js"></script>
+<script>
+var blimp, viz, replEl, stateEl;
+
+(async function() {
+  replEl = document.getElementById('repl');
+  stateEl = document.getElementById('state');
+
+  // Init canvas
+  viz = new BlimpCanvas(document.getElementById('viz'));
+
+  // Init REPL
+  blimp = new Blimp();
+  await blimp.init('repl/blimp.wasm');
+
+  buildRepl();
+})();
+
+var buffer = '', depth = 0, cmdHistory = [], historyIdx = -1;
+var compEl = null, compItems = [], compIdx = -1, compPrefix = '';
+var scroll, inputRow, inputEl;
+
+function buildRepl() {
+  replEl.innerHTML = '';
+  replEl.style.cssText = 'height:100%;background:#0e0e1a;overflow-y:auto;padding:1rem 1.25rem;font-size:13px;line-height:1.6;cursor:text;';
+
+  scroll = replEl;
+  addLine('result-line', 'Blimp REPL ready. Shift+Enter for newlines.');
+  addLine('spacer-line', '');
+  createPrompt();
+
+  replEl.addEventListener('click', function() { if (inputEl) inputEl.focus(); });
+}
+
+function addLine(cls, text) {
+  var div = document.createElement('div');
+  div.className = cls;
+  div.style.whiteSpace = 'pre-wrap';
+  div.style.wordBreak = 'break-all';
+  if (cls === 'prompt-line') div.style.color = '#a6e22e';
+  else if (cls === 'error-line') div.style.color = '#f92672';
+  else if (cls === 'spacer-line') { div.innerHTML = '&nbsp;'; div.style.height = '0.4em'; }
+  else div.style.color = '#d4d4d4';
+  scroll.appendChild(div);
+  if (cls === 'spacer-line') div.textContent = '';
+  else div.textContent = text;
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
+function createPrompt() {
+  inputRow = document.createElement('div');
+  inputRow.style.cssText = 'display:flex;align-items:flex-start;margin-top:0.15rem;';
+  var pc = document.createElement('span');
+  pc.style.cssText = 'color:#a6e22e;white-space:pre;user-select:none;';
+  pc.textContent = depth > 0 ? '   ... ' : 'blimp> ';
+  inputEl = document.createElement('textarea');
+  inputEl.style.cssText = 'flex:1;background:transparent;border:none;color:#d4d4d4;font:inherit;font-size:13px;line-height:1.6;resize:none;outline:none;min-height:1.6em;max-height:15em;padding:0;margin:0;';
+  inputEl.rows = 1;
+  inputEl.spellcheck = false;
+  inputEl.addEventListener('keydown', handleKey);
+  inputEl.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 240) + 'px';
+    autoComplete();
+  });
+  inputRow.appendChild(pc);
+  inputRow.appendChild(inputEl);
+  scroll.appendChild(inputRow);
+  inputEl.focus();
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
+function freezeInput() {
+  var text = inputEl.value;
+  var prompt = depth > 0 ? '   ... ' : 'blimp> ';
+  inputRow.remove();
+  addLine('prompt-line', prompt + text);
+  inputRow = null; inputEl = null;
+  return text;
+}
+
+function countDepth(text) {
+  var d = 0, words = text.replace(/#.*/g, '').match(/\b(do|end)\b/g) || [];
+  for (var w of words) { if (w === 'do') d++; else if (w === 'end') d--; }
+  return d;
+}
+
+function submitBuffer() {
+  var source = buffer.trim();
+  if (!source) { buffer = ''; depth = 0; return; }
+  cmdHistory.push(source); historyIdx = cmdHistory.length;
+  var result = blimp.eval(source);
+  if (result.ok) { if (result.value) addLine('result-line', '=> ' + result.value); }
+  else addLine('error-line', result.error);
+  addLine('spacer-line', '');
+
+  var st = blimp.getState();
+  viz.feed(st, source);
+  updateState(st);
+
+  buffer = ''; depth = 0;
+}
+
+function autoComplete() {
+  if (!blimp || !inputEl) return;
+  if (typeof blimp.complete !== 'function') return;
+  var text = inputEl.value;
+  var cursor = inputEl.selectionStart;
+  // Get the last word (the one being typed)
+  var start = cursor;
+  while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
+  compPrefix = text.substring(start, cursor);
+  if (compPrefix.length < 1) { dismissComp(); compItems = []; return; }
+  try { compItems = blimp.complete(compPrefix); } catch(e) { compItems = []; }
+  if (compItems.length === 0) { dismissComp(); return; }
+  if (compItems.length === 1 && compItems[0].insert === compPrefix) { dismissComp(); return; }
+  compIdx = 0;
+  renderComp();
+}
+
+function renderComp() {
+  dismissComp();
+  if (!inputRow) return;
+
+  compEl = document.createElement('div');
+  compEl.style.cssText = 'padding:4px 0;margin-left:4.5rem;border-left:2px solid #555;padding-left:8px;margin-top:2px;margin-bottom:4px;background:#0e0e1a;';
+
+  var max = Math.min(compItems.length, 3);
+  for (var i = 0; i < max; i++) {
+    var item = document.createElement('div');
+    var isActive = (i === compIdx);
+    item.style.cssText = 'padding:2px 6px;font-size:12px;line-height:1.6;cursor:pointer;border-radius:2px;' +
+      'color:' + (isActive ? '#a6e22e' : '#888') + ';' +
+      (isActive ? 'background:rgba(166,226,46,0.08);' : '') +
+      'display:block;';
+
+    var labelSpan = document.createElement('span');
+    labelSpan.textContent = compItems[i].label;
+    item.appendChild(labelSpan);
+
+    var kindSpan = document.createElement('span');
+    kindSpan.style.cssText = 'color:#444;font-size:10px;margin-left:0.75rem;font-style:italic;';
+    kindSpan.textContent = compItems[i].kind;
+    item.appendChild(kindSpan);
+
+    (function(idx) {
+      item.addEventListener('click', function() {
+        acceptComp(compItems[idx]);
+        dismissComp();
+        if (inputEl) inputEl.focus();
+      });
+    })(i);
+    compEl.appendChild(item);
+  }
+  if (compItems.length > 3) {
+    var more = document.createElement('div');
+    more.style.cssText = 'font-size:10px;color:#444;padding:1px 4px;';
+    more.textContent = '... ' + (compItems.length - 3) + ' more';
+    compEl.appendChild(more);
+  }
+
+  // Insert right after the input row
+  inputRow.after(compEl);
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
+function acceptComp(comp) {
+  var text = inputEl.value;
+  var cursor = inputEl.selectionStart;
+  var start = cursor;
+  while (start > 0 && /[a-zA-Z0-9_?!]/.test(text[start - 1])) start--;
+  inputEl.value = text.substring(0, start) + comp.insert + text.substring(cursor);
+  var p = start + comp.insert.length;
+  inputEl.setSelectionRange(p, p);
+}
+
+function dismissComp() {
+  if (compEl) { compEl.remove(); compEl = null; }
+  compIdx = -1;
+  // Don't clear compItems here - renderComp calls dismissComp then uses compItems
+}
+
+function handleKey(e) {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    if (compEl && compItems.length > 0) {
+      compIdx = (compIdx + 1) % Math.min(compItems.length, 3);
+      renderComp();
+    }
+    return;
+  }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (compEl && compIdx >= 0 && compIdx < compItems.length) {
+      acceptComp(compItems[compIdx]);
+      dismissComp();
+      return;
+    }
+    dismissComp();
+    var line = freezeInput();
+    buffer += (buffer ? '\n' : '') + line;
+    depth += countDepth(line);
+    if (depth > 0) { createPrompt(); return; }
+    submitBuffer(); createPrompt(); return;
+  }
+  if (e.key === 'Escape') {
+    if (compEl) { dismissComp(); e.preventDefault(); return; }
+  }
+  if (!compEl) {
+    if (e.key === 'ArrowUp' && !buffer && inputEl.selectionStart === 0) {
+      e.preventDefault();
+      if (historyIdx > 0) {
+        historyIdx--;
+        inputEl.value = cmdHistory[historyIdx];
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 300) + 'px';
+        inputEl.setSelectionRange(0, 0);
+        scroll.scrollTop = scroll.scrollHeight;
+      }
+    }
+    if (e.key === 'ArrowDown' && !buffer) {
+      e.preventDefault();
+      if (historyIdx < cmdHistory.length - 1) {
+        historyIdx++;
+        inputEl.value = cmdHistory[historyIdx];
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 300) + 'px';
+        scroll.scrollTop = scroll.scrollHeight;
+      } else {
+        historyIdx = cmdHistory.length;
+        inputEl.value = '';
+        inputEl.style.height = 'auto';
+      }
+    }
+  }
+}
+
+function updateState(st) {
+  if (!st) return;
+  stateEl.innerHTML = '';
+
+  if (st.vars && st.vars.length) {
+    var h = document.createElement('h3'); h.textContent = 'Variables'; stateEl.appendChild(h);
+    for (var v of st.vars) {
+      var d = document.createElement('div'); d.className = 'entry';
+      d.innerHTML = '<span class="vname">' + esc(v.name) + '</span> <span class="veq">=</span> <span class="vval">' + esc(v.value) + '</span>';
+      stateEl.appendChild(d);
+    }
+  }
+
+  if (st.actors && st.actors.length) {
+    var h = document.createElement('h3'); h.textContent = 'Actors'; h.style.marginTop = '0.75rem'; stateEl.appendChild(h);
+    for (var a of st.actors) {
+      var ah = document.createElement('div'); ah.className = 'actor-heading'; ah.textContent = a.ref; stateEl.appendChild(ah);
+      for (var k in a.state) {
+        var fd = document.createElement('div'); fd.className = 'field'; fd.textContent = k + ': ' + a.state[k]; stateEl.appendChild(fd);
+      }
+    }
+  }
+}
+
+function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function resetRepl() {
+  blimp.reset();
+  buffer = ''; depth = 0; cmdHistory = []; historyIdx = -1;
+  viz = new BlimpCanvas(document.getElementById('viz'));
+  stateEl.innerHTML = '';
+  buildRepl();
+}
+
+function toggleCheatsheet() {
+  var o = document.getElementById('cheatOverlay');
+  o.classList.toggle('open');
+  document.getElementById('cheatBtn').classList.toggle('active');
+}
+
+// Copy on click for cheatsheet code blocks
+document.addEventListener('click', function(e) {
+  var pre = e.target.closest('.cheatsheet pre');
+  if (!pre) return;
+  navigator.clipboard.writeText(pre.textContent).then(function() {
+    pre.classList.add('copied');
+    setTimeout(function() { pre.classList.remove('copied'); }, 1500);
+  });
+});
+
+// Escape closes cheatsheet
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    var o = document.getElementById('cheatOverlay');
+    if (o.classList.contains('open')) toggleCheatsheet();
+  }
+});
+
+// ── Demo: type commands at human speed ──────────────────
+
+var demoRunning = false;
+
+function runDemo() {
+  if (demoRunning) return;
+  demoRunning = true;
+  var btn = document.getElementById('demoBtn');
+  btn.classList.add('active');
+  btn.textContent = 'Running...';
+
+  resetRepl();
+
+  var commands = [
+    // Define Counter
+    'actor Counter do\n  state count: Int :: 0\n\n  on :increment do\n    become count: count + 1\n    reply count + 1\n  end\n\n  on :get do\n    reply count\n  end\nend',
+    // Define Greeter
+    'actor Greeter do\n  state name: String :: "world"\n\n  on :set_name(n) do\n    become name: n\n    reply n\n  end\n\n  on :greet do\n    reply name\n  end\nend',
+    // Spawn counters
+    'c1 = spawn Counter',
+    'c2 = spawn Counter',
+    'c3 = spawn Counter',
+    // Spawn greeters
+    'g1 = spawn Greeter',
+    'g2 = spawn Greeter',
+    // Send messages
+    'c1 <- :increment',
+    'c1 <- :increment',
+    'c1 <- :increment',
+    'c2 <- :increment',
+    'c2 <- :increment',
+    'c3 <- :increment',
+    'g1 <- :set_name("alice")',
+    'g2 <- :set_name("bob")',
+    'g1 <- :greet',
+    'g2 <- :greet',
+    // Use closures
+    'c1 <- :get',
+    'c2 <- :get',
+    'c3 <- :get',
+    // Map over a list
+    'double = fn(x) do x * 2 end',
+    '...[1, 2, 3, 4, 5], double',
+  ];
+
+  var idx = 0;
+
+  function typeNext() {
+    if (idx >= commands.length) {
+      demoRunning = false;
+      btn.classList.remove('active');
+      btn.textContent = 'Demo';
+      return;
+    }
+
+    var cmd = commands[idx];
+    idx++;
+
+    // Type the command character by character
+    var chars = cmd.split('');
+    var ci = 0;
+
+    function typeChar() {
+      if (ci >= chars.length) {
+        // Done typing, submit after a pause
+        setTimeout(function() {
+          // Simulate Enter
+          if (inputEl) {
+            inputEl.value = cmd;
+            var lines = cmd.split('\n');
+            // Freeze + submit the full command
+            freezeInput();
+            buffer = cmd;
+            depth = 0;
+            submitBuffer();
+            createPrompt();
+            // Next command after delay
+            var delay = cmd.length > 50 ? 600 : 400;
+            setTimeout(typeNext, delay);
+          }
+        }, 200);
+        return;
+      }
+
+      if (inputEl) {
+        // For multiline, show the accumulating text
+        inputEl.value = cmd.substring(0, ci + 1);
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 240) + 'px';
+        scroll.scrollTop = scroll.scrollHeight;
+      }
+      ci++;
+      // Vary typing speed: faster for whitespace/newlines
+      var ch = chars[ci - 1];
+      var speed = (ch === ' ' || ch === '\n') ? 15 : 30 + Math.random() * 25;
+      setTimeout(typeChar, speed);
+    }
+
+    typeChar();
+  }
+
+  // Start after a brief pause
+  setTimeout(typeNext, 500);
+}
+</script>
+</body>
+</html>
