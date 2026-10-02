@@ -276,8 +276,13 @@ const CHAPTERS = [
     solution: './exercises/ch07_gravity/solutions/01_gravity.blimp' },
   { id: '08', title: 'The screen, and playing it',         md: '08-the-screen.md',
     stub: './exercises/ch08_screen/01_screen.blimp',
-    solution: './exercises/ch08_screen/solutions/01_screen.blimp', play: true },
+    solution: './exercises/ch08_screen/solutions/01_screen.blimp', play: true,
+    playHint: '← → move, ↑ or x rotates, ↓ drops a row, space drops, p pauses, r restarts' },
   { id: '09', title: 'Where to take it',                   md: '09-where-to-take-it.md' },
+  { id: '10', title: 'A page of your own',                 md: '10-a-page.md',
+    stub: './exercises/ch10_page/01_guestbook.blimp',
+    solution: './exercises/ch10_page/solutions/01_guestbook.blimp', play: true,
+    playHint: 'sign the book; reload the tutorial and the notes are still here' },
 ];
 
 const statusEl = document.getElementById('status');
@@ -495,7 +500,7 @@ function stopPlay() {
   playStopBtn.disabled = true;
 }
 
-async function play(source, label) {
+async function play(source, label, hint) {
   stopPlay();
   const b = new Blimp();
   b.onPrint(() => {});
@@ -515,7 +520,7 @@ async function play(source, label) {
     (/^\s*Evaluation error\s*$/.test(msg) ? ' The page\'s interpreter says no more than that; Run Tests in the Editor tab shows which handler is not done yet.' : ''), true) });
   const r = playView.mount(source, 'game');
   if (r && r.ok) {
-    playStatus(label + ': ← → move, ↑ or x rotates, ↓ drops a row, space drops, p pauses, r restarts');
+    playStatus(label + ': ' + (hint || '← → move, ↑ or x rotates, ↓ drops a row, space drops, p pauses, r restarts'));
     playStopBtn.disabled = false;
   }
 }
@@ -529,7 +534,7 @@ playFinishedBtn.addEventListener('click', async () => {
   }
   play(finishedSource, 'the finished game');
 });
-playMineBtn.addEventListener('click', () => play(getEditorValue(), 'your code'));
+playMineBtn.addEventListener('click', () => play(getEditorValue(), 'your code', currentChapter && currentChapter.playHint));
 playStopBtn.addEventListener('click', () => { stopPlay(); playStatus('stopped'); });
 
 function idFromHash() {

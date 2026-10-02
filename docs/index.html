@@ -222,6 +222,7 @@ footer { border-top: 1px solid var(--rule); margin-top: 48px; padding: 22px 0 48
     <a class="card" href="/tutorial/#ch07"><div class="p">7. Gravity</div><div class="d">A tick is one row. Landing, locking, clearing, game over.</div></a>
     <a class="card" href="/tutorial/#ch08"><div class="p">8. The screen</div><div class="d"><code>Tetris.Screen</code>: views are values. Then play what you built.</div></a>
     <a class="card" href="/tutorial/#ch09"><div class="p">9. Where to take it</div><div class="d">Hold, a longer queue, and the other things the game does not do yet.</div></a>
+    <a class="card" href="/tutorial/#ch10"><div class="p">10. A page of your own</div><div class="d">A guestbook: a form that arrives as a map, a keyed list, <code>show</code>, a modal dialog, storage. Then sign it.</div></a>
   </div>
   <p class="cap">The finished program is <a href="https://github.com/notactuallytreyanastasio/blimp/blob/main/chunks/lang/examples/tetris.blimp"><code>examples/tetris.blimp</code></a>, 801 lines with 34 tests. Chapters 3 to 8 are cut from it by <code>exercises/build_tetris.py</code>, so a change to the game reaches the exercises by running one script.</p>
 </section>
@@ -289,7 +290,8 @@ length(posts)
 <!-- ─────────────────────────────────────────────────────────────── -->
 <section id="browser">
   <h2><span class="num">2</span>The same interpreter runs in your browser</h2>
-  <p>The Zig interpreter also compiles to WebAssembly. A page loads <code>blimp.wasm</code>, fetches a <code>.blimp</code> file from the server and runs it. The program's last expression is a view: <code>el(tag, attrs, children...)</code> builds real DOM elements with the page's own CSS classes, including SVG, and events come back to an actor as messages (<code>click:</code>, <code>input:</code>, <code>submit:</code>, <code>swipe:</code>, keys, <code>timer(ms, :msg)</code>, <code>fetch(url, :msg)</code>). <code>draw()</code> paints a canvas for pages with thousands of points.</p>
+  <p>The Zig interpreter also compiles to WebAssembly. A page loads <code>blimp.wasm</code>, fetches a <code>.blimp</code> file from the server and runs it. The program's last expression is a view: <code>el(tag, attrs, children...)</code> builds real DOM elements with the page's own CSS classes, including SVG and <code>&lt;dialog&gt;</code>, and events come back to an actor as messages (<code>click:</code>, <code>input:</code>, <code>submit:</code> with the form as a map, <code>swipe:</code>, <code>drag:</code>, keys, <code>timer(ms, :msg)</code>, <code>fetch(url, :msg)</code>). The view also holds a WebSocket (<code>socket()</code>), remembers between visits (<code>stored()</code> and <code>store()</code>), and keeps a list's rows by <code>key:</code>. <code>draw()</code> paints a canvas for pages with thousands of points. <a href="/view/reference.html">The view reference</a> has every piece, and <a href="/tutorial/#ch10">tutorial chapter 10</a> builds a page with most of them.</p>
+  <p>Since 1 October 2026 <a href="https://bobbby.online/aim">bobbby.online/aim</a> has no script of its own: its chat socket, its stored screen name, its draggable windows, its sounds and its clock are all the Blimp program.</p>
   <p>Every such page has a small window that draws that program's own actors and the messages between them, live, from the interpreter's state while you play.</p>
 
 <pre><span class="c"># static/twenty48/twenty48.blimp: the rules are Temper (below), the actor and view are Blimp</span>
@@ -433,7 +435,7 @@ site tests          29240 ms -&gt; 3020 ms</pre>
   <h2><span class="num">7</span>Learn it, and where it came from</h2>
   <p>The tutorial is <a href="#tetris">above</a>. The rest was written in March, before the site, and describes a language that has changed since: the March posts talk about reference counting and LLVM compilation, while the interpreter serving the site frees nothing while it evaluates and compacts its heap between ticks.</p>
   <div class="archive">
-    <div><a href="/tutorial/">tutorial</a><span class="d">Build Tetris: ten chapters, one actor each, with exercises and the game running in the page.</span></div>
+    <div><a href="/tutorial/">tutorial</a><span class="d">Build Tetris: ten chapters, one actor each, with exercises and the game running in the page. Then a guestbook: forms, lists, a dialog, storage.</span></div>
     <div><a href="/manifesto/">manifesto</a><span class="d">Why actors are the only abstraction. Live examples.</span></div>
     <div><a href="/blog/">design journal</a><span class="d">Four posts from March, and Tetris from September.</span></div>
     <div><a href="/blog/playground.html">playground</a><span class="d">A REPL in the browser.</span></div>
