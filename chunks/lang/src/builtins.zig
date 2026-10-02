@@ -207,8 +207,8 @@ pub const BuiltinRegistry = struct {
         reg.register("list_dir", &builtinListDir);
         reg.register("file_exists?", &builtinFileExists);
         reg.register("file_size", &builtinFileSize);
-        // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
         reg.register("to_html", &builtinToHtml_impl);
+        // Native-only builtins (TCP, process, WebSocket -- stubbed on WASM)
         reg.register("tcp_listen", &builtinTcpListen_impl);
         reg.register("tcp_connect", &builtinTcpConnectNative);
         reg.register("http_start", &builtinHttpStart);
@@ -3351,7 +3351,10 @@ const native_stub = if (is_wasm) struct {
     }
 } else struct {};
 
-const builtinToHtml_impl = if (is_wasm) native_stub.stub else builtinToHtmlNative;
+// to_html is string building, nothing native: the browser has it too, so a
+// test that checks a view's markup passes in the tutorial's page as well as
+// on the command line. (It was stubbed with the TCP and process builtins.)
+const builtinToHtml_impl = builtinToHtmlNative;
 const builtinTcpListen_impl = if (is_wasm) native_stub.stub else builtinTcpListenNative;
 const builtinTcpAccept_impl = if (is_wasm) native_stub.stub else builtinTcpAcceptNative;
 const builtinTcpRead_impl = if (is_wasm) native_stub.stub else builtinTcpReadNative;

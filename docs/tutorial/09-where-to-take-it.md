@@ -140,5 +140,6 @@ The page calls `seed(Date.now())` before each game; a local experiment that want
 - [Rooms and presence](../web/rooms.html) is the server-side piece a spectator mode or a networked versus game would sit on: one hub actor, `:join`, `:broadcast` and a `:flush` per tick. Also unmerged, and it needs an interpreter with `tcp_write_some`. A frame would have to cross the wire as JSON, and not all of it survives the trip: `json_decode(json_encode(%{m: :left, t: {1, 2}}))` gives back `{:ok, %{m: "left", t: [1, 2]}}`: the atom is now a string and the tuple a list.
 - The language design notes in `docs/lang_design/` are background reading on actors, views, sessions and the parser. Where they disagree with what the interpreter does, the interpreter is right.
 
-That's the end of the tutorial.
+That's the end of Tetris.
 The game you play in chapter 8 is the one on [bobbby.online/tetris](https://bobbby.online/tetris), actor for actor.
+[Chapter 10](#ch10) leaves the game for a page made of forms and lists, a guestbook, and the rest of what Blimp's view can do.

@@ -1,6 +1,6 @@
 # Build Tetris in Blimp
 
-Ten chapters that build the Tetris running on [bobbby.online/tetris](https://bobbby.online/tetris), one actor at a time. Each chapter has an exercise: a Blimp file with some handlers left as `reply :TODO`, and the tests that say when they are right. The last one plays the game you wrote.
+Ten chapters that build the Tetris running on [bobbby.online/tetris](https://bobbby.online/tetris), one actor at a time, and an eleventh that builds a page of forms and lists: a guestbook. Each chapter has an exercise: a Blimp file with some handlers left as `reply :TODO`, and the tests that say when they are right. Chapter 8 plays the game you wrote, and chapter 10 the guestbook.
 
 Read it at [blimp.bobbby.online/tutorial/](https://blimp.bobbby.online/tutorial/). The page runs the interpreter as WebAssembly, so the editor, the tests and the game all run in the browser.
 
@@ -18,6 +18,7 @@ Read it at [blimp.bobbby.online/tutorial/](https://blimp.bobbby.online/tutorial/
 | [07](07-gravity.md) | Gravity, landing, game over | `Tetris.Game` | `exercises/ch07_gravity` |
 | [08](08-the-screen.md) | The screen, and playing it | `Tetris.Screen` | `exercises/ch08_screen` |
 | [09](09-where-to-take-it.md) | Where to take it | | none |
+| [10](10-a-page.md) | A page of your own | `Guestbook` | `exercises/ch10_page` |
 
 ## Running an exercise locally
 
