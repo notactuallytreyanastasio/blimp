@@ -1,4 +1,5 @@
 const std = @import("std");
+const Value = @import("value.zig").Value;
 
 /// Source location for error reporting.
 pub const Loc = struct {
@@ -96,20 +97,50 @@ pub const Node = struct {
         value: *const Node,
     };
 
+    // A literal's Value is built once by the parser, in the parser's own
+    // allocator, so it lives exactly as long as the node that points at it:
+    // the code arena in a plain run, the heap in the wasm `send` path (where
+    // the AST dies with it).  It is never in the heap a compaction replaces
+    // unless its node is too.  A node built by hand, as the tests do, has
+    // `prebuilt == null` and the evaluator builds the Value as it always did.
     pub const IntegerLit = struct {
         value: i64,
+        prebuilt: ?*const Value = null,
     };
 
     pub const FloatLit = struct {
         value: f64,
+        prebuilt: ?*const Value = null,
     };
 
+    /// `value` is the lexeme as written, quotes and escapes included (the
+    /// checker reads it).  The parser classifies it once: no interpolation
+    /// and the unescaped text is in `prebuilt`; interpolation and the parts
+    /// are in `interp`.
     pub const StringLit = struct {
         value: []const u8,
+        prebuilt: ?*const Value = null,
+        interp: ?*const Interp = null,
+    };
+
+    pub const InterpPart = union(enum) {
+        /// Literal text, already unescaped.
+        text: []const u8,
+        /// The expression inside `#{...}`, parsed once.
+        expr: *const Node,
+    };
+
+    pub const Interp = struct {
+        parts: []const InterpPart,
+        /// An unbalanced `#{` or an expression that does not parse.  It is
+        /// an error when the literal is evaluated, as it was when the
+        /// expression was parsed at every evaluation.
+        bad: bool = false,
     };
 
     pub const AtomLit = struct {
         name: []const u8,
+        prebuilt: ?*const Value = null,
     };
 
     pub const BoolLit = struct {
@@ -193,6 +224,12 @@ pub const Node = struct {
     pub const DotAccess = struct {
         object: *const Node,
         field: []const u8,
+        /// Set by the parser (`flat_checked`): the chain flattened to
+        /// "App.Shop.Checkout" when the object is an identifier chain whose
+        /// every part starts with an upper-case letter, the only names
+        /// `actor` binds.  Null means "do not look it up, read the field".
+        flat: ?[]const u8 = null,
+        flat_checked: bool = false,
     };
 
     pub const Hole = struct {

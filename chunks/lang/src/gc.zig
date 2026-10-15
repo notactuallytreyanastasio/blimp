@@ -789,3 +789,52 @@ test "keep_all still keeps every actor" {
     _ = heap_a.reset(.free_all);
     try std.testing.expectEqual(@as(usize, 2), eval.registry.instances.items.len);
 }
+
+test "a literal built once by the parser survives compaction, bound and re-evaluated" {
+    @import("handles.zig").dropAll();
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var parser = Parser.init(code.allocator(),
+        \\s = "a\tb"
+        \\n = 5000
+        \\f = 2.5
+        \\k = :ok
+        \\t = "n=#{n}!"
+        \\[s, n, f, k, t]
+    );
+    const nodes = try parser.parseFile();
+    // The parser built the value once; every evaluation returns that pointer.
+    const lit = nodes[0].kind.assign_stmt.value.kind.string_lit;
+    try std.testing.expect(lit.prebuilt != null);
+
+    var eval = Evaluator.init(heap_a.allocator());
+    var last: *const Value = undefined;
+    for (nodes) |node| last = try eval.eval(node);
+    try std.testing.expect(last.list[0] == lit.prebuilt.?);
+
+    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    _ = heap_a.reset(.free_all);
+
+    // The bindings hold copies; the AST's own values were never in heap_a.
+    try std.testing.expectEqualStrings("a\tb", (try run(code.allocator(), &eval, "s")).string);
+    try std.testing.expectEqual(@as(i64, 5000), (try run(code.allocator(), &eval, "n")).integer);
+    try std.testing.expectEqualStrings("n=5000!", (try run(code.allocator(), &eval, "t")).string);
+
+    // Evaluate the same nodes again after the swap.
+    for (nodes) |node| last = try eval.eval(node);
+    try std.testing.expectEqualStrings("a\tb", last.list[0].string);
+    try std.testing.expectEqual(@as(i64, 5000), last.list[1].integer);
+    try std.testing.expectEqual(@as(f64, 2.5), last.list[2].float);
+    try std.testing.expectEqualStrings("ok", last.list[3].atom);
+    try std.testing.expectEqualStrings("n=5000!", last.list[4].string);
+
+    // A second compaction copies the shared prebuilt values by value.
+    try compact(&eval, heap_a.allocator(), std.testing.allocator);
+    _ = heap_b.reset(.free_all);
+    try std.testing.expectEqualStrings("a\tb", (try run(code.allocator(), &eval, "s")).string);
+}

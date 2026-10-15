@@ -15,33 +15,7 @@ pub const BlimpError = errors.BlimpError;
 pub const EvalError = builtins_mod.EvalError;
 
 /// Tree-walking interpreter for Blimp expressions.
-/// True when `s` has a `#{` that is not written `\\#{`.
-fn hasInterpolation(s: []const u8) bool {
-    var i: usize = 0;
-    while (i + 1 < s.len) : (i += 1) {
-        if (s[i] == '\\') {
-            i += 1;
-            continue;
-        }
-        if (s[i] == '#' and s[i + 1] == '{') return true;
-    }
-    return false;
-}
-
-/// The first `#{` or `\\#` at or after `from`, or the end of `s`.
-fn nextInterpOrEscapedHash(s: []const u8, from: usize) usize {
-    var j = from;
-    while (j + 1 < s.len) {
-        if (s[j] == '\\') {
-            if (s[j + 1] == '#') return j;
-            j += 2; // an escape pair: `\\#{` is a backslash, then `#{`
-            continue;
-        }
-        if (s[j] == '#' and s[j + 1] == '{') return j;
-        j += 1;
-    }
-    return s.len;
-}
+const literal = @import("literal.zig");
 
 pub const Evaluator = struct {
     allocator: std.mem.Allocator,
@@ -436,38 +410,31 @@ pub const Evaluator = struct {
         }
         switch (node.kind) {
             // Literals
+            // Built once by the parser; see ast.IntegerLit.
             .integer_lit => |lit| {
+                if (lit.prebuilt) |v| return v;
                 return self.make(.{ .integer = lit.value });
             },
             .float_lit => |lit| {
+                if (lit.prebuilt) |v| return v;
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = Value{ .float = lit.value };
                 return v;
             },
             .string_lit => |lit| {
-                // Strip surrounding quotes if present
-                const raw = lit.value;
-                const s = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
-                    raw[1 .. raw.len - 1]
-                else
-                    raw;
-                // Check for interpolation: #{expr}
-                if (hasInterpolation(s)) {
-                    return self.evalStringInterp(s);
-                }
-                // Process escape sequences if any backslashes present
-                if (std.mem.indexOf(u8, s, "\\") != null) {
-                    var buf: std.ArrayListUnmanaged(u8) = .empty;
-                    try self.appendUnescaped(&buf, s);
-                    const v = self.allocator.create(Value) catch return error.OutOfMemory;
-                    v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
-                    return v;
-                }
+                if (lit.prebuilt) |v| return v;
+                if (lit.interp) |ip| return self.evalStringInterp(ip.*);
+                // A node built by hand, not by the parser.
+                const s = literal.stripQuotes(lit.value);
+                if (literal.hasInterpolation(s)) return self.evalStringInterp(try self.interpFromSource(s));
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                try literal.appendUnescaped(self.allocator, &buf, s);
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
-                v.* = Value{ .string = s };
+                v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
                 return v;
             },
             .atom_lit => |lit| {
+                if (lit.prebuilt) |v| return v;
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = Value{ .atom = lit.name };
                 return v;
@@ -840,60 +807,22 @@ pub const Evaluator = struct {
         return error.Bubble;
     }
 
-    /// Append `s` to `buf`, turning \\n \\r \\t \\e \\\\ \\" and \\# into the bytes they
-    /// name. Any other backslash is kept as written.
-    fn appendUnescaped(self: *Evaluator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) EvalError!void {
-        var i: usize = 0;
-        while (i < s.len) {
-            if (s[i] == '\\' and i + 1 < s.len) {
-                const byte: ?u8 = switch (s[i + 1]) {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    'e' => 0x1b,
-                    '\\' => '\\',
-                    '"' => '"',
-                    '#' => '#',
-                    else => null,
-                };
-                if (byte) |b| {
-                    buf.append(self.allocator, b) catch return error.OutOfMemory;
-                    i += 2;
-                    continue;
-                }
-            }
-            buf.append(self.allocator, s[i]) catch return error.OutOfMemory;
-            i += 1;
-        }
+    /// Split the inside of an interpolated literal for a node the parser did
+    /// not build (the parser does this once, in `Parser.interpParts`).
+    fn interpFromSource(self: *Evaluator, s: []const u8) EvalError!ast.Node.Interp {
+        const P = @import("parser.zig").Parser;
+        var parser = P.init(self.allocator, "");
+        const parts = parser.interpParts(s) catch return error.OutOfMemory;
+        return parts;
     }
 
-    fn evalStringInterp(self: *Evaluator, s: []const u8) EvalError!*const Value {
+    fn evalStringInterp(self: *Evaluator, ip: ast.Node.Interp) EvalError!*const Value {
+        if (ip.bad) return error.UnsupportedOperation;
         var result: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
-        var i: usize = 0;
-        while (i < s.len) {
-            if (i + 1 < s.len and s[i] == '\\' and s[i + 1] == '#') {
-                // `\#{` is the way to write a literal `#{`.
-                result.append(self.allocator, '#') catch return error.OutOfMemory;
-                i += 2;
-            } else if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
-                // Find the closing }
-                const start = i + 2;
-                var depth: u32 = 1;
-                var j = start;
-                while (j < s.len and depth > 0) {
-                    if (s[j] == '{') depth += 1;
-                    if (s[j] == '}') depth -= 1;
-                    if (depth > 0) j += 1;
-                }
-                if (depth != 0) return error.UnsupportedOperation;
-
-                // Parse and evaluate the expression inside #{...}
-                const expr_src = s[start..j];
-                const P = @import("parser.zig").Parser;
-                var parser = P.init(self.allocator, expr_src);
-                const expr_node = parser.parseExpressionPublic() catch return error.UnsupportedOperation;
-                const val = try self.eval(expr_node);
-
+        for (ip.parts) |part| switch (part) {
+            .text => |t| result.appendSlice(self.allocator, t) catch return error.OutOfMemory,
+            .expr => |expr_node| {
+                const val = try self.eval(expr_node.*);
                 // A string goes in as it is. Anything else is formatted, into
                 // a buffer that grows: a fixed one cut every value at 4096
                 // bytes without a word, which a rendered page passes easily.
@@ -905,16 +834,8 @@ pub const Evaluator = struct {
                         result.appendSlice(self.allocator, aw.written()) catch return error.OutOfMemory;
                     },
                 }
-
-                i = j + 1; // skip past }
-            } else {
-                // The literal text up to the next #{ gets the same escapes as
-                // a string with no interpolation in it.
-                const next = nextInterpOrEscapedHash(s, i);
-                try self.appendUnescaped(&result, s[i..next]);
-                i = next;
-            }
-        }
+            },
+        };
         const v = self.allocator.create(Value) catch return error.OutOfMemory;
         v.* = Value{ .string = result.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
         return v;
@@ -2316,10 +2237,14 @@ pub const Evaluator = struct {
     }
 
     fn evalDotAccess(self: *Evaluator, da: ast.Node.DotAccess) EvalError!*const Value {
-        // First, try to resolve as a dotted actor name (e.g., Shop.Checkout).
-        // Flatten the DotAccess chain into a single dotted name string and
-        // look it up in the environment (where actor singletons are bound).
-        if (flattenDottedName(da, self.allocator)) |dotted_name| {
+        // First, try to resolve as a dotted actor name (e.g., Shop.Checkout):
+        // the parser flattened the chain once, and only for chains of
+        // upper-case names, the only dotted names `actor` binds.
+        if (da.flat_checked) {
+            if (da.flat) |dotted_name| {
+                if (self.env.lookup(dotted_name)) |val| return val;
+            }
+        } else if (flattenDottedName(da, self.allocator)) |dotted_name| {
             if (self.env.lookup(dotted_name)) |val| {
                 return val;
             }
@@ -2751,23 +2676,20 @@ pub const Evaluator = struct {
                 return null;
             },
             .string_lit => |lit| {
-                // Strip surrounding quotes from AST lexeme (lexer stores "POST" with quotes,
-                // but runtime strings are unquoted)
-                const raw = lit.value;
-                const s = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
-                    raw[1 .. raw.len - 1]
-                else
-                    raw;
                 if (subject.* != .string) return null;
                 // The pattern is written the way a string expression is, so
                 // it gets the same escapes: "\n" is a newline here too.
                 // Comparing the raw lexeme meant "\n" matched the two
                 // characters backslash and n, which no string ever was.
+                if (lit.prebuilt) |pv| {
+                    return if (std.mem.eql(u8, subject.string, pv.string)) &.{} else null;
+                }
+                const s = literal.stripQuotes(lit.value);
                 if (std.mem.indexOfScalar(u8, s, '\\') == null) {
                     return if (std.mem.eql(u8, subject.string, s)) &.{} else null;
                 }
                 var buf: std.ArrayListUnmanaged(u8) = .empty;
-                self.appendUnescaped(&buf, s) catch return null;
+                literal.appendUnescaped(self.allocator, &buf, s) catch return null;
                 if (std.mem.eql(u8, subject.string, buf.items)) return &.{};
                 return null;
             },

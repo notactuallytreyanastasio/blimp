@@ -4,6 +4,9 @@ const Lexer = @import("lexer.zig").Lexer;
 const ast = @import("ast.zig");
 const Node = ast.Node;
 const Loc = ast.Loc;
+const Value = @import("value.zig").Value;
+const interned = @import("value.zig").interned;
+const literal = @import("literal.zig");
 
 pub const ParseError = error{
     UnexpectedToken,
@@ -789,12 +792,113 @@ pub const Parser = struct {
             self.advance();
             const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
             left_ptr.* = left;
+            var da: Node.DotAccess = .{ .object = left_ptr, .field = field, .flat_checked = true };
+            da.flat = try self.flatActorName(da);
             left = Node{
-                .kind = .{ .dot_access = .{ .object = left_ptr, .field = field } },
+                .kind = .{ .dot_access = da },
                 .loc = left.loc,
             };
         }
         return left;
+    }
+
+    /// "App.Shop.Checkout" for a chain of identifiers and dot accesses whose
+    /// parts all start with an upper-case letter, else null. The evaluator
+    /// looks the name up as an actor; nothing else is ever bound with a dot
+    /// in it, so `order.total` skips the lookup altogether.
+    fn flatActorName(self: *Parser, da: Node.DotAccess) ParseError!?[]const u8 {
+        var parts: [16][]const u8 = undefined; // innermost field first
+        var count: usize = 0;
+        var total: usize = 0;
+        parts[0] = da.field;
+        count = 1;
+        total = da.field.len;
+        var current = da.object;
+        while (true) {
+            const part = switch (current.kind) {
+                .dot_access => |inner| inner.field,
+                .identifier => |id| id.name,
+                else => return null,
+            };
+            if (count >= 16) return null;
+            parts[count] = part;
+            count += 1;
+            total += part.len + 1;
+            switch (current.kind) {
+                .dot_access => |inner| current = inner.object,
+                else => break,
+            }
+        }
+        for (parts[0..count]) |part| {
+            if (part.len == 0 or part[0] < 'A' or part[0] > 'Z') return null;
+        }
+        const buf = self.allocator.alloc(u8, total) catch return error.OutOfMemory;
+        var pos: usize = 0;
+        var i: usize = count;
+        while (i > 0) {
+            i -= 1;
+            if (pos > 0) {
+                buf[pos] = '.';
+                pos += 1;
+            }
+            @memcpy(buf[pos .. pos + parts[i].len], parts[i]);
+            pos += parts[i].len;
+        }
+        return buf;
+    }
+
+    /// Split the inside of a string literal that has `#{...}` in it into
+    /// literal text (unescaped) and expressions (parsed), once.
+    pub fn interpParts(self: *Parser, s: []const u8) error{OutOfMemory}!Node.Interp {
+        var parts: std.ArrayList(Node.InterpPart) = .empty;
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        var i: usize = 0;
+        while (i < s.len) {
+            if (i + 1 < s.len and s[i] == '\\' and s[i + 1] == '#') {
+                // `\#{` is the way to write a literal `#{`.
+                try text.append(self.allocator, '#');
+                i += 2;
+            } else if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
+                const start = i + 2;
+                var depth: u32 = 1;
+                var j = start;
+                while (j < s.len and depth > 0) {
+                    if (s[j] == '{') depth += 1;
+                    if (s[j] == '}') depth -= 1;
+                    if (depth > 0) j += 1;
+                }
+                if (depth != 0) return .{ .parts = &.{}, .bad = true };
+                var sub = Parser.init(self.allocator, s[start..j]);
+                const expr = sub.parseExpressionPublic() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return .{ .parts = &.{}, .bad = true },
+                };
+                if (text.items.len > 0) {
+                    try parts.append(self.allocator, .{ .text = try text.toOwnedSlice(self.allocator) });
+                }
+                const np = try self.allocator.create(Node);
+                np.* = expr;
+                try parts.append(self.allocator, .{ .expr = np });
+                i = j + 1;
+            } else {
+                // The literal text up to the next #{ gets the same escapes as
+                // a string with no interpolation in it.
+                const next = literal.nextInterpOrEscapedHash(s, i);
+                try literal.appendUnescaped(self.allocator, &text, s[i..next]);
+                i = next;
+            }
+        }
+        if (text.items.len > 0) {
+            try parts.append(self.allocator, .{ .text = try text.toOwnedSlice(self.allocator) });
+        }
+        return .{ .parts = try parts.toOwnedSlice(self.allocator) };
+    }
+
+    fn buildValue(self: *Parser, v: Value) ParseError!*const Value {
+        if (interned.get(v)) |shared| return shared;
+        const p = self.allocator.create(Value) catch return error.OutOfMemory;
+        p.* = v;
+        return p;
     }
 
     fn parsePrimary(self: *Parser) ParseError!Node {
@@ -803,23 +907,39 @@ pub const Parser = struct {
             .integer => {
                 const value = std.fmt.parseInt(i64, self.current.lexeme, 10) catch return error.InvalidNumber;
                 self.advance();
-                return Node{ .kind = .{ .integer_lit = .{ .value = value } }, .loc = loc };
+                const pre = try self.buildValue(.{ .integer = value });
+                return Node{ .kind = .{ .integer_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };
             },
             .float => {
                 const value = std.fmt.parseFloat(f64, self.current.lexeme) catch return error.InvalidNumber;
                 self.advance();
-                return Node{ .kind = .{ .float_lit = .{ .value = value } }, .loc = loc };
+                const pre = try self.buildValue(.{ .float = value });
+                return Node{ .kind = .{ .float_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };
             },
             .string => {
                 const value = self.current.lexeme;
                 self.advance();
-                return Node{ .kind = .{ .string_lit = .{ .value = value } }, .loc = loc };
+                const body = literal.stripQuotes(value);
+                if (literal.hasInterpolation(body)) {
+                    const ip = self.allocator.create(Node.Interp) catch return error.OutOfMemory;
+                    ip.* = try self.interpParts(body);
+                    return Node{ .kind = .{ .string_lit = .{ .value = value, .interp = ip } }, .loc = loc };
+                }
+                var text = body;
+                if (std.mem.indexOfScalar(u8, body, '\\') != null) {
+                    var buf: std.ArrayListUnmanaged(u8) = .empty;
+                    try literal.appendUnescaped(self.allocator, &buf, body);
+                    text = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+                }
+                const pre = try self.buildValue(.{ .string = text });
+                return Node{ .kind = .{ .string_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };
             },
             .atom => {
                 const raw = self.current.lexeme;
                 const name = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
                 self.advance();
-                return Node{ .kind = .{ .atom_lit = .{ .name = name } }, .loc = loc };
+                const pre = try self.buildValue(.{ .atom = name });
+                return Node{ .kind = .{ .atom_lit = .{ .name = name, .prebuilt = pre } }, .loc = loc };
             },
             .true_lit => {
                 self.advance();
