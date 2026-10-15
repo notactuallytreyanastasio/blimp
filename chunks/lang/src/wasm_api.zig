@@ -239,7 +239,7 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
 
     // Evaluate each node, keep the last result
     var last_value: ?*const Value = null;
-    for (nodes) |node| {
+    for (nodes) |*node| {
         last_value = eval.eval(node) catch {
             setEvalError(eval, "Evaluation error");
             result.clear();
@@ -563,7 +563,7 @@ export fn blimp_send(
         return 1;
     }
 
-    const value = eval.eval(nodes[0]) catch {
+    const value = eval.eval(&nodes[0]) catch {
         if (eval.last_error == null) {
             setError("Evaluation error in send: {s}", .{src});
         } else {
@@ -791,7 +791,7 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
     };
 
     // First pass: evaluate top-level nodes so actors are registered.
-    for (nodes) |node| {
+    for (nodes) |*node| {
         _ = eval.eval(node) catch {};
     }
 
@@ -819,7 +819,7 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
                 if (state_node.kind != .state_def) continue;
                 for (state_node.kind.state_def.fields) |field| {
                     if (field.default_value) |default_ptr| {
-                        const val = eval.eval(default_ptr.*) catch continue;
+                        const val = eval.eval(default_ptr) catch continue;
                         eval.env.define(field.key, val);
                     }
                 }
@@ -829,7 +829,7 @@ export fn blimp_run_tests(source_ptr: [*]const u8, source_len: u32) i32 {
             builtins.last_assertion_detail_len = 0;
 
             var test_passed = true;
-            for (test_def.body) |stmt| {
+            for (test_def.body) |*stmt| {
                 _ = eval.eval(stmt) catch {
                     test_passed = false;
                     break;

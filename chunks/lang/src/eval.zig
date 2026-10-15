@@ -118,9 +118,9 @@ pub const Evaluator = struct {
 
             // Eval body
             var reply_val: ?*const Value = null;
-            for (handler.body) |stmt| {
+            for (handler.body) |*stmt| {
                 if (stmt.kind == .reply_stmt) {
-                    reply_val = self.eval(stmt.kind.reply_stmt.value.*) catch null;
+                    reply_val = self.eval(stmt.kind.reply_stmt.value) catch null;
                     break;
                 }
                 _ = self.eval(stmt) catch {};
@@ -184,7 +184,7 @@ pub const Evaluator = struct {
 
         // First pass: evaluate all top-level nodes (actor defs, functions, etc.)
         // so actors and functions are registered before tests run
-        for (nodes) |node| {
+        for (nodes) |*node| {
             _ = self.eval(node) catch {
                 stderr.writeStreamingAll(ioenv.io, "\x1b[33mwarning: first-pass eval failed: ") catch {};
                 if (self.last_error) |blimp_err| {
@@ -222,7 +222,7 @@ pub const Evaluator = struct {
                     if (state_node.kind != .state_def) continue;
                     for (state_node.kind.state_def.fields) |field| {
                         if (field.default_value) |default_ptr| {
-                            const val = self.eval(default_ptr.*) catch continue;
+                            const val = self.eval(default_ptr) catch continue;
                             self.env.define(field.key, val);
                         }
                     }
@@ -230,7 +230,7 @@ pub const Evaluator = struct {
 
                 // Run test body
                 var test_passed = true;
-                for (test_def.body) |stmt| {
+                for (test_def.body) |*stmt| {
                     _ = self.eval(stmt) catch {
                         test_passed = false;
                         break;
@@ -279,14 +279,14 @@ pub const Evaluator = struct {
                         if (state_node.kind != .state_def) continue;
                         for (state_node.kind.state_def.fields) |field| {
                             if (field.default_value) |default_ptr| {
-                                const val = self.eval(default_ptr.*) catch continue;
+                                const val = self.eval(default_ptr) catch continue;
                                 self.env.define(field.key, val);
                             }
                         }
                     }
 
                     // Run property body (given + assertions)
-                    for (prop.body) |stmt| {
+                    for (prop.body) |*stmt| {
                         _ = self.eval(stmt) catch {
                             prop_passed = false;
                             break;
@@ -363,7 +363,7 @@ pub const Evaluator = struct {
     }
 
     /// Evaluate a single AST node to a runtime Value.
-    pub fn eval(self: *Evaluator, node: ast.Node) EvalError!*const Value {
+    pub fn eval(self: *Evaluator, node: *const ast.Node) EvalError!*const Value {
         return self.evalNode(node) catch |err| {
             self.locate(node, err);
             return err;
@@ -378,7 +378,7 @@ pub const Evaluator = struct {
     /// arithmetic paths do -- reached the top as `Runtime error:
     /// error.TypeError` with nothing at all. The innermost node wins because
     /// only the first location to be filled in sticks.
-    fn locate(self: *Evaluator, node: ast.Node, err: EvalError) void {
+    fn locate(self: *Evaluator, node: *const ast.Node, err: EvalError) void {
         // A bubble is Temper-style control flow on its way to a handler, not
         // a fault -- until nothing handles it, and it reaches the top with
         // only its reason. The innermost node gets there first and is the one
@@ -400,41 +400,41 @@ pub const Evaluator = struct {
         self.last_error = errors.runtimeError(err, self.source, node.loc.line, node.loc.col);
     }
 
-    fn evalNode(self: *Evaluator, node: ast.Node) EvalError!*const Value {
+    fn evalNode(self: *Evaluator, node: *const ast.Node) EvalError!*const Value {
         // Reduction counting + auto-schedule: after async sends queue up,
         // drain mailboxes periodically without explicit schedule() calls
         switch (node.kind) {
             // Literals
             // Built once by the parser; see ast.IntegerLit.
-            .integer_lit => |lit| {
+            .integer_lit => |*lit| {
                 if (lit.prebuilt) |v| return v;
                 return self.make(.{ .integer = lit.value });
             },
-            .float_lit => |lit| {
+            .float_lit => |*lit| {
                 if (lit.prebuilt) |v| return v;
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = Value{ .float = lit.value };
                 return v;
             },
-            .string_lit => |lit| {
+            .string_lit => |*lit| {
                 if (lit.prebuilt) |v| return v;
-                if (lit.interp) |ip| return self.evalStringInterp(ip.*);
+                if (lit.interp) |ip| return self.evalStringInterp(ip);
                 // A node built by hand, not by the parser.
                 const s = literal.stripQuotes(lit.value);
-                if (literal.hasInterpolation(s)) return self.evalStringInterp(try self.interpFromSource(s));
+                if (literal.hasInterpolation(s)) { const built = try self.interpFromSource(s); return self.evalStringInterp(&built); }
                 var buf: std.ArrayListUnmanaged(u8) = .empty;
                 try literal.appendUnescaped(self.allocator, &buf, s);
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
                 return v;
             },
-            .atom_lit => |lit| {
+            .atom_lit => |*lit| {
                 if (lit.prebuilt) |v| return v;
                 const v = self.allocator.create(Value) catch return error.OutOfMemory;
                 v.* = Value{ .atom = lit.name };
                 return v;
             },
-            .bool_lit => |lit| {
+            .bool_lit => |*lit| {
                 return self.make(.{ .boolean = lit.value });
             },
             .nil_lit => {
@@ -447,7 +447,7 @@ pub const Evaluator = struct {
             },
 
             // Identifier
-            .identifier => |id| {
+            .identifier => |*id| {
                 if (self.env.lookup(id.name)) |val| {
                     return val;
                 }
@@ -456,21 +456,21 @@ pub const Evaluator = struct {
             },
 
             // Assignment
-            .given_stmt => |given| {
+            .given_stmt => |*given| {
                 // Evaluate generator expression and bind result
-                const val = try self.eval(given.generator.*);
+                const val = try self.eval(given.generator);
                 self.env.define(given.name, val);
                 return val;
             },
 
-            .assign_stmt => |assign| {
-                const val = try self.eval(assign.value.*);
+            .assign_stmt => |*assign| {
+                const val = try self.eval(assign.value);
                 self.env.define(assign.name, val);
                 return val;
             },
 
             // Binary operations
-            .binary_op => |op| return self.evalBinaryOp(op) catch |err| {
+            .binary_op => |*op| return self.evalBinaryOp(op) catch |err| {
                 if (self.last_error == null and err == error.TypeError) {
                     self.last_error = errors.typeMismatch(self.source);
                 } else if (self.last_error == null and err == error.DivisionByZero) {
@@ -480,40 +480,40 @@ pub const Evaluator = struct {
             },
 
             // Unary operations
-            .unary_op => |op| return self.evalUnaryOp(op),
+            .unary_op => |*op| return self.evalUnaryOp(op),
 
             // Function call
-            .func_call => |call| return self.evalFuncCall(call),
+            .func_call => |*call| return self.evalFuncCall(call),
 
             // Pipe expression
-            .pipe_expr => |pipe| return self.evalPipe(pipe),
+            .pipe_expr => |*pipe| return self.evalPipe(pipe),
 
             // List literal
-            .list_lit => |list| return self.evalList(list),
+            .list_lit => |*list| return self.evalList(list),
 
             // Tuple literal
-            .tuple_lit => |tuple| return self.evalTuple(tuple),
+            .tuple_lit => |*tuple| return self.evalTuple(tuple),
 
             // Map literal
-            .map_lit => |map| return self.evalMap(map),
+            .map_lit => |*map| return self.evalMap(map),
 
             // Dot access
-            .dot_access => |da| return self.evalDotAccess(da),
+            .dot_access => |*da| return self.evalDotAccess(da),
 
             // Orelse
-            .orelse_expr => |oe| return self.evalOrElse(oe),
+            .orelse_expr => |*oe| return self.evalOrElse(oe),
 
             // Situation (pattern matching)
-            .situation => |sit| return self.evalSituation(sit),
+            .situation => |*sit| return self.evalSituation(sit),
 
             // Case (same as situation for eval purposes)
-            .case_expr => |ce| return self.evalSituation(ast.Node.Situation{
+            .case_expr => |*ce| return self.evalSituation(&ast.Node.Situation{
                 .subject = ce.subject,
                 .branches = ce.branches,
             }),
 
             // Actor definition
-            .actor_def => |def| return self.evalActorDef(def),
+            .actor_def => |*def| return self.evalActorDef(def),
 
             // Test/property defs stored during actor eval; standalone is skipped
             .test_def, .property_def => {
@@ -533,51 +533,51 @@ pub const Evaluator = struct {
             },
 
             // Become statement
-            .become_stmt => |bs| return self.evalBecomeStmt(bs),
+            .become_stmt => |*bs| return self.evalBecomeStmt(bs),
 
             // Reply statement
-            .reply_stmt => |rs| return self.evalReplyStmt(rs),
+            .reply_stmt => |*rs| return self.evalReplyStmt(rs),
 
             // Message send
-            .message_send => |ms| return self.evalMessageSend(ms),
+            .message_send => |*ms| return self.evalMessageSend(ms),
 
             // Spawn expression
-            .spawn_expr => |se| return self.evalSpawnExpr(se),
+            .spawn_expr => |*se| return self.evalSpawnExpr(se),
 
             // Struct literal: %Counter{count: 42}
-            .struct_lit => |sl| return self.evalStructLit(sl),
+            .struct_lit => |*sl| return self.evalStructLit(sl),
 
             // Try/catch
-            .try_catch => |tc| return self.evalTryCatch(tc),
+            .try_catch => |*tc| return self.evalTryCatch(tc),
 
             // Anonymous function
-            .fn_expr => |fe| return self.evalFnExpr(fe),
+            .fn_expr => |*fe| return self.evalFnExpr(fe),
 
             // Calling an expression as a function
-            .call_expr => |ce| return self.evalCallExpr(ce),
+            .call_expr => |*ce| return self.evalCallExpr(ce),
 
             // Named function definition
-            .def_stmt => |ds| return self.evalDefStmt(ds),
+            .def_stmt => |*ds| return self.evalDefStmt(ds),
 
             // Bubble (failure propagation)
-            .bubble_stmt => |bs| return self.evalBubble(bs),
+            .bubble_stmt => |*bs| return self.evalBubble(bs),
 
             // Range (not used directly, ranges are via range() builtin)
             .range_expr => return error.UnsupportedOperation,
 
             // For loop
-            .for_expr => |fe| return self.evalForExpr(fe),
+            .for_expr => |*fe| return self.evalForExpr(fe),
 
             // Spread: ...list, fn (map) and ..list, fn (each)
-            .spread_map => |se| return self.evalSpreadMap(se),
-            .spread_each => |se| return self.evalSpreadEach(se),
+            .spread_map => |*se| return self.evalSpreadMap(se),
+            .spread_each => |*se| return self.evalSpreadEach(se),
 
             // Self reference inside a handler
             .self_ref => return self.evalSelfRef(),
         }
     }
 
-    fn evalActorDef(self: *Evaluator, def: ast.Node.ActorDef) EvalError!*const Value {
+    fn evalActorDef(self: *Evaluator, def: *const ast.Node.ActorDef) EvalError!*const Value {
         // Collect state fields and handlers from the body
         var state_fields_list = std.ArrayList(Value.MapEntry).empty;
         var handlers_list = std.ArrayList(Value.HandlerDef).empty;
@@ -585,9 +585,9 @@ pub const Evaluator = struct {
         for (def.body) |body_node| {
             switch (body_node.kind) {
                 .state_def => |sd| {
-                    for (sd.fields) |field| {
+                    for (sd.fields) |*field| {
                         // Evaluate the default value
-                        const val = self.eval(field.value) catch |err| return err;
+                        const val = self.eval(&field.value) catch |err| return err;
                         state_fields_list.append(self.allocator, .{
                             .key = field.key,
                             .val = val,
@@ -678,7 +678,7 @@ pub const Evaluator = struct {
         fn_ptr(self.trace_ctx, line);
     }
 
-    fn evalSpawnExpr(self: *Evaluator, se: ast.Node.SpawnExpr) EvalError!*const Value {
+    fn evalSpawnExpr(self: *Evaluator, se: *const ast.Node.SpawnExpr) EvalError!*const Value {
         // Look up the template in the registry
         const template = self.registry.lookupTemplate(se.actor_name) orelse {
             self.last_error = errors.templateNotFound(se.actor_name, self.source);
@@ -687,8 +687,8 @@ pub const Evaluator = struct {
 
         // Evaluate override values
         var overrides_list = std.ArrayList(Value.MapEntry).empty;
-        for (se.overrides) |ov| {
-            const val = try self.eval(ov.value);
+        for (se.overrides) |*ov| {
+            const val = try self.eval(&ov.value);
             overrides_list.append(self.allocator, .{
                 .key = ov.key,
                 .val = val,
@@ -705,8 +705,8 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalForExpr(self: *Evaluator, fe: ast.Node.ForExpr) EvalError!*const Value {
-        const iterable = try self.eval(fe.iterable.*);
+    fn evalForExpr(self: *Evaluator, fe: *const ast.Node.ForExpr) EvalError!*const Value {
+        const iterable = try self.eval(fe.iterable);
         if (iterable.* != .list) return error.TypeError;
 
         var results: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
@@ -715,7 +715,7 @@ pub const Evaluator = struct {
             self.env.define(fe.var_name, item);
             var last: *const Value = undefined;
             var has = false;
-            for (fe.body) |stmt| {
+            for (fe.body) |*stmt| {
                 last = try self.eval(stmt);
                 has = true;
             }
@@ -727,9 +727,9 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalSpreadMap(self: *Evaluator, se: ast.Node.SpreadExpr) EvalError!*const Value {
-        const iterable = try self.eval(se.iterable.*);
-        const func = try self.eval(se.func.*);
+    fn evalSpreadMap(self: *Evaluator, se: *const ast.Node.SpreadExpr) EvalError!*const Value {
+        const iterable = try self.eval(se.iterable);
+        const func = try self.eval(se.func);
         if (iterable.* != .list) return error.TypeError;
 
         var results = self.allocator.alloc(*const Value, iterable.list.len) catch return error.OutOfMemory;
@@ -741,9 +741,9 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalSpreadEach(self: *Evaluator, se: ast.Node.SpreadExpr) EvalError!*const Value {
-        const iterable = try self.eval(se.iterable.*);
-        const func = try self.eval(se.func.*);
+    fn evalSpreadEach(self: *Evaluator, se: *const ast.Node.SpreadExpr) EvalError!*const Value {
+        const iterable = try self.eval(se.iterable);
+        const func = try self.eval(se.func);
         if (iterable.* != .list) return error.TypeError;
 
         for (iterable.list) |item| {
@@ -769,10 +769,10 @@ pub const Evaluator = struct {
         return error.NotSupported;
     }
 
-    fn evalBubble(self: *Evaluator, bs: ast.Node.BubbleStmt) EvalError!*const Value {
+    fn evalBubble(self: *Evaluator, bs: *const ast.Node.BubbleStmt) EvalError!*const Value {
         // Store the bubble reason if provided
         if (bs.reason) |reason_node| {
-            const reason_val = try self.eval(reason_node.*);
+            const reason_val = try self.eval(reason_node);
             self.bubble_reason = reason_val;
         } else {
             self.bubble_reason = null;
@@ -812,13 +812,13 @@ pub const Evaluator = struct {
         return parts;
     }
 
-    fn evalStringInterp(self: *Evaluator, ip: ast.Node.Interp) EvalError!*const Value {
+    fn evalStringInterp(self: *Evaluator, ip: *const ast.Node.Interp) EvalError!*const Value {
         if (ip.bad) return error.UnsupportedOperation;
         var result: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
         for (ip.parts) |part| switch (part) {
             .text => |t| result.appendSlice(self.allocator, t) catch return error.OutOfMemory,
             .expr => |expr_node| {
-                const val = try self.eval(expr_node.*);
+                const val = try self.eval(expr_node);
                 // A string goes in as it is. Anything else is formatted, into
                 // a buffer that grows: a fixed one cut every value at 4096
                 // bytes without a word, which a rendered page passes easily.
@@ -837,7 +837,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalDefStmt(self: *Evaluator, ds: ast.Node.DefStmt) EvalError!*const Value {
+    fn evalDefStmt(self: *Evaluator, ds: *const ast.Node.DefStmt) EvalError!*const Value {
         // A def at top level captures nothing; see Closure.top_level.
         if (self.env.depth() == 1 and self.actor_ctx == null) {
             const tc = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
@@ -879,11 +879,11 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalTryCatch(self: *Evaluator, tc: ast.Node.TryCatch) EvalError!*const Value {
+    fn evalTryCatch(self: *Evaluator, tc: *const ast.Node.TryCatch) EvalError!*const Value {
         // Try to evaluate the try body
         var last_val: *const Value = undefined;
         var has_val = false;
-        for (tc.try_body) |stmt| {
+        for (tc.try_body) |*stmt| {
             last_val = self.eval(stmt) catch |err| {
                 // Caught an error - run the catch body. The error is handled
                 // now, so its details go with it: a stale one left here is
@@ -910,7 +910,7 @@ pub const Evaluator = struct {
 
                 var catch_result: *const Value = undefined;
                 var catch_has = false;
-                for (tc.catch_body) |catch_stmt| {
+                for (tc.catch_body) |*catch_stmt| {
                     catch_result = self.eval(catch_stmt) catch {
                         self.env.popScope();
                         return err; // re-raise if catch body also fails
@@ -928,7 +928,7 @@ pub const Evaluator = struct {
         return self.make(.nil);
     }
 
-    fn evalStructLit(self: *Evaluator, sl: ast.Node.StructLit) EvalError!*const Value {
+    fn evalStructLit(self: *Evaluator, sl: *const ast.Node.StructLit) EvalError!*const Value {
         // %Counter{count: 42} = spawn Counter with overrides
         const template = self.registry.lookupTemplate(sl.type_name) orelse {
             self.last_error = errors.templateNotFound(sl.type_name, self.source);
@@ -936,8 +936,8 @@ pub const Evaluator = struct {
         };
 
         var overrides_list = std.ArrayList(Value.MapEntry).empty;
-        for (sl.fields) |field| {
-            const val = try self.eval(field.value);
+        for (sl.fields) |*field| {
+            const val = try self.eval(&field.value);
             overrides_list.append(self.allocator, .{
                 .key = field.key,
                 .val = val,
@@ -952,7 +952,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalFnExpr(self: *Evaluator, fe: ast.Node.FnExpr) EvalError!*const Value {
+    fn evalFnExpr(self: *Evaluator, fe: *const ast.Node.FnExpr) EvalError!*const Value {
         const bindings = self.env.capturableBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
@@ -975,8 +975,8 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalCallExpr(self: *Evaluator, ce: ast.Node.CallExpr) EvalError!*const Value {
-        const callee_val = try self.eval(ce.callee.*);
+    fn evalCallExpr(self: *Evaluator, ce: *const ast.Node.CallExpr) EvalError!*const Value {
+        const callee_val = try self.eval(ce.callee);
         return self.callClosure(callee_val, ce.args);
     }
 
@@ -991,7 +991,7 @@ pub const Evaluator = struct {
                 }
                 var slot: ArgSlot = .{};
                 const args = try slot.take(self, arg_nodes.len);
-                for (arg_nodes, 0..) |arg_node, i| {
+                for (arg_nodes, 0..) |*arg_node, i| {
                     args[i] = try self.eval(arg_node);
                 }
                 return self.callClosureWithValues(callee_val, args);
@@ -1050,8 +1050,8 @@ pub const Evaluator = struct {
         if (lend) |l| l.borrowers -= 1;
     }
 
-    fn evalMessageSend(self: *Evaluator, ms: ast.Node.MessageSend) EvalError!*const Value {
-        const target_val = try self.eval(ms.target.*);
+    fn evalMessageSend(self: *Evaluator, ms: *const ast.Node.MessageSend) EvalError!*const Value {
+        const target_val = try self.eval(ms.target);
 
         // Target must be a spawned actor_ref. Atoms (template names) are not instances.
         switch (target_val.*) {
@@ -1076,7 +1076,7 @@ pub const Evaluator = struct {
                 if (ms.is_async) {
                     const entry = self.registry.getInstance(ref) orelse return error.TypeError;
                     const args = self.allocator.alloc(*const Value, ms.args.len) catch return error.OutOfMemory;
-                    for (ms.args, 0..) |arg, i| {
+                    for (ms.args, 0..) |*arg, i| {
                         args[i] = try self.eval(arg);
                     }
                     if (log_idx) |li| self.msg_log[li].args = args;
@@ -1124,7 +1124,7 @@ pub const Evaluator = struct {
                             leaveHandler(guard_lend);
                         }
 
-                        const guard_val = self.eval(guard.*) catch |err| return err;
+                        const guard_val = self.eval(guard) catch |err| return err;
                         if (!guard_val.truthy()) continue; // Guard failed, try next handler
                     }
 
@@ -1155,7 +1155,7 @@ pub const Evaluator = struct {
                     // Evaluate handler body
                     var last_val: *const Value = undefined;
                     var has_val = false;
-                    for (handler.body) |stmt| {
+                    for (handler.body) |*stmt| {
                         last_val = self.eval(stmt) catch |err| {
                             self.actor_ctx = prev_ctx;
                             self.env.popScope();
@@ -1208,7 +1208,7 @@ pub const Evaluator = struct {
             self.allocator.alloc(*const Value, args.len) catch return error.OutOfMemory
         else
             try slot.take(self, args.len);
-        for (args, 0..) |arg, i| {
+        for (args, 0..) |*arg, i| {
             out[i] = try self.eval(arg);
         }
         return out;
@@ -1237,14 +1237,14 @@ pub const Evaluator = struct {
         entry.lent = nl;
     }
 
-    fn evalBecomeStmt(self: *Evaluator, bs: ast.Node.BecomeStmt) EvalError!*const Value {
+    fn evalBecomeStmt(self: *Evaluator, bs: *const ast.Node.BecomeStmt) EvalError!*const Value {
         const ctx = self.actor_ctx orelse {
             self.last_error = errors.becomeOutsideHandler(self.source);
             return error.NotSupported;
         };
 
-        for (bs.fields) |field| {
-            const new_val = try self.eval(field.value);
+        for (bs.fields) |*field| {
+            const new_val = try self.eval(&field.value);
 
             // Find the matching state field and update it in place via the registry entry
             for (ctx.entry.state_fields, 0..) |*state_field, fi| {
@@ -1262,13 +1262,13 @@ pub const Evaluator = struct {
         return self.make(.nil);
     }
 
-    fn evalReplyStmt(self: *Evaluator, rs: ast.Node.ReplyStmt) EvalError!*const Value {
+    fn evalReplyStmt(self: *Evaluator, rs: *const ast.Node.ReplyStmt) EvalError!*const Value {
         const ctx = self.actor_ctx orelse {
             self.last_error = errors.replyOutsideHandler(self.source);
             return error.NotSupported;
         };
 
-        const val = try self.eval(rs.value.*);
+        const val = try self.eval(rs.value);
         ctx.reply_value = val;
         return val;
     }
@@ -1306,24 +1306,24 @@ pub const Evaluator = struct {
         return error.TypeError;
     }
 
-    fn evalBinaryOp(self: *Evaluator, op: ast.Node.BinaryOp) EvalError!*const Value {
-        const left = try self.eval(op.left.*);
+    fn evalBinaryOp(self: *Evaluator, op: *const ast.Node.BinaryOp) EvalError!*const Value {
+        const left = try self.eval(op.left);
 
         // `and` and `or` stop at the left side when it decides the answer,
         // so `i < length(s) and char_at(s, i) == " "` never reads past the end.
         switch (op.op) {
             .and_op => {
                 if (!left.truthy()) return self.make(.{ .boolean = false });
-                return self.make(.{ .boolean = (try self.eval(op.right.*)).truthy() });
+                return self.make(.{ .boolean = (try self.eval(op.right)).truthy() });
             },
             .or_op => {
                 if (left.truthy()) return self.make(.{ .boolean = true });
-                return self.make(.{ .boolean = (try self.eval(op.right.*)).truthy() });
+                return self.make(.{ .boolean = (try self.eval(op.right)).truthy() });
             },
             else => {},
         }
 
-        const right = try self.eval(op.right.*);
+        const right = try self.eval(op.right);
 
         switch (op.op) {
             .add => {
@@ -1537,8 +1537,8 @@ pub const Evaluator = struct {
         }
     }
 
-    fn evalUnaryOp(self: *Evaluator, op: ast.Node.UnaryOp) EvalError!*const Value {
-        const operand = try self.eval(op.operand.*);
+    fn evalUnaryOp(self: *Evaluator, op: *const ast.Node.UnaryOp) EvalError!*const Value {
+        const operand = try self.eval(op.operand);
         switch (op.op) {
             .negate => switch (operand.*) {
                 .integer => |n| {
@@ -1559,10 +1559,10 @@ pub const Evaluator = struct {
 
     fn evalShow(self: *Evaluator, args: []const ast.Node) EvalError!*const Value {
         if (args.len != 2) return error.TypeError;
-        const cond = try self.eval(args[0]);
+        const cond = try self.eval(&args[0]);
         if (cond.* != .boolean) return error.TypeError;
         if (!cond.boolean) return self.make(.nil);
-        return self.eval(args[1]);
+        return self.eval(&args[1]);
     }
 
     /// One reduction per call (function call, tail call, closure applied by
@@ -1576,7 +1576,7 @@ pub const Evaluator = struct {
         }
     }
 
-    fn evalFuncCall(self: *Evaluator, call: ast.Node.FuncCall) EvalError!*const Value {
+    fn evalFuncCall(self: *Evaluator, call: *const ast.Node.FuncCall) EvalError!*const Value {
         self.countReduction();
         // A call site that resolved to a builtin before, with no top-level
         // definition added since and no frame binding the name, is that
@@ -1630,14 +1630,14 @@ pub const Evaluator = struct {
         return self.callBuiltin(func, call);
     }
 
-    fn callBuiltin(self: *Evaluator, func: builtins_mod.BuiltinFn, call: ast.Node.FuncCall) EvalError!*const Value {
+    fn callBuiltin(self: *Evaluator, func: builtins_mod.BuiltinFn, call: *const ast.Node.FuncCall) EvalError!*const Value {
         // Evaluate arguments.  A builtin reads its argument vector and never
         // keeps it -- what it keeps are the values, which live on the heap --
         // so the vector belongs on this frame, not in an allocator that hands
         // nothing back.  `puts` in a loop used to cost one vector an iteration.
         var slot: ArgSlot = .{};
         const args = try slot.take(self, call.args.len);
-        for (call.args, 0..) |arg, i| {
+        for (call.args, 0..) |*arg, i| {
             args[i] = try self.eval(arg);
         }
 
@@ -1656,8 +1656,8 @@ pub const Evaluator = struct {
     /// map(list, fn(x) do ... end) -> new list
     fn builtinMap(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 2) return error.TypeError;
-        const list_val = try self.eval(arg_nodes[0]);
-        const fn_val = try self.eval(arg_nodes[1]);
+        const list_val = try self.eval(&arg_nodes[0]);
+        const fn_val = try self.eval(&arg_nodes[1]);
         if (list_val.* != .list) return error.TypeError;
 
         const items = list_val.list;
@@ -1674,8 +1674,8 @@ pub const Evaluator = struct {
     /// filter(list, fn(x) do ... end) -> filtered list
     fn builtinFilter(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 2) return error.TypeError;
-        const list_val = try self.eval(arg_nodes[0]);
-        const fn_val = try self.eval(arg_nodes[1]);
+        const list_val = try self.eval(&arg_nodes[0]);
+        const fn_val = try self.eval(&arg_nodes[1]);
         if (list_val.* != .list) return error.TypeError;
 
         var results: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
@@ -1693,9 +1693,9 @@ pub const Evaluator = struct {
     /// reduce(list, initial, fn(acc, x) do ... end) -> value
     fn builtinReduce(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 3) return error.TypeError;
-        const list_val = try self.eval(arg_nodes[0]);
-        var acc = try self.eval(arg_nodes[1]);
-        const fn_val = try self.eval(arg_nodes[2]);
+        const list_val = try self.eval(&arg_nodes[0]);
+        var acc = try self.eval(&arg_nodes[1]);
+        const fn_val = try self.eval(&arg_nodes[2]);
         if (list_val.* != .list) return error.TypeError;
 
         for (list_val.list) |item| {
@@ -1707,8 +1707,8 @@ pub const Evaluator = struct {
     /// each(list, fn(x) do ... end) -> :ok (side effects only)
     fn builtinEach(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 2) return error.TypeError;
-        const list_val = try self.eval(arg_nodes[0]);
-        const fn_val = try self.eval(arg_nodes[1]);
+        const list_val = try self.eval(&arg_nodes[0]);
+        const fn_val = try self.eval(&arg_nodes[1]);
         if (list_val.* != .list) return error.TypeError;
 
         for (list_val.list) |item| {
@@ -1764,19 +1764,19 @@ pub const Evaluator = struct {
     /// tail position. An empty body yields nil.
     fn evalBodyTail(self: *Evaluator, body: []const ast.Node, slot: *ArgSlot) EvalError!TailResult {
         if (body.len == 0) return .{ .value = try self.make(.nil) };
-        for (body[0 .. body.len - 1]) |stmt| {
+        for (body[0 .. body.len - 1]) |*stmt| {
             _ = try self.eval(stmt);
         }
-        return self.evalTail(body[body.len - 1], slot);
+        return self.evalTail(&body[body.len - 1], slot);
     }
 
     /// Evaluate a node in tail position. A call to a closure becomes a pending
     /// .call (args evaluated here, in the current scope); case/situation select
     /// their branch and evaluate its body in tail position; anything else is
     /// evaluated normally.
-    fn evalTail(self: *Evaluator, node: ast.Node, slot: *ArgSlot) EvalError!TailResult {
+    fn evalTail(self: *Evaluator, node: *const ast.Node, slot: *ArgSlot) EvalError!TailResult {
         switch (node.kind) {
-            .func_call => |call| {
+            .func_call => |*call| {
                 if (self.env.lookup(call.name)) |val| {
                     if (val.* == .closure) {
                         // Same reduction accounting as eval()
@@ -1787,7 +1787,7 @@ pub const Evaluator = struct {
                             return error.TypeError;
                         }
                         const args = try slot.take(self, call.args.len);
-                        for (call.args, 0..) |arg_node, i| {
+                        for (call.args, 0..) |*arg_node, i| {
                             args[i] = try self.eval(arg_node);
                         }
                         return .{ .call = .{ .callee = val, .args = args } };
@@ -1795,8 +1795,8 @@ pub const Evaluator = struct {
                 }
                 return .{ .value = try self.eval(node) };
             },
-            .situation => |sit| return self.evalSituationTail(sit, slot),
-            .case_expr => |ce| return self.evalSituationTail(ast.Node.Situation{
+            .situation => |*sit| return self.evalSituationTail(sit, slot),
+            .case_expr => |*ce| return self.evalSituationTail(&ast.Node.Situation{
                 .subject = ce.subject,
                 .branches = ce.branches,
             }, slot),
@@ -1894,15 +1894,15 @@ pub const Evaluator = struct {
     /// send_async(actor_ref, :message, args...) -- enqueue a message without blocking
     fn builtinSendAsync(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len < 2) return error.TypeError;
-        const target_val = try self.eval(arg_nodes[0]);
-        const msg_val = try self.eval(arg_nodes[1]);
+        const target_val = try self.eval(&arg_nodes[0]);
+        const msg_val = try self.eval(&arg_nodes[1]);
         if (target_val.* != .actor_ref or msg_val.* != .atom) return error.TypeError;
         const ref = target_val.actor_ref;
         const msg_name = msg_val.atom;
 
         // Evaluate remaining args
         var args = self.allocator.alloc(*const Value, arg_nodes.len - 2) catch return error.OutOfMemory;
-        for (arg_nodes[2..], 0..) |arg_node, i| {
+        for (arg_nodes[2..], 0..) |*arg_node, i| {
             args[i] = try self.eval(arg_node);
         }
 
@@ -1922,7 +1922,7 @@ pub const Evaluator = struct {
     fn builtinSchedule(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         var ticks: u32 = 100;
         if (arg_nodes.len >= 1) {
-            const arg = try self.eval(arg_nodes[0]);
+            const arg = try self.eval(&arg_nodes[0]);
             if (arg.* == .integer) ticks = @intCast(@max(1, arg.integer));
         }
         self.runScheduler(ticks);
@@ -1993,7 +1993,7 @@ pub const Evaluator = struct {
 
     fn runtimeEval(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 1) return error.TypeError;
-        const code_val = try self.eval(arg_nodes[0]);
+        const code_val = try self.eval(&arg_nodes[0]);
         if (code_val.* != .string) return error.TypeError;
         // The AST points into its source, and both have to outlive the next
         // compaction: a handler defined here keeps pointing at them.
@@ -2016,7 +2016,7 @@ pub const Evaluator = struct {
         self.env.pushScope();
         var last: *const Value = undefined;
         var has_val = false;
-        for (nodes) |node| {
+        for (nodes) |*node| {
             last = self.eval(node) catch {
                 self.env.popScope();
                 // Eval error -- return error map
@@ -2041,7 +2041,7 @@ pub const Evaluator = struct {
     /// Parses code, evaluates it, runs any test blocks, returns results as a map.
     fn runtimeTest(self: *Evaluator, arg_nodes: []const ast.Node) EvalError!*const Value {
         if (arg_nodes.len != 1) return error.TypeError;
-        const code_val = try self.eval(arg_nodes[0]);
+        const code_val = try self.eval(&arg_nodes[0]);
         if (code_val.* != .string) return error.TypeError;
         const code = self.code_allocator.dupe(u8, code_val.string) catch return error.OutOfMemory;
 
@@ -2052,7 +2052,7 @@ pub const Evaluator = struct {
 
         // Evaluate all top-level nodes (register actors, functions)
         self.env.pushScope();
-        for (nodes) |node| {
+        for (nodes) |*node| {
             _ = self.eval(node) catch {};
         }
 
@@ -2076,14 +2076,14 @@ pub const Evaluator = struct {
                     if (state_node.kind != .state_def) continue;
                     for (state_node.kind.state_def.fields) |field| {
                         if (field.default_value) |default_ptr| {
-                            const val = self.eval(default_ptr.*) catch continue;
+                            const val = self.eval(default_ptr) catch continue;
                             self.env.define(field.key, val);
                         }
                     }
                 }
 
                 var test_passed = true;
-                for (test_def.body) |stmt| {
+                for (test_def.body) |*stmt| {
                     _ = self.eval(stmt) catch {
                         test_passed = false;
                         break;
@@ -2134,8 +2134,8 @@ pub const Evaluator = struct {
         return self.make(.{ .map = entries });
     }
 
-    fn evalPipe(self: *Evaluator, pipe: ast.Node.PipeExpr) EvalError!*const Value {
-        const left_val = try self.eval(pipe.left.*);
+    fn evalPipe(self: *Evaluator, pipe: *const ast.Node.PipeExpr) EvalError!*const Value {
+        const left_val = try self.eval(pipe.left);
 
         // If right side is a func_call, check for hole args and substitute
         switch (pipe.right.kind) {
@@ -2165,7 +2165,7 @@ pub const Evaluator = struct {
                         }
                     }
                     const modified_call = ast.Node.FuncCall{ .name = call.name, .args = new_args };
-                    return self.evalFuncCall(modified_call);
+                    return self.evalFuncCall(&modified_call);
                 } else {
                     // No hole -- prepend left as first arg
                     const new_args = self.allocator.alloc(ast.Node, call.args.len + 1) catch return error.OutOfMemory;
@@ -2174,7 +2174,7 @@ pub const Evaluator = struct {
                         new_args[i + 1] = arg;
                     }
                     const modified_call = ast.Node.FuncCall{ .name = call.name, .args = new_args };
-                    return self.evalFuncCall(modified_call);
+                    return self.evalFuncCall(&modified_call);
                 }
             },
             .identifier => |id| {
@@ -2192,14 +2192,14 @@ pub const Evaluator = struct {
             .message_send => |ms| {
                 // Pipe into message send: val |> actor <- :msg(_)
                 // Substitute _ holes in the message args with the piped value
-                const target_val = try self.eval(ms.target.*);
+                const target_val = try self.eval(ms.target);
                 switch (target_val.*) {
                     .actor_ref => |ref| {
                         const entry = self.registry.getInstance(ref) orelse return error.TypeError;
 
                         // Build args with hole substitution
                         var arg_vals: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
-                        for (ms.args) |arg| {
+                        for (ms.args) |*arg| {
                             if (arg.kind == .hole) {
                                 arg_vals.append(self.allocator, left_val) catch return error.OutOfMemory;
                             } else {
@@ -2230,7 +2230,7 @@ pub const Evaluator = struct {
 
                             var last_val: *const Value = undefined;
                             var has_val = false;
-                            for (handler.body) |stmt| {
+                            for (handler.body) |*stmt| {
                                 last_val = self.eval(stmt) catch |err| {
                                     self.actor_ctx = prev_ctx;
                                     self.env.popScope();
@@ -2257,14 +2257,14 @@ pub const Evaluator = struct {
         }
     }
 
-    fn evalList(self: *Evaluator, list: ast.Node.ListLit) EvalError!*const Value {
+    fn evalList(self: *Evaluator, list: *const ast.Node.ListLit) EvalError!*const Value {
         // If there's a tail expression [h1, h2 | tail], concat head elements with evaluated tail
         if (list.tail) |tail_node| {
-            const tail_val = try self.eval(tail_node.*);
+            const tail_val = try self.eval(tail_node);
             const tail_items = if (tail_val.* == .list) tail_val.list else &[_]*const Value{};
             const total = list.elements.len + tail_items.len;
             const items = self.allocator.alloc(*const Value, total) catch return error.OutOfMemory;
-            for (list.elements, 0..) |elem, i| {
+            for (list.elements, 0..) |*elem, i| {
                 items[i] = try self.eval(elem);
             }
             for (tail_items, 0..) |item, i| {
@@ -2274,30 +2274,30 @@ pub const Evaluator = struct {
         }
         // Simple list literal [a, b, c]
         const items = self.allocator.alloc(*const Value, list.elements.len) catch return error.OutOfMemory;
-        for (list.elements, 0..) |elem, i| {
+        for (list.elements, 0..) |*elem, i| {
             items[i] = try self.eval(elem);
         }
         return self.make(.{ .list = items });
     }
 
-    fn evalTuple(self: *Evaluator, tuple: ast.Node.TupleLit) EvalError!*const Value {
+    fn evalTuple(self: *Evaluator, tuple: *const ast.Node.TupleLit) EvalError!*const Value {
         const items = self.allocator.alloc(*const Value, tuple.elements.len) catch return error.OutOfMemory;
-        for (tuple.elements, 0..) |elem, i| {
+        for (tuple.elements, 0..) |*elem, i| {
             items[i] = try self.eval(elem);
         }
         return self.make(.{ .tuple = items });
     }
 
-    fn evalMap(self: *Evaluator, map: ast.Node.MapLit) EvalError!*const Value {
+    fn evalMap(self: *Evaluator, map: *const ast.Node.MapLit) EvalError!*const Value {
         const entries = self.allocator.alloc(Value.MapEntry, map.entries.len) catch return error.OutOfMemory;
-        for (map.entries, 0..) |entry, i| {
-            const val = try self.eval(entry.value);
+        for (map.entries, 0..) |*entry, i| {
+            const val = try self.eval(&entry.value);
             entries[i] = .{ .key = entry.key, .val = val };
         }
         return self.make(.{ .map = entries });
     }
 
-    fn evalDotAccess(self: *Evaluator, da: ast.Node.DotAccess) EvalError!*const Value {
+    fn evalDotAccess(self: *Evaluator, da: *const ast.Node.DotAccess) EvalError!*const Value {
         // First, try to resolve as a dotted actor name (e.g., Shop.Checkout):
         // the parser flattened the chain once, and only for chains of
         // upper-case names, the only dotted names `actor` binds.
@@ -2312,7 +2312,7 @@ pub const Evaluator = struct {
         }
 
         // Fall back to map field access
-        const obj = try self.eval(da.object.*);
+        const obj = try self.eval(da.object);
         switch (obj.*) {
             .map => |entries| {
                 for (entries) |entry| {
@@ -2330,7 +2330,7 @@ pub const Evaluator = struct {
     /// Flatten a DotAccess chain into a single dotted name string.
     /// e.g., DotAccess(DotAccess(identifier("App"), "Shop"), "Checkout") -> "App.Shop.Checkout"
     /// Returns null if the chain doesn't consist entirely of identifiers/dot accesses.
-    fn flattenDottedName(da: ast.Node.DotAccess, allocator: std.mem.Allocator) ?[]const u8 {
+    fn flattenDottedName(da: *const ast.Node.DotAccess, allocator: std.mem.Allocator) ?[]const u8 {
         // Collect parts in reverse order by walking the chain
         var parts: [16][]const u8 = undefined; // max 16 nesting levels
         var count: usize = 0;
@@ -2379,23 +2379,23 @@ pub const Evaluator = struct {
         return buf;
     }
 
-    fn evalOrElse(self: *Evaluator, oe: ast.Node.OrElseExpr) EvalError!*const Value {
-        const try_val = self.eval(oe.try_expr.*) catch |err| {
+    fn evalOrElse(self: *Evaluator, oe: *const ast.Node.OrElseExpr) EvalError!*const Value {
+        const try_val = self.eval(oe.try_expr) catch |err| {
             if (err == error.Bubble) {
                 // Bubble caught by orelse - execute fallback
                 self.bubble_line = 0;
                 self.last_error = null;
-                return self.eval(oe.fallback.*);
+                return self.eval(oe.fallback);
             }
             return err;
         };
         switch (try_val.*) {
-            .nil, .hole => return self.eval(oe.fallback.*),
+            .nil, .hole => return self.eval(oe.fallback),
             else => return try_val,
         }
     }
 
-    fn evalSituation(self: *Evaluator, sit: ast.Node.Situation) EvalError!*const Value {
+    fn evalSituation(self: *Evaluator, sit: *const ast.Node.Situation) EvalError!*const Value {
         const base = self.env.depth();
         var slot: ArgSlot = .{};
         return self.resolveTail(try self.evalSituationTail(sit, &slot), base);
@@ -2406,12 +2406,12 @@ pub const Evaluator = struct {
     /// bindings' scope is left on the stack for the call to see (see
     /// resolveTail and callClosureWithValues, which pop it); otherwise it is
     /// popped here.
-    fn evalSituationTail(self: *Evaluator, sit: ast.Node.Situation, slot: *ArgSlot) EvalError!TailResult {
-        const subject = try self.eval(sit.subject.*);
+    fn evalSituationTail(self: *Evaluator, sit: *const ast.Node.Situation, slot: *ArgSlot) EvalError!TailResult {
+        const subject = try self.eval(sit.subject);
 
-        for (sit.branches) |branch| {
+        for (sit.branches) |*branch| {
             if (branch.pattern) |pattern| {
-                if (self.matchPattern(pattern.*, subject)) |bindings| {
+                if (self.matchPattern(pattern, subject)) |bindings| {
                     self.env.pushScope();
                     for (bindings) |b| {
                         self.env.define(b.name, b.val);
@@ -2419,7 +2419,7 @@ pub const Evaluator = struct {
 
                     // Check optional when guard
                     if (branch.guard) |guard_node| {
-                        const guard_val = self.eval(guard_node.*) catch {
+                        const guard_val = self.eval(guard_node) catch {
                             self.env.popScope();
                             continue; // guard eval failed, skip branch
                         };
@@ -2606,7 +2606,7 @@ pub const Evaluator = struct {
             v.* = .nil;
             break :blk v;
         };
-        for (nodes) |node| {
+        for (nodes) |*node| {
             last = self.eval(node) catch {
                 std.debug.print("[Hole] Error evaluating Claude response\n", .{});
                 break;
@@ -2717,10 +2717,10 @@ pub const Evaluator = struct {
 
     /// Try to match a pattern AST node against a runtime value.
     /// Returns bindings on success, null on failure.
-    fn matchPattern(self: *Evaluator, pattern: ast.Node, subject: *const Value) ?[]const PatternBinding {
+    fn matchPattern(self: *Evaluator, pattern: *const ast.Node, subject: *const Value) ?[]const PatternBinding {
         switch (pattern.kind) {
             // Identifier: always matches, binds the value
-            .identifier => |id| {
+            .identifier => |*id| {
                 var bindings = self.allocator.alloc(PatternBinding, 1) catch return null;
                 bindings[0] = .{ .name = id.name, .val = subject };
                 return bindings;
@@ -2728,15 +2728,15 @@ pub const Evaluator = struct {
             // Hole: always matches, no bindings
             .hole => return &.{},
             // Literals: match by value
-            .integer_lit => |lit| {
+            .integer_lit => |*lit| {
                 if (subject.* == .integer and subject.integer == lit.value) return &.{};
                 return null;
             },
-            .float_lit => |lit| {
+            .float_lit => |*lit| {
                 if (subject.* == .float and subject.float == lit.value) return &.{};
                 return null;
             },
-            .string_lit => |lit| {
+            .string_lit => |*lit| {
                 if (subject.* != .string) return null;
                 // The pattern is written the way a string expression is, so
                 // it gets the same escapes: "\n" is a newline here too.
@@ -2754,11 +2754,11 @@ pub const Evaluator = struct {
                 if (std.mem.eql(u8, subject.string, buf.items)) return &.{};
                 return null;
             },
-            .atom_lit => |lit| {
+            .atom_lit => |*lit| {
                 if (subject.* == .atom and std.mem.eql(u8, subject.atom, lit.name)) return &.{};
                 return null;
             },
-            .bool_lit => |lit| {
+            .bool_lit => |*lit| {
                 if (subject.* == .boolean and subject.boolean == lit.value) return &.{};
                 return null;
             },
@@ -2767,16 +2767,16 @@ pub const Evaluator = struct {
                 return null;
             },
             // Map destructuring: %{key: var, key2: var2}
-            .map_lit => |ml| {
+            .map_lit => |*ml| {
                 if (subject.* != .map) return null;
                 var all_bindings: std.ArrayList(PatternBinding) = .{ .items = &.{}, .capacity = 0 };
-                for (ml.entries) |entry| {
+                for (ml.entries) |*entry| {
                     // Find the key in the subject map
                     var found = false;
                     for (subject.map) |map_entry| {
                         if (std.mem.eql(u8, map_entry.key, entry.key)) {
                             // Recursively match the value pattern
-                            const sub_bindings = self.matchPattern(entry.value, map_entry.val) orelse return null;
+                            const sub_bindings = self.matchPattern(&entry.value, map_entry.val) orelse return null;
                             for (sub_bindings) |b| {
                                 all_bindings.append(self.allocator, b) catch return null;
                             }
@@ -2789,7 +2789,7 @@ pub const Evaluator = struct {
                 return all_bindings.toOwnedSlice(self.allocator) catch return null;
             },
             // List pattern: [head | tail] destructuring
-            .list_lit => |ll| {
+            .list_lit => |*ll| {
                 if (subject.* != .list) return null;
                 if (ll.tail != null) {
                     // [head | tail] pattern
@@ -2798,7 +2798,7 @@ pub const Evaluator = struct {
 
                     // Match head elements
                     if (ll.elements.len > subject.list.len) return null;
-                    for (ll.elements, 0..) |elem_pat, i| {
+                    for (ll.elements, 0..) |*elem_pat, i| {
                         const sub = self.matchPattern(elem_pat, subject.list[i]) orelse return null;
                         for (sub) |b| all_bindings.append(self.allocator, b) catch return null;
                     }
@@ -2808,7 +2808,7 @@ pub const Evaluator = struct {
                     const tail_items = subject.list[tail_start..];
                     const tail_val = self.allocator.create(Value) catch return null;
                     tail_val.* = Value{ .list = tail_items };
-                    const tail_bindings = self.matchPattern(ll.tail.?.*, tail_val) orelse return null;
+                    const tail_bindings = self.matchPattern(ll.tail.?, tail_val) orelse return null;
                     for (tail_bindings) |b| all_bindings.append(self.allocator, b) catch return null;
 
                     return all_bindings.toOwnedSlice(self.allocator) catch return null;
@@ -2816,7 +2816,7 @@ pub const Evaluator = struct {
                     // Fixed-length list pattern [a, b, c]
                     if (subject.list.len != ll.elements.len) return null;
                     var all_bindings: std.ArrayList(PatternBinding) = .{ .items = &.{}, .capacity = 0 };
-                    for (ll.elements, 0..) |elem_pat, i| {
+                    for (ll.elements, 0..) |*elem_pat, i| {
                         const sub = self.matchPattern(elem_pat, subject.list[i]) orelse return null;
                         for (sub) |b| all_bindings.append(self.allocator, b) catch return null;
                     }
@@ -2824,11 +2824,11 @@ pub const Evaluator = struct {
                 }
             },
             // Tuple pattern: {a, b}
-            .tuple_lit => |tl| {
+            .tuple_lit => |*tl| {
                 if (subject.* != .tuple) return null;
                 if (subject.tuple.len != tl.elements.len) return null;
                 var all_bindings: std.ArrayList(PatternBinding) = .{ .items = &.{}, .capacity = 0 };
-                for (tl.elements, 0..) |elem_pat, i| {
+                for (tl.elements, 0..) |*elem_pat, i| {
                     const sub = self.matchPattern(elem_pat, subject.tuple[i]) orelse return null;
                     for (sub) |b| all_bindings.append(self.allocator, b) catch return null;
                 }
@@ -2846,7 +2846,7 @@ pub const Evaluator = struct {
     fn evalBody(self: *Evaluator, body: []const ast.Node) EvalError!*const Value {
         var last: *const Value = undefined;
         var has_val = false;
-        for (body) |stmt| {
+        for (body) |*stmt| {
             last = try self.eval(stmt);
             has_val = true;
         }
@@ -2865,13 +2865,13 @@ fn evalExpr(allocator: std.mem.Allocator, source: []const u8) EvalError!*const V
     var parser = Parser.init(allocator, source);
     const node = parser.parseExpressionPublic() catch return error.UnsupportedOperation;
     var evaluator = Evaluator.init(allocator);
-    return evaluator.eval(node);
+    return evaluator.eval(&node);
 }
 
 fn evalStmt(allocator: std.mem.Allocator, evaluator: *Evaluator, source: []const u8) EvalError!*const Value {
     var parser = Parser.init(allocator, source);
     const node = parser.parseStatementPublic() catch return error.UnsupportedOperation;
-    return evaluator.eval(node);
+    return evaluator.eval(&node);
 }
 
 test "evaluate integer literal" {
@@ -3025,7 +3025,7 @@ test "evaluate variable assignment and lookup" {
     // Now look up x
     var parser2 = Parser.init(alloc, "x");
     const node2 = parser2.parseExpressionPublic() catch unreachable;
-    const lookup_result = try evaluator.eval(node2);
+    const lookup_result = try evaluator.eval(&node2);
     try std.testing.expect(lookup_result.eql(Value{ .integer = 42 }));
 }
 
@@ -3083,7 +3083,7 @@ test "evaluate dot access on map" {
 
     var parser = Parser.init(alloc, "m.name");
     const node = parser.parseExpressionPublic() catch unreachable;
-    const result = try evaluator.eval(node);
+    const result = try evaluator.eval(&node);
     try std.testing.expect(result.eql(Value{ .string = "bob" }));
 }
 
@@ -3120,7 +3120,7 @@ test "evaluate situation" {
     // parseSituation is only accessible through parseActorBody, but situation is
     // also a top-level expression in our statement parser. Let's use parseStatementPublic.
     const node = parser.parseStatementPublic() catch unreachable;
-    const result = try evaluator.eval(node);
+    const result = try evaluator.eval(&node);
     try std.testing.expect(result.eql(Value{ .integer = 1 }));
 }
 
@@ -3140,7 +3140,7 @@ test "evaluate situation wildcard branch" {
     ;
     var parser = Parser.init(alloc, source);
     const node = parser.parseStatementPublic() catch unreachable;
-    const result = try evaluator.eval(node);
+    const result = try evaluator.eval(&node);
     try std.testing.expect(result.eql(Value{ .integer = 0 }));
 }
 
@@ -3172,7 +3172,7 @@ fn evalProgram(allocator: std.mem.Allocator, evaluator: *Evaluator, source: []co
     const nodes = parser.parseFilePublic() catch return error.UnsupportedOperation;
     var last: *const Value = undefined;
     var has_val = false;
-    for (nodes) |node| {
+    for (nodes) |*node| {
         last = try evaluator.eval(node);
         has_val = true;
     }

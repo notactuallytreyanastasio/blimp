@@ -34,7 +34,7 @@ fn heapCost(source: []const u8) !usize {
 
     var eval = Evaluator.init(counted.allocator());
     const before = counted.used;
-    for (nodes) |node| _ = try eval.eval(node);
+    for (nodes) |*node| _ = try eval.eval(node);
     return counted.used - before;
 }
 
@@ -116,7 +116,7 @@ test "a recursion past its ceiling says so rather than dying on a signal" {
     eval.max_call_depth = 100;
 
     var caught: ?anyerror = null;
-    for (nodes) |node| {
+    for (nodes) |*node| {
         _ = eval.eval(node) catch |err| {
             caught = err;
             break;

@@ -357,7 +357,7 @@ fn run(code: std.mem.Allocator, eval: *Evaluator, source: []const u8) !*const Va
     var parser = Parser.init(code, source);
     const nodes = try parser.parseFile();
     var last: *const Value = undefined;
-    for (nodes) |node| last = try eval.eval(node);
+    for (nodes) |*node| last = try eval.eval(node);
     return last;
 }
 
@@ -815,7 +815,7 @@ test "a literal built once by the parser survives compaction, bound and re-evalu
 
     var eval = Evaluator.init(heap_a.allocator());
     var last: *const Value = undefined;
-    for (nodes) |node| last = try eval.eval(node);
+    for (nodes) |*node| last = try eval.eval(node);
     try std.testing.expect(last.list[0] == lit.prebuilt.?);
 
     try compact(&eval, heap_b.allocator(), std.testing.allocator);
@@ -827,7 +827,7 @@ test "a literal built once by the parser survives compaction, bound and re-evalu
     try std.testing.expectEqualStrings("n=5000!", (try run(code.allocator(), &eval, "t")).string);
 
     // Evaluate the same nodes again after the swap.
-    for (nodes) |node| last = try eval.eval(node);
+    for (nodes) |*node| last = try eval.eval(node);
     try std.testing.expectEqualStrings("a\tb", last.list[0].string);
     try std.testing.expectEqual(@as(i64, 5000), last.list[1].integer);
     try std.testing.expectEqual(@as(f64, 2.5), last.list[2].float);
