@@ -189,16 +189,23 @@ fn closeAll(fds: []const c_int) void {
 
 // ── SQLite ──────────────────────────────────────────────────
 
+// The header is the vendored one (vendor/sqlite/sqlite3.h, on the library
+// module's include path), so the constants below are the compiled library's own
+// and a change to them is a build error here, not a silent mismatch. The
+// functions stay hand-declared: translate-c cannot express SQLITE_TRANSIENT,
+// and the declarations below say exactly which signatures this file relies on.
+const sq = @cImport(@cInclude("sqlite3.h"));
+
 const sqlite = struct {
-    const Db = opaque {};
-    const Stmt = opaque {};
-    const OK = 0;
-    const ROW = 100;
-    const DONE = 101;
-    const BLOB = 4;
-    const NULL = 5;
-    const OPEN_READWRITE = 0x2;
-    const OPEN_CREATE = 0x4;
+    const Db = sq.sqlite3;
+    const Stmt = sq.sqlite3_stmt;
+    const OK = sq.SQLITE_OK;
+    const ROW = sq.SQLITE_ROW;
+    const DONE = sq.SQLITE_DONE;
+    const BLOB = sq.SQLITE_BLOB;
+    const NULL = sq.SQLITE_NULL;
+    const OPEN_READWRITE = sq.SQLITE_OPEN_READWRITE;
+    const OPEN_CREATE = sq.SQLITE_OPEN_CREATE;
     // SQLITE_TRANSIENT is (void(*)(void*))-1: sqlite copies the bytes at once.
     const TRANSIENT: isize = -1; // declared as an integer: the ABI is the same and Zig will not align -1
 
