@@ -35,18 +35,25 @@ A statement with no result columns (an INSERT, an UPDATE, a `create table`) answ
 
 ## Why `$1` and `?`
 
-SQL text with values pasted into it is how injections happen, and `sqlite_query` is where they would happen, so it takes parameters and binds them. `?` and `?NNN` are SQLite's own, and `$1` reads like the placeholders Postgres uses. SQLite treats `$1` as a named parameter whose name happens to be `$1`, which means it numbers `$` names in the order they first appear, not by the digit:
+SQL text with values pasted into it is how injections happen, and `sqlite_query` is where they would happen, so it takes parameters and binds them. `?` and `?NNN` are SQLite's own, and `$1` reads like the placeholders Postgres uses. SQLite treats `$1` as a named parameter whose name happens to be `$1`, and numbers `$` names in the order they first appear, not by the digit. Binding param `i` to index `i` would therefore make `$2, $1` swap its values, which is not what anyone who has written Postgres expects, and is what the first version of the builtin did:
 
 ```
 sqlite_query(db, "select $2 as first, $1 as second", ["a", "b"])
-=> [["first", "second"], ["a", "b"]]
+=> [["first", "second"], ["a", "b"]]     # wrong: $2 got "a"
+```
+
+The builtin now looks each param up by name: param `i` is bound at `sqlite3_bind_parameter_index(stmt, "$i")`.
+
+```
+sqlite_query(db, "select $2 as first, $1 as second", ["a", "b"])
+=> [["first", "second"], ["b", "a"]]
 sqlite_query(db, "select ?2 as first, ?1 as second", ["a", "b"])
 => [["first", "second"], ["b", "a"]]
 ```
 
-Postgres would have answered `["b", "a"]` to the first. The builtin does not paper over this: write the placeholders in order, or use `?1`.
+When the statement has no `$N` placeholder (`?` and `?NNN`) the lookup is skipped and param `i` binds at index `i`, which for `?NNN` is the N-th param as well. A statement that has `$N` placeholders and anything else, a `$N` with no param, or a param with no `$N` raises with the placeholder named, rather than leaving a NULL behind.
 
-Two more rules, both about failing early. The number of params must equal the statement's parameter count, so a forgotten value is an error and not a silent NULL. And `sqlite_query` runs one statement; text after it raises `one statement per call`. With `sqlite3_exec`, which takes many statements, there is nowhere to bind a value, and a program that builds a statement by pasting a value in front of a `;` would run what follows it. `sqlite_exec` is the many-statements builtin and takes no parameters.
+Two more rules, both about failing early. Without `$N` the number of params must equal the statement's parameter count, so a forgotten value is an error and not a silent NULL. And `sqlite_query` runs one statement; text after it raises `one statement per call`. With `sqlite3_exec`, which takes many statements, there is nowhere to bind a value, and a program that builds a statement by pasting a value in front of a `;` would run what follows it. `sqlite_exec` is the many-statements builtin and takes no parameters.
 
 ## Why a table of handles
 

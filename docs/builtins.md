@@ -342,7 +342,7 @@ sqlite_query(db: Int, sql: String, params: List) -> List[List[String | nil]]
 
 Runs one statement with `params` bound to its parameters, and answers the result as text.
 
-**Parameters** are bound by position. `?`, `?1` and `$1` all work. For `$1` the number is only a name: SQLite numbers `$name` parameters in the order they first appear, so `select $2, $1` with `["a", "b"]` binds `"a"` to `$2`. Use `?1`, `?2` when the order in the SQL differs from the order of the list. The length of `params` must equal the statement's parameter count (a name used twice counts once). A `nil` binds NULL, an Int or a Float binds as that number, a String binds as TEXT, and a Bool or an atom binds as its text (`true`, `ok`). Anything else, such as a list or a map, is an error that names the parameter.
+**Parameters** are bound like Postgres when the SQL uses `$N`: param `i` (counting from 1) goes to `$i`, in whatever order the placeholders appear, so `select $2, $1` with `["a", "b"]` answers `b, a`. A `$N` used twice takes the same param twice. With `?` and `?NNN` the params bind by position, and `?2, ?1` also answers `b, a`. A statement that has any `$N` placeholder must have only `$N` placeholders; a `$N` with no param (`select $2` with one param), a param with no `$N` (`select $1` with two), or a `?` next to a `$1` raises, naming the placeholder. Without `$N`, the length of `params` must equal the statement's parameter count (a name used twice counts once). A `nil` binds NULL, an Int or a Float binds as that number, a String binds as TEXT, and a Bool or an atom binds as its text (`true`, `ok`). Anything else, such as a list or a map, is an error that names the parameter.
 
 **The result** is a list of rows, and every cell is a String or `nil`:
 
