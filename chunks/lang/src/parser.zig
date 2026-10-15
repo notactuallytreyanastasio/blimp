@@ -2,6 +2,7 @@ const std = @import("std");
 const Token = @import("token.zig").Token;
 const Lexer = @import("lexer.zig").Lexer;
 const ast = @import("ast.zig");
+const NameKey = @import("name_key.zig").Key;
 const Node = ast.Node;
 const Loc = ast.Loc;
 const Value = @import("value.zig").Value;
@@ -190,7 +191,7 @@ pub const Parser = struct {
                 const gen_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
                 gen_ptr.* = gen_expr;
                 body.append(self.allocator, Node{
-                    .kind = .{ .given_stmt = .{ .name = var_name, .generator = gen_ptr } },
+                    .kind = .{ .given_stmt = .{ .name = var_name, .key = NameKey.of(var_name), .generator = gen_ptr } },
                     .loc = given_loc,
                 }) catch return error.OutOfMemory;
             } else {
@@ -239,6 +240,7 @@ pub const Parser = struct {
 
                 params.append(self.allocator, .{
                     .name = param_name,
+                    .key = NameKey.of(param_name),
                     .type_name = param_type,
                 }) catch return error.OutOfMemory;
                 if (self.current.kind == .comma) self.advance();
@@ -563,6 +565,7 @@ pub const Parser = struct {
                 return Node{
                     .kind = .{ .assign_stmt = .{
                         .name = expr.kind.identifier.name,
+                        .key = expr.kind.identifier.key,
                         .value = value_ptr,
                     } },
                     .loc = expr.loc,
@@ -960,12 +963,12 @@ pub const Parser = struct {
                 if (self.current.kind == .lparen) {
                     return self.parseFuncCall(name, loc);
                 }
-                return Node{ .kind = .{ .identifier = .{ .name = name } }, .loc = loc };
+                return Node{ .kind = .{ .identifier = .{ .name = name, .key = NameKey.of(name), .hint = try self.newHint() } }, .loc = loc };
             },
             .upper_identifier => {
                 const name = self.current.lexeme;
                 self.advance();
-                return Node{ .kind = .{ .identifier = .{ .name = name } }, .loc = loc };
+                return Node{ .kind = .{ .identifier = .{ .name = name, .key = NameKey.of(name), .hint = try self.newHint() } }, .loc = loc };
             },
             .hole => {
                 self.advance();
@@ -1067,6 +1070,7 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .for_expr = .{
                 .var_name = var_name,
+                .key = NameKey.of(var_name),
                 .iterable = iter_ptr,
                 .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
@@ -1283,6 +1287,12 @@ pub const Parser = struct {
         };
     }
 
+    fn newHint(self: *Parser) ParseError!*u32 {
+        const h = self.allocator.create(u32) catch return error.OutOfMemory;
+        h.* = 0;
+        return h;
+    }
+
     fn parseFuncCall(self: *Parser, name: []const u8, loc: Loc) ParseError!Node {
         self.advance(); // skip (
         var args: std.ArrayList(Node) = .empty;
@@ -1299,6 +1309,7 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .func_call = .{
                 .name = name,
+                .key = NameKey.of(name),
                 .args = args.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
                 .cache = cache,
             } },

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("value.zig").Value;
+const name_key = @import("name_key.zig");
 
 /// Variable environment with lexical scope support.
 /// Uses a stack of scopes, each mapping variable names to values.
@@ -132,22 +133,8 @@ pub const Environment = struct {
     /// FNV-1a over the name's bytes.  Cheap enough to compute per lookup:
     /// a scope with a dozen same-length candidates cost a dozen
     /// `eqlBytes` calls, and one of these costs about one.
-    pub fn hashName(name: []const u8) u32 {
-        var h: u32 = 0x811c9dc5;
-        for (name) |c| {
-            h ^= c;
-            h *%= 0x01000193;
-        }
-        return h;
-    }
-
-    pub fn nameBit(name: []const u8) u64 {
-        if (name.len == 0) return 1;
-        const first: u64 = name[0];
-        const last: u64 = name[name.len - 1];
-        const h = first ^ (last << 2) ^ (@as(u64, name.len) << 4);
-        return @as(u64, 1) << @as(u6, @truncate(h));
-    }
+    pub const hashName = name_key.hashName;
+    pub const nameBit = name_key.nameBit;
 
     pub fn init(allocator: std.mem.Allocator) Environment {
         var env = Environment{
@@ -342,7 +329,7 @@ pub const Environment = struct {
             // it is per tail call rather than per call.
             const scope = self.scopes.items[i];
             for (scope.captured) |b| {
-                self.defineIn(base, b.name, b.val);
+                self.defineIn(base, b.name, b.hash, nameBit(b.name), b.val);
             }
             // Only a call frame is lent a view of the top level, and a call
             // frame is popped before its caller collapses anything; were one
@@ -351,7 +338,7 @@ pub const Environment = struct {
                 if (m != live and m > self.scopes.items[base].left_mark) self.scopes.items[base].left_mark = m;
             }
             for (scope.bindings.items) |b| {
-                self.defineIn(base, b.name, b.val);
+                self.defineIn(base, b.name, b.hash, nameBit(b.name), b.val);
             }
         }
         while (self.scopes.items.len > base + 1) {
@@ -361,14 +348,19 @@ pub const Environment = struct {
 
     /// Define (or update) a variable in the current scope.
     pub fn define(self: *Environment, name: []const u8, value: *const Value) void {
-        if (self.scopes.items.len == 0) return;
-        self.defineIn(self.scopes.items.len - 1, name, value);
+        self.defineKeyed(name, name_key.Key.of(name), value);
     }
 
-    fn defineIn(self: *Environment, index: usize, name: []const u8, value: *const Value) void {
+    /// `define` for a caller that already has the name's key (the parser
+    /// computed it), so no string is hashed here.  An unset key is computed.
+    pub fn defineKeyed(self: *Environment, name: []const u8, key: name_key.Key, value: *const Value) void {
+        if (self.scopes.items.len == 0) return;
+        const k = if (key.isSet()) key else name_key.Key.of(name);
+        self.defineIn(self.scopes.items.len - 1, name, k.hash, k.bit, value);
+    }
+
+    fn defineIn(self: *Environment, index: usize, name: []const u8, hash: u32, bit: u64, value: *const Value) void {
         const scope = &self.scopes.items[index];
-        const bit = nameBit(name);
-        const hash = hashName(name);
         if (index == 0) {
             // Appended, never overwritten, so closures made earlier still see
             // the value they were made with (see `global_prev`). And no scan
@@ -479,8 +471,26 @@ pub const Environment = struct {
 
     /// Look up a variable, searching from innermost to outermost scope.
     pub fn lookup(self: *const Environment, name: []const u8) ?*const Value {
-        const bit = nameBit(name);
-        const hash = hashName(name);
+        return self.lookupKeyed(name, name_key.Key.of(name));
+    }
+
+    /// `lookup` for a caller holding the name's key.  An unset key is computed.
+    pub fn lookupKeyed(self: *const Environment, name: []const u8, key: name_key.Key) ?*const Value {
+        return self.lookupHinted(name, key, null);
+    }
+
+    /// `lookupKeyed` with an inline cache: `hint` holds the offset from the
+    /// innermost frame's `own_base` at which this read found its name last
+    /// time.  It is only a guess to try first: the slot is used when it is in
+    /// range and holds the same hash and bytes, otherwise the scan runs.
+    /// Within a callee's own region a name appears once (`defineIn` overwrites
+    /// in place), so a validated slot is the binding the scan would find.
+    /// The offset is relative to `own_base` so a tail call that reuses the
+    /// frame, and moves `own_base`, still hits.
+    pub fn lookupHinted(self: *const Environment, name: []const u8, key: name_key.Key, hint: ?*u32) ?*const Value {
+        const nk = if (key.isSet()) key else name_key.Key.of(name);
+        const bit = nk.bit;
+        const hash = nk.hash;
         // The name's latest top-level binding, found once and only when a
         // frame asks.  It used to be found again, a hash of the name each
         // time, at every frame on the way out that reads the top level.  A
@@ -497,11 +507,19 @@ pub const Environment = struct {
             // produce: what the current callee bound, then what it captured,
             // then what an earlier callee left in a reused frame.
             if (scope.names & bit != 0) {
-                var j: usize = scope.bindings.items.len;
+                const items = scope.bindings.items;
+                if (hint != null and i == self.scopes.items.len - 1) {
+                    const at = scope.own_base +% @as(usize, hint.?.*);
+                    if (at < items.len and items[at].hash == hash and std.mem.eql(u8, items[at].name, name)) {
+                        return items[at].val;
+                    }
+                }
+                var j: usize = items.len;
                 while (j > scope.own_base) {
                     j -= 1;
-                    if (scope.bindings.items[j].hash == hash and std.mem.eql(u8, scope.bindings.items[j].name, name)) {
-                        return scope.bindings.items[j].val;
+                    if (items[j].hash == hash and std.mem.eql(u8, items[j].name, name)) {
+                        if (hint != null and i == self.scopes.items.len - 1) hint.?.* = @intCast(j - scope.own_base);
+                        return items[j].val;
                     }
                 }
             }
@@ -894,4 +912,40 @@ test "what a closure captures does not include the top level" {
     const got = env.capturableBindings(alloc);
     try std.testing.expectEqual(@as(usize, 1), got.len);
     try std.testing.expectEqualStrings("local", got[0].name);
+}
+
+test "a stale hint is validated, never trusted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = Environment.init(alloc);
+    const one = try alloc.create(Value);
+    one.* = Value{ .integer = 1 };
+    const two = try alloc.create(Value);
+    two.* = Value{ .integer = 2 };
+    const key = name_key.Key.of("b");
+
+    var hint: u32 = 0;
+    env.pushScope();
+    env.define("a", one);
+    env.define("b", two);
+    try std.testing.expectEqual(@as(i64, 2), env.lookupHinted("b", key, &hint).?.integer);
+    try std.testing.expectEqual(@as(u32, 1), hint);
+    env.popScope();
+
+    // A frame with a different layout: the hint points at a slot that holds
+    // another name, then past the end, then at the right slot.
+    env.pushScope();
+    env.define("b", one);
+    env.define("c", two);
+    hint = 1;
+    try std.testing.expectEqual(@as(i64, 1), env.lookupHinted("b", key, &hint).?.integer);
+    try std.testing.expectEqual(@as(u32, 0), hint);
+    hint = 9;
+    try std.testing.expectEqual(@as(i64, 1), env.lookupHinted("b", key, &hint).?.integer);
+    // A name the frame does not bind falls through, whatever the hint says.
+    hint = 0;
+    try std.testing.expect(env.lookupHinted("zz", name_key.Key.of("zz"), &hint) == null);
+    env.popScope();
 }

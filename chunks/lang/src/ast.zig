@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("value.zig").Value;
+const NameKey = @import("name_key.zig").Key;
 
 /// Source location for error reporting.
 pub const Loc = struct {
@@ -81,6 +82,7 @@ pub const Node = struct {
 
     pub const HandlerParam = struct {
         name: []const u8,
+        key: NameKey = .{},
         type_name: ?[]const u8 = null, // null = untyped (legacy, checker will reject)
     };
 
@@ -94,6 +96,7 @@ pub const Node = struct {
 
     pub const AssignStmt = struct {
         name: []const u8,
+        key: NameKey = .{},
         value: *const Node,
     };
 
@@ -149,6 +152,11 @@ pub const Node = struct {
 
     pub const Identifier = struct {
         name: []const u8,
+        key: NameKey = .{},
+        /// Inline cache: where in the frame this read found its name last
+        /// time (see `Environment.lookupHinted`).  Null for a node built by
+        /// hand.
+        hint: ?*u32 = null,
     };
 
     pub const BinaryOp = struct {
@@ -185,6 +193,7 @@ pub const Node = struct {
 
     pub const FuncCall = struct {
         name: []const u8,
+        key: NameKey = .{},
         args: []const Node,
         /// What this call site resolved to last time, when the parser gave
         /// it a slot.  A node built by hand (the checker's tests) has none
@@ -316,12 +325,14 @@ pub const Node = struct {
     /// given x: generator -- binds a generated value
     pub const GivenStmt = struct {
         name: []const u8, // variable name
+        key: NameKey = .{},
         generator: *const Node, // generator expression (func_call)
     };
 
     /// For loop: for x in list do ... end
     pub const ForExpr = struct {
         var_name: []const u8,
+        key: NameKey = .{},
         iterable: *const Node,
         body: []const Node,
     };

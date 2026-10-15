@@ -448,7 +448,7 @@ pub const Evaluator = struct {
 
             // Identifier
             .identifier => |*id| {
-                if (self.env.lookup(id.name)) |val| {
+                if (self.env.lookupHinted(id.name, id.key, id.hint)) |val| {
                     return val;
                 }
                 self.last_error = errors.undefinedVariable(id.name, self.source, &self.env, self.allocator);
@@ -459,13 +459,13 @@ pub const Evaluator = struct {
             .given_stmt => |*given| {
                 // Evaluate generator expression and bind result
                 const val = try self.eval(given.generator);
-                self.env.define(given.name, val);
+                self.env.defineKeyed(given.name, given.key, val);
                 return val;
             },
 
             .assign_stmt => |*assign| {
                 const val = try self.eval(assign.value);
-                self.env.define(assign.name, val);
+                self.env.defineKeyed(assign.name, assign.key, val);
                 return val;
             },
 
@@ -712,7 +712,7 @@ pub const Evaluator = struct {
         var results: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
         for (iterable.list) |item| {
             self.env.pushScope();
-            self.env.define(fe.var_name, item);
+            self.env.defineKeyed(fe.var_name, fe.key, item);
             var last: *const Value = undefined;
             var has = false;
             for (fe.body) |*stmt| {
@@ -1026,7 +1026,7 @@ pub const Evaluator = struct {
     fn enterHandler(self: *Evaluator, entry: *registry_mod.ActorEntry, handler: Value.HandlerDef, args: []const *const Value) ?*registry_mod.StateLend {
         self.env.pushScope();
         for (handler.params, 0..) |param, i| {
-            self.env.define(param.name, args[i]);
+            self.env.defineKeyed(param.name, param.key, args[i]);
         }
         const lend = self.stateLend(entry) orelse {
             for (entry.state_fields) |field| self.env.define(field.key, field.val);
@@ -1584,7 +1584,7 @@ pub const Evaluator = struct {
         if (call.cache) |cache| {
             if (cache.builtin) |ptr| {
                 if (cache.globals_version == self.env.globals_version and
-                    !self.env.bindsLocally(Environment.nameBit(call.name)))
+                    !self.env.bindsLocally((if (call.key.isSet()) call.key.bit else Environment.nameBit(call.name))))
                 {
                     const func: builtins_mod.BuiltinFn = @ptrCast(@alignCast(ptr));
                     return self.callBuiltin(func, call);
@@ -1592,7 +1592,7 @@ pub const Evaluator = struct {
             }
         }
         // First check if the name refers to a closure in the environment
-        if (self.env.lookup(call.name)) |val| {
+        if (self.env.lookupKeyed(call.name, call.key)) |val| {
             if (val.* == .closure) {
                 return self.callClosure(val, call.args);
             }
@@ -1777,7 +1777,7 @@ pub const Evaluator = struct {
     fn evalTail(self: *Evaluator, node: *const ast.Node, slot: *ArgSlot) EvalError!TailResult {
         switch (node.kind) {
             .func_call => |*call| {
-                if (self.env.lookup(call.name)) |val| {
+                if (self.env.lookupKeyed(call.name, call.key)) |val| {
                     if (val.* == .closure) {
                         // Same reduction accounting as eval()
                         self.countReduction();
@@ -1861,7 +1861,7 @@ pub const Evaluator = struct {
                         return error.TypeError;
                     }
                 }
-                self.env.define(param.name, args[i]);
+                self.env.defineKeyed(param.name, param.key, args[i]);
             }
 
             // Evaluate body with the last statement in tail position
@@ -2164,7 +2164,7 @@ pub const Evaluator = struct {
                             new_args[i] = arg;
                         }
                     }
-                    const modified_call = ast.Node.FuncCall{ .name = call.name, .args = new_args };
+                    const modified_call = ast.Node.FuncCall{ .name = call.name, .key = call.key, .args = new_args };
                     return self.evalFuncCall(&modified_call);
                 } else {
                     // No hole -- prepend left as first arg
@@ -2173,14 +2173,14 @@ pub const Evaluator = struct {
                     for (call.args, 0..) |arg, i| {
                         new_args[i + 1] = arg;
                     }
-                    const modified_call = ast.Node.FuncCall{ .name = call.name, .args = new_args };
+                    const modified_call = ast.Node.FuncCall{ .name = call.name, .key = call.key, .args = new_args };
                     return self.evalFuncCall(&modified_call);
                 }
             },
             .identifier => |id| {
                 // Pipe into bare function name: items |> length
                 // Check for closure first
-                if (self.env.lookup(id.name)) |val| {
+                if (self.env.lookupKeyed(id.name, id.key)) |val| {
                     if (val.* == .closure) {
                         return self.callClosureWithValues(val, &.{left_val});
                     }
@@ -3968,6 +3968,107 @@ test "a builtin that refuses an argument says which one" {
     var again = Evaluator.init(alloc);
     try std.testing.expectError(error.TypeError, evalProgram(alloc, &again, "concat(\"a\")"));
     try std.testing.expectEqualStrings("RUNTIME ERROR", again.last_error.?.title);
+}
+
+test "a name read in a loop after a redefinition in the same frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    // `x` is rebound in place before it is read, on every pass of a
+    // tail-recursive loop and of a `for`; the read site's remembered slot
+    // must be the current binding, not the first one.
+    const result = try evalProgram(alloc, &evaluator,
+        \\def f(n: Int, acc: Int) -> Int do
+        \\  x = n
+        \\  x = x * 2
+        \\  case n do
+        \\    0 -> acc
+        \\    _ -> f(n - 1, acc + x)
+        \\  end
+        \\end
+        \\f(3, 0)
+    );
+    try std.testing.expect(result.eql(Value{ .integer = 12 }));
+
+    const each = try evalProgram(alloc, &evaluator,
+        \\for i in [1, 2, 3] do
+        \\  x = i
+        \\  x = x * 10
+        \\  x + i
+        \\end
+    );
+    try std.testing.expectEqual(@as(usize, 3), each.list.len);
+    try std.testing.expect(each.list[0].eql(Value{ .integer = 11 }));
+    try std.testing.expect(each.list[1].eql(Value{ .integer = 22 }));
+    try std.testing.expect(each.list[2].eql(Value{ .integer = 33 }));
+}
+
+test "a capture is shadowed by a later local at the same read site" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    // The final `v` is one node. Called with 0 it reads the captured 1; called
+    // with 1 the frame has bound a local `v` first and the read must find that
+    // one, whichever of the two the site resolved to last time.
+    const result = try evalProgram(alloc, &evaluator,
+        \\def mk() do
+        \\  v = 1
+        \\  fn(k: Int) do
+        \\    case k do
+        \\      0 -> 0
+        \\      _ -> v = 100
+        \\    end
+        \\    v
+        \\  end
+        \\end
+        \\g = mk()
+        \\[g(0), g(1), g(0), g(1)]
+    );
+    const want = [_]i64{ 1, 100, 1, 100 };
+    try std.testing.expectEqual(@as(usize, 4), result.list.len);
+    for (want, 0..) |w, i| try std.testing.expect(result.list[i].eql(Value{ .integer = w }));
+}
+
+test "a parameter is read from a nested closure and from the frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = try evalProgram(alloc, &evaluator,
+        \\def outer(n) do
+        \\  inner = fn(k) do n + k end
+        \\  inner(1) + inner(2) + n
+        \\end
+        \\outer(10) + outer(20)
+    );
+    try std.testing.expect(result.eql(Value{ .integer = 33 + 63 }));
+}
+
+test "a tail-recursive loop reads its locals as its frame is reused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    // Each iteration reuses the frame and moves `own_base`; `step` and `acc`
+    // are read at offsets that are relative to it.
+    const result = try evalProgram(alloc, &evaluator,
+        \\def loop(n, acc) do
+        \\  step = n * 2
+        \\  case n do
+        \\    0 -> acc
+        \\    _ -> loop(n - 1, acc + step)
+        \\  end
+        \\end
+        \\loop(1000, 0)
+    );
+    try std.testing.expect(result.eql(Value{ .integer = 1001000 }));
+    try std.testing.expectEqual(@as(usize, 1), evaluator.env.depth());
 }
 
 // State is lent to a handler's scope rather than defined into it, and a
