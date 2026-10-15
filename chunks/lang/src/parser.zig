@@ -202,7 +202,7 @@ pub const Parser = struct {
                 const gen_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
                 gen_ptr.* = gen_expr;
                 body.append(self.allocator, Node{
-                    .kind = .{ .given_stmt = .{ .name = var_name, .key = NameKey.of(var_name), .generator = gen_ptr } },
+                    .kind = .{ .given_stmt = .{ .name = var_name, .key = NameKey.of(var_name), .hint = try self.newHint(), .generator = gen_ptr } },
                     .loc = given_loc,
                 }) catch return error.OutOfMemory;
             } else {
@@ -307,7 +307,7 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .message_handler = .{
                 .name = name,
-                .params = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .params = shadowedMarked(params.toOwnedSlice(self.allocator) catch return error.OutOfMemory),
                 .return_type = return_type,
                 .guard = guard,
                 .bubble_strategy = bubble_strategy,
@@ -577,6 +577,7 @@ pub const Parser = struct {
                     .kind = .{ .assign_stmt = .{
                         .name = expr.kind.identifier.name,
                         .key = expr.kind.identifier.key,
+                        .hint = expr.kind.identifier.hint,
                         .value = value_ptr,
                     } },
                     .loc = expr.loc,
@@ -1205,13 +1206,16 @@ pub const Parser = struct {
 
             params.append(self.allocator, .{
                 .name = param_name,
+                .key = NameKey.of(param_name),
                 .type_name = type_name,
             }) catch return error.OutOfMemory;
 
             if (self.current.kind == .comma) self.advance();
         }
         try self.expect(.rparen);
-        return params.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        const owned = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        Node.HandlerParam.markShadowed(owned);
+        return owned;
     }
 
     fn parseDefStmt(self: *Parser) ParseError!Node {
@@ -1296,6 +1300,11 @@ pub const Parser = struct {
             } },
             .loc = loc,
         };
+    }
+
+    fn shadowedMarked(params: []Node.HandlerParam) []Node.HandlerParam {
+        Node.HandlerParam.markShadowed(params);
+        return params;
     }
 
     fn newHint(self: *Parser) ParseError!*u32 {

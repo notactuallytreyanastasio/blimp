@@ -85,6 +85,18 @@ pub const Node = struct {
         name: []const u8,
         key: NameKey = .{},
         type_name: ?[]const u8 = null, // null = untyped (legacy, checker will reject)
+        /// A later parameter of the same name wins, so this one is not bound
+        /// (it is still type-checked).  Set by the parser.
+        shadowed: bool = false,
+
+        /// Mark every parameter that a later one of the same name shadows.
+        pub fn markShadowed(params: []HandlerParam) void {
+            for (params, 0..) |*p, i| {
+                for (params[i + 1 ..]) |q| {
+                    if (std.mem.eql(u8, p.name, q.name)) p.shadowed = true;
+                }
+            }
+        }
     };
 
     pub const BecomeStmt = struct {
@@ -99,6 +111,8 @@ pub const Node = struct {
         name: []const u8,
         key: NameKey = .{},
         value: *const Node,
+        /// Slot hint, as `Identifier.hint` (see `Environment.defineHinted`).
+        hint: ?*u32 = null,
     };
 
     // A literal's Value is built once by the parser, in the parser's own
@@ -331,6 +345,7 @@ pub const Node = struct {
         name: []const u8, // variable name
         key: NameKey = .{},
         generator: *const Node, // generator expression (func_call)
+        hint: ?*u32 = null,
     };
 
     /// For loop: for x in list do ... end

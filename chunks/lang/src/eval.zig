@@ -450,13 +450,13 @@ pub const Evaluator = struct {
             .given_stmt => |*given| {
                 // Evaluate generator expression and bind result
                 const val = try self.eval(given.generator);
-                self.env.defineKeyed(given.name, given.key, val);
+                self.env.defineHinted(given.name, given.key, given.hint, val);
                 return val;
             },
 
             .assign_stmt => |*assign| {
                 const val = try self.eval(assign.value);
-                self.env.defineKeyed(assign.name, assign.key, val);
+                self.env.defineHinted(assign.name, assign.key, assign.hint, val);
                 return val;
             },
 
@@ -1056,7 +1056,8 @@ pub const Evaluator = struct {
     fn enterHandler(self: *Evaluator, entry: *registry_mod.ActorEntry, handler: Value.HandlerDef, args: []const *const Value) ?*registry_mod.StateLend {
         self.env.pushScope();
         for (handler.params, 0..) |param, i| {
-            self.env.defineKeyed(param.name, param.key, args[i]);
+            if (param.shadowed) continue;
+            self.env.bindParam(param.name, param.key, args[i]);
         }
         const lend = self.stateLend(entry) orelse {
             for (entry.state_fields) |field| self.env.define(field.key, field.val);
@@ -1943,7 +1944,7 @@ pub const Evaluator = struct {
                         return error.TypeError;
                     }
                 }
-                self.env.defineKeyed(param.name, param.key, args[i]);
+                if (!param.shadowed) self.env.bindParam(param.name, param.key, args[i]);
             }
 
             // Evaluate body with the last statement in tail position
@@ -4327,6 +4328,57 @@ test "one fn literal made at two marks of the top level sees each its own" {
     try expectInt(alloc, &evaluator, "c1()", 10);
     try expectInt(alloc, &evaluator, "c2()", 20);
     try expectInt(alloc, &evaluator, "c1()", 10);
+}
+
+// Parameters are appended at call entry without a scan, and assignments
+// rebind through a per-site slot hint.  A repeated parameter name is the one
+// way the append could leave two bindings of a name in a frame; the parser
+// marks the earlier one and it is not bound, so the last argument wins as it
+// did when `define` overwrote.
+test "a repeated parameter name binds the last argument, and an assignment rebinds it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const result = try evalProgram(alloc, &evaluator,
+        \\def f(x: Int, x: Int) do
+        \\  inner = fn() do x end
+        \\  x = x + 10
+        \\  inner() + x
+        \\end
+        \\f(1, 2)
+    );
+    // inner captured x = 2 before the rebind; x is 12 after it.
+    try std.testing.expect(result.eql(Value{ .integer = 14 }));
+    try std.testing.expectEqual(@as(usize, 1), evaluator.env.depth());
+}
+
+test "a loop body rebinding a name through its hint, across frames of different shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    // `acc = ...` is one site; its slot differs between the two callers
+    // (`pad` is bound first in `wrap`), and the tail call moves own_base
+    // every pass.
+    const result = try evalProgram(alloc, &evaluator,
+        \\def loop(n, acc) do
+        \\  acc = acc + n
+        \\  case n do
+        \\    0 -> acc
+        \\    _ -> loop(n - 1, acc)
+        \\  end
+        \\end
+        \\def wrap(p) do
+        \\  pad = p
+        \\  pad2 = p
+        \\  loop(100, 0) + pad + pad2
+        \\end
+        \\loop(100, 0) + wrap(1)
+    );
+    try std.testing.expect(result.eql(Value{ .integer = 5050 + 5050 + 2 }));
 }
 
 test "a cached builtin survives a local that shares its bloom bit, and loses to one that shadows it" {

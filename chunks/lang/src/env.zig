@@ -380,6 +380,60 @@ pub const Environment = struct {
         self.defineIn(self.scopes.items.len - 1, name, k.hash, k.bit, value);
     }
 
+    /// `defineKeyed` for an assignment or `given`, which carries a slot
+    /// hint like an identifier does: where in the frame's own region this
+    /// site's binding was last time, as an offset from `own_base`.  A loop
+    /// body that rebinds `acc` finds it there without scanning.  The hint is
+    /// trusted only after `sameName` agrees, and a callee's own region holds
+    /// each name once, so a validated slot is the binding `defineIn` would
+    /// have found.  Whatever happens, the hint is left pointing at the slot.
+    pub fn defineHinted(self: *Environment, name: []const u8, key: name_key.Key, hint: ?*u32, value: *const Value) void {
+        const h = hint orelse return self.defineKeyed(name, key, value);
+        if (self.scopes.items.len < 2) return self.defineKeyed(name, key, value);
+        const k = if (key.isSet()) key else name_key.Key.of(name);
+        const scope = &self.scopes.items[self.scopes.items.len - 1];
+        const items = scope.bindings.items;
+        if (scope.names & k.bit != 0) {
+            const at = scope.own_base +% @as(usize, h.*);
+            if (at < items.len and name_key.sameName(items[at].name, items[at].hash, name, k.hash)) {
+                items[at].val = value;
+                return;
+            }
+            var j: usize = items.len;
+            while (j > scope.own_base) {
+                j -= 1;
+                if (name_key.sameName(items[j].name, items[j].hash, name, k.hash)) {
+                    items[j].val = value;
+                    h.* = @intCast(j - scope.own_base);
+                    return;
+                }
+            }
+        }
+        scope.names |= k.bit;
+        h.* = @intCast(items.len - scope.own_base);
+        scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
+    }
+
+    /// Bind a parameter at call entry.  The callee's own region is empty
+    /// here -- `lendCaptured` either truncated it to `own_base` (the same
+    /// closure re-entering) or moved `own_base` to the end (another callee),
+    /// and a fresh scope has nothing -- and parameters are bound first, so
+    /// there is no existing binding to look for: append.
+    ///
+    /// A parameter list may repeat a name (`fn(x: Int, x: Int)` parses and
+    /// the last argument wins).  The parser marks the earlier one
+    /// `HandlerParam.shadowed` and the caller does not bind it, so the
+    /// region keeps each name once, which `lookupHinted` and `defineHinted`
+    /// rely on when they trust a validated slot.
+    pub fn bindParam(self: *Environment, name: []const u8, key: name_key.Key, value: *const Value) void {
+        if (self.scopes.items.len == 0) return;
+        const k = if (key.isSet()) key else name_key.Key.of(name);
+        const scope = &self.scopes.items[self.scopes.items.len - 1];
+        if (self.scopes.items.len == 1) return self.defineIn(0, name, k.hash, k.bit, value);
+        scope.names |= k.bit;
+        scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
+    }
+
     fn defineIn(self: *Environment, index: usize, name: []const u8, hash: u32, bit: u64, value: *const Value) void {
         const scope = &self.scopes.items[index];
         if (index == 0) {
@@ -1026,5 +1080,75 @@ test "a stale hint is validated, never trusted" {
     // A name the frame does not bind falls through, whatever the hint says.
     hint = 0;
     try std.testing.expect(env.lookupHinted("zz", name_key.Key.of("zz"), &hint) == null);
+    env.popScope();
+}
+
+test "defineHinted validates its slot and leaves the hint pointing at the binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    var vals: [4]*const Value = undefined;
+    for (&vals, 0..) |*v, i| {
+        const p = try alloc.create(Value);
+        p.* = Value{ .integer = @intCast(i) };
+        v.* = p;
+    }
+    const key = name_key.Key.of("acc");
+
+    // A fresh name is appended and the hint records where.
+    var hint: u32 = 0;
+    env.pushScope();
+    env.define("a", vals[0]);
+    env.defineHinted("acc", key, &hint, vals[1]);
+    try std.testing.expectEqual(@as(u32, 1), hint);
+    // Rebinding goes straight to the slot, with no growth of the frame.
+    env.defineHinted("acc", key, &hint, vals[2]);
+    try std.testing.expectEqual(@as(usize, 2), env.scopes.items[1].bindings.items.len);
+    try std.testing.expectEqual(@as(i64, 2), env.lookup("acc").?.integer);
+    env.popScope();
+
+    // Another frame layout: a stale hint (wrong name in the slot, then past
+    // the end) is corrected, not trusted, and never makes a second binding.
+    env.pushScope();
+    env.define("acc", vals[0]);
+    env.define("b", vals[1]);
+    hint = 1;
+    env.defineHinted("acc", key, &hint, vals[3]);
+    try std.testing.expectEqual(@as(u32, 0), hint);
+    hint = 9;
+    env.defineHinted("acc", key, &hint, vals[2]);
+    try std.testing.expectEqual(@as(usize, 2), env.scopes.items[1].bindings.items.len);
+    try std.testing.expectEqual(@as(i64, 2), env.lookup("acc").?.integer);
+    env.popScope();
+
+    // A hint must not reach below own_base: a binding an earlier callee left
+    // in a reused frame is not overwritten, a new one is appended.
+    env.pushScope();
+    env.define("acc", vals[0]);
+    env.scopes.items[1].own_base = 1;
+    hint = 0;
+    env.defineHinted("acc", key, &hint, vals[3]);
+    try std.testing.expectEqual(@as(usize, 2), env.scopes.items[1].bindings.items.len);
+    try std.testing.expectEqual(@as(i64, 0), env.scopes.items[1].bindings.items[0].val.integer);
+    try std.testing.expectEqual(@as(i64, 3), env.lookup("acc").?.integer);
+    env.popScope();
+}
+
+test "bindParam appends without looking for an existing binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    const one = try alloc.create(Value);
+    one.* = Value{ .integer = 1 };
+    const two = try alloc.create(Value);
+    two.* = Value{ .integer = 2 };
+    env.pushScope();
+    env.bindParam("x", name_key.Key.of("x"), one);
+    env.bindParam("y", name_key.Key.of("y"), two);
+    try std.testing.expectEqual(@as(usize, 2), env.scopes.items[1].bindings.items.len);
+    try std.testing.expectEqual(@as(i64, 1), env.lookup("x").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), env.lookup("y").?.integer);
     env.popScope();
 }
