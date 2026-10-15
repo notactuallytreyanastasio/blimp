@@ -75,9 +75,13 @@ it.
 
 A plain `blimp file` run compacts too now, between top-level statements,
 once the heap has grown by as much as what survived the last compaction and
-at least 16 MB (`main.zig`, the same policy as `--serve`). It never did
-before, which is why a Temper library's test run, one statement running
-every test, reached the 8 GB ceiling with three hundred tests.
+at least 16 MB, and it drops the actors nothing can reach (`main.zig`, the
+same policy as `--serve`; the REPL and the browser keep every actor because
+a host may hold an id). It never did before, which is why a Temper library's
+test run, one statement running every test, reached the 8 GB ceiling with
+three hundred tests. With those tests as one statement each: keeping every
+actor, 353 s and a 1057 MB peak; dropping the unreachable ones, 119 s and
+980 MB, because every dead object was an actor copied on each compaction.
 
 The probe (`probe_compact.blimp`: a buffer of 1,000 entries and a map, each
 entry naming an actor held nowhere else, then 160 MB of garbage over six

@@ -243,7 +243,12 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
         defer {
             const grown = heap_limit.used -| live_after_compact;
             if (grown >= @max(live_after_compact, 16 * 1024 * 1024)) {
-                heap.compact(&evaluator);
+                // Actors nothing can reach go too.  A plain run has no host
+                // holding an actor's id, unlike the REPL and the browser, and
+                // a Temper program spawns an actor per object: keeping them
+                // all made the live set grow by every test's objects, and a
+                // library of 43 router tests still hit the 2 GB ceiling.
+                _ = heap.compactWith(&evaluator, .drop_unreachable);
                 live_after_compact = heap_limit.used;
             }
         }
