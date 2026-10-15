@@ -1576,6 +1576,21 @@ pub const Evaluator = struct {
         }
     }
 
+    /// `env.lookupKeyed(call.name, call.key)`, answered from the call site's
+    /// memory when `Environment.topHit` allows.  Only closures are
+    /// remembered.
+    fn lookupCall(self: *Evaluator, call: *const ast.Node.FuncCall) ?*const Value {
+        const cache = call.cache orelse return self.env.lookupKeyed(call.name, call.key);
+        if (self.env.topHit(&cache.top)) |v| return v;
+        const v = self.env.lookupKeyed(call.name, call.key) orelse return null;
+        if (v.* == .closure) {
+            self.env.fillTop(&cache.top, call.name, call.key);
+            // Debug builds: a slot that is usable now is what lookup returned.
+            if (self.env.topHit(&cache.top)) |t| std.debug.assert(t == v);
+        }
+        return v;
+    }
+
     fn evalFuncCall(self: *Evaluator, call: *const ast.Node.FuncCall) EvalError!*const Value {
         self.countReduction();
         // A call site that resolved to a builtin before, with no top-level
@@ -1592,7 +1607,7 @@ pub const Evaluator = struct {
             }
         }
         // First check if the name refers to a closure in the environment
-        if (self.env.lookupKeyed(call.name, call.key)) |val| {
+        if (self.lookupCall(call)) |val| {
             if (val.* == .closure) {
                 return self.callClosure(val, call.args);
             }
@@ -1777,7 +1792,7 @@ pub const Evaluator = struct {
     fn evalTail(self: *Evaluator, node: *const ast.Node, slot: *ArgSlot) EvalError!TailResult {
         switch (node.kind) {
             .func_call => |*call| {
-                if (self.env.lookupKeyed(call.name, call.key)) |val| {
+                if (self.lookupCall(call)) |val| {
                     if (val.* == .closure) {
                         // Same reduction accounting as eval()
                         self.countReduction();
@@ -4153,4 +4168,96 @@ test "become is a snapshot for the running handler, however state is bound" {
     try std.testing.expectEqual(@as(i64, 103), items[12].list[0].integer);
     try std.testing.expectEqual(@as(i64, 103), items[12].list[1].integer);
     try std.testing.expectEqual(@as(i64, 104), items[12].list[2].integer);
+}
+
+// ── Call-site cache for top-level closures (Environment.topHit) ──────
+
+fn expectInt(alloc: std.mem.Allocator, evaluator: *Evaluator, source: []const u8, want: i64) !void {
+    const result = try evalProgram(alloc, evaluator, source);
+    try std.testing.expectEqual(want, result.integer);
+}
+
+test "a cached call site follows a redefinition of the function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\def f() do 1 end
+        \\def g() do f() end
+    );
+    try expectInt(alloc, &evaluator, "g()", 1);
+    try expectInt(alloc, &evaluator, "g()", 1);
+    _ = try evalProgram(alloc, &evaluator, "def f() do 2 end");
+    try expectInt(alloc, &evaluator, "g()", 2);
+    try expectInt(alloc, &evaluator, "g()", 2);
+}
+
+test "a top-level def sees the top level before its caller's locals, cached or not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    // Not a shadowing test: `caller` is a top-level def, so its frame reads
+    // the live top level ahead of `shadow`'s local f.  The cache must say
+    // the same as lookup.
+    _ = try evalProgram(alloc, &evaluator,
+        \\def f(x) do x end
+        \\def caller() do f(1) end
+        \\def shadow() do
+        \\  f = fn(x) do x + 100 end
+        \\  caller()
+        \\end
+        \\def param(f) do caller() end
+    );
+    try expectInt(alloc, &evaluator, "caller()", 1);
+    try expectInt(alloc, &evaluator, "shadow()", 1);
+    try expectInt(alloc, &evaluator, "caller()", 1);
+    try expectInt(alloc, &evaluator, "param(fn(x) do x + 7 end)", 1);
+    try expectInt(alloc, &evaluator, "caller()", 1);
+}
+
+test "a capture that shadows a top-level name wins at a site that also resolves to the top level" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    // One `fn` literal.  c2 is made while wrap's local f is visible, so it
+    // captures that f; c1 and c3 have no f of their own and read the top level.
+    try expectInt(alloc, &evaluator,
+        \\def f(x) do x end
+        \\def mk() do fn() do f(1) end end
+        \\def wrap() do
+        \\  f = fn(x) do x + 100 end
+        \\  mk()
+        \\end
+        \\c1 = mk()
+        \\c2 = wrap()
+        \\a = c1()
+        \\b = c2()
+        \\c = c1()
+        \\d = c2()
+        \\a * 1000000 + b * 1000 + c * 10 + d
+    , 1101111);
+}
+
+test "one fn literal made at two marks of the top level sees each its own" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    // c1 was made before `f` was redefined, c2 after.  Their frames have
+    // different globals_marks, so the site's slot (the latest f) is right
+    // for c2 and wrong for c1, and must not be used for c1.
+    _ = try evalProgram(alloc, &evaluator,
+        \\def f() do 10 end
+        \\def mk() do fn() do f() end end
+        \\c1 = mk()
+    );
+    try expectInt(alloc, &evaluator, "c1()", 10);
+    _ = try evalProgram(alloc, &evaluator, "def f() do 20 end\nc2 = mk()");
+    try expectInt(alloc, &evaluator, "c2()", 20);
+    try expectInt(alloc, &evaluator, "c1()", 10);
+    try expectInt(alloc, &evaluator, "c2()", 20);
+    try expectInt(alloc, &evaluator, "c1()", 10);
 }

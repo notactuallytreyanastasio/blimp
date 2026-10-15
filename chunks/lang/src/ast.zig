@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("value.zig").Value;
 const NameKey = @import("name_key.zig").Key;
+const Environment = @import("env.zig").Environment;
 
 /// Source location for error reporting.
 pub const Loc = struct {
@@ -209,6 +210,9 @@ pub const Node = struct {
     pub const CallCache = struct {
         builtin: ?*const anyopaque = null,
         globals_version: u32 = 0,
+        /// The top-level closure this site resolved to; see
+        /// `Environment.topHit` for when it may be used again.
+        top: Environment.TopSlot = .{},
     };
 
     pub const PipeExpr = struct {

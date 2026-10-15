@@ -839,3 +839,30 @@ test "a literal built once by the parser survives compaction, bound and re-evalu
     _ = heap_b.reset(.free_all);
     try std.testing.expectEqualStrings("a\tb", (try run(code.allocator(), &eval, "s")).string);
 }
+
+test "a call site cached before compaction is not used after it" {
+    @import("handles.zig").dropAll();
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    // `caller` holds the site; it lives in `code`, so it survives the swap,
+    // and the site's cached value points into heap_a.
+    _ = try run(code.allocator(), &eval,
+        \\def name() do "marginalia" end
+        \\def caller() do name() + "!" end
+    );
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+
+    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    _ = heap_a.reset(.free_all);
+
+    // Were the cache trusted now it would read freed memory.
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+}

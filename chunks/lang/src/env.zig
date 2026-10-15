@@ -469,6 +469,64 @@ pub const Environment = struct {
         return false;
     }
 
+    /// A call site's memory of a top-level binding.
+    pub const TopSlot = struct {
+        /// `globals_version` when it was filled; any later top-level define
+        /// or reindex (gc compaction) makes it stale.
+        version: u32 = 0,
+        /// The binding's index in the top-level scope.
+        index: u32 = 0,
+        /// null: nothing remembered.
+        val: ?*const Value = null,
+        /// `nameBit(name)`, so a hit does not recompute it.
+        bit: u64 = 0,
+    };
+
+    /// The remembered binding, if `lookup(name)` from the current stack is
+    /// certain to return it; null means "ask `lookup`".
+    ///
+    /// The slot holds the *latest* top-level binding of the name.  `lookup`
+    /// returns that binding when
+    ///   1. the version is unchanged (a top-level define or a compaction
+    ///      bumps it), and
+    ///   2. walking out from the innermost frame, no frame binds or
+    ///      captures the name (`names`/`captured_names` have no bit for it;
+    ///      a set bit may be a false alarm and only means the slow path)
+    ///      before the first frame that reads the top level at all, the
+    ///      first with a nonzero `globals_mark`, else `left_mark`, and
+    ///   3. that frame's mark is above the binding's index.  A top-level
+    ///      def's frame has mark `live`.  A frame with a lower mark sees an
+    ///      older binding; the slot cannot say which, so it is not used.
+    /// `lookup` stops at that frame too, so nothing further out matters:
+    /// the walk is as long as the run of block scopes above the call's own
+    /// frame, not as long as the stack.
+    pub fn topHit(self: *const Environment, slot: *const TopSlot) ?*const Value {
+        const v = slot.val orelse return null;
+        if (slot.version != self.globals_version) return null;
+        var i: usize = self.scopes.items.len;
+        while (i > 1) {
+            i -= 1;
+            const scope = &self.scopes.items[i];
+            if ((scope.names | scope.captured_names) & slot.bit != 0) return null;
+            const m = if (scope.globals_mark != 0) scope.globals_mark else scope.left_mark;
+            if (m != 0) return if (slot.index < m) v else null;
+        }
+        return v;
+    }
+
+    /// Remember the name's latest top-level binding if `topHit` would
+    /// return it from here.  Independent of how `lookup` found its answer:
+    /// `topHit` holding is what makes the slot sound.
+    pub fn fillTop(self: *const Environment, slot: *TopSlot, name: []const u8, key: name_key.Key) void {
+        if (self.scopes.items.len == 0) return;
+        const idx = self.globals.get(name) orelse return;
+        slot.version = self.globals_version;
+        slot.index = idx;
+        slot.val = self.scopes.items[0].bindings.items[idx].val;
+        slot.bit = if (key.isSet()) key.bit else nameBit(name);
+        if (self.topHit(slot) == null) slot.val = null;
+    }
+
     /// Look up a variable, searching from innermost to outermost scope.
     pub fn lookup(self: *const Environment, name: []const u8) ?*const Value {
         return self.lookupKeyed(name, name_key.Key.of(name));
