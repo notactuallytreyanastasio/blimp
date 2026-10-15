@@ -378,7 +378,7 @@ pub const Evaluator = struct {
     /// arithmetic paths do -- reached the top as `Runtime error:
     /// error.TypeError` with nothing at all. The innermost node wins because
     /// only the first location to be filled in sticks.
-    fn locate(self: *Evaluator, node: *const ast.Node, err: EvalError) void {
+    noinline fn locate(self: *Evaluator, node: *const ast.Node, err: EvalError) void {
         // A bubble is Temper-style control flow on its way to a handler, not
         // a fault -- until nothing handles it, and it reaches the top with
         // only its reason. The innermost node gets there first and is the one
@@ -418,15 +418,7 @@ pub const Evaluator = struct {
             },
             .string_lit => |*lit| {
                 if (lit.prebuilt) |v| return v;
-                if (lit.interp) |ip| return self.evalStringInterp(ip);
-                // A node built by hand, not by the parser.
-                const s = literal.stripQuotes(lit.value);
-                if (literal.hasInterpolation(s)) { const built = try self.interpFromSource(s); return self.evalStringInterp(&built); }
-                var buf: std.ArrayListUnmanaged(u8) = .empty;
-                try literal.appendUnescaped(self.allocator, &buf, s);
-                const v = self.allocator.create(Value) catch return error.OutOfMemory;
-                v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
-                return v;
+                return self.evalStringLitSlow(lit);
             },
             .atom_lit => |*lit| {
                 if (lit.prebuilt) |v| return v;
@@ -451,8 +443,7 @@ pub const Evaluator = struct {
                 if (self.env.lookupHinted(id.name, id.key, id.hint)) |val| {
                     return val;
                 }
-                self.last_error = errors.undefinedVariable(id.name, self.source, &self.env, self.allocator);
-                return error.UndefinedVariable;
+                return self.undefinedIdentifier(id);
             },
 
             // Assignment
@@ -470,14 +461,7 @@ pub const Evaluator = struct {
             },
 
             // Binary operations
-            .binary_op => |*op| return self.evalBinaryOp(op) catch |err| {
-                if (self.last_error == null and err == error.TypeError) {
-                    self.last_error = errors.typeMismatch(self.source);
-                } else if (self.last_error == null and err == error.DivisionByZero) {
-                    self.last_error = errors.divisionByZero(self.source);
-                }
-                return err;
-            },
+            .binary_op => |*op| return self.evalBinaryOp(op) catch |err| return self.binaryOpFailed(err),
 
             // Unary operations
             .unary_op => |*op| return self.evalUnaryOp(op),
@@ -488,6 +472,25 @@ pub const Evaluator = struct {
             // Pipe expression
             .pipe_expr => |*pipe| return self.evalPipe(pipe),
 
+            // Dot access
+            .dot_access => |*da| return self.evalDotAccess(da),
+
+            // Situation (pattern matching)
+            .situation => |*sit| return self.evalSituation(sit),
+
+            // Case (same as situation for eval purposes)
+            .case_expr => |*ce| return self.evalCaseExpr(ce),
+
+            // Everything else is out of line: see evalCold.
+            else => return self.evalCold(node),
+        }
+    }
+
+    /// The arms of `evalNode` that are not on the per-node path. They live in a
+    /// function of their own because Zig gives every call in a switch arm its own
+    /// result slot, unshared, and 35 arms made `eval`'s frame 2000 bytes.
+    noinline fn evalCold(self: *Evaluator, node: *const ast.Node) EvalError!*const Value {
+        switch (node.kind) {
             // List literal
             .list_lit => |*list| return self.evalList(list),
 
@@ -497,20 +500,8 @@ pub const Evaluator = struct {
             // Map literal
             .map_lit => |*map| return self.evalMap(map),
 
-            // Dot access
-            .dot_access => |*da| return self.evalDotAccess(da),
-
             // Orelse
             .orelse_expr => |*oe| return self.evalOrElse(oe),
-
-            // Situation (pattern matching)
-            .situation => |*sit| return self.evalSituation(sit),
-
-            // Case (same as situation for eval purposes)
-            .case_expr => |*ce| return self.evalSituation(&ast.Node.Situation{
-                .subject = ce.subject,
-                .branches = ce.branches,
-            }),
 
             // Actor definition
             .actor_def => |*def| return self.evalActorDef(def),
@@ -521,16 +512,10 @@ pub const Evaluator = struct {
             },
 
             // State def is handled inside evalActorDef; standalone is an error
-            .state_def => {
-                self.last_error = errors.notSupportedInRepl("state", self.source);
-                return error.NotSupported;
-            },
+            .state_def => return self.notSupportedStandalone("state"),
 
             // Message handler is handled inside evalActorDef; standalone is an error
-            .message_handler => {
-                self.last_error = errors.notSupportedInRepl("on", self.source);
-                return error.NotSupported;
-            },
+            .message_handler => return self.notSupportedStandalone("on"),
 
             // Become statement
             .become_stmt => |*bs| return self.evalBecomeStmt(bs),
@@ -574,10 +559,55 @@ pub const Evaluator = struct {
 
             // Self reference inside a handler
             .self_ref => return self.evalSelfRef(),
+
+            else => unreachable,
         }
     }
 
-    fn evalActorDef(self: *Evaluator, def: *const ast.Node.ActorDef) EvalError!*const Value {
+    // Cold paths of `evalNode`, kept out of line so its frame holds only what the hot arms
+    // need. Every one of these used to be inlined into it (see notes/coldarms.md).
+    noinline fn evalStringLitSlow(self: *Evaluator, lit: *const ast.Node.StringLit) EvalError!*const Value {
+        if (lit.interp) |ip| return self.evalStringInterp(ip);
+        // A node built by hand, not by the parser.
+        const s = literal.stripQuotes(lit.value);
+        if (literal.hasInterpolation(s)) {
+            const built = try self.interpFromSource(s);
+            return self.evalStringInterp(&built);
+        }
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        try literal.appendUnescaped(self.allocator, &buf, s);
+        const v = self.allocator.create(Value) catch return error.OutOfMemory;
+        v.* = Value{ .string = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory };
+        return v;
+    }
+
+    noinline fn undefinedIdentifier(self: *Evaluator, id: *const ast.Node.Identifier) EvalError!*const Value {
+        self.last_error = errors.undefinedVariable(id.name, self.source, &self.env, self.allocator);
+        return error.UndefinedVariable;
+    }
+
+    noinline fn binaryOpFailed(self: *Evaluator, err: EvalError) EvalError {
+        if (self.last_error == null and err == error.TypeError) {
+            self.last_error = errors.typeMismatch(self.source);
+        } else if (self.last_error == null and err == error.DivisionByZero) {
+            self.last_error = errors.divisionByZero(self.source);
+        }
+        return err;
+    }
+
+    noinline fn notSupportedStandalone(self: *Evaluator, what: []const u8) EvalError!*const Value {
+        self.last_error = errors.notSupportedInRepl(what, self.source);
+        return error.NotSupported;
+    }
+
+    noinline fn evalCaseExpr(self: *Evaluator, ce: *const ast.Node.CaseExpr) EvalError!*const Value {
+        return self.evalSituation(&ast.Node.Situation{
+            .subject = ce.subject,
+            .branches = ce.branches,
+        });
+    }
+
+    noinline fn evalActorDef(self: *Evaluator, def: *const ast.Node.ActorDef) EvalError!*const Value {
         // Collect state fields and handlers from the body
         var state_fields_list = std.ArrayList(Value.MapEntry).empty;
         var handlers_list = std.ArrayList(Value.HandlerDef).empty;
@@ -678,7 +708,7 @@ pub const Evaluator = struct {
         fn_ptr(self.trace_ctx, line);
     }
 
-    fn evalSpawnExpr(self: *Evaluator, se: *const ast.Node.SpawnExpr) EvalError!*const Value {
+    noinline fn evalSpawnExpr(self: *Evaluator, se: *const ast.Node.SpawnExpr) EvalError!*const Value {
         // Look up the template in the registry
         const template = self.registry.lookupTemplate(se.actor_name) orelse {
             self.last_error = errors.templateNotFound(se.actor_name, self.source);
@@ -705,7 +735,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalForExpr(self: *Evaluator, fe: *const ast.Node.ForExpr) EvalError!*const Value {
+    noinline fn evalForExpr(self: *Evaluator, fe: *const ast.Node.ForExpr) EvalError!*const Value {
         const iterable = try self.eval(fe.iterable);
         if (iterable.* != .list) return error.TypeError;
 
@@ -727,7 +757,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalSpreadMap(self: *Evaluator, se: *const ast.Node.SpreadExpr) EvalError!*const Value {
+    noinline fn evalSpreadMap(self: *Evaluator, se: *const ast.Node.SpreadExpr) EvalError!*const Value {
         const iterable = try self.eval(se.iterable);
         const func = try self.eval(se.func);
         if (iterable.* != .list) return error.TypeError;
@@ -741,7 +771,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalSpreadEach(self: *Evaluator, se: *const ast.Node.SpreadExpr) EvalError!*const Value {
+    noinline fn evalSpreadEach(self: *Evaluator, se: *const ast.Node.SpreadExpr) EvalError!*const Value {
         const iterable = try self.eval(se.iterable);
         const func = try self.eval(se.func);
         if (iterable.* != .list) return error.TypeError;
@@ -754,7 +784,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalSelfRef(self: *Evaluator) EvalError!*const Value {
+    noinline fn evalSelfRef(self: *Evaluator) EvalError!*const Value {
         if (self.actor_ctx) |ctx| {
             const v = self.allocator.create(Value) catch return error.OutOfMemory;
             v.* = Value{ .actor_ref = ctx.entry.ref };
@@ -769,7 +799,7 @@ pub const Evaluator = struct {
         return error.NotSupported;
     }
 
-    fn evalBubble(self: *Evaluator, bs: *const ast.Node.BubbleStmt) EvalError!*const Value {
+    noinline fn evalBubble(self: *Evaluator, bs: *const ast.Node.BubbleStmt) EvalError!*const Value {
         // Store the bubble reason if provided
         if (bs.reason) |reason_node| {
             const reason_val = try self.eval(reason_node);
@@ -812,7 +842,7 @@ pub const Evaluator = struct {
         return parts;
     }
 
-    fn evalStringInterp(self: *Evaluator, ip: *const ast.Node.Interp) EvalError!*const Value {
+    noinline fn evalStringInterp(self: *Evaluator, ip: *const ast.Node.Interp) EvalError!*const Value {
         if (ip.bad) return error.UnsupportedOperation;
         var result: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
         for (ip.parts) |part| switch (part) {
@@ -837,7 +867,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalDefStmt(self: *Evaluator, ds: *const ast.Node.DefStmt) EvalError!*const Value {
+    noinline fn evalDefStmt(self: *Evaluator, ds: *const ast.Node.DefStmt) EvalError!*const Value {
         // A def at top level captures nothing; see Closure.top_level.
         if (self.env.depth() == 1 and self.actor_ctx == null) {
             const tc = self.allocator.create(Value.Closure) catch return error.OutOfMemory;
@@ -879,7 +909,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalTryCatch(self: *Evaluator, tc: *const ast.Node.TryCatch) EvalError!*const Value {
+    noinline fn evalTryCatch(self: *Evaluator, tc: *const ast.Node.TryCatch) EvalError!*const Value {
         // Try to evaluate the try body
         var last_val: *const Value = undefined;
         var has_val = false;
@@ -928,7 +958,7 @@ pub const Evaluator = struct {
         return self.make(.nil);
     }
 
-    fn evalStructLit(self: *Evaluator, sl: *const ast.Node.StructLit) EvalError!*const Value {
+    noinline fn evalStructLit(self: *Evaluator, sl: *const ast.Node.StructLit) EvalError!*const Value {
         // %Counter{count: 42} = spawn Counter with overrides
         const template = self.registry.lookupTemplate(sl.type_name) orelse {
             self.last_error = errors.templateNotFound(sl.type_name, self.source);
@@ -952,7 +982,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalFnExpr(self: *Evaluator, fe: *const ast.Node.FnExpr) EvalError!*const Value {
+    noinline fn evalFnExpr(self: *Evaluator, fe: *const ast.Node.FnExpr) EvalError!*const Value {
         const bindings = self.env.capturableBindings(self.allocator);
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
@@ -975,7 +1005,7 @@ pub const Evaluator = struct {
         return v;
     }
 
-    fn evalCallExpr(self: *Evaluator, ce: *const ast.Node.CallExpr) EvalError!*const Value {
+    noinline fn evalCallExpr(self: *Evaluator, ce: *const ast.Node.CallExpr) EvalError!*const Value {
         const callee_val = try self.eval(ce.callee);
         return self.callClosure(callee_val, ce.args);
     }
@@ -1050,7 +1080,7 @@ pub const Evaluator = struct {
         if (lend) |l| l.borrowers -= 1;
     }
 
-    fn evalMessageSend(self: *Evaluator, ms: *const ast.Node.MessageSend) EvalError!*const Value {
+    noinline fn evalMessageSend(self: *Evaluator, ms: *const ast.Node.MessageSend) EvalError!*const Value {
         const target_val = try self.eval(ms.target);
 
         // Target must be a spawned actor_ref. Atoms (template names) are not instances.
@@ -1237,7 +1267,7 @@ pub const Evaluator = struct {
         entry.lent = nl;
     }
 
-    fn evalBecomeStmt(self: *Evaluator, bs: *const ast.Node.BecomeStmt) EvalError!*const Value {
+    noinline fn evalBecomeStmt(self: *Evaluator, bs: *const ast.Node.BecomeStmt) EvalError!*const Value {
         const ctx = self.actor_ctx orelse {
             self.last_error = errors.becomeOutsideHandler(self.source);
             return error.NotSupported;
@@ -1262,7 +1292,7 @@ pub const Evaluator = struct {
         return self.make(.nil);
     }
 
-    fn evalReplyStmt(self: *Evaluator, rs: *const ast.Node.ReplyStmt) EvalError!*const Value {
+    noinline fn evalReplyStmt(self: *Evaluator, rs: *const ast.Node.ReplyStmt) EvalError!*const Value {
         const ctx = self.actor_ctx orelse {
             self.last_error = errors.replyOutsideHandler(self.source);
             return error.NotSupported;
@@ -1537,7 +1567,7 @@ pub const Evaluator = struct {
         }
     }
 
-    fn evalUnaryOp(self: *Evaluator, op: *const ast.Node.UnaryOp) EvalError!*const Value {
+    noinline fn evalUnaryOp(self: *Evaluator, op: *const ast.Node.UnaryOp) EvalError!*const Value {
         const operand = try self.eval(op.operand);
         switch (op.op) {
             .negate => switch (operand.*) {
@@ -2149,7 +2179,7 @@ pub const Evaluator = struct {
         return self.make(.{ .map = entries });
     }
 
-    fn evalPipe(self: *Evaluator, pipe: *const ast.Node.PipeExpr) EvalError!*const Value {
+    noinline fn evalPipe(self: *Evaluator, pipe: *const ast.Node.PipeExpr) EvalError!*const Value {
         const left_val = try self.eval(pipe.left);
 
         // If right side is a func_call, check for hole args and substitute
@@ -2272,7 +2302,7 @@ pub const Evaluator = struct {
         }
     }
 
-    fn evalList(self: *Evaluator, list: *const ast.Node.ListLit) EvalError!*const Value {
+    noinline fn evalList(self: *Evaluator, list: *const ast.Node.ListLit) EvalError!*const Value {
         // If there's a tail expression [h1, h2 | tail], concat head elements with evaluated tail
         if (list.tail) |tail_node| {
             const tail_val = try self.eval(tail_node);
@@ -2295,7 +2325,7 @@ pub const Evaluator = struct {
         return self.make(.{ .list = items });
     }
 
-    fn evalTuple(self: *Evaluator, tuple: *const ast.Node.TupleLit) EvalError!*const Value {
+    noinline fn evalTuple(self: *Evaluator, tuple: *const ast.Node.TupleLit) EvalError!*const Value {
         const items = self.allocator.alloc(*const Value, tuple.elements.len) catch return error.OutOfMemory;
         for (tuple.elements, 0..) |*elem, i| {
             items[i] = try self.eval(elem);
@@ -2303,7 +2333,7 @@ pub const Evaluator = struct {
         return self.make(.{ .tuple = items });
     }
 
-    fn evalMap(self: *Evaluator, map: *const ast.Node.MapLit) EvalError!*const Value {
+    noinline fn evalMap(self: *Evaluator, map: *const ast.Node.MapLit) EvalError!*const Value {
         const entries = self.allocator.alloc(Value.MapEntry, map.entries.len) catch return error.OutOfMemory;
         for (map.entries, 0..) |*entry, i| {
             const val = try self.eval(&entry.value);
@@ -2312,7 +2342,7 @@ pub const Evaluator = struct {
         return self.make(.{ .map = entries });
     }
 
-    fn evalDotAccess(self: *Evaluator, da: *const ast.Node.DotAccess) EvalError!*const Value {
+    noinline fn evalDotAccess(self: *Evaluator, da: *const ast.Node.DotAccess) EvalError!*const Value {
         // First, try to resolve as a dotted actor name (e.g., Shop.Checkout):
         // the parser flattened the chain once, and only for chains of
         // upper-case names, the only dotted names `actor` binds.
@@ -2394,7 +2424,7 @@ pub const Evaluator = struct {
         return buf;
     }
 
-    fn evalOrElse(self: *Evaluator, oe: *const ast.Node.OrElseExpr) EvalError!*const Value {
+    noinline fn evalOrElse(self: *Evaluator, oe: *const ast.Node.OrElseExpr) EvalError!*const Value {
         const try_val = self.eval(oe.try_expr) catch |err| {
             if (err == error.Bubble) {
                 // Bubble caught by orelse - execute fallback
@@ -2410,7 +2440,7 @@ pub const Evaluator = struct {
         }
     }
 
-    fn evalSituation(self: *Evaluator, sit: *const ast.Node.Situation) EvalError!*const Value {
+    noinline fn evalSituation(self: *Evaluator, sit: *const ast.Node.Situation) EvalError!*const Value {
         const base = self.env.depth();
         var slot: ArgSlot = .{};
         return self.resolveTail(try self.evalSituationTail(sit, &slot), base);
