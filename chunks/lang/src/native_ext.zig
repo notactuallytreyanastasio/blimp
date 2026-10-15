@@ -255,10 +255,17 @@ fn errmsg(h: *sqlite.Db) []const u8 {
 /// sqlite_open(path: String) -> Int
 ///
 /// Opens (creating if need be) the database at `path` and runs
-/// `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON`.
+/// `PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON`.
 /// Answers a handle for the other sqlite_* builtins. ":memory:" works and is
 /// private to its handle. Raises with sqlite's message when it cannot open,
 /// or when 256 databases are already open.
+///
+/// The busy timeout is set before the journal mode, not after. Switching to
+/// WAL takes a lock, and with no timeout yet a connection that was writing
+/// at that instant made the PRAGMA fail with SQLITE_BUSY at once, so the
+/// open itself failed. A server that forks a child per request and a
+/// grandchild per job opens this way all the time; under load a job's
+/// "could not open" was this, seen once in 1,806 end-to-end assertions.
 pub fn sqliteOpen(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     const path = allocator.dupeZ(u8, args[0].string) catch return error.OutOfMemory;
@@ -275,7 +282,7 @@ pub fn sqliteOpen(allocator: std.mem.Allocator, args: []const *const Value) Eval
         _ = sqlite.sqlite3_close(h);
         return r;
     }
-    if (sqlite.sqlite3_exec(h, "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON", null, null, null) != sqlite.OK) {
+    if (sqlite.sqlite3_exec(h, "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON", null, null, null) != sqlite.OK) {
         const r = builtins.failArg("sqlite_open: {s}: {s}", .{ args[0].string, errmsg(h) });
         _ = sqlite.sqlite3_close(h);
         return r;
