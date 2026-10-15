@@ -113,6 +113,7 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
     eval.registry.templates = templates;
     eval.registry.instances = instances;
     eval.registry.allocator = to;
+    eval.registry.reindex();
     eval.bubble_reason = bubble_reason;
     for (0..eval.msg_log_count) |i| eval.msg_log[i] = msg_log[i];
     eval.builtins = BuiltinRegistry.init(to);
