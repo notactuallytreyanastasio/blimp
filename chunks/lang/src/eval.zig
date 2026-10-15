@@ -1647,21 +1647,28 @@ pub const Evaluator = struct {
         return v;
     }
 
+    /// The builtin this call site resolved to before, if it is certain to
+    /// resolve to it again: no top-level define since (`globals_version`),
+    /// and no frame binds the name.  `bindsLocally` is a bloom over every
+    /// frame and says true for names that merely share a bit with a local;
+    /// on the Markdown bench it said true for a third of the builtin calls,
+    /// and each of those then paid a full walk, the registry's hash and nine
+    /// string compares.  A true is now settled by one `lookup`: a name bound
+    /// nowhere is the builtin.  A name bound to something is left to the
+    /// general path, which decides exactly as it always did.
+    inline fn builtinHit(self: *Evaluator, call: *const ast.Node.FuncCall) ?builtins_mod.BuiltinFn {
+        const cache = call.cache orelse return null;
+        const ptr = cache.builtin orelse return null;
+        if (cache.globals_version != self.env.globals_version) return null;
+        if (self.env.bindsLocally(if (call.key.isSet()) call.key.bit else Environment.nameBit(call.name))) {
+            if (self.env.lookupKeyed(call.name, call.key) != null) return null;
+        }
+        return @ptrCast(@alignCast(ptr));
+    }
+
     fn evalFuncCall(self: *Evaluator, call: *const ast.Node.FuncCall) EvalError!*const Value {
         self.countReduction();
-        // A call site that resolved to a builtin before, with no top-level
-        // definition added since and no frame binding the name, is that
-        // builtin again: no walk of the stack, no hash of the name.
-        if (call.cache) |cache| {
-            if (cache.builtin) |ptr| {
-                if (cache.globals_version == self.env.globals_version and
-                    !self.env.bindsLocally((if (call.key.isSet()) call.key.bit else Environment.nameBit(call.name))))
-                {
-                    const func: builtins_mod.BuiltinFn = @ptrCast(@alignCast(ptr));
-                    return self.callBuiltin(func, call);
-                }
-            }
-        }
+        if (self.builtinHit(call)) |func| return self.callBuiltin(func, call);
         // First check if the name refers to a closure in the environment
         if (self.lookupCall(call)) |val| {
             if (val.* == .closure) {
@@ -1848,6 +1855,10 @@ pub const Evaluator = struct {
     fn evalTail(self: *Evaluator, node: *const ast.Node, slot: *ArgSlot) EvalError!TailResult {
         switch (node.kind) {
             .func_call => |*call| {
+                if (self.builtinHit(call)) |func| {
+                    self.countReduction();
+                    return .{ .value = try self.callBuiltin(func, call) };
+                }
                 if (self.lookupCall(call)) |val| {
                     if (val.* == .closure) {
                         // Same reduction accounting as eval()
@@ -4316,6 +4327,36 @@ test "one fn literal made at two marks of the top level sees each its own" {
     try expectInt(alloc, &evaluator, "c1()", 10);
     try expectInt(alloc, &evaluator, "c2()", 20);
     try expectInt(alloc, &evaluator, "c1()", 10);
+}
+
+test "a cached builtin survives a local that shares its bloom bit, and loses to one that shadows it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    // `sire` and `size` have the same first byte, last byte and length, so the
+    // same bit: the bloom says "bound locally" and the exact lookup says no.
+    // tail_count calls len in tail position (evalTail).
+    _ = try evalProgram(alloc, &evaluator,
+        \\def count(xs: Any) -> Any do
+        \\  sire = 5
+        \\  size(xs) + sire
+        \\end
+        \\def tail_count(xs: Any) -> Any do
+        \\  sire = 5
+        \\  size(xs)
+        \\end
+        \\def shadowed(size: Any, xs: Any) -> Any do
+        \\  size(xs)
+        \\end
+    );
+    try expectInt(alloc, &evaluator, "count([1, 2, 3])", 8);
+    try expectInt(alloc, &evaluator, "count([1, 2, 3])", 8);
+    try expectInt(alloc, &evaluator, "tail_count([1, 2, 3])", 3);
+    try expectInt(alloc, &evaluator, "tail_count([1, 2, 3])", 3);
+    // The same builtin, now bound to a closure in the caller's frame.
+    try expectInt(alloc, &evaluator, "shadowed(fn(x: Any) do 99 end, [1])", 99);
+    try expectInt(alloc, &evaluator, "tail_count([1, 2, 3])", 3);
 }
 
 test "integer operators agree inside and outside the interned table" {

@@ -5,6 +5,20 @@ const name_key = @import("name_key.zig");
 /// Variable environment with lexical scope support.
 /// Uses a stack of scopes, each mapping variable names to values.
 /// Follows the same pattern as TypeEnv in types.zig.
+/// A name and its `hashName`, the key of `Environment.globals`.
+pub const GlobalKey = struct { name: []const u8, hash: u32 };
+
+pub const GlobalCtx = struct {
+    pub fn hash(_: GlobalCtx, k: GlobalKey) u64 {
+        // The map takes the index from the low bits and a fingerprint from
+        // the high ones; FNV is good in the low bits only.
+        return @as(u64, k.hash) *% 0x9E3779B97F4A7C15;
+    }
+    pub fn eql(_: GlobalCtx, a: GlobalKey, b: GlobalKey) bool {
+        return name_key.sameName(a.name, a.hash, b.name, b.hash);
+    }
+};
+
 pub const Environment = struct {
     scopes: std.ArrayList(Scope),
     /// Binding lists left behind by popped scopes, kept for the next push.
@@ -24,7 +38,13 @@ pub const Environment = struct {
     /// being called: 200k calls of a function followed by 3000 other defs
     /// took 1408ms, against 35ms with none. The name mask does not help
     /// there, because 3000 names set all 64 of its bits.
-    globals: std.StringHashMapUnmanaged(u32) = .{},
+    ///
+    /// Keyed by the name and its FNV hash (`name_key.hashName`), which the
+    /// parser computed once per node and every Binding carries: a lookup
+    /// from a node did not need `Wyhash` over the name's bytes on top of it
+    /// (`hash.wyhash` was 3 percent of a Markdown run).  A name made at run
+    /// time is hashed by the caller, once.
+    globals: std.HashMapUnmanaged(GlobalKey, u32, GlobalCtx, 80) = .{},
     /// Bumped whenever a top-level binding is added or the index is
     /// rebuilt.  A call site that cached "this name is a builtin" checks it:
     /// a later top-level `def` of that name must win.
@@ -244,7 +264,7 @@ pub const Environment = struct {
     /// bindings: what a closure made when there were `mark` of them saw.
     pub fn lookupTopAt(self: *const Environment, name: []const u8, mark: u32) ?*const Value {
         if (self.scopes.items.len == 0) return null;
-        return self.topFrom(self.globals.get(name), mark);
+        return self.topFrom(self.globals.get(.{ .name = name, .hash = name_key.hashName(name) }), mark);
     }
 
     /// The top-level binding at or before `mark`, walking the `global_prev`
@@ -274,13 +294,13 @@ pub const Environment = struct {
         self.globals_version +%= 1;
         if (self.scopes.items.len == 0) return;
         for (self.scopes.items[0].bindings.items, 0..) |b, i| {
-            self.indexGlobal(b.name, @intCast(i));
+            self.indexGlobal(b.name, b.hash, @intCast(i));
         }
     }
 
-    fn indexGlobal(self: *Environment, name: []const u8, index: u32) void {
+    fn indexGlobal(self: *Environment, name: []const u8, hash: u32, index: u32) void {
         self.globals_version +%= 1;
-        const got = self.globals.getOrPut(self.allocator, name) catch {
+        const got = self.globals.getOrPut(self.allocator, .{ .name = name, .hash = hash }) catch {
             @panic("out of memory indexing a top-level binding");
         };
         const prev: u32 = if (got.found_existing) got.value_ptr.* else no_prev;
@@ -370,7 +390,7 @@ pub const Environment = struct {
             scope.names |= bit;
             const at: u32 = @intCast(scope.bindings.items.len);
             scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = hash }) catch return;
-            self.indexGlobal(name, at);
+            self.indexGlobal(name, hash, at);
             return;
         }
         // A clear bit means no binding of this name is in the scope at all,
@@ -427,7 +447,7 @@ pub const Environment = struct {
             if (i == 0) {
                 // Append-only: only the latest binding of each name counts.
                 for (scope.bindings.items, 0..) |binding, j| {
-                    if (self.globals.get(binding.name) != @as(u32, @intCast(j))) continue;
+                    if (self.globals.get(.{ .name = binding.name, .hash = binding.hash }) != @as(u32, @intCast(j))) continue;
                     const got = seen.getOrPut(allocator, binding.name) catch continue;
                     if (!got.found_existing) result.append(allocator, binding) catch {};
                 }
@@ -520,7 +540,7 @@ pub const Environment = struct {
     /// `topHit` holding is what makes the slot sound.
     pub fn fillTop(self: *const Environment, slot: *TopSlot, name: []const u8, key: name_key.Key) void {
         if (self.scopes.items.len == 0) return;
-        const idx = self.globals.get(name) orelse return;
+        const idx = self.globals.get(.{ .name = name, .hash = if (key.isSet()) key.hash else name_key.hashName(name) }) orelse return;
         slot.version = self.globals_version;
         slot.index = idx;
         slot.val = self.scopes.items[0].bindings.items[idx].val;
@@ -593,7 +613,7 @@ pub const Environment = struct {
             }
             if (scope.globals_mark != 0) {
                 if (!top_known) {
-                    top = self.globals.get(name);
+                    top = self.globals.get(.{ .name = name, .hash = hash });
                     top_known = true;
                 }
                 if (self.topFrom(top, scope.globals_mark)) |v| return v;
@@ -609,14 +629,14 @@ pub const Environment = struct {
             }
             if (scope.left_mark != 0) {
                 if (!top_known) {
-                    top = self.globals.get(name);
+                    top = self.globals.get(.{ .name = name, .hash = hash });
                     top_known = true;
                 }
                 if (self.topFrom(top, scope.left_mark)) |v| return v;
             }
         }
         if (self.scopes.items.len == 0) return null;
-        if (!top_known) top = self.globals.get(name);
+        if (!top_known) top = self.globals.get(.{ .name = name, .hash = hash });
         return self.topFrom(top, live);
     }
 };
