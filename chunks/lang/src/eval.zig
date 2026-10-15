@@ -2493,6 +2493,28 @@ pub const Evaluator = struct {
         const subject = try self.eval(sit.subject);
 
         for (sit.branches) |*branch| {
+            // The parser's two shapes, `true -> .. _ -> ..` (what Temper's
+            // `if` compiles to): no matchPattern call, and no scope for a
+            // branch that cannot define.  A scoped branch takes the same
+            // path as below with an empty binding list.
+            switch (branch.mode) {
+                .general => {},
+                // A wildcard has never run its guard; kept.
+                .wild => return self.evalBodyTail(branch.body, slot),
+                .is_true, .is_false => {
+                    if (subject.* != .boolean or subject.boolean != (branch.mode == .is_true)) continue;
+                    if (!branch.scoped) {
+                        if (branch.guard) |guard_node| {
+                            const guard_val = self.eval(guard_node) catch continue;
+                            if (!guard_val.truthy()) continue;
+                        }
+                        return self.evalBodyTail(branch.body, slot);
+                    }
+                    self.env.pushScope();
+                    if (try self.branchBody(branch, slot)) |result| return result;
+                    continue;
+                },
+            }
             if (branch.pattern) |pattern| {
                 if (self.matchPattern(pattern, subject)) |bindings| {
                     self.env.pushScope();
@@ -2534,6 +2556,27 @@ pub const Evaluator = struct {
         const result = self.allocator.create(Value) catch return error.OutOfMemory;
         result.* = .nil;
         return .{ .value = result };
+    }
+
+    /// Guard, then body, of a branch whose scope was just pushed.  Null
+    /// means the guard failed (scope popped; try the next branch).
+    fn branchBody(self: *Evaluator, branch: *const ast.Node.Branch, slot: *ArgSlot) EvalError!?TailResult {
+        if (branch.guard) |guard_node| {
+            const guard_val = self.eval(guard_node) catch {
+                self.env.popScope();
+                return null;
+            };
+            if (!guard_val.truthy()) {
+                self.env.popScope();
+                return null;
+            }
+        }
+        const result = self.evalBodyTail(branch.body, slot) catch |err| {
+            self.env.popScope();
+            return err;
+        };
+        if (result == .value) self.env.popScope();
+        return result;
     }
 
     /// Hole operator: called when a situation hits a `_ # directive` branch.
@@ -4489,4 +4532,55 @@ test "a read through block scopes: shadowing, loops that reuse the frame, a call
     try expectInt(alloc, &evaluator, "shade(5)", 10);
     try expectInt(alloc, &evaluator, "shade(0)", 1);
     try std.testing.expectEqual(@as(usize, 1), evaluator.env.depth());
+}
+
+test "true and wildcard branches: an assigning branch does not leak, a plain one takes no scope" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const source =
+        \\def f(n) do
+        \\  x = 1
+        \\  case n > 0 do
+        \\    true ->
+        \\      x = 2
+        \\      y = 3
+        \\      x + y
+        \\    _ -> 0
+        \\  end
+        \\  x
+        \\end
+        \\def g(n) do
+        \\  case n > 5 do
+        \\    true when n > 8 -> :big
+        \\    true -> :mid
+        \\    false -> :small
+        \\  end
+        \\end
+        \\def depth_ok(n) do
+        \\  case n == 0 do
+        \\    true -> :done
+        \\    _ -> depth_ok(n - 1)
+        \\  end
+        \\end
+        \\def h(n) do
+        \\  case n do
+        \\    true -> :yes
+        \\    _ -> :other
+        \\  end
+        \\end
+        \\[f(1), g(9), g(6), g(1), depth_ok(100000), h(1), h(true)]
+    ;
+    evaluator.setSource(source);
+    const result = try evalProgram(alloc, &evaluator, source);
+    try std.testing.expectEqual(@as(usize, 7), result.list.len);
+    try std.testing.expectEqual(@as(i64, 1), result.list[0].integer);
+    try std.testing.expectEqualStrings("big", result.list[1].atom);
+    try std.testing.expectEqualStrings("mid", result.list[2].atom);
+    try std.testing.expectEqualStrings("small", result.list[3].atom);
+    try std.testing.expectEqualStrings("done", result.list[4].atom);
+    try std.testing.expectEqualStrings("other", result.list[5].atom);
+    try std.testing.expectEqualStrings("yes", result.list[6].atom);
 }

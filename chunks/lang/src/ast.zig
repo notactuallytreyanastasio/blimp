@@ -277,7 +277,71 @@ pub const Node = struct {
         pattern: ?*const Node,
         guard: ?*const Node = null, // optional when guard
         body: []const Node,
+        /// Set by the parser; a Branch built by hand is `.general`, which
+        /// is the old path exactly.
+        mode: Mode = .general,
+        /// Whether taking the branch needs a scope of its own: its pattern
+        /// binds a name, or something it evaluates may define one in the
+        /// current scope (an assignment would otherwise leak into the
+        /// enclosing frame).  Only read when `mode` is not `.general`.
+        scoped: bool = true,
+
+        pub const Mode = enum {
+            general,
+            /// `_ ->` whose body is not a lone hole.
+            wild,
+            /// `true ->` and `false ->`.
+            is_true,
+            is_false,
+        };
     };
+
+    /// Does matching this pattern bind a name?  Only the literal patterns
+    /// are known not to.
+    pub fn patternBinds(pattern: Node) bool {
+        return switch (pattern.kind) {
+            .integer_lit, .float_lit, .string_lit, .atom_lit, .bool_lit, .nil_lit, .hole => false,
+            else => true,
+        };
+    }
+
+    /// False only when evaluating `node` provably defines nothing in the
+    /// current scope.  A whitelist: every kind not named here may define (an
+    /// assignment, a def, a destructuring, a pipe's temporary), so a branch
+    /// containing one keeps its scope.
+    pub fn mayDefine(node: Node) bool {
+        switch (node.kind) {
+            .integer_lit, .float_lit, .string_lit, .atom_lit, .bool_lit, .nil_lit, .identifier => return false,
+            .binary_op => |b| return mayDefine(b.left.*) or mayDefine(b.right.*),
+            .unary_op => |u| return mayDefine(u.operand.*),
+            .func_call => |c| {
+                for (c.args) |a| if (mayDefine(a)) return true;
+                return false;
+            },
+            .dot_access => |d| return mayDefine(d.object.*),
+            .list_lit => |l| {
+                for (l.elements) |e| if (mayDefine(e)) return true;
+                if (l.tail) |t| return mayDefine(t.*);
+                return false;
+            },
+            .tuple_lit => |t| {
+                for (t.elements) |e| if (mayDefine(e)) return true;
+                return false;
+            },
+            .case_expr => |c| return situationMayDefine(c.subject.*, c.branches),
+            .situation => |c| return situationMayDefine(c.subject.*, c.branches),
+            else => return true,
+        }
+    }
+
+    fn situationMayDefine(subject: Node, branches: []const Branch) bool {
+        if (mayDefine(subject)) return true;
+        for (branches) |b| {
+            if (b.guard) |g| if (mayDefine(g.*)) return true;
+            for (b.body) |stmt| if (mayDefine(stmt)) return true;
+        }
+        return false;
+    }
 
     pub const MessageSend = struct {
         target: *const Node,

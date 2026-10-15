@@ -550,10 +550,31 @@ pub const Parser = struct {
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
         }
 
+        const owned_body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        var mode: Node.Branch.Mode = .general;
+        var scoped = true;
+        if (pattern) |pat| {
+            switch (pat.kind) {
+                .bool_lit => |lit| mode = if (lit.value) .is_true else .is_false,
+                else => {},
+            }
+            if (mode != .general) {
+                scoped = Node.patternBinds(pat.*);
+            }
+        } else if (!(owned_body.len == 1 and owned_body[0].kind == .hole)) {
+            mode = .wild;
+            scoped = false;
+        }
+        if (mode != .general) {
+            if (guard) |g| scoped = scoped or Node.mayDefine(g.*);
+            for (owned_body) |stmt| scoped = scoped or Node.mayDefine(stmt);
+        }
         return .{
             .pattern = pattern,
             .guard = guard,
-            .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            .body = owned_body,
+            .mode = mode,
+            .scoped = scoped,
         };
     }
 
