@@ -1009,7 +1009,7 @@ pub const Evaluator = struct {
         const items = self.allocator.alloc(Value.CapturedBinding, entry.state_fields.len) catch return null;
         var names: u64 = 0;
         for (entry.state_fields, 0..) |f, i| {
-            items[i] = .{ .name = f.key, .val = f.val, .hash = Environment.hashName(f.key) };
+            items[i] = .{ .name = Environment.internName(f.key), .val = f.val, .hash = Environment.hashName(f.key) };
             names |= Environment.nameBit(f.key);
         }
         const l = self.allocator.create(registry_mod.StateLend) catch return null;

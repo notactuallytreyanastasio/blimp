@@ -2,7 +2,8 @@ const std = @import("std");
 const Token = @import("token.zig").Token;
 const Lexer = @import("lexer.zig").Lexer;
 const ast = @import("ast.zig");
-const NameKey = @import("name_key.zig").Key;
+const name_key = @import("name_key.zig");
+const NameKey = name_key.Key;
 const Node = ast.Node;
 const Loc = ast.Loc;
 const Value = @import("value.zig").Value;
@@ -16,6 +17,16 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// A lowercase identifier token's lexeme becomes the interned copy of the name.
+/// Not `upper_identifier`: the parser slices a type annotation or a dotted actor
+/// name out of the source between two tokens' pointers, and an interned lexeme
+/// is not in the source.
+fn internName(tok: Token) Token {
+    var t = tok;
+    if (t.kind == .identifier) t.lexeme = name_key.intern(t.lexeme);
+    return t;
+}
+
 pub const Parser = struct {
     lexer: Lexer,
     current: Token,
@@ -23,7 +34,7 @@ pub const Parser = struct {
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         var lexer = Lexer.init(source);
-        const first = lexer.next();
+        const first = internName(lexer.next());
         return .{
             .lexer = lexer,
             .current = first,
@@ -1676,7 +1687,7 @@ pub const Parser = struct {
     }
 
     fn advance(self: *Parser) void {
-        self.current = self.lexer.next();
+        self.current = internName(self.lexer.next());
     }
 
     fn skipNewlines(self: *Parser) void {

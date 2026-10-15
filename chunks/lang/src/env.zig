@@ -135,6 +135,7 @@ pub const Environment = struct {
     /// `eqlBytes` calls, and one of these costs about one.
     pub const hashName = name_key.hashName;
     pub const nameBit = name_key.nameBit;
+    pub const internName = name_key.intern;
 
     pub fn init(allocator: std.mem.Allocator) Environment {
         var env = Environment{
@@ -209,7 +210,7 @@ pub const Environment = struct {
             const own_base = self.scopes.items[index].own_base;
             outer: for (existing) |b| {
                 for (self.scopes.items[index].bindings.items[own_base..own_len]) |binding| {
-                    if (binding.hash == b.hash and std.mem.eql(u8, binding.name, b.name)) continue :outer;
+                    if (name_key.sameName(binding.name, binding.hash, b.name, b.hash)) continue :outer;
                 }
                 const sc = &self.scopes.items[index];
                 sc.names |= nameBit(b.name);
@@ -388,7 +389,7 @@ pub const Environment = struct {
         // where `lookup` reads it only *after* the captures, so the callee's
         // own parameter would lose to something it captured.
         for (scope.bindings.items[scope.own_base..]) |*binding| {
-            if (binding.hash == hash and std.mem.eql(u8, binding.name, name)) {
+            if (name_key.sameName(binding.name, binding.hash, name, hash)) {
                 binding.val = value;
                 return;
             }
@@ -568,14 +569,14 @@ pub const Environment = struct {
                 const items = scope.bindings.items;
                 if (hint != null and i == self.scopes.items.len - 1) {
                     const at = scope.own_base +% @as(usize, hint.?.*);
-                    if (at < items.len and items[at].hash == hash and std.mem.eql(u8, items[at].name, name)) {
+                    if (at < items.len and name_key.sameName(items[at].name, items[at].hash, name, hash)) {
                         return items[at].val;
                     }
                 }
                 var j: usize = items.len;
                 while (j > scope.own_base) {
                     j -= 1;
-                    if (items[j].hash == hash and std.mem.eql(u8, items[j].name, name)) {
+                    if (name_key.sameName(items[j].name, items[j].hash, name, hash)) {
                         if (hint != null and i == self.scopes.items.len - 1) hint.?.* = @intCast(j - scope.own_base);
                         return items[j].val;
                     }
@@ -585,7 +586,7 @@ pub const Environment = struct {
                 var k: usize = scope.captured.len;
                 while (k > 0) {
                     k -= 1;
-                    if (scope.captured[k].hash == hash and std.mem.eql(u8, scope.captured[k].name, name)) {
+                    if (name_key.sameName(scope.captured[k].name, scope.captured[k].hash, name, hash)) {
                         return scope.captured[k].val;
                     }
                 }
@@ -601,7 +602,7 @@ pub const Environment = struct {
                 var j: usize = scope.own_base;
                 while (j > 0) {
                     j -= 1;
-                    if (scope.bindings.items[j].hash == hash and std.mem.eql(u8, scope.bindings.items[j].name, name)) {
+                    if (name_key.sameName(scope.bindings.items[j].name, scope.bindings.items[j].hash, name, hash)) {
                         return scope.bindings.items[j].val;
                     }
                 }
