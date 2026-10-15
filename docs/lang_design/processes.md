@@ -55,3 +55,24 @@ On this machine (an Apple silicon laptop), 500 calls of `exec(["true"], "", nil)
 - **No environment argument.** The child inherits the interpreter's environment.
 - **No streaming.** stdout and stderr arrive whole.
 - **No process groups.** If the child starts children of its own and the child is killed, they carry on.
+
+## A forked child owns the socket
+
+`fork()` copies the descriptor table, so after `fork` a connection is open in two processes, as two descriptors that refer to one connection. [concurrency.md](concurrency.md) describes forking a child per connection (its option A): the child handles the connection and exits, and the parent goes back to `tcp_accept`. The parent has to close its copy, or it leaks one descriptor per connection.
+
+The obvious call for the parent is `tcp_close`, and it is wrong. `tcp_close` was written for the other case, a process that has just written a response and is about to forget the socket. It does what nginx's lingering close does: it reads and discards what has arrived, calls `shutdown(SHUT_WR)` so the peer gets its FIN after the last queued byte, and keeps the descriptor open until the peer hangs up or 30 seconds pass. `shutdown` acts on the connection, not on one descriptor. In the parent, with a child about to write, it shuts the child's write side under it.
+
+Measured with a parent that accepts, forks a handler that writes after 300 ms, and closes its copy:
+
+```
+CLOSE_WITH=tcp_close   "client read: "
+CLOSE_WITH=fd_close    "client read: hello from the child"
+```
+
+With `tcp_close` the client reads the end of the stream and no data. With `fd_close` the connection is untouched and the child's write arrives.
+
+`fd_close(fd)` is `close(2)` and one more thing: if the descriptor is on the lingering list it comes off, so the same number is never closed twice. A descriptor number is reused as soon as it is free, and a second `close` of a stale number would close somebody else's socket.
+
+The rule is: the process that wrote the last byte of the response closes with `tcp_close`; a process that handed the socket to a child closes with `fd_close`. A child that is the last to use the socket closes it with `tcp_close`, which is what it was written for.
+
+`fd_close` does not check that the descriptor is open, and it will close any descriptor, a file or a pipe, not just a socket. It is not a safer `tcp_close`, it is a different call.

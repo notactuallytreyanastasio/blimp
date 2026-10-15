@@ -17,6 +17,66 @@ Every builtin that refuses its arguments raises a runtime error that points at t
 
 Builtins marked **native only** are stubbed in the WebAssembly build. Calling one there raises `NotSupported`; the program still compiles and loads.
 
+## Files
+
+### append_file(path, data)
+
+```
+append_file(path: String, data: String) -> nil
+```
+
+Adds `data` to the end of the file at `path`, creating the file (mode 0644) if it is missing. `write_file` replaces the contents; this keeps them. The file is opened with `O_APPEND`, so the kernel moves to the end of the file and writes in one step, and two processes appending to the same log (a server and the children it forked) do not overwrite each other's lines as long as each call is one write. The descriptor is closed before the call returns and is not inherited by `exec`.
+
+Raises if `path` has a NUL byte in it, or if the file cannot be opened or written; the message carries the `errno` (`2` is "no such file or directory", `13` is "permission denied").
+
+```
+append_file("/tmp/demo.log", "one\n")
+append_file("/tmp/demo.log", "two\n")
+read_file("/tmp/demo.log")
+=> "one\ntwo\n"
+
+write_file("/tmp/demo.log", "three\n")
+read_file("/tmp/demo.log")
+=> "three\n"
+
+append_file("/no/such/dir/x.log", "x")
+-- BAD ARGUMENT: append_file: cannot open /no/such/dir/x.log: errno 2
+```
+
+It does not create directories, add a newline, or sync to disk.
+
+The other builtins in this group, without an entry here: `read_file`, `write_file`, `write_bytes`, `list_dir`, `file_exists?`, `file_size`.
+
+## Sockets
+
+Native only.
+
+### fd_close(fd)
+
+```
+fd_close(fd: Int) -> nil
+```
+
+Closes a descriptor with a plain `close(2)`, and nothing else. For a parent process that has `fork`ed a child to handle a connection: the connection is now the child's, and the parent only has to let go of its own copy of the descriptor.
+
+`tcp_close` is the wrong call there. It does `shutdown(fd, SHUT_WR)`, which acts on the connection and not on the one descriptor, so the child's connection has its write side shut under it: the client sees the end of the stream before the child has written anything. Then it keeps the descriptor open for up to 30 seconds, reading and discarding, so the peer gets its FIN after the last queued byte. That is right for a process that wrote the response itself and is about to forget the socket, and wrong for a process that gave the socket away.
+
+```
+# the parent accepts, forks a child that writes after 300 ms, then lets go
+s = tcp_accept(l)
+handler = fork()
+# child: sleep_ms(300); tcp_write(s, "hello from the child"); exit(0)
+
+tcp_close(s)    # the client reads ""
+fd_close(s)     # the client reads "hello from the child"
+```
+
+If `fd` is on the list `tcp_close` keeps for lingering, `fd_close` takes it off, so a descriptor is never closed twice (a second close could close an unrelated socket that has since been given the same number). Raises TypeError if `fd` is not an Int. It does not check that `fd` is open; closing one that is not is ignored.
+
+The design is in [lang_design/processes.md](lang_design/processes.md#a-forked-child-owns-the-socket).
+
+The other builtins in this group, without an entry here: `tcp_listen`, `tcp_connect`, `tcp_accept`, `tcp_read`, `tcp_write`, `tcp_close`, `tcp_set_nonblocking`, `tcp_poll`, `tcp_write_some`, `tcp_poll_write`, `ws_open`, `ws_recv`, `ws_send`, `ws_close`, `ws_stats`, `ws_accept_key`, `ws_read_frame`, `ws_write_frame`, `http_start`, `http_result`.
+
 ## Process
 
 Native only.

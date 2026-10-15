@@ -239,6 +239,8 @@ pub const BuiltinRegistry = struct {
         reg.register("random_token", &builtinRandomToken_impl);
         reg.register("getenv", &builtinGetenv_impl);
         reg.register("argv", &builtinArgv_impl);
+        reg.register("append_file", &builtinAppendFile_impl);
+        reg.register("fd_close", &builtinFdClose_impl);
         reg.register("pbkdf2_sha256", &builtinPbkdf2Sha256_impl);
         reg.register("constant_time_eq", &builtinConstantTimeEq_impl);
         reg.register("sqlite_open", &builtinSqliteOpen_impl);
@@ -3395,6 +3397,8 @@ const builtinSqliteLastId_impl = if (is_wasm) native_stub.stub else @import("nat
 const builtinSqliteChanges_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteChanges;
 const builtinPbkdf2Sha256_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").pbkdf2Sha256;
 const builtinConstantTimeEq_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").constantTimeEq;
+const builtinAppendFile_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").appendFile;
+const builtinFdClose_impl = if (is_wasm) native_stub.stub else builtinFdCloseNative;
 
 /// getenv(name) -> the variable's value as a String, or nil when it is not
 /// set. A set-but-empty variable is "", not nil.
@@ -5186,6 +5190,52 @@ fn builtinTcpCloseNative(allocator: std.mem.Allocator, args: []const *const Valu
     lingering[lingering_len] = .{ .fd = fd, .deadline = monoMs() + linger_ms };
     lingering_len += 1;
     return make(allocator, .nil);
+}
+
+/// fd_close(fd: Int) -> nil
+///
+/// A plain close(2): no shutdown, no lingering drain. For a parent that has
+/// forked a child which now owns the socket: tcp_close would shutdown(SHUT_WR)
+/// the shared connection under the child and keep the fd open, reading, for up
+/// to linger_ms. If the fd is on the lingering table it is dropped from it
+/// (and closed once), so it is never closed twice. Raises on a non-Int.
+fn builtinFdCloseNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+    var i: usize = 0;
+    while (i < lingering_len) {
+        if (lingering[i].fd == fd) {
+            lingering_len -= 1;
+            lingering[i] = lingering[lingering_len];
+        } else i += 1;
+    }
+    _ = std.c.close(fd);
+    return make(allocator, .nil);
+}
+
+test "fd_close closes once, without shutdown, and forgets a lingering fd" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var sv: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sv));
+    defer _ = std.c.close(sv[1]);
+
+    // Pretend tcp_close parked sv[0] for lingering; fd_close must drop the entry.
+    lingering[lingering_len] = .{ .fd = sv[0], .deadline = monoMs() + linger_ms };
+    lingering_len += 1;
+    const before = lingering_len;
+
+    const r = try builtinFdCloseNative(a, &.{try make(a, .{ .integer = sv[0] })});
+    try std.testing.expect(r.* == .nil);
+    try std.testing.expectEqual(before - 1, lingering_len);
+    // Closed: the descriptor is gone, and the peer sees EOF rather than a drained, half-open socket.
+    try std.testing.expect(std.c.fcntl(sv[0], std.posix.F.GETFL, @as(c_int, 0)) < 0);
+    var b: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), std.c.read(sv[1], &b, 1));
+
+    try std.testing.expectError(error.TypeError, builtinFdCloseNative(a, &.{try make(a, .{ .string = "3" })}));
 }
 
 // ============================================================

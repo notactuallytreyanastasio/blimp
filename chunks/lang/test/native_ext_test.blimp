@@ -1,4 +1,5 @@
-# SQLite, exec, PBKDF2 and the constant-time compare.
+# SQLite, subprocesses, PBKDF2, constant-time compare, append_file and
+# fd_close.
 # Run: ./blimp test/native_ext_test.blimp --test
 
 def raises(code: String) -> Bool do
@@ -108,5 +109,24 @@ actor CryptoAndFileTests do
     assert(constant_time_eq("", ""))
     refute(constant_time_eq("abc", "abd"))
     refute(constant_time_eq("abc", "ab"))
+  end
+
+  test "append_file creates the file, then appends" do
+    path = "/tmp/blimp-native-ext-test.log"
+    exec(["rm", "-f", path], "", nil)
+    append_file(path, "one\n")
+    append_file(path, "two\n")
+    assert_eq(read_file(path), "one\ntwo\n")
+    exec(["rm", "-f", path], "", nil)
+  end
+
+  test "fd_close closes a socket without shutting the connection down first" do
+    l = tcp_listen(47312)
+    c = tcp_connect("127.0.0.1", 47312)
+    s = tcp_accept(l)
+    assert_eq(fd_close(c), nil)
+    assert(raises("fd_close(\"x\")"))
+    tcp_close(s)
+    tcp_close(l)
   end
 end

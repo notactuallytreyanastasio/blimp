@@ -1,13 +1,15 @@
 //! What a web application compiled from Temper needs from the machine, and
-//! the interpreter did not have: SQLite, subprocesses, PBKDF2 and a
-//! constant-time compare. Native only (builtins.zig stubs them on WASM).
+//! the interpreter did not have: SQLite, subprocesses, PBKDF2, a constant-time
+//! compare, append-only file writes, and a bare close(2). Native only
+//! (builtins.zig stubs them on WASM).
 //!
 //!   sqlite_open(path) -> Int            sqlite_close(db) -> nil
 //!   sqlite_exec(db, sql) -> Int         sqlite_query(db, sql, params) -> [[String|nil]]
 //!   sqlite_last_id(db) -> Int           sqlite_changes(db) -> Int
 //!   exec(argv, stdin, cwd) -> [status, stdout, stderr]
 //!   pbkdf2_sha256(password, salt_hex, iterations, dklen) -> hex String
-//!   constant_time_eq(a, b) -> Bool
+//!   constant_time_eq(a, b) -> Bool      append_file(path, data) -> nil
+//!   fd_close(fd) -> nil                 (fd_close lives in builtins.zig, beside tcp_close)
 //!
 //! Every failure is a TypeError carrying a message (builtins.failArg), which
 //! the evaluator reports as BAD ARGUMENT with the source line.
@@ -476,6 +478,34 @@ pub fn constantTimeEq(allocator: std.mem.Allocator, args: []const *const Value) 
     return box(allocator, .{ .boolean = same });
 }
 
+// ── append_file ─────────────────────────────────────────────
+
+/// append_file(path: String, data: String) -> nil
+///
+/// Appends `data` to `path` with O_APPEND, creating the file (mode 0644) when
+/// missing. `write_file` truncates; this does not. Raises when the file cannot
+/// be opened or written.
+pub fn appendFile(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
+    if (std.mem.indexOfScalar(u8, args[0].string, 0) != null) return error.TypeError;
+    const path = allocator.dupeZ(u8, args[0].string) catch return error.OutOfMemory;
+    defer allocator.free(path);
+    const flags: std.posix.O = .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true, .CLOEXEC = true };
+    const fd = std.c.open(path.ptr, flags, @as(c_uint, 0o644));
+    if (fd < 0) return builtins.failArg("append_file: cannot open {s}: errno {d}", .{ args[0].string, std.c._errno().* });
+    defer _ = std.c.close(fd);
+    var rest = args[1].string;
+    while (rest.len > 0) {
+        const n = std.c.write(fd, rest.ptr, rest.len);
+        if (n < 0) {
+            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
+            return builtins.failArg("append_file: cannot write {s}: errno {d}", .{ args[0].string, std.c._errno().* });
+        }
+        rest = rest[@intCast(n)..];
+    }
+    return box(allocator, .nil);
+}
+
 // ── tests ───────────────────────────────────────────────────
 
 fn sv(a: std.mem.Allocator, s: []const u8) !*const Value {
@@ -727,4 +757,26 @@ test "constant_time_eq" {
     try std.testing.expect(!(try constantTimeEq(a, &.{ try sv(a, "abc"), try sv(a, "ab") })).boolean);
     try std.testing.expect(!(try constantTimeEq(a, &.{ try sv(a, "abc"), try sv(a, "abcd") })).boolean);
     try std.testing.expectError(error.TypeError, constantTimeEq(a, &.{ try sv(a, "abc"), try iv(a, 1) }));
+}
+
+test "append_file creates, then appends rather than truncating" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "/tmp/blimp-native-ext-{d}.log", .{std.c.getpid()});
+    defer _ = std.c.unlink(path.ptr);
+    _ = std.c.unlink(path.ptr);
+
+    _ = try appendFile(a, &.{ try sv(a, path), try sv(a, "one\n") });
+    _ = try appendFile(a, &.{ try sv(a, path), try sv(a, "two\n") });
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    var buf: [32]u8 = undefined;
+    const n: usize = @intCast(std.c.read(fd, &buf, buf.len));
+    try std.testing.expectEqualStrings("one\ntwo\n", buf[0..n]);
+
+    try std.testing.expectError(error.TypeError, appendFile(a, &.{ try sv(a, "/no/such/dir/f"), try sv(a, "x") }));
+    _ = builtins.takeFailure();
 }
