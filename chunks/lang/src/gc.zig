@@ -209,7 +209,7 @@ const Copier = struct {
 
     fn captured(self: *Copier, bindings: []const Value.CapturedBinding) CompactError![]const Value.CapturedBinding {
         const out = try self.to.alloc(Value.CapturedBinding, bindings.len);
-        for (bindings, 0..) |b, i| out[i] = .{ .name = try self.str(b.name), .val = try self.value(b.val) };
+        for (bindings, 0..) |b, i| out[i] = .{ .name = try self.str(b.name), .val = try self.value(b.val), .hash = b.hash };
         return out;
     }
 
@@ -248,7 +248,7 @@ const Copier = struct {
             for (scope.bindings.items) |b| {
                 const name = try self.str(b.name);
                 names |= Environment.nameBit(name);
-                bindings.appendAssumeCapacity(.{ .name = name, .val = try self.value(b.val) });
+                bindings.appendAssumeCapacity(.{ .name = name, .val = try self.value(b.val), .hash = b.hash });
             }
             out.appendAssumeCapacity(.{ .bindings = bindings, .names = names });
         }

@@ -155,6 +155,20 @@ pub const Node = struct {
     pub const FuncCall = struct {
         name: []const u8,
         args: []const Node,
+        /// What this call site resolved to last time, when the parser gave
+        /// it a slot.  A node built by hand (the checker's tests) has none
+        /// and takes the slow path every time.
+        cache: ?*CallCache = null,
+    };
+
+    /// A call site's memory of the builtin it resolved to.  Valid while no
+    /// top-level definition has been added since (`globals_version`) and
+    /// no frame on the stack binds the name (`Environment.bindsLocally`).
+    /// A builtin's name has no top-level binding, so resolving it used to
+    /// miss at every frame on the way out, then hash the name twice.
+    pub const CallCache = struct {
+        builtin: ?*const anyopaque = null,
+        globals_version: u32 = 0,
     };
 
     pub const PipeExpr = struct {

@@ -24,6 +24,10 @@ pub const Environment = struct {
     /// took 1408ms, against 35ms with none. The name mask does not help
     /// there, because 3000 names set all 64 of its bits.
     globals: std.StringHashMapUnmanaged(u32) = .{},
+    /// Bumped whenever a top-level binding is added or the index is
+    /// rebuilt.  A call site that cached "this name is a builtin" checks it:
+    /// a later top-level `def` of that name must win.
+    globals_version: u32 = 1,
     /// For each binding in the top-level scope, the index of the binding of
     /// the same name before it, or `no_prev`. The top-level scope is
     /// append-only -- redefining a name adds a binding rather than
@@ -38,6 +42,14 @@ pub const Environment = struct {
     pub const Binding = struct {
         name: []const u8,
         val: *const Value,
+        /// `hashName(name)`.  A lookup or a redefinition compares this
+        /// before the bytes.  Names a compiler generates are the same
+        /// length and share a prefix (`best__2115`, `from__2111`,
+        /// `blimp_branch_764`, `blimp_signal_765`), so `std.mem.eql`'s
+        /// length check never ruled one out and every candidate in a scope
+        /// cost a byte compare: `mem.eqlBytes` was the top frame of a
+        /// native profile of a translated Temper program.
+        hash: u32,
     };
 
     pub const Scope = struct {
@@ -117,6 +129,18 @@ pub const Environment = struct {
     /// mask itself — gc.zig does, and the gc tests fail loudly if it stops.  Two loads and three
     /// arithmetic ops: a real hash costs more than the string comparisons it
     /// saves, because most lookups hit the innermost scope on the first try.
+    /// FNV-1a over the name's bytes.  Cheap enough to compute per lookup:
+    /// a scope with a dozen same-length candidates cost a dozen
+    /// `eqlBytes` calls, and one of these costs about one.
+    pub fn hashName(name: []const u8) u32 {
+        var h: u32 = 0x811c9dc5;
+        for (name) |c| {
+            h ^= c;
+            h *%= 0x01000193;
+        }
+        return h;
+    }
+
     pub fn nameBit(name: []const u8) u64 {
         if (name.len == 0) return 1;
         const first: u64 = name[0];
@@ -198,11 +222,11 @@ pub const Environment = struct {
             const own_base = self.scopes.items[index].own_base;
             outer: for (existing) |b| {
                 for (self.scopes.items[index].bindings.items[own_base..own_len]) |binding| {
-                    if (std.mem.eql(u8, binding.name, b.name)) continue :outer;
+                    if (binding.hash == b.hash and std.mem.eql(u8, binding.name, b.name)) continue :outer;
                 }
                 const sc = &self.scopes.items[index];
                 sc.names |= nameBit(b.name);
-                sc.bindings.append(self.allocator, .{ .name = b.name, .val = b.val }) catch {};
+                sc.bindings.append(self.allocator, .{ .name = b.name, .val = b.val, .hash = b.hash }) catch {};
             }
         }
         const scope = &self.scopes.items[index];
@@ -223,7 +247,14 @@ pub const Environment = struct {
     /// bindings: what a closure made when there were `mark` of them saw.
     pub fn lookupTopAt(self: *const Environment, name: []const u8, mark: u32) ?*const Value {
         if (self.scopes.items.len == 0) return null;
-        var idx = self.globals.get(name) orelse return null;
+        return self.topFrom(self.globals.get(name), mark);
+    }
+
+    /// The top-level binding at or before `mark`, walking the `global_prev`
+    /// chain down from `start`, the latest binding of the name (null when
+    /// the name has none).
+    fn topFrom(self: *const Environment, start: ?u32, mark: u32) ?*const Value {
+        var idx = start orelse return null;
         while (idx >= mark) {
             idx = self.global_prev.items[idx];
             if (idx == no_prev) return null;
@@ -243,6 +274,7 @@ pub const Environment = struct {
     pub fn reindexGlobals(self: *Environment) void {
         self.globals = .{};
         self.global_prev = .{ .items = &.{}, .capacity = 0 };
+        self.globals_version +%= 1;
         if (self.scopes.items.len == 0) return;
         for (self.scopes.items[0].bindings.items, 0..) |b, i| {
             self.indexGlobal(b.name, @intCast(i));
@@ -250,6 +282,7 @@ pub const Environment = struct {
     }
 
     fn indexGlobal(self: *Environment, name: []const u8, index: u32) void {
+        self.globals_version +%= 1;
         const got = self.globals.getOrPut(self.allocator, name) catch {
             @panic("out of memory indexing a top-level binding");
         };
@@ -325,29 +358,41 @@ pub const Environment = struct {
 
     fn defineIn(self: *Environment, index: usize, name: []const u8, value: *const Value) void {
         const scope = &self.scopes.items[index];
-        scope.names |= nameBit(name);
+        const bit = nameBit(name);
+        const hash = hashName(name);
         if (index == 0) {
             // Appended, never overwritten, so closures made earlier still see
             // the value they were made with (see `global_prev`). And no scan
             // for an existing binding: that made loading N defs N^2/2 string
             // comparisons.
+            scope.names |= bit;
             const at: u32 = @intCast(scope.bindings.items.len);
-            scope.bindings.append(self.allocator, .{ .name = name, .val = value }) catch return;
+            scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = hash }) catch return;
             self.indexGlobal(name, at);
             return;
         }
+        // A clear bit means no binding of this name is in the scope at all,
+        // so the scan for one to overwrite is skipped.  Every assignment in a
+        // loop body is a define, and each used to compare its name against
+        // every local in the frame.
+        if (scope.names & bit == 0) {
+            scope.names |= bit;
+            scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = hash }) catch {};
+            return;
+        }
+        scope.names |= bit;
         // Only the current callee's own region is searched for an existing
         // binding. Reaching below `own_base` would update an entry a previous
         // callee left in this frame, and it would stay at that low index --
         // where `lookup` reads it only *after* the captures, so the callee's
         // own parameter would lose to something it captured.
         for (scope.bindings.items[scope.own_base..]) |*binding| {
-            if (std.mem.eql(u8, binding.name, name)) {
+            if (binding.hash == hash and std.mem.eql(u8, binding.name, name)) {
                 binding.val = value;
                 return;
             }
         }
-        scope.bindings.append(self.allocator, .{ .name = name, .val = value }) catch {};
+        scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = hash }) catch {};
     }
 
     /// Return all bindings visible from the current scope (innermost wins).
@@ -398,7 +443,7 @@ pub const Environment = struct {
             for (scope.captured) |binding| {
                 const got = seen.getOrPut(allocator, binding.name) catch continue;
                 if (!got.found_existing) {
-                    result.append(allocator, .{ .name = binding.name, .val = binding.val }) catch {};
+                    result.append(allocator, .{ .name = binding.name, .val = binding.val, .hash = binding.hash }) catch {};
                 }
             }
             for (scope.bindings.items[0..scope.own_base]) |binding| {
@@ -411,13 +456,34 @@ pub const Environment = struct {
         return result.items;
     }
 
+    /// Whether some frame other than the top level may bind a name with
+    /// this `nameBit`.  Conservative: the masks are never cleared and
+    /// several names share a bit, so a true may be a false alarm; a false
+    /// is certain.
+    pub fn bindsLocally(self: *const Environment, bit: u64) bool {
+        if (self.scopes.items.len < 2) return false;
+        for (self.scopes.items[1..]) |*scope| {
+            if ((scope.names | scope.captured_names) & bit != 0) return true;
+        }
+        return false;
+    }
+
     /// Look up a variable, searching from innermost to outermost scope.
     pub fn lookup(self: *const Environment, name: []const u8) ?*const Value {
         const bit = nameBit(name);
+        const hash = hashName(name);
+        // The name's latest top-level binding, found once and only when a
+        // frame asks.  It used to be found again, a hash of the name each
+        // time, at every frame on the way out that reads the top level.  A
+        // builtin's name has no top-level binding, so a builtin called from
+        // twenty frames deep missed twenty times before `lookupTop` missed
+        // once more and the evaluator asked the builtin registry.
+        var top: ?u32 = null;
+        var top_known = false;
         var i: usize = self.scopes.items.len;
         while (i > 1) {
             i -= 1;
-            const scope = self.scopes.items[i];
+            const scope = &self.scopes.items[i];
             // Three tiers, in the order copying the captures in used to
             // produce: what the current callee bound, then what it captured,
             // then what an earlier callee left in a reused frame.
@@ -425,7 +491,7 @@ pub const Environment = struct {
                 var j: usize = scope.bindings.items.len;
                 while (j > scope.own_base) {
                     j -= 1;
-                    if (std.mem.eql(u8, scope.bindings.items[j].name, name)) {
+                    if (scope.bindings.items[j].hash == hash and std.mem.eql(u8, scope.bindings.items[j].name, name)) {
                         return scope.bindings.items[j].val;
                     }
                 }
@@ -434,28 +500,38 @@ pub const Environment = struct {
                 var k: usize = scope.captured.len;
                 while (k > 0) {
                     k -= 1;
-                    if (std.mem.eql(u8, scope.captured[k].name, name)) {
+                    if (scope.captured[k].hash == hash and std.mem.eql(u8, scope.captured[k].name, name)) {
                         return scope.captured[k].val;
                     }
                 }
             }
             if (scope.globals_mark != 0) {
-                if (self.lookupTopAt(name, scope.globals_mark)) |v| return v;
+                if (!top_known) {
+                    top = self.globals.get(name);
+                    top_known = true;
+                }
+                if (self.topFrom(top, scope.globals_mark)) |v| return v;
             }
             if (scope.names & bit != 0) {
                 var j: usize = scope.own_base;
                 while (j > 0) {
                     j -= 1;
-                    if (std.mem.eql(u8, scope.bindings.items[j].name, name)) {
+                    if (scope.bindings.items[j].hash == hash and std.mem.eql(u8, scope.bindings.items[j].name, name)) {
                         return scope.bindings.items[j].val;
                     }
                 }
             }
             if (scope.left_mark != 0) {
-                if (self.lookupTopAt(name, scope.left_mark)) |v| return v;
+                if (!top_known) {
+                    top = self.globals.get(name);
+                    top_known = true;
+                }
+                if (self.topFrom(top, scope.left_mark)) |v| return v;
             }
         }
-        return self.lookupTop(name);
+        if (self.scopes.items.len == 0) return null;
+        if (!top_known) top = self.globals.get(name);
+        return self.topFrom(top, live);
     }
 };
 
@@ -642,7 +718,7 @@ test "a call does not pay for what the closure captured" {
     var names: u64 = 0;
     for (0..400) |i| {
         const name = try std.fmt.allocPrint(alloc, "prelude_helper_{d}", .{i});
-        captured[i] = .{ .name = name, .val = val };
+        captured[i] = .{ .name = name, .val = val, .hash = Environment.hashName(name) };
         names |= Environment.nameBit(name);
     }
 
@@ -668,7 +744,7 @@ test "a parameter shadows a capture of the same name" {
     param_val.* = Value{ .integer = 2 };
 
     const captured = try alloc.alloc(Value.CapturedBinding, 1);
-    captured[0] = .{ .name = "x", .val = captured_val };
+    captured[0] = .{ .name = "x", .val = captured_val, .hash = Environment.hashName("x") };
 
     env.pushScope();
     env.lendCaptured(captured, Environment.nameBit("x"), @intFromPtr(captured.ptr), 0);
@@ -714,9 +790,9 @@ test "a callee's capture beats what an earlier callee left in the frame" {
     mine.* = Value{ .integer = 2 };
 
     const first = try alloc.alloc(Value.CapturedBinding, 1);
-    first[0] = .{ .name = "other", .val = stale };
+    first[0] = .{ .name = "other", .val = stale, .hash = Environment.hashName("other") };
     const second = try alloc.alloc(Value.CapturedBinding, 1);
-    second[0] = .{ .name = "k", .val = mine };
+    second[0] = .{ .name = "k", .val = mine, .hash = Environment.hashName("k") };
 
     env.pushScope();
     // One callee runs in the frame and binds `k`...
@@ -741,7 +817,7 @@ test "the same closure re-entering its frame does not grow it" {
     const val = try alloc.create(Value);
     val.* = Value{ .integer = 5 };
     const captured = try alloc.alloc(Value.CapturedBinding, 1);
-    captured[0] = .{ .name = "g", .val = val };
+    captured[0] = .{ .name = "g", .val = val, .hash = Environment.hashName("g") };
 
     env.pushScope();
     var i: usize = 0;

@@ -99,6 +99,9 @@ pub const Value = union(enum) {
     pub const CapturedBinding = struct {
         name: []const u8,
         val: *const Value,
+        /// `Environment.hashName(name)`, carried so a lookup compares one
+        /// integer before any bytes.
+        hash: u32,
     };
 
     pub const MapEntry = struct {

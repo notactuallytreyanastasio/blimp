@@ -1174,10 +1174,13 @@ pub const Parser = struct {
             self.skipNewlines(); // allow newlines between args
         }
         try self.expect(.rparen);
+        const cache = self.allocator.create(Node.CallCache) catch return error.OutOfMemory;
+        cache.* = .{};
         return Node{
             .kind = .{ .func_call = .{
                 .name = name,
                 .args = args.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .cache = cache,
             } },
             .loc = loc,
         };
