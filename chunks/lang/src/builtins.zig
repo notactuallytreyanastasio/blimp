@@ -239,6 +239,8 @@ pub const BuiltinRegistry = struct {
         reg.register("random_token", &builtinRandomToken_impl);
         reg.register("getenv", &builtinGetenv_impl);
         reg.register("argv", &builtinArgv_impl);
+        reg.register("pbkdf2_sha256", &builtinPbkdf2Sha256_impl);
+        reg.register("constant_time_eq", &builtinConstantTimeEq_impl);
         reg.register("sqlite_open", &builtinSqliteOpen_impl);
         reg.register("sqlite_close", &builtinSqliteClose_impl);
         reg.register("sqlite_exec", &builtinSqliteExec_impl);
@@ -3391,6 +3393,8 @@ const builtinSqliteExec_impl = if (is_wasm) native_stub.stub else @import("nativ
 const builtinSqliteQuery_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteQuery;
 const builtinSqliteLastId_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteLastId;
 const builtinSqliteChanges_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteChanges;
+const builtinPbkdf2Sha256_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").pbkdf2Sha256;
+const builtinConstantTimeEq_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").constantTimeEq;
 
 /// getenv(name) -> the variable's value as a String, or nil when it is not
 /// set. A set-but-empty variable is "", not nil.

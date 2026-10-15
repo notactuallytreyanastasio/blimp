@@ -1,11 +1,13 @@
 //! What a web application compiled from Temper needs from the machine, and
-//! the interpreter did not have: SQLite and subprocesses. Native only
-//! (builtins.zig stubs them on WASM).
+//! the interpreter did not have: SQLite, subprocesses, PBKDF2 and a
+//! constant-time compare. Native only (builtins.zig stubs them on WASM).
 //!
 //!   sqlite_open(path) -> Int            sqlite_close(db) -> nil
 //!   sqlite_exec(db, sql) -> Int         sqlite_query(db, sql, params) -> [[String|nil]]
 //!   sqlite_last_id(db) -> Int           sqlite_changes(db) -> Int
 //!   exec(argv, stdin, cwd) -> [status, stdout, stderr]
+//!   pbkdf2_sha256(password, salt_hex, iterations, dklen) -> hex String
+//!   constant_time_eq(a, b) -> Bool
 //!
 //! Every failure is a TypeError carrying a message (builtins.failArg), which
 //! the evaluator reports as BAD ARGUMENT with the source line.
@@ -426,6 +428,54 @@ fn changesResult(allocator: std.mem.Allocator, n: i64) EvalError!*const Value {
     return box(allocator, .{ .list = rows });
 }
 
+// ── pbkdf2_sha256, constant_time_eq ────────────────────────
+
+/// pbkdf2_sha256(password: String, salt_hex: String, iterations: Int, dklen: Int) -> String
+///
+/// PBKDF2-HMAC-SHA256 (std.crypto.pwhash.pbkdf2). The salt is given as hex;
+/// the answer is `dklen` bytes as lowercase hex. Raises when the salt is not
+/// valid hex, iterations is not in 1..2^31-1, or dklen is not in 1..1024.
+pub fn pbkdf2Sha256(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 4 or args[0].* != .string or args[1].* != .string or args[2].* != .integer or args[3].* != .integer) return error.TypeError;
+    const iterations = args[2].integer;
+    const dklen = args[3].integer;
+    if (iterations < 1 or iterations > std.math.maxInt(i32))
+        return builtins.failArg("pbkdf2_sha256: iterations must be 1..2147483647, got {d}", .{iterations});
+    if (dklen < 1 or dklen > 1024)
+        return builtins.failArg("pbkdf2_sha256: dklen must be 1..1024, got {d}", .{dklen});
+    const salt_hex = args[1].string;
+    if (salt_hex.len % 2 != 0) return builtins.failArg("pbkdf2_sha256: salt_hex has an odd length", .{});
+    const salt = allocator.alloc(u8, salt_hex.len / 2) catch return error.OutOfMemory;
+    defer allocator.free(salt);
+    _ = std.fmt.hexToBytes(salt, salt_hex) catch return builtins.failArg("pbkdf2_sha256: salt_hex is not hex", .{});
+
+    var dk_buf: [1024]u8 = undefined;
+    const dk = dk_buf[0..@intCast(dklen)];
+    std.crypto.pwhash.pbkdf2(dk, args[0].string, salt, @intCast(iterations), std.crypto.auth.hmac.sha2.HmacSha256) catch
+        return builtins.failArg("pbkdf2_sha256: parameters refused", .{});
+    const hex = allocator.alloc(u8, dk.len * 2) catch return error.OutOfMemory;
+    _ = std.fmt.bufPrint(hex, "{x}", .{dk}) catch unreachable;
+    return box(allocator, .{ .string = hex });
+}
+
+/// constant_time_eq(a: String, b: String) -> Bool
+///
+/// True when the bytes are equal. Over equal-length inputs every byte is
+/// looked at whatever they hold; differing lengths answer false at once
+/// (the length is not a secret here).
+pub fn constantTimeEq(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[0].* != .string or args[1].* != .string) return error.TypeError;
+    const a = args[0].string;
+    const b = args[1].string;
+    var same = a.len == b.len;
+    if (same) {
+        var diff: u8 = 0;
+        for (a, b) |x, y| diff |= x ^ y;
+        same = diff == 0;
+    }
+    return box(allocator, .{ .boolean = same });
+}
+
 // ── tests ───────────────────────────────────────────────────
 
 fn sv(a: std.mem.Allocator, s: []const u8) !*const Value {
@@ -643,4 +693,38 @@ test "sqlite_open on a file turns on WAL and persists across handles" {
     const r = try sqliteQuery(a, &.{ db2, try sv(a, "select x from t"), try lv(a, &.{}) });
     try std.testing.expectEqualStrings("kept", cell(r, 1, 0).string);
     _ = try sqliteClose(a, &.{db2});
+}
+
+test "pbkdf2_sha256 matches RFC 7914 section 11 and python's hashlib" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // RFC 7914 section 11: PBKDF2-HMAC-SHA-256 (P="passwd", S="salt", c=1, dkLen=64)
+    const r = try pbkdf2Sha256(a, &.{ try sv(a, "passwd"), try sv(a, "73616c74"), try iv(a, 1), try iv(a, 64) });
+    try std.testing.expectEqualStrings(
+        "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783",
+        r.string,
+    );
+    // python3 -c 'import hashlib; print(hashlib.pbkdf2_hmac("sha256", b"password", b"salt", 1, 32).hex())'
+    const p = try pbkdf2Sha256(a, &.{ try sv(a, "password"), try sv(a, "73616c74"), try iv(a, 1), try iv(a, 32) });
+    try std.testing.expectEqualStrings("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b", p.string);
+
+    try std.testing.expectError(error.TypeError, pbkdf2Sha256(a, &.{ try sv(a, "p"), try sv(a, "zz"), try iv(a, 1), try iv(a, 32) }));
+    try std.testing.expectError(error.TypeError, pbkdf2Sha256(a, &.{ try sv(a, "p"), try sv(a, "abc"), try iv(a, 1), try iv(a, 32) }));
+    try std.testing.expectError(error.TypeError, pbkdf2Sha256(a, &.{ try sv(a, "p"), try sv(a, "00"), try iv(a, 0), try iv(a, 32) }));
+    try std.testing.expectError(error.TypeError, pbkdf2Sha256(a, &.{ try sv(a, "p"), try sv(a, "00"), try iv(a, 1), try iv(a, 0) }));
+    _ = builtins.takeFailure();
+}
+
+test "constant_time_eq" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try constantTimeEq(a, &.{ try sv(a, "abc"), try sv(a, "abc") })).boolean);
+    try std.testing.expect((try constantTimeEq(a, &.{ try sv(a, ""), try sv(a, "") })).boolean);
+    try std.testing.expect(!(try constantTimeEq(a, &.{ try sv(a, "abc"), try sv(a, "abd") })).boolean);
+    try std.testing.expect(!(try constantTimeEq(a, &.{ try sv(a, "abc"), try sv(a, "ab") })).boolean);
+    try std.testing.expect(!(try constantTimeEq(a, &.{ try sv(a, "abc"), try sv(a, "abcd") })).boolean);
+    try std.testing.expectError(error.TypeError, constantTimeEq(a, &.{ try sv(a, "abc"), try iv(a, 1) }));
 }

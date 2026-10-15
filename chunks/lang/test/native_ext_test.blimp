@@ -1,4 +1,4 @@
-# SQLite and exec: the builtins a Temper web application leans on.
+# SQLite, exec, PBKDF2 and the constant-time compare.
 # Run: ./blimp test/native_ext_test.blimp --test
 
 def raises(code: String) -> Bool do
@@ -95,3 +95,18 @@ actor ExecTests do
   end
 end
 
+actor CryptoAndFileTests do
+  test "pbkdf2_sha256 matches RFC 7914 section 11 and hashlib" do
+    assert_eq(pbkdf2_sha256("passwd", hex_encode("salt"), 1, 64), "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783")
+    assert_eq(pbkdf2_sha256("password", hex_encode("salt"), 1, 32), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+    assert(raises("pbkdf2_sha256(\"p\", \"zz\", 1, 32)"))
+    assert(raises("pbkdf2_sha256(\"p\", \"00\", 0, 32)"))
+  end
+
+  test "constant_time_eq" do
+    assert(constant_time_eq("abc", "abc"))
+    assert(constant_time_eq("", ""))
+    refute(constant_time_eq("abc", "abd"))
+    refute(constant_time_eq("abc", "ab"))
+  end
+end

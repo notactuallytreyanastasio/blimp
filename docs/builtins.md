@@ -72,6 +72,54 @@ The design is in [lang_design/processes.md](lang_design/processes.md).
 
 The other builtins in this group, without an entry here: `fork`, `waitpid`, `exit`, `sleep_ms`, `getenv`, `argv`, `read_line`, `process_stats`.
 
+## Crypto
+
+Native only for `pbkdf2_sha256` and `constant_time_eq`.
+
+### pbkdf2_sha256(password, salt_hex, iterations, dklen)
+
+```
+pbkdf2_sha256(password: String, salt_hex: String, iterations: Int, dklen: Int) -> String
+```
+
+PBKDF2 with HMAC-SHA256 (RFC 8018), for storing a password so that a stolen table is slow to guess against. The salt is passed as hex, as the other binary-carrying builtins (`sha256`, `hmac_sha256`, `random_bytes`) do, and the answer is the derived key as `2 * dklen` lowercase hex characters.
+
+Raises when `salt_hex` is not an even number of hex digits, when `iterations` is not between 1 and 2147483647, or when `dklen` is not between 1 and 1024.
+
+```
+pbkdf2_sha256("password", hex_encode("salt"), 1, 32)
+=> "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+
+pbkdf2_sha256("password", hex_encode("salt"), 2, 20)
+=> "ae4d0c95af6b46d32d0adff928f06dd02a303f8e"
+
+pbkdf2_sha256("p", "zz", 1, 32)
+-- BAD ARGUMENT: pbkdf2_sha256: salt_hex is not hex
+```
+
+The first two agree with Python's `hashlib.pbkdf2_hmac`, and the test file checks RFC 7914 section 11's vector. A salt wants to be random and per-password: `hex_encode(random_bytes(16))`. 600,000 iterations (the figure OWASP gives for PBKDF2-HMAC-SHA256 as of 2023) took 67 ms on an Apple silicon laptop. That is 67 ms in which the interpreter does nothing else, which under `--serve` stalls every request; there is no way to run it off the main thread.
+
+### constant_time_eq(a, b)
+
+```
+constant_time_eq(a: String, b: String) -> Bool
+```
+
+True when the two Strings hold the same bytes. For two Strings of the same length it looks at every byte whatever they contain, so how long it takes does not say where they first differ. Use it to compare a token or a derived key with the one a client sent; `==` stops at the first byte that differs.
+
+Strings of different lengths answer false at once. The length is not treated as secret, so compare values of a fixed size (the hex of a key, a fixed-length token), not values whose length is private.
+
+```
+constant_time_eq("abc", "abc")
+=> true
+constant_time_eq("abc", "abd")
+=> false
+constant_time_eq("abc", "ab")
+=> false
+```
+
+The other builtins in this group, without an entry here: `sha256`, `hmac_sha256`, `hex_encode`, `hex_decode`, `xor_bytes`, `base64_encode`, `base64_decode`, `base64url_encode`, `base64url_decode`, `random_bytes`, `random_token`, `p256_keypair`, `p256_public_key`, `p256_ecdh`, `ecdsa_p256_sign`, `ecdsa_p256_verify`, `aes128gcm_encrypt`, `aes128gcm_decrypt`.
+
 ## SQLite
 
 Native only. The interpreter links the system `libsqlite3` (`-lsqlite3`; on Debian and Ubuntu, `libsqlite3-dev`). The design is in [lang_design/sqlite.md](lang_design/sqlite.md).
