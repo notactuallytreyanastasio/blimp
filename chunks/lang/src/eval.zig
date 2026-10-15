@@ -100,6 +100,7 @@ pub const Evaluator = struct {
     pub fn processMailboxMessage(self: *Evaluator, actor_ref: registry_mod.ActorRef) ?*const Value {
         const entry = self.registry.getInstance(actor_ref) orelse return null;
         const msg = entry.mailbox.dequeue(self.allocator) orelse return null;
+        if (entry.mailbox.isEmpty()) self.registry.clearPending(entry.ref.id);
 
         // Find a matching handler
         for (entry.handlers) |handler| {
@@ -150,19 +151,26 @@ pub const Evaluator = struct {
 
     /// Run the scheduler: process messages from all actors in round-robin
     /// until no messages remain or max_ticks is reached.
+    ///
+    /// A tick is one pass over the actors in instance order, one message
+    /// each. The registry keeps the set of actors with mail, so a pass
+    /// visits only those, still in id order: `nextPending(cursor)` is the
+    /// smallest pending id above the one just handled. Mail that a handler
+    /// sends to a later actor is handled in the same pass and mail to an
+    /// earlier one waits for the next, as when the pass walked every actor.
     pub fn runScheduler(self: *Evaluator, max_ticks: u32) void {
         var ticks: u32 = 0;
         while (ticks < max_ticks) : (ticks += 1) {
             var processed_any = false;
-            // Re-read `items` each step: handling a message can spawn, and
-            // that append may move the list out from under a held slice.
-            var i: usize = 0;
-            while (i < self.registry.instances.items.len) : (i += 1) {
-                const entry = self.registry.instances.items[i];
-                if (!entry.mailbox.isEmpty()) {
-                    _ = self.processMailboxMessage(entry.ref);
-                    processed_any = true;
-                }
+            var cursor: u64 = 0;
+            while (self.registry.nextPending(cursor)) |id| {
+                cursor = id + 1;
+                const entry = self.registry.getInstance(.{ .id = id, .type_name = "" }) orelse {
+                    self.registry.clearPending(id);
+                    continue;
+                };
+                _ = self.processMailboxMessage(entry.ref);
+                processed_any = true;
             }
             if (!processed_any) break; // all mailboxes empty
         }
@@ -403,11 +411,6 @@ pub const Evaluator = struct {
     fn evalNode(self: *Evaluator, node: ast.Node) EvalError!*const Value {
         // Reduction counting + auto-schedule: after async sends queue up,
         // drain mailboxes periodically without explicit schedule() calls
-        self.reductions -= 1;
-        if (self.reductions <= 0) {
-            self.reductions = 4000;
-            self.runScheduler(100);
-        }
         switch (node.kind) {
             // Literals
             // Built once by the parser; see ast.IntegerLit.
@@ -1039,7 +1042,7 @@ pub const Evaluator = struct {
                     if (log_idx) |li| self.msg_log[li].args = args;
                     self.traceSend(ref, ms.message, args, null);
                     const MailboxMsg = @import("mailbox.zig").Message;
-                    entry.mailbox.enqueue(self.allocator, MailboxMsg{
+                    self.registry.send(entry, MailboxMsg{
                         .name = ms.message,
                         .args = args,
                         .reply_slot = null,
@@ -1510,7 +1513,19 @@ pub const Evaluator = struct {
         return self.eval(args[1]);
     }
 
+    /// One reduction per call (function call, tail call, closure applied by
+    /// a builtin).  When the slice is spent, drain async mail.  Every loop in
+    /// Blimp is a call, so mail still waits a bounded number of steps.
+    inline fn countReduction(self: *Evaluator) void {
+        self.reductions -= 1;
+        if (self.reductions <= 0) {
+            self.reductions = 4000;
+            self.runScheduler(100);
+        }
+    }
+
     fn evalFuncCall(self: *Evaluator, call: ast.Node.FuncCall) EvalError!*const Value {
+        self.countReduction();
         // A call site that resolved to a builtin before, with no top-level
         // definition added since and no frame binding the name, is that
         // builtin again: no walk of the stack, no hash of the name.
@@ -1713,11 +1728,7 @@ pub const Evaluator = struct {
                 if (self.env.lookup(call.name)) |val| {
                     if (val.* == .closure) {
                         // Same reduction accounting as eval()
-                        self.reductions -= 1;
-                        if (self.reductions <= 0) {
-                            self.reductions = 4000;
-                            self.runScheduler(100);
-                        }
+                        self.countReduction();
                         const c = val.closure;
                         if (c.params.len != call.args.len) {
                             self.last_error = errors.wrongArgCount("fn", c.params.len, call.args.len, self.source);
@@ -1753,6 +1764,7 @@ pub const Evaluator = struct {
     /// on top. The callee sees exactly what it would have seen without the
     /// elimination, and the scope stack stays flat.
     fn callClosureWithValues(self: *Evaluator, callee_val: *const Value, args_in: []const *const Value) EvalError!*const Value {
+        self.countReduction();
         if (self.call_depth >= self.max_call_depth) {
             self.last_error = errors.recursionTooDeep(self.call_depth, self.source);
             return error.RecursionTooDeep;
@@ -1845,7 +1857,7 @@ pub const Evaluator = struct {
         // Enqueue in target's mailbox
         const entry = self.registry.getInstance(ref) orelse return error.TypeError;
         const MailboxMsg = @import("mailbox.zig").Message;
-        entry.mailbox.enqueue(self.allocator, MailboxMsg{
+        self.registry.send(entry, MailboxMsg{
             .name = msg_name,
             .args = args,
             .reply_slot = null,

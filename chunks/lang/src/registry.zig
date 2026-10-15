@@ -51,6 +51,19 @@ pub const Registry = struct {
     /// actors alive: a Temper program, where every object is an actor,
     /// paid 40 us per field read once a few thousand objects existed.
     by_id: std.ArrayList(?*ActorEntry),
+    /// The ids whose mailbox is not empty, as a two-level bitset: `pending`
+    /// has bit `id` set, `pending_words` has bit `w` set when `pending[w]`
+    /// is not zero.  `runScheduler` used to walk every instance looking for
+    /// mail; with an actor per object that was a walk of thousands after
+    /// every async send.  Ids ascend with instance order, so "the smallest
+    /// pending id above the cursor" visits actors in the order the walk did.
+    /// The invariant is: bit set if and only if the mailbox is non-empty.
+    /// `send` sets it, `processMailboxMessage` clears it when it empties the
+    /// mailbox, and `reindex` rebuilds it from the mailboxes after a
+    /// compaction.
+    pending: std.ArrayList(u64),
+    pending_words: std.ArrayList(u64),
+    pending_count: usize = 0,
     next_id: u64,
 
     pub fn init(allocator: std.mem.Allocator) Registry {
@@ -59,6 +72,8 @@ pub const Registry = struct {
             .templates = .{ .items = &.{}, .capacity = 0 },
             .instances = .{ .items = &.{}, .capacity = 0 },
             .by_id = .{ .items = &.{}, .capacity = 0 },
+            .pending = .{ .items = &.{}, .capacity = 0 },
+            .pending_words = .{ .items = &.{}, .capacity = 0 },
             .next_id = 1,
         };
     }
@@ -162,7 +177,63 @@ pub const Registry = struct {
     /// list; the index lived in the old one and must follow.
     pub fn reindex(self: *Registry) void {
         self.by_id = .{ .items = &.{}, .capacity = 0 };
-        for (self.instances.items) |entry| self.indexEntry(entry);
+        self.pending = .{ .items = &.{}, .capacity = 0 };
+        self.pending_words = .{ .items = &.{}, .capacity = 0 };
+        self.pending_count = 0;
+        for (self.instances.items) |entry| {
+            self.indexEntry(entry);
+            if (!entry.mailbox.isEmpty()) self.markPending(entry.ref.id);
+        }
+    }
+
+    /// Put a message in `entry`'s mailbox and note that it has mail.
+    pub fn send(self: *Registry, entry: *ActorEntry, msg: @import("mailbox.zig").Message) void {
+        entry.mailbox.enqueue(self.allocator, msg);
+        self.markPending(entry.ref.id);
+    }
+
+    pub fn markPending(self: *Registry, id: u64) void {
+        const w: usize = @intCast(id >> 6);
+        const bit = @as(u64, 1) << @intCast(id & 63);
+        while (self.pending.items.len <= w) self.pending.append(self.allocator, 0) catch return;
+        const sw = w >> 6;
+        while (self.pending_words.items.len <= sw) self.pending_words.append(self.allocator, 0) catch return;
+        if (self.pending.items[w] & bit != 0) return;
+        self.pending.items[w] |= bit;
+        self.pending_words.items[sw] |= @as(u64, 1) << @intCast(w & 63);
+        self.pending_count += 1;
+    }
+
+    pub fn clearPending(self: *Registry, id: u64) void {
+        const w: usize = @intCast(id >> 6);
+        if (w >= self.pending.items.len) return;
+        const bit = @as(u64, 1) << @intCast(id & 63);
+        if (self.pending.items[w] & bit == 0) return;
+        self.pending.items[w] &= ~bit;
+        self.pending_count -= 1;
+        if (self.pending.items[w] == 0) self.pending_words.items[w >> 6] &= ~(@as(u64, 1) << @intCast(w & 63));
+    }
+
+    /// The smallest id >= `from` whose mailbox has mail.
+    pub fn nextPending(self: *const Registry, from: u64) ?u64 {
+        if (self.pending_count == 0) return null;
+        const w: usize = @intCast(from >> 6);
+        if (w >= self.pending.items.len) return null;
+        const m = self.pending.items[w] & (~@as(u64, 0) << @intCast(from & 63));
+        if (m != 0) return @as(u64, w) * 64 + @ctz(m);
+        const s = w + 1;
+        var sw = s >> 6;
+        if (sw >= self.pending_words.items.len) return null;
+        var sm = self.pending_words.items[sw] & (~@as(u64, 0) << @intCast(s & 63));
+        while (true) {
+            if (sm != 0) {
+                const nw = sw * 64 + @ctz(sm);
+                return @as(u64, nw) * 64 + @ctz(self.pending.items[nw]);
+            }
+            sw += 1;
+            if (sw >= self.pending_words.items.len) return null;
+            sm = self.pending_words.items[sw];
+        }
     }
 
     /// Look up a spawned instance by ref.  The pointer stays valid for the
@@ -390,4 +461,28 @@ test "instance pointers survive later spawns" {
     try std.testing.expectEqual(ref.id, entry.ref.id);
     try std.testing.expectEqual(@as(usize, 1), entry.state_fields.len);
     try std.testing.expect(entry == registry.getInstance(ref).?);
+}
+
+test "pending set yields ids in ascending order across word boundaries" {
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.pending.deinit(std.testing.allocator);
+    defer reg.pending_words.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?u64, null), reg.nextPending(0));
+    const ids = [_]u64{ 3, 63, 64, 200, 4095, 4096, 9000 };
+    for (ids) |id| reg.markPending(id);
+    reg.markPending(64); // already set: no double count
+    try std.testing.expectEqual(ids.len, reg.pending_count);
+    var got: [ids.len]u64 = undefined;
+    var n: usize = 0;
+    var cursor: u64 = 0;
+    while (reg.nextPending(cursor)) |id| : (cursor = id + 1) {
+        got[n] = id;
+        n += 1;
+    }
+    try std.testing.expectEqualSlices(u64, &ids, &got);
+    reg.clearPending(4096);
+    try std.testing.expectEqual(@as(?u64, 9000), reg.nextPending(4096));
+    for (ids) |id| reg.clearPending(id);
+    try std.testing.expectEqual(@as(usize, 0), reg.pending_count);
+    try std.testing.expectEqual(@as(?u64, null), reg.nextPending(0));
 }
