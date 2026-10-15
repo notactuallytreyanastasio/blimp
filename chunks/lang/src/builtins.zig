@@ -149,6 +149,7 @@ pub const BuiltinRegistry = struct {
         reg.register("size", &builtinSize);
         reg.register("empty?", &builtinIsEmpty);
         reg.register("flat", &builtinFlat);
+        reg.register("flat_deep", &builtinFlatDeep);
         reg.register("zip", &builtinZip);
         reg.register("uniq", &builtinUniq);
         reg.register("sum", &builtinSum);
@@ -1876,6 +1877,59 @@ fn builtinFlat(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .list = items.toOwnedSlice(allocator) catch return error.OutOfMemory };
     return result;
+}
+
+/// flat_deep([1, [2, [3, "x"]], "y"]) => [1, 2, 3, "x", "y"]
+///
+/// Flattens lists nested to any depth into one list, in order, and keeps the
+/// elements that are not lists. `flat` takes off one level only:
+/// flat([1, [2, [3]]]) => [1, 2, [3]]. Iterative, with an explicit stack, so
+/// depth is bounded by memory and not by the native stack. Raises TypeError
+/// for an argument that is not a list.
+fn builtinFlatDeep(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    const Frame = struct { items: []const *const Value, i: usize };
+    var stack: std.ArrayList(Frame) = .empty;
+    defer stack.deinit(allocator);
+    var out: std.ArrayList(*const Value) = .empty;
+    stack.append(allocator, .{ .items = args[0].list, .i = 0 }) catch return error.OutOfMemory;
+    while (stack.items.len > 0) {
+        const top = &stack.items[stack.items.len - 1];
+        if (top.i == top.items.len) {
+            _ = stack.pop();
+            continue;
+        }
+        const item = top.items[top.i];
+        top.i += 1;
+        if (item.* == .list) {
+            stack.append(allocator, .{ .items = item.list, .i = 0 }) catch return error.OutOfMemory;
+        } else {
+            out.append(allocator, item) catch return error.OutOfMemory;
+        }
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = out.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+test "flat_deep flattens depth 3, keeps non-lists and order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const one = try make(a, .{ .integer = 1 });
+    const x = try make(a, .{ .string = "x" });
+    const empty = try make(a, .{ .list = &.{} });
+    const l3 = try make(a, .{ .list = try a.dupe(*const Value, &.{ try make(a, .{ .integer = 3 }), x }) });
+    const l2 = try make(a, .{ .list = try a.dupe(*const Value, &.{ try make(a, .{ .integer = 2 }), l3, empty }) });
+    const top = try make(a, .{ .list = try a.dupe(*const Value, &.{ one, l2, try make(a, .{ .string = "y" }) }) });
+    const r = try builtinFlatDeep(a, &.{top});
+    try std.testing.expectEqual(@as(usize, 5), r.list.len);
+    try std.testing.expectEqual(@as(i64, 1), r.list[0].integer);
+    try std.testing.expectEqual(@as(i64, 2), r.list[1].integer);
+    try std.testing.expectEqual(@as(i64, 3), r.list[2].integer);
+    try std.testing.expectEqualStrings("x", r.list[3].string);
+    try std.testing.expectEqualStrings("y", r.list[4].string);
+    try std.testing.expectError(error.TypeError, builtinFlatDeep(a, &.{one}));
 }
 
 /// zip([1,2,3], [:a,:b,:c]) => [{1,:a},{2,:b},{3,:c}]

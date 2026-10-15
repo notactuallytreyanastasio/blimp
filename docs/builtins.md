@@ -17,6 +17,41 @@ Every builtin that refuses its arguments raises a runtime error that points at t
 
 Builtins marked **native only** are stubbed in the WebAssembly build. Calling one there raises `NotSupported`; the program still compiles and loads.
 
+## Lists
+
+### flat_deep(list)
+
+```
+flat_deep(list: List) -> List
+```
+
+Flattens a list nested to any depth into one list, in order. Elements that are not lists (Strings, numbers, maps, `nil`) are kept as they are. `flat` takes off one level and stops; `flat_deep` takes off all of them. It uses an explicit stack, not recursion, so a list nested 100,000 levels deep is flattened without running out of native stack.
+
+Raises TypeError if the argument is not a list.
+
+```
+flat_deep([1, [2, [3, "x"]], "y"])
+=> [1, 2, 3, "x", "y"]
+
+flat([1, [2, [3]]])
+=> [1, 2, [3]]
+flat_deep([1, [2, [3]]])
+=> [1, 2, 3]
+
+flat_deep([[], [[]], "a"])
+=> ["a"]
+
+flat_deep([%{a: 1}, [nil, [true]]])
+=> [%{a: 1}, nil, true]
+
+flat_deep(3)
+-- RUNTIME ERROR: TypeError while evaluating this.
+```
+
+A Blimp string is not a list, so it is never taken apart. A map is not a list either, and is kept whole.
+
+The other builtins in this group, without an entry here: `length`, `append`, `reverse`, `head`, `tail`, `sort`, `sort_by_keys`, `range`, `elem`, `set_at`, `size`, `empty?`, `flat`, `zip`, `uniq`, `sum`, `map`, `filter`, `reduce`, `each`.
+
 ## Files
 
 ### append_file(path, data)

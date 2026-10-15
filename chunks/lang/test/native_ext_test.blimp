@@ -1,6 +1,5 @@
-# SQLite, subprocesses, PBKDF2, constant-time compare, append_file and
-# fd_close.
-# Run: ./blimp test/native_ext_test.blimp --test
+# SQLite, subprocesses, PBKDF2, constant-time compare, append_file, fd_close
+# and flat_deep: the builtins a Temper web application leans on.
 
 def raises(code: String) -> Bool do
   r = blimp_eval(code)
@@ -128,5 +127,22 @@ actor CryptoAndFileTests do
     assert(raises("fd_close(\"x\")"))
     tcp_close(s)
     tcp_close(l)
+  end
+
+  test "flat_deep flattens any depth and keeps the non-lists" do
+    assert_eq(flat_deep([1, [2, [3, "x"]], "y"]), [1, 2, 3, "x", "y"])
+    assert_eq(flat_deep([]), [])
+    assert_eq(flat_deep([[], [[]], "a"]), ["a"])
+    assert(raises("flat_deep(3)"))
+  end
+
+  test "flat takes off one level, flat_deep all of them" do
+    assert_eq(flat([1, [2, [3]]]), [1, 2, [3]])
+    assert_eq(flat_deep([1, [2, [3]]]), [1, 2, 3])
+  end
+
+  test "flat_deep walks 100000 levels without using the native stack" do
+    deep = reduce(range(0, 100000), [7], fn(acc: List, i: Int) do [acc] end)
+    assert_eq(flat_deep(deep), [7])
   end
 end
