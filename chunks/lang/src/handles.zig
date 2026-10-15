@@ -38,8 +38,9 @@
 //! O(n) per pair (what it cost before, not more).
 //!
 //! The values a buffer holds are pointers into the evaluator's heap. gc.compact
-//! moves that heap, so main.zig does not compact while any buffer exists
-//! (`inUse`). fork() copies the table with the rest of the process, which is
+//! moves that heap, and carries what the buffers point at through
+//! `valuePointers` and `relocate` (docs/lang_design/handles.md); `inUse` is
+//! what the REPL and --serve check. fork() copies the table with the rest of the process, which is
 //! what is wanted. Handles are never reused or closed: a builder lives as long
 //! as the process, like every actor. Single-threaded: only the evaluator
 //! touches the table. Native only (builtins.zig stubs these on WASM).
@@ -92,6 +93,26 @@ var scratch: std.ArrayList(u8) = .empty;
 /// True once any buffer exists.
 pub fn inUse() bool {
     return table.items.len > 0;
+}
+
+/// Empty the table and free what it owned.  For tests, and only tests: a
+/// program's buffers live as long as the process.  The table is
+/// process-global, so a test that made buffers and then freed the arena
+/// their values live in leaves pointers behind, and the next test that
+/// compacts follows them into freed memory ("switch on corrupt value" in
+/// gc.Copier.value, from the handles tests into the gc test).  Every test
+/// that makes a buffer defers this.
+pub fn dropAll() void {
+    for (table.items) |*o| switch (o.*) {
+        .list => |*b| b.items.deinit(gpa),
+        .str => |*b| b.bytes.deinit(gpa),
+        .map => |*m| {
+            clearMap(m);
+            m.slots.deinit(gpa);
+            m.index.deinit(gpa);
+        },
+    };
+    table.clearAndFree(gpa);
 }
 
 /// Every pointer into the value heap that a buffer or a map holds, in a
@@ -520,6 +541,7 @@ test "buf_push, get, set, pop, items, replace, clear" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const h = try bufNew(a, &.{});
     for (0..100) |i| _ = try bufPush(a, &.{ h, try iv(a, @intCast(i * 1000)) });
     try std.testing.expectEqual(@as(i64, 100), (try bufLen(a, &.{h})).integer);
@@ -549,6 +571,7 @@ test "sbuf appends bytes and snapshots" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const h = try sbufNew(a, &.{});
     for (0..20000) |_| _ = try sbufAppend(a, &.{ h, try sv(a, "0123456789") });
     try std.testing.expectEqual(@as(i64, 200000), (try sbufLen(a, &.{h})).integer);
@@ -565,6 +588,7 @@ test "hmap keeps Int 1 and String \"1\" apart, in insertion order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const none = try box(a, .{ .atom = "none" });
     const h = try hmapNew(a, &.{});
     _ = try hmapPut(a, &.{ h, try sv(a, "1"), try iv(a, 10) });
@@ -595,6 +619,7 @@ test "hmap remove, sweep and assign" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const none = try box(a, .{ .atom = "none" });
     const h = try hmapNew(a, &.{});
     var buf: [16]u8 = undefined;

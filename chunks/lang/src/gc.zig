@@ -406,6 +406,9 @@ fn checkProgram(eval: *Evaluator, code: std.mem.Allocator) !void {
 }
 
 test "compact keeps actors, closures, bindings and views alive after the old heap is freed" {
+    // The handle table is process-global; nothing an earlier test left there
+    // may be followed by this compaction.
+    @import("handles.zig").dropAll();
     var code = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer code.deinit();
     var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);

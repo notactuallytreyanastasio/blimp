@@ -765,7 +765,7 @@ test "collapsing a scope keeps what it was lent" {
     const val = try alloc.create(Value);
     val.* = Value{ .integer = 42 };
     const captured = try alloc.alloc(Value.CapturedBinding, 1);
-    captured[0] = .{ .name = "helper", .val = val };
+    captured[0] = .{ .name = "helper", .val = val, .hash = Environment.hashName("helper") };
 
     const base = env.depth();
     env.pushScope();
