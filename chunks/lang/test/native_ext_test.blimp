@@ -1,0 +1,39 @@
+# exec: a subprocess with its stdin, stdout, stderr and status.
+# Run: ./blimp test/native_ext_test.blimp --test
+
+def raises(code: String) -> Bool do
+  r = blimp_eval(code)
+  case type_of(r) == :map do
+    true -> lookup(r, "error") == "runtime error"
+    false -> false
+  end
+end
+
+actor ExecTests do
+  test "exec of /bin/echo answers a list of status, stdout, stderr" do
+    assert_eq(exec(["/bin/echo", "hello world"], "", nil), [0, "hello world\n", ""])
+  end
+
+  test "exec feeds stdin and reports a failing command's status and stderr" do
+    assert_eq(exec(["cat"], "from stdin", nil), [0, "from stdin", ""])
+    assert_eq(exec(["sh", "-c", "echo out; echo err 1>&2; exit 3"], "", nil), [3, "out\n", "err\n"])
+    assert_eq(elem(exec(["no-such-program-xyz"], "", nil), 0), 127)
+    assert_eq(elem(exec(["sh", "-c", "kill -9 $$"], "", nil), 0), -9)
+  end
+
+  test "exec moves more than a pipe holds in both directions" do
+    big = random_token(300000)
+    r = exec(["cat"], big, nil)
+    assert_eq(elem(r, 0), 0)
+    assert(elem(r, 1) == big)
+  end
+
+  test "exec runs in cwd when one is given" do
+    assert_eq(exec(["pwd"], "", "/"), [0, "/\n", ""])
+  end
+
+  test "exec refuses an empty argv" do
+    assert(raises("exec([], \"\", nil)"))
+  end
+end
+

@@ -239,6 +239,7 @@ pub const BuiltinRegistry = struct {
         reg.register("random_token", &builtinRandomToken_impl);
         reg.register("getenv", &builtinGetenv_impl);
         reg.register("argv", &builtinArgv_impl);
+        reg.register("exec", &builtinExec_impl);
         // P-256 and AES-128-GCM, for Web Push (RFC 8291 / RFC 8292)
         reg.register("p256_keypair", &builtinP256Keypair_impl);
         reg.register("p256_public_key", &builtinP256PublicKey);
@@ -3377,6 +3378,7 @@ const builtinRandomBytes_impl = if (is_wasm) native_stub.stub else builtinRandom
 const builtinRandomToken_impl = if (is_wasm) native_stub.stub else builtinRandomTokenNative;
 const builtinGetenv_impl = if (is_wasm) native_stub.stub else builtinGetenvNative;
 const builtinArgv_impl = if (is_wasm) native_stub.stub else builtinArgvNative;
+const builtinExec_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").exec;
 
 /// getenv(name) -> the variable's value as a String, or nil when it is not
 /// set. A set-but-empty variable is "", not nil.

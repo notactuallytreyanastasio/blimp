@@ -396,6 +396,7 @@ docs/blog/               Design journal
 
 - [Playground](https://blimp.bobbby.online/blog/playground.html) -- run Blimp in your browser
 - [Tutorial](https://blimp.bobbby.online/tutorial/) -- build Tetris, chapters 0-9
+- [Builtins reference](docs/builtins.md) -- signatures, results and errors, by area
 - [Design journal](https://blimp.bobbby.online/blog/)
 - [Tree-sitter grammar](https://github.com/notactuallytreyanastasio/tree-sitter-blimp)
 - [Landing page](https://blimp.bobbby.online)

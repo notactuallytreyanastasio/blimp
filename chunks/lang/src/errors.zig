@@ -481,7 +481,8 @@ pub fn unknownFunction(name: []const u8, source: []const u8) BlimpError {
         "base64url_encode", "base64url_decode", "random_bytes", "random_token",
         "p256_keypair", "p256_public_key", "p256_ecdh", "ecdsa_p256_sign", "ecdsa_p256_verify",
         "aes128gcm_encrypt", "aes128gcm_decrypt",
-        "getenv", "argv", "list_dir", "file_exists?", "file_size", "read_file", "write_file",
+        "getenv", "argv", "exec",
+        "list_dir", "file_exists?", "file_size", "read_file", "write_file",
         "format_time", "now_ms", "utc_offset", "show", "sort_by_keys", "index_of", "replace",
     };
 
