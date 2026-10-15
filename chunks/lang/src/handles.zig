@@ -89,9 +89,79 @@ const Obj = union(enum) { list: ListBuf, str: StrBuf, map: HMap };
 var table: std.ArrayList(Obj) = .empty;
 var scratch: std.ArrayList(u8) = .empty;
 
-/// True once any buffer exists. main.zig will not compact the heap then.
+/// True once any buffer exists.
 pub fn inUse() bool {
     return table.items.len > 0;
+}
+
+/// Every pointer into the value heap that a buffer or a map holds, in a
+/// fixed order, so a compaction can copy what they point at.  `relocate`
+/// takes the copies back in the same order.  Nothing may touch the tables
+/// in between; a compaction runs with nothing else happening.
+pub fn valuePointers(allocator: std.mem.Allocator) error{OutOfMemory}![]*const Value {
+    var out: std.ArrayList(*const Value) = .empty;
+    for (table.items) |*o| switch (o.*) {
+        .list => |*b| {
+            for (b.items.items) |v| try out.append(allocator, v);
+            if (b.snap) |s| try out.append(allocator, s);
+        },
+        .str => |*b| {
+            if (b.snap) |s| try out.append(allocator, s);
+        },
+        .map => |*m| {
+            for (m.slots.items) |slot| {
+                try out.append(allocator, slot.key);
+                try out.append(allocator, slot.val);
+            }
+            if (m.keys_snap) |s| try out.append(allocator, s);
+            if (m.values_snap) |s| try out.append(allocator, s);
+            if (m.entries_snap) |s| try out.append(allocator, s);
+        },
+    };
+    return out.toOwnedSlice(allocator);
+}
+
+/// Write the copies `valuePointers` listed back into the tables.
+pub fn relocate(moved: []const *const Value) void {
+    var i: usize = 0;
+    for (table.items) |*o| switch (o.*) {
+        .list => |*b| {
+            for (b.items.items) |*v| {
+                v.* = moved[i];
+                i += 1;
+            }
+            if (b.snap != null) {
+                b.snap = moved[i];
+                i += 1;
+            }
+        },
+        .str => |*b| {
+            if (b.snap != null) {
+                b.snap = moved[i];
+                i += 1;
+            }
+        },
+        .map => |*m| {
+            for (m.slots.items) |*slot| {
+                slot.key = moved[i];
+                slot.val = moved[i + 1];
+                i += 2;
+            }
+            if (m.keys_snap != null) {
+                m.keys_snap = moved[i];
+                i += 1;
+            }
+            if (m.values_snap != null) {
+                m.values_snap = moved[i];
+                i += 1;
+            }
+            if (m.entries_snap != null) {
+                m.entries_snap = moved[i];
+                i += 1;
+            }
+        },
+    };
+    std.debug.assert(i == moved.len);
 }
 
 fn box(allocator: std.mem.Allocator, v: Value) EvalError!*const Value {

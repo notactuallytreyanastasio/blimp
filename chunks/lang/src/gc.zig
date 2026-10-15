@@ -86,6 +86,18 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
     if (eval.scheduler) |sched| {
         for (sched.run_queue.items) |id| try copier.see(id);
     }
+    // Buffers and hash maps (handles.zig) hold pointers into the heap being
+    // left; their storage is outside it.  The copies are made here, before
+    // the instances, because a value in a buffer may name an actor, and
+    // written back with the rest of the swap at the end.  Compaction used
+    // to refuse once any buffer existed, so a Temper program, whose
+    // ListBuilder is a buffer, never freed anything.
+    const handles_mod = @import("handles.zig");
+    const handle_old = try handles_mod.valuePointers(scratch);
+    defer scratch.free(handle_old);
+    const handle_new = try scratch.alloc(*const Value, handle_old.len);
+    defer scratch.free(handle_new);
+    for (handle_old, 0..) |v, i| handle_new[i] = try copier.value(v);
     const old_instances = eval.registry.instances.items;
     const instances = switch (actors) {
         .keep_all => try copier.instances(old_instances),
@@ -118,6 +130,7 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
     for (0..eval.msg_log_count) |i| eval.msg_log[i] = msg_log[i];
     eval.builtins = BuiltinRegistry.init(to);
     eval.allocator = to;
+    handles_mod.relocate(handle_new);
     return dropped;
 }
 

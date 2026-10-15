@@ -48,46 +48,46 @@ The buffers' memory comes from libc, not from the arena the evaluator allocates 
 
 A handle is never closed and its number is never reused. A builder, a string buffer or a map lives until the process exits, like an actor. `fork()` copies the table with the process, which is what a forking server wants. A program that makes a buffer per request leaks one per request.
 
-### Compaction stops once any buffer exists (a regression for `--serve` and the REPL)
+### Compaction follows the buffers
 
-This is the part to read twice.
-
-The buffers hold `*const Value` pointers into the evaluator's heap. `gc.compactWith` copies everything the evaluator can reach into a fresh arena and frees the old one, and it does not know about the buffers, so after a compaction every pointer in every buffer would point into freed memory. The fork's author's answer, in `main.zig`, is to refuse:
-
-```zig
-fn compactWith(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) usize {
-    // Buffers in handles.zig hold pointers into this heap; moving it would strand them.
-    if (@import("handles.zig").inUse()) return 0;
-```
-
-`inUse()` is true once any buffer, of any kind, has been created, and it never becomes false. After that:
-
-- **`blimp --serve` never frees its heap.** It compacts when the heap has grown by more than the larger of its live size and 16 MB since the last compaction. Now the attempt returns 0 at once, the loop records it as a compaction anyway (`:stats` reports compactions that did not happen), and the heap grows without bound until it reaches the 2 GiB ceiling and the site stops.
-- **The REPL never frees its heap** between prompts.
-- A plain `blimp file` run is unaffected: it never compacted.
-- The first compaction after boot (which also drops actors nothing can reach) is skipped too, if a buffer exists by then.
-
-Measured here, on this tree: a served program whose tick builds and discards a 2,000-element list, with and without one `buf_new()` at the top level that nothing ever uses:
+The buffers hold `*const Value` pointers into the evaluator's heap, and
+`gc.compactWith` copies everything reachable into a fresh arena and frees the
+old one. For a while the two could not coexist: `main.zig` refused to compact
+once any buffer existed (`inUse()`), which traded a use-after-free for a leak,
+and a `--serve` site or a REPL that loaded one Temper library grew without
+bound from then on. Measured then, a served program whose tick built and
+discarded a 2,000-element list, with and without one unused `buf_new()`:
 
 ```
 without a buffer   rss after 2 s  14.5 MB   after 4 s   8.7 MB   after 6 s   3.7 MB
 with one buf_new() rss after 2 s 1.25 GB    after 4 s   2.9 GB   after 6 s   3.7 GB
 ```
 
-A server that stays flat today will not stay flat once any library it loads creates a builder at start-up. Nothing existing calls these builtins, so nothing changes on its own; but the first library that does turns a `--serve` site into one that leaks. Fix the following before depending on them in a long-lived server.
+Now `gc.compactWith` asks `handles.valuePointers` for every pointer a buffer
+or a map holds (the items of a list buffer, the key and value of every map
+slot, and the cached snapshots), copies each with the memoizing
+`copier.value`, and writes the copies back through `handles.relocate` with
+the rest of the swap at the end. The copies are made before the instances,
+because a value in a buffer may name an actor: with `.drop_unreachable`, an
+actor that only a map holds is kept. The canonical key bytes are the map's
+own and are not touched. `inUse()` stays, as information; nothing refuses on
+it.
 
-### The fix this needs
+A plain `blimp file` run compacts too now, between top-level statements,
+once the heap has grown by as much as what survived the last compaction and
+at least 16 MB (`main.zig`, the same policy as `--serve`). It never did
+before, which is why a Temper library's test run, one statement running
+every test, reached the 8 GB ceiling with three hundred tests.
 
-Make the collector aware of the buffers, so `inUse()` need not stop it:
+The probe (`probe_compact.blimp`: a buffer of 1,000 entries and a map, each
+entry naming an actor held nowhere else, then 160 MB of garbage over six
+statements, then every entry read back and the actors asked):
 
-1. `gc.compactWith` already has a memoizing `copier.value(v)` that returns the new address of an old value. Add a pass, after the evaluator's own roots are copied, that walks every buffer and replaces each `*const Value` it holds with `copier.value(item)`: the items of each list buffer, and the key and value of each live hash-map slot.
-2. Build the replacement arrays first and swap them in with the rest of the swap at the end of `compactWith`, so a failed copy leaves the buffers consistent, as the file already promises for the evaluator.
-3. Clear the cached snapshots (`snap`, `keys_snap`, `values_snap`, `entries_snap`); they are old-heap pointers too, and the next read will rebuild them.
-4. The buffers are roots: a value reachable only through a buffer is live. For `.drop_unreachable`, actor references found in buffers must be passed to `copier.see`, or an actor that only a map holds will be dropped.
-
-The canonical key bytes need no change: they are copies, not pointers. Then `inUse()` and the early return in `main.zig` go.
-
-Until then the early return is the safe choice: it trades a leak for a use-after-free.
+```
+                               before        after
+  bad entries after compaction      0            0
+  maximum resident set size   1206 MB       206 MB
+```
 
 ## What else does not work
 
