@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.linkSystemLibrary("sqlite3", .{});
     b.installArtifact(exe);
 
     // -- Run step --
@@ -62,6 +63,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // -- Tests --
+    lib_mod.linkSystemLibrary("sqlite3", .{});
     const lib_tests = b.addTest(.{
         .root_module = lib_mod,
     });
@@ -81,6 +83,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    main_tests.root_module.linkSystemLibrary("sqlite3", .{});
     const run_main_tests = b.addRunArtifact(main_tests);
 
     const test_step = b.step("test", "Run all tests");

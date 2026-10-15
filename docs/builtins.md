@@ -4,7 +4,16 @@ A reference for the functions the interpreter provides without an `import`. The 
 
 It does not describe every builtin yet. Each section below has full entries (signature, what it returns, what it raises, an example) for the builtins listed under it, and then a line naming the others in the group that have no entry here. Where an entry's example shows output, the output was checked against a run of `chunks/lang/zig-out/bin/blimp`.
 
-Every builtin that refuses its arguments raises a runtime error that points at the call (`TypeError while evaluating this.`, with the source line under it). Where a builtin has something more specific to say, as `sqlite_query` does with sqlite's own message, the entry says so.
+Every builtin that refuses its arguments raises a runtime error that points at the call. Most say `TypeError while evaluating this.`; the newer ones carry a message, and the error is titled `BAD ARGUMENT`:
+
+```
+-- BAD ARGUMENT ----------------------------------
+
+  sqlite_query: no such table: nope
+
+3| sqlite_query(db, "select * from nope", [])
+   ^
+```
 
 Builtins marked **native only** are stubbed in the WebAssembly build. Calling one there raises `NotSupported`; the program still compiles and loads.
 
@@ -62,3 +71,104 @@ What it does not do:
 The design is in [lang_design/processes.md](lang_design/processes.md).
 
 The other builtins in this group, without an entry here: `fork`, `waitpid`, `exit`, `sleep_ms`, `getenv`, `argv`, `read_line`, `process_stats`.
+
+## SQLite
+
+Native only. The interpreter links the system `libsqlite3` (`-lsqlite3`; on Debian and Ubuntu, `libsqlite3-dev`). The design is in [lang_design/sqlite.md](lang_design/sqlite.md).
+
+A database is an Int handle. Handles start at 1, at most 256 can be open at once, and a closed handle's number is reused, so a handle kept after `sqlite_close` may name a different database. Every builtin below raises, with SQLite's own message, when the handle is not open.
+
+### sqlite_open(path)
+
+```
+sqlite_open(path: String) -> Int
+```
+
+Opens the database at `path`, creating the file if it is missing, and answers a handle. `":memory:"` gives a database private to that handle. Every connection is opened with `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON`, so foreign keys are enforced (SQLite's own default is off), readers do not block the writer, and a write that finds the database locked retries for five seconds before it fails.
+
+Raises with SQLite's message if the file cannot be opened (`sqlite_open: cannot open /no/such/dir/x.db: unable to open database file`), or if 256 databases are open already.
+
+### sqlite_close(db)
+
+```
+sqlite_close(db: Int) -> nil
+```
+
+Closes the database and frees the handle number. Raises if `db` is not open.
+
+### sqlite_exec(db, sql)
+
+```
+sqlite_exec(db: Int, sql: String) -> Int
+```
+
+Runs `sql`, which may hold any number of statements separated by `;`, and throws away any rows they produce. There are no parameters, so this is for schema and fixed statements; use `sqlite_query` for anything that carries a value. Returns the number of rows the statements changed in all.
+
+If a statement fails it raises with SQLite's message, and the statements before it have already run: wrap a script in `begin; ...; commit` if that matters.
+
+```
+db = sqlite_open(":memory:")
+sqlite_exec(db, "create table notes(id integer primary key, body text, stars integer)")
+=> 0
+sqlite_exec(db, "create table t(x); insert into t values (1); insert into t values (2); delete from t")
+=> 4
+```
+
+### sqlite_query(db, sql, params)
+
+```
+sqlite_query(db: Int, sql: String, params: List) -> List[List[String | nil]]
+```
+
+Runs one statement with `params` bound to its parameters, and answers the result as text.
+
+**Parameters** are bound by position. `?`, `?1` and `$1` all work. For `$1` the number is only a name: SQLite numbers `$name` parameters in the order they first appear, so `select $2, $1` with `["a", "b"]` binds `"a"` to `$2`. Use `?1`, `?2` when the order in the SQL differs from the order of the list. The length of `params` must equal the statement's parameter count (a name used twice counts once). A `nil` binds NULL, an Int or a Float binds as that number, a String binds as TEXT, and a Bool or an atom binds as its text (`true`, `ok`). Anything else, such as a list or a map, is an error that names the parameter.
+
+**The result** is a list of rows, and every cell is a String or `nil`:
+
+- The first row is the column names.
+- Then one row per result row. NULL is `nil`. Integers and floats come back in their text form (`"5"`, `"2.5"`). A BLOB comes back as lowercase hex.
+- A SELECT that matches nothing is just the header row, so you still learn the columns.
+- A statement with no result columns (INSERT, UPDATE, DELETE, DDL, `PRAGMA` that sets) answers `[["changes"], ["<n>"]]`, n being the rows it changed. Empty SQL, or only a comment, answers `[["changes"], ["0"]]`.
+
+Raises with SQLite's message (`no such table: nope`), and for a second statement after the first (`one statement per call, found more after the first`), a wrong number of params, or an unbindable param.
+
+```
+db = sqlite_open(":memory:")
+sqlite_query(db, "insert into notes(body, stars) values ($1, $2), ($3, $4)", ["it's fine", 5, "later", nil])
+=> [["changes"], ["2"]]
+
+sqlite_query(db, "select id, body, stars from notes order by id", [])
+=> [["id", "body", "stars"], ["1", "it's fine", "5"], ["2", "later", nil]]
+
+sqlite_query(db, "select body from notes where stars > $1", [9])
+=> [["body"]]
+
+sqlite_query(db, "select x'00ff' as b, 2.5 as f, 7 as i", [])
+=> [["b", "f", "i"], ["00ff", "2.5", "7"]]
+```
+
+The column names are not made unique: `select 1 as a, 2 as a` has the header `["a", "a"]`.
+
+### sqlite_last_id(db)
+
+```
+sqlite_last_id(db: Int) -> Int
+```
+
+The rowid of the most recent INSERT on this handle (SQLite's `last_insert_rowid`), or 0 if there has not been one.
+
+### sqlite_changes(db)
+
+```
+sqlite_changes(db: Int) -> Int
+```
+
+The number of rows the most recent INSERT, UPDATE or DELETE on this handle changed.
+
+```
+sqlite_last_id(db)
+=> 2
+sqlite_changes(db)
+=> 2
+```

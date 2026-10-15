@@ -1,6 +1,10 @@
 //! What a web application compiled from Temper needs from the machine, and
-//! the interpreter did not have. Native only (builtins.zig stubs them on WASM).
+//! the interpreter did not have: SQLite and subprocesses. Native only
+//! (builtins.zig stubs them on WASM).
 //!
+//!   sqlite_open(path) -> Int            sqlite_close(db) -> nil
+//!   sqlite_exec(db, sql) -> Int         sqlite_query(db, sql, params) -> [[String|nil]]
+//!   sqlite_last_id(db) -> Int           sqlite_changes(db) -> Int
 //!   exec(argv, stdin, cwd) -> [status, stdout, stderr]
 //!
 //! Every failure is a TypeError carrying a message (builtins.failArg), which
@@ -179,6 +183,249 @@ fn closeAll(fds: []const c_int) void {
     for (fds) |fd| _ = std.c.close(fd);
 }
 
+// ── SQLite ──────────────────────────────────────────────────
+
+const sqlite = struct {
+    const Db = opaque {};
+    const Stmt = opaque {};
+    const OK = 0;
+    const ROW = 100;
+    const DONE = 101;
+    const BLOB = 4;
+    const NULL = 5;
+    const OPEN_READWRITE = 0x2;
+    const OPEN_CREATE = 0x4;
+    // SQLITE_TRANSIENT is (void(*)(void*))-1: sqlite copies the bytes at once.
+    const TRANSIENT: isize = -1; // declared as an integer: the ABI is the same and Zig will not align -1
+
+    extern "c" fn sqlite3_open_v2(path: [*:0]const u8, db: *?*Db, flags: c_int, vfs: ?[*:0]const u8) c_int;
+    extern "c" fn sqlite3_close(db: *Db) c_int;
+    extern "c" fn sqlite3_errmsg(db: *Db) [*:0]const u8;
+    extern "c" fn sqlite3_exec(db: *Db, sql: [*:0]const u8, cb: ?*const anyopaque, arg: ?*anyopaque, err: ?*?[*:0]u8) c_int;
+    extern "c" fn sqlite3_prepare_v2(db: *Db, sql: [*]const u8, n: c_int, stmt: *?*Stmt, tail: *[*]const u8) c_int;
+    extern "c" fn sqlite3_finalize(stmt: *Stmt) c_int;
+    extern "c" fn sqlite3_step(stmt: *Stmt) c_int;
+    extern "c" fn sqlite3_changes64(db: *Db) i64;
+    extern "c" fn sqlite3_total_changes64(db: *Db) i64;
+    extern "c" fn sqlite3_last_insert_rowid(db: *Db) i64;
+    extern "c" fn sqlite3_bind_parameter_count(stmt: *Stmt) c_int;
+    extern "c" fn sqlite3_bind_null(stmt: *Stmt, i: c_int) c_int;
+    extern "c" fn sqlite3_bind_int64(stmt: *Stmt, i: c_int, v: i64) c_int;
+    extern "c" fn sqlite3_bind_double(stmt: *Stmt, i: c_int, v: f64) c_int;
+    extern "c" fn sqlite3_bind_text(stmt: *Stmt, i: c_int, s: [*]const u8, n: c_int, d: isize) c_int;
+    extern "c" fn sqlite3_column_count(stmt: *Stmt) c_int;
+    extern "c" fn sqlite3_column_name(stmt: *Stmt, i: c_int) ?[*:0]const u8;
+    extern "c" fn sqlite3_column_type(stmt: *Stmt, i: c_int) c_int;
+    extern "c" fn sqlite3_column_text(stmt: *Stmt, i: c_int) ?[*]const u8;
+    extern "c" fn sqlite3_column_blob(stmt: *Stmt, i: c_int) ?[*]const u8;
+    extern "c" fn sqlite3_column_bytes(stmt: *Stmt, i: c_int) c_int;
+};
+
+/// Open databases. A handle is the table index plus one, so 0 and negatives
+/// are never valid; a closed slot is reused. Not locked: the interpreter
+/// calls builtins from one thread at a time.
+const max_dbs = 256;
+var dbs: [max_dbs]?*sqlite.Db = .{null} ** max_dbs;
+
+fn dbFrom(v: *const Value, who: []const u8) EvalError!*sqlite.Db {
+    if (v.* != .integer) return error.TypeError;
+    const n = v.integer;
+    if (n < 1 or n > max_dbs or dbs[@intCast(n - 1)] == null)
+        return builtins.failArg("{s}: {d} is not an open database handle", .{ who, n });
+    return dbs[@intCast(n - 1)].?;
+}
+
+fn errmsg(h: *sqlite.Db) []const u8 {
+    return std.mem.span(sqlite.sqlite3_errmsg(h));
+}
+
+/// sqlite_open(path: String) -> Int
+///
+/// Opens (creating if need be) the database at `path` and runs
+/// `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON`.
+/// Answers a handle for the other sqlite_* builtins. ":memory:" works and is
+/// private to its handle. Raises with sqlite's message when it cannot open,
+/// or when 256 databases are already open.
+pub fn sqliteOpen(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .string) return error.TypeError;
+    const path = allocator.dupeZ(u8, args[0].string) catch return error.OutOfMemory;
+    defer allocator.free(path);
+    var slot: usize = 0;
+    while (slot < max_dbs and dbs[slot] != null) slot += 1;
+    if (slot == max_dbs) return builtins.failArg("sqlite_open: {d} databases are open already", .{max_dbs});
+
+    var db: ?*sqlite.Db = null;
+    const rc = sqlite.sqlite3_open_v2(path.ptr, &db, sqlite.OPEN_READWRITE | sqlite.OPEN_CREATE, null);
+    const h = db orelse return error.OutOfMemory;
+    if (rc != sqlite.OK) {
+        const r = builtins.failArg("sqlite_open: cannot open {s}: {s}", .{ args[0].string, errmsg(h) });
+        _ = sqlite.sqlite3_close(h);
+        return r;
+    }
+    if (sqlite.sqlite3_exec(h, "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON", null, null, null) != sqlite.OK) {
+        const r = builtins.failArg("sqlite_open: {s}: {s}", .{ args[0].string, errmsg(h) });
+        _ = sqlite.sqlite3_close(h);
+        return r;
+    }
+    dbs[slot] = h;
+    return box(allocator, .{ .integer = @intCast(slot + 1) });
+}
+
+/// sqlite_close(db: Int) -> nil. The handle is invalid afterwards. Raises on a
+/// handle that is not open.
+pub fn sqliteClose(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const h = try dbFrom(args[0], "sqlite_close");
+    _ = sqlite.sqlite3_close(h);
+    dbs[@intCast(args[0].integer - 1)] = null;
+    return box(allocator, .nil);
+}
+
+/// sqlite_exec(db: Int, sql: String) -> Int
+///
+/// Runs `sql` through sqlite3_exec: any number of statements, no parameters,
+/// results discarded. Answers how many rows those statements changed in all
+/// (the difference in sqlite3_total_changes across the call). Raises with
+/// sqlite's message; statements before the failing one have already run.
+pub fn sqliteExec(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 2 or args[1].* != .string) return error.TypeError;
+    const h = try dbFrom(args[0], "sqlite_exec");
+    if (std.mem.indexOfScalar(u8, args[1].string, 0) != null) return error.TypeError;
+    const sql = allocator.dupeZ(u8, args[1].string) catch return error.OutOfMemory;
+    defer allocator.free(sql);
+    const before = sqlite.sqlite3_total_changes64(h);
+    if (sqlite.sqlite3_exec(h, sql.ptr, null, null, null) != sqlite.OK)
+        return builtins.failArg("sqlite_exec: {s}", .{errmsg(h)});
+    return box(allocator, .{ .integer = sqlite.sqlite3_total_changes64(h) - before });
+}
+
+/// sqlite_last_id(db: Int) -> Int: the rowid of the last INSERT on this handle.
+pub fn sqliteLastId(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const h = try dbFrom(args[0], "sqlite_last_id");
+    return box(allocator, .{ .integer = sqlite.sqlite3_last_insert_rowid(h) });
+}
+
+/// sqlite_changes(db: Int) -> Int: rows changed by the most recent
+/// INSERT, UPDATE or DELETE on this handle.
+pub fn sqliteChanges(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1) return error.TypeError;
+    const h = try dbFrom(args[0], "sqlite_changes");
+    return box(allocator, .{ .integer = sqlite.sqlite3_changes64(h) });
+}
+
+/// sqlite_query(db: Int, sql: String, params: List) -> [[String|nil]]
+///
+/// Runs ONE statement; a second statement after it is an error. `params` are
+/// bound by position (?, ?NNN, $1 ...): nil binds NULL, Int and Float bind
+/// natively, a String binds as TEXT, and a Bool or atom binds as its
+/// to_string; anything else (list, map, ...) is an error. The number of
+/// params must equal the statement's parameter count.
+///
+/// Every cell comes back as text (sqlite3_column_text), NULL as nil, a BLOB as
+/// lowercase hex. The FIRST row is the column names, then one row per result
+/// row, so a SELECT that matches nothing answers just the header.
+/// A statement with no result columns (INSERT, UPDATE, DELETE, DDL) answers
+/// [["changes"], ["<n>"]], n being the rows it changed.
+/// Empty or comment-only SQL answers [["changes"], ["0"]].
+///
+/// Raises with sqlite's message (e.g. "no such table: nope").
+pub fn sqliteQuery(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3 or args[1].* != .string or args[2].* != .list) return error.TypeError;
+    const h = try dbFrom(args[0], "sqlite_query");
+    const params = args[2].list;
+    const sql = args[1].string;
+
+    var stmt: ?*sqlite.Stmt = null;
+    var tail: [*]const u8 = sql.ptr;
+    if (sqlite.sqlite3_prepare_v2(h, sql.ptr, @intCast(sql.len), &stmt, &tail) != sqlite.OK)
+        return builtins.failArg("sqlite_query: {s}", .{errmsg(h)});
+    const st = stmt orelse return changesResult(allocator, 0);
+    defer _ = sqlite.sqlite3_finalize(st);
+    const rest = sql[(@intFromPtr(tail) - @intFromPtr(sql.ptr))..];
+    if (std.mem.trim(u8, rest, " \t\r\n;").len != 0)
+        return builtins.failArg("sqlite_query: one statement per call, found more after the first", .{});
+
+    const want: usize = @intCast(sqlite.sqlite3_bind_parameter_count(st));
+    if (want != params.len)
+        return builtins.failArg("sqlite_query: statement has {d} parameters, got {d}", .{ want, params.len });
+    for (params, 1..) |p, i| {
+        const idx: c_int = @intCast(i);
+        const rc = switch (p.*) {
+            .integer => |n| sqlite.sqlite3_bind_int64(st, idx, n),
+            .float => |f| sqlite.sqlite3_bind_double(st, idx, f),
+            .nil => sqlite.sqlite3_bind_null(st, idx),
+            .string => |s| bindText(st, idx, s),
+            .boolean => |b| bindText(st, idx, if (b) "true" else "false"),
+            .atom => |a| bindText(st, idx, a),
+            else => return builtins.failArg("sqlite_query: parameter {d} is a {s}; bindable: String, Int, Float, Bool, atom, nil", .{ i, @tagName(p.*) }),
+        };
+        if (rc != sqlite.OK) return builtins.failArg("sqlite_query: bind {d}: {s}", .{ i, errmsg(h) });
+    }
+
+    const ncols: usize = @intCast(sqlite.sqlite3_column_count(st));
+    if (ncols == 0) {
+        const rc = sqlite.sqlite3_step(st);
+        if (rc != sqlite.DONE and rc != sqlite.ROW) return builtins.failArg("sqlite_query: {s}", .{errmsg(h)});
+        return changesResult(allocator, sqlite.sqlite3_changes64(h));
+    }
+
+    var rows: std.ArrayList(*const Value) = .empty;
+    const header = allocator.alloc(*const Value, ncols) catch return error.OutOfMemory;
+    for (header, 0..) |*cell_, j| {
+        const name = sqlite.sqlite3_column_name(st, @intCast(j));
+        const copy = allocator.dupe(u8, if (name) |nm| std.mem.span(nm) else "") catch return error.OutOfMemory;
+        cell_.* = try box(allocator, .{ .string = copy });
+    }
+    rows.append(allocator, try box(allocator, .{ .list = header })) catch return error.OutOfMemory;
+
+    while (true) {
+        const rc = sqlite.sqlite3_step(st);
+        if (rc == sqlite.DONE) break;
+        if (rc != sqlite.ROW) return builtins.failArg("sqlite_query: {s}", .{errmsg(h)});
+        const cells = allocator.alloc(*const Value, ncols) catch return error.OutOfMemory;
+        for (cells, 0..) |*cell_, j| {
+            const col: c_int = @intCast(j);
+            cell_.* = switch (sqlite.sqlite3_column_type(st, col)) {
+                sqlite.NULL => try box(allocator, .nil),
+                sqlite.BLOB => blk: {
+                    const n: usize = @intCast(sqlite.sqlite3_column_bytes(st, col));
+                    const p = sqlite.sqlite3_column_blob(st, col);
+                    const hex = allocator.alloc(u8, n * 2) catch return error.OutOfMemory;
+                    if (p) |q| _ = std.fmt.bufPrint(hex, "{x}", .{q[0..n]}) catch unreachable;
+                    break :blk try box(allocator, .{ .string = hex });
+                },
+                else => blk: {
+                    // sqlite3_column_text converts INTEGER and FLOAT to their text form.
+                    const p = sqlite.sqlite3_column_text(st, col);
+                    const n: usize = @intCast(sqlite.sqlite3_column_bytes(st, col));
+                    const copy = allocator.dupe(u8, if (p) |q| q[0..n] else "") catch return error.OutOfMemory;
+                    break :blk try box(allocator, .{ .string = copy });
+                },
+            };
+        }
+        rows.append(allocator, try box(allocator, .{ .list = cells })) catch return error.OutOfMemory;
+    }
+    return box(allocator, .{ .list = rows.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
+
+/// Binds text; sqlite copies it at once (SQLITE_TRANSIENT), so any slice will do.
+fn bindText(st: *sqlite.Stmt, idx: c_int, s: []const u8) c_int {
+    return sqlite.sqlite3_bind_text(st, idx, s.ptr, @intCast(s.len), sqlite.TRANSIENT);
+}
+
+/// [["changes"], ["<n>"]]
+fn changesResult(allocator: std.mem.Allocator, n: i64) EvalError!*const Value {
+    const head = allocator.alloc(*const Value, 1) catch return error.OutOfMemory;
+    head[0] = try box(allocator, .{ .string = "changes" });
+    const body = allocator.alloc(*const Value, 1) catch return error.OutOfMemory;
+    body[0] = try box(allocator, .{ .string = std.fmt.allocPrint(allocator, "{d}", .{n}) catch return error.OutOfMemory });
+    const rows = allocator.alloc(*const Value, 2) catch return error.OutOfMemory;
+    rows[0] = try box(allocator, .{ .list = head });
+    rows[1] = try box(allocator, .{ .list = body });
+    return box(allocator, .{ .list = rows });
+}
+
 // ── tests ───────────────────────────────────────────────────
 
 fn sv(a: std.mem.Allocator, s: []const u8) !*const Value {
@@ -195,6 +442,14 @@ fn nilv(a: std.mem.Allocator) !*const Value {
 
 fn lv(a: std.mem.Allocator, items: []const *const Value) !*const Value {
     return box(a, .{ .list = try a.dupe(*const Value, items) });
+}
+
+fn cell(v: *const Value, row: usize, col: usize) *const Value {
+    return v.list[row].list[col];
+}
+
+fn memDb(a: std.mem.Allocator) !*const Value {
+    return sqliteOpen(a, &.{try sv(a, ":memory:")});
 }
 
 test "exec answers status, stdout and stderr, and feeds stdin" {
@@ -254,4 +509,138 @@ test "exec closes inherited fds above 2 in the child" {
     const cmd = try std.fmt.allocPrint(a, "if [ -e /dev/fd/{d} ]; then echo open; else echo closed; fi", .{fds[0]});
     const r = try exec(a, &.{ try lv(a, &.{ try sv(a, "sh"), try sv(a, "-c"), try sv(a, cmd) }), try sv(a, ""), try nilv(a) });
     try std.testing.expectEqualStrings("closed\n", r.list[1].string);
+}
+
+test "sqlite_query binds params and answers the header row then text cells" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const db = try memDb(a);
+
+    const rows = try sqliteQuery(a, &.{
+        db,
+        try sv(a, "select ? as i, ? as f, ? as t, null as n, x'00ff' as b"),
+        try lv(a, &.{ try iv(a, 7), try box(a, .{ .float = 2.5 }), try sv(a, "it's \"x\" é") }),
+    });
+    try std.testing.expectEqual(@as(usize, 2), rows.list.len);
+    try std.testing.expectEqualStrings("i", cell(rows, 0, 0).string);
+    try std.testing.expectEqualStrings("n", cell(rows, 0, 3).string);
+    try std.testing.expectEqualStrings("7", cell(rows, 1, 0).string);
+    try std.testing.expectEqualStrings("2.5", cell(rows, 1, 1).string);
+    try std.testing.expectEqualStrings("it's \"x\" é", cell(rows, 1, 2).string);
+    try std.testing.expect(cell(rows, 1, 3).* == .nil);
+    try std.testing.expectEqualStrings("00ff", cell(rows, 1, 4).string);
+}
+
+test "sqlite_query: nil, bool and atom params; wrong count, bad type, second statement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const db = try memDb(a);
+
+    const r = try sqliteQuery(a, &.{ db, try sv(a, "select ?, ?, ?"), try lv(a, &.{ try nilv(a), try box(a, .{ .boolean = true }), try box(a, .{ .atom = "ok" }) }) });
+    try std.testing.expect(cell(r, 1, 0).* == .nil);
+    try std.testing.expectEqualStrings("true", cell(r, 1, 1).string);
+    try std.testing.expectEqualStrings("ok", cell(r, 1, 2).string);
+
+    try std.testing.expectError(error.TypeError, sqliteQuery(a, &.{ db, try sv(a, "select ?"), try lv(a, &.{}) }));
+    try std.testing.expectError(error.TypeError, sqliteQuery(a, &.{ db, try sv(a, "select ?"), try lv(a, &.{try lv(a, &.{})}) }));
+    try std.testing.expectError(error.TypeError, sqliteQuery(a, &.{ db, try sv(a, "select 1; select 2"), try lv(a, &.{}) }));
+    _ = builtins.takeFailure();
+    // A trailing semicolon and whitespace are not a second statement.
+    _ = try sqliteQuery(a, &.{ db, try sv(a, "select 1; \n"), try lv(a, &.{}) });
+}
+
+test "sqlite errors carry sqlite's message" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const db = try memDb(a);
+
+    try std.testing.expectError(error.TypeError, sqliteQuery(a, &.{ db, try sv(a, "select * from nope"), try lv(a, &.{}) }));
+    try std.testing.expect(std.mem.indexOf(u8, builtins.takeFailure().?, "no such table: nope") != null);
+
+    try std.testing.expectError(error.TypeError, sqliteExec(a, &.{ db, try sv(a, "create table t(a); bogus") }));
+    try std.testing.expect(std.mem.indexOf(u8, builtins.takeFailure().?, "syntax error") != null);
+
+    try std.testing.expectError(error.TypeError, sqliteOpen(a, &.{try sv(a, "/no/such/dir/x.db")}));
+    try std.testing.expect(std.mem.indexOf(u8, builtins.takeFailure().?, "unable to open database file") != null);
+}
+
+test "sqlite round trip: exec, insert, changes, last_id, update, delete, no-column statements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const db = try memDb(a);
+    const none = try lv(a, &.{});
+
+    const created = try sqliteExec(a, &.{ db, try sv(a, "create table t(id integer primary key, name text, n integer); create index tn on t(n);") });
+    try std.testing.expectEqual(@as(i64, 0), created.integer);
+
+    const ins = try sqliteQuery(a, &.{ db, try sv(a, "insert into t(name, n) values (?, ?), (?, ?)"), try lv(a, &.{ try sv(a, "a"), try iv(a, 1), try nilv(a), try iv(a, 2) }) });
+    try std.testing.expectEqualStrings("changes", cell(ins, 0, 0).string);
+    try std.testing.expectEqualStrings("2", cell(ins, 1, 0).string);
+    try std.testing.expectEqual(@as(i64, 2), (try sqliteChanges(a, &.{db})).integer);
+    try std.testing.expectEqual(@as(i64, 2), (try sqliteLastId(a, &.{db})).integer);
+
+    const all = try sqliteQuery(a, &.{ db, try sv(a, "select id, name, n from t order by id"), none });
+    try std.testing.expectEqual(@as(usize, 3), all.list.len);
+    try std.testing.expectEqualStrings("name", cell(all, 0, 1).string);
+    try std.testing.expectEqualStrings("a", cell(all, 1, 1).string);
+    try std.testing.expect(cell(all, 2, 1).* == .nil);
+    try std.testing.expectEqualStrings("2", cell(all, 2, 2).string);
+
+    const upd = try sqliteExec(a, &.{ db, try sv(a, "update t set n = n + 10; delete from t where id = 1") });
+    try std.testing.expectEqual(@as(i64, 3), upd.integer);
+
+    const empty = try sqliteQuery(a, &.{ db, try sv(a, "select * from t where id = 99"), none });
+    try std.testing.expectEqual(@as(usize, 1), empty.list.len); // header only
+
+    const comment = try sqliteQuery(a, &.{ db, try sv(a, "-- nothing"), none });
+    try std.testing.expectEqualStrings("0", cell(comment, 1, 0).string);
+}
+
+test "sqlite: foreign keys are on, handles close and are reused, a stale handle raises" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const db = try memDb(a);
+
+    const fk = try sqliteQuery(a, &.{ db, try sv(a, "pragma foreign_keys"), try lv(a, &.{}) });
+    try std.testing.expectEqualStrings("1", cell(fk, 1, 0).string);
+    const bt = try sqliteQuery(a, &.{ db, try sv(a, "pragma busy_timeout"), try lv(a, &.{}) });
+    try std.testing.expectEqualStrings("5000", cell(bt, 1, 0).string);
+
+    _ = try sqliteClose(a, &.{db});
+    try std.testing.expectError(error.TypeError, sqliteChanges(a, &.{db}));
+    try std.testing.expect(std.mem.indexOf(u8, builtins.takeFailure().?, "not an open database") != null);
+    const again = try memDb(a);
+    try std.testing.expectEqual(db.integer, again.integer);
+    _ = try sqliteClose(a, &.{again});
+    try std.testing.expectError(error.TypeError, sqliteClose(a, &.{again}));
+    _ = builtins.takeFailure();
+}
+
+test "sqlite_open on a file turns on WAL and persists across handles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/blimp-native-ext-{d}.db", .{std.c.getpid()});
+    defer for ([_][]const u8{ "", "-wal", "-shm" }) |suffix| {
+        var b: [80]u8 = undefined;
+        const p = std.fmt.bufPrintZ(&b, "{s}{s}", .{ path, suffix }) catch continue;
+        _ = std.c.unlink(p.ptr);
+    };
+
+    const db = try sqliteOpen(a, &.{try sv(a, path)});
+    const mode = try sqliteQuery(a, &.{ db, try sv(a, "pragma journal_mode"), try lv(a, &.{}) });
+    try std.testing.expectEqualStrings("wal", cell(mode, 1, 0).string);
+    _ = try sqliteExec(a, &.{ db, try sv(a, "create table t(x); insert into t values ('kept')") });
+    _ = try sqliteClose(a, &.{db});
+
+    const db2 = try sqliteOpen(a, &.{try sv(a, path)});
+    const r = try sqliteQuery(a, &.{ db2, try sv(a, "select x from t"), try lv(a, &.{}) });
+    try std.testing.expectEqualStrings("kept", cell(r, 1, 0).string);
+    _ = try sqliteClose(a, &.{db2});
 }

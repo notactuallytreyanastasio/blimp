@@ -44,7 +44,7 @@ var failure_len: ?usize = null;
 
 /// Record why the call failed and answer TypeError, which is what a caller
 /// passing the wrong thing gets from every other builtin.
-fn failArg(comptime fmt: []const u8, args: anytype) EvalError {
+pub fn failArg(comptime fmt: []const u8, args: anytype) EvalError {
     const msg = std.fmt.bufPrint(&failure_buf, fmt, args) catch failure_buf[0..];
     failure_len = msg.len;
     return error.TypeError;
@@ -239,6 +239,12 @@ pub const BuiltinRegistry = struct {
         reg.register("random_token", &builtinRandomToken_impl);
         reg.register("getenv", &builtinGetenv_impl);
         reg.register("argv", &builtinArgv_impl);
+        reg.register("sqlite_open", &builtinSqliteOpen_impl);
+        reg.register("sqlite_close", &builtinSqliteClose_impl);
+        reg.register("sqlite_exec", &builtinSqliteExec_impl);
+        reg.register("sqlite_query", &builtinSqliteQuery_impl);
+        reg.register("sqlite_last_id", &builtinSqliteLastId_impl);
+        reg.register("sqlite_changes", &builtinSqliteChanges_impl);
         reg.register("exec", &builtinExec_impl);
         // P-256 and AES-128-GCM, for Web Push (RFC 8291 / RFC 8292)
         reg.register("p256_keypair", &builtinP256Keypair_impl);
@@ -3379,6 +3385,12 @@ const builtinRandomToken_impl = if (is_wasm) native_stub.stub else builtinRandom
 const builtinGetenv_impl = if (is_wasm) native_stub.stub else builtinGetenvNative;
 const builtinArgv_impl = if (is_wasm) native_stub.stub else builtinArgvNative;
 const builtinExec_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").exec;
+const builtinSqliteOpen_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteOpen;
+const builtinSqliteClose_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteClose;
+const builtinSqliteExec_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteExec;
+const builtinSqliteQuery_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteQuery;
+const builtinSqliteLastId_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteLastId;
+const builtinSqliteChanges_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteChanges;
 
 /// getenv(name) -> the variable's value as a String, or nil when it is not
 /// set. A set-but-empty variable is "", not nil.

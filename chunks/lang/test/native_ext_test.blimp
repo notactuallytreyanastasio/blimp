@@ -1,4 +1,4 @@
-# exec: a subprocess with its stdin, stdout, stderr and status.
+# SQLite and exec: the builtins a Temper web application leans on.
 # Run: ./blimp test/native_ext_test.blimp --test
 
 def raises(code: String) -> Bool do
@@ -6,6 +6,64 @@ def raises(code: String) -> Bool do
   case type_of(r) == :map do
     true -> lookup(r, "error") == "runtime error"
     false -> false
+  end
+end
+
+actor SqliteTests do
+  test "round trip: NULL, ints, quotes and unicode all come back as text" do
+    db = sqlite_open(":memory:")
+    assert_eq(sqlite_exec(db, "create table t(id integer primary key, name text, n integer); create index tn on t(n)"), 0)
+    ins = sqlite_query(db, "insert into t(name, n) values (?, ?), (?, ?), (?, ?)", ["it's \"q\"", 42, "héllo ❤️", nil, nil, 7])
+    assert_eq(ins, [["changes"], ["3"]])
+    assert_eq(sqlite_changes(db), 3)
+    assert_eq(sqlite_last_id(db), 3)
+    rows = sqlite_query(db, "select id, name, n from t order by id", [])
+    assert_eq(rows, [["id", "name", "n"], ["1", "it's \"q\"", "42"], ["2", "héllo ❤️", nil], ["3", nil, "7"]])
+    sqlite_close(db)
+  end
+
+  test "a select that matches nothing is just the header row" do
+    db = sqlite_open(":memory:")
+    sqlite_exec(db, "create table t(a, b)")
+    assert_eq(sqlite_query(db, "select a, b from t", []), [["a", "b"]])
+    sqlite_close(db)
+  end
+
+  test "floats bind natively, blobs come back as hex, ints are text" do
+    db = sqlite_open(":memory:")
+    assert_eq(sqlite_query(db, "select ? as f, x'00ff' as b, 5 as i", [2.5]), [["f", "b", "i"], ["2.5", "00ff", "5"]])
+    sqlite_close(db)
+  end
+
+  test "sqlite_exec counts changes across a script" do
+    db = sqlite_open(":memory:")
+    sqlite_exec(db, "create table t(a)")
+    assert_eq(sqlite_exec(db, "insert into t values (1); insert into t values (2); update t set a = a + 1"), 4)
+    sqlite_close(db)
+  end
+
+  test "mistakes raise, and a stale handle does too" do
+    db = sqlite_open(":memory:")
+    assert(raises("sqlite_query(1, \"select * from nope\", [])"))
+    assert(raises("sqlite_query(1, \"select 1; select 2\", [])"))
+    assert(raises("sqlite_query(1, \"select ?\", [])"))
+    assert(raises("sqlite_query(1, \"select ?\", [[1]])"))
+    sqlite_close(db)
+    assert(raises("sqlite_changes(1)"))
+    assert(raises("sqlite_open(\"/no/such/dir/x.db\")"))
+  end
+
+  test "a file database keeps its rows across handles" do
+    path = "/tmp/blimp-native-ext-test.db"
+    exec(["rm", "-f", path, concat(path, "-wal"), concat(path, "-shm")], "", nil)
+    db = sqlite_open(path)
+    sqlite_exec(db, "create table t(x); insert into t values ('kept')")
+    sqlite_close(db)
+    db2 = sqlite_open(path)
+    assert_eq(sqlite_query(db2, "select x from t", []), [["x"], ["kept"]])
+    assert_eq(sqlite_query(db2, "pragma journal_mode", []), [["journal_mode"], ["wal"]])
+    sqlite_close(db2)
+    exec(["rm", "-f", path, concat(path, "-wal"), concat(path, "-shm")], "", nil)
   end
 end
 
