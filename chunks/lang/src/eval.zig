@@ -1336,124 +1336,150 @@ pub const Evaluator = struct {
         return error.TypeError;
     }
 
-    fn evalBinaryOp(self: *Evaluator, op: *const ast.Node.BinaryOp) EvalError!*const Value {
+    /// The shared pointer for an integer result, else one allocation.  The
+    /// allocation is out of line so the arithmetic arms carry no Value
+    /// temporary of their own.
+    inline fn makeInt(self: *Evaluator, n: i64) EvalError!*const Value {
+        if (value_mod.interned.intPtr(n)) |shared| return shared;
+        return self.allocInt(n);
+    }
+
+    noinline fn allocInt(self: *Evaluator, n: i64) EvalError!*const Value {
+        const p = self.allocator.create(Value) catch return error.OutOfMemory;
+        p.* = .{ .integer = n };
+        return p;
+    }
+
+    /// Binary operators.  This function is entered for every one of them
+    /// (5M on the Markdown bench), so it holds only the integer and the
+    /// equality cases, each ending in one shared pointer or one call.
+    /// Everything else is a `noinline` helper below: with about thirty
+    /// `self.make(.{...})` sites in one body, ReleaseSafe gave each its own
+    /// Value temporary and result slot and the frame was 1248 bytes.
+    noinline fn evalBinaryOp(self: *Evaluator, op: *const ast.Node.BinaryOp) EvalError!*const Value {
         const left = try self.eval(op.left);
+        const boolean = value_mod.interned.boolean;
 
         // `and` and `or` stop at the left side when it decides the answer,
         // so `i < length(s) and char_at(s, i) == " "` never reads past the end.
-        switch (op.op) {
-            .and_op => {
-                if (!left.truthy()) return self.make(.{ .boolean = false });
-                return self.make(.{ .boolean = (try self.eval(op.right)).truthy() });
-            },
-            .or_op => {
-                if (left.truthy()) return self.make(.{ .boolean = true });
-                return self.make(.{ .boolean = (try self.eval(op.right)).truthy() });
-            },
-            else => {},
+        const logical = op.op == .and_op or op.op == .or_op;
+        if (op.op == .and_op and !left.truthy()) return boolean(false);
+        if (op.op == .or_op and left.truthy()) return boolean(true);
+
+        // One call site for the right operand: each call in this function
+        // costs a 16-byte result slot that ReleaseSafe never reuses.
+        const right = try self.eval(op.right);
+        if (logical) return boolean(right.truthy());
+
+        if (left.* == .integer and right.* == .integer) {
+            const a = left.integer;
+            const b = right.integer;
+            const n: i64 = switch (op.op) {
+                .add => a +% b,
+                .sub => a -% b,
+                .mul => a *% b,
+                .eq => return boolean(a == b),
+                .neq => return boolean(a != b),
+                .lt => return boolean(a < b),
+                .gt => return boolean(a > b),
+                .lte => return boolean(a <= b),
+                .gte => return boolean(a >= b),
+                // Division (zero, minInt / -1) and `++` are in the slow path.
+                .div, .concat => return self.evalBinarySlow(op.op, left, right),
+                .and_op, .or_op => unreachable,
+            };
+            return self.makeInt(n);
         }
 
-        const right = try self.eval(op.right);
+        // Atoms and strings compare here; Value.eql is not inlined.
+        if (op.op == .eq or op.op == .neq) return boolean(eqlOut(left, right) == (op.op == .eq));
+        return self.evalBinarySlow(op.op, left, right);
+    }
 
-        switch (op.op) {
-            .add => {
-                switch (left.*) {
-                    .integer => |a| switch (right.*) {
-                        .integer => |b| {
-                            return self.make(.{ .integer = a +% b });
-                        },
-                        .float => |b| {
-                            return self.make(.{ .float = @as(f64, @floatFromInt(a)) + b });
-                        },
-                        else => return error.TypeError,
-                    },
-                    .float => |a| switch (right.*) {
-                        .integer => |b| {
-                            return self.make(.{ .float = a + @as(f64, @floatFromInt(b)) });
-                        },
-                        .float => |b| {
-                            return self.make(.{ .float = a + b });
-                        },
-                        else => return error.TypeError,
-                    },
-                    .string => |a| switch (right.*) {
-                        .string => |b| {
-                            const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
-                            @memcpy(new_str[0..a.len], a);
-                            @memcpy(new_str[a.len..], b);
-                            return self.make(.{ .string = new_str });
-                        },
-                        else => return self.typeError(left, right, "+"),
-                    },
-                    else => return self.typeError(left, right, "+"),
-                }
-            },
-            .concat => {
-                switch (left.*) {
-                    .list => |a| switch (right.*) {
-                        .list => |b| {
-                            var items = self.allocator.alloc(*const Value, a.len + b.len) catch return error.OutOfMemory;
-                            @memcpy(items[0..a.len], a);
-                            @memcpy(items[a.len..], b);
-                            return self.make(.{ .list = items });
-                        },
-                        else => return error.TypeError,
-                    },
-                    .string => |a| switch (right.*) {
-                        .string => |b| {
-                            const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
-                            @memcpy(new_str[0..a.len], a);
-                            @memcpy(new_str[a.len..], b);
-                            return self.make(.{ .string = new_str });
-                        },
-                        else => return error.TypeError,
-                    },
-                    else => return error.TypeError,
-                }
-            },
-            .sub => return self.evalArithOp(left.*, right.*, .sub),
-            .mul => return self.evalArithOp(left.*, right.*, .mul),
-            .div => return self.evalArithOp(left.*, right.*, .div),
-            .eq => {
-                return self.make(.{ .boolean = left.eql(right.*) });
-            },
-            .neq => {
-                return self.make(.{ .boolean = !left.eql(right.*) });
-            },
+    /// Everything that is not integer with integer: atoms, floats, strings,
+    /// lists, nil comparisons.  `eql` for atoms and strings is here too; the
+    /// cost is one call, and the hot function's frame stays small.
+    noinline fn evalBinarySlow(self: *Evaluator, op: ast.Node.BinaryOp.Op, left: *const Value, right: *const Value) EvalError!*const Value {
+        const boolean = value_mod.interned.boolean;
+        switch (op) {
+            .eq => return boolean(left.eql(right.*)),
+            .neq => return boolean(!left.eql(right.*)),
+            .add => return self.evalAddSlow(left, right),
+            .concat => return self.evalConcatSlow(left, right),
+            .sub => return self.evalArithOp(left, right, .sub),
+            .mul => return self.evalArithOp(left, right, .mul),
+            .div => return self.evalArithOp(left, right, .div),
             // Comparisons: nil on either side returns false instead of TypeError
-            .lt => {
-                if (left.* == .nil or right.* == .nil) {
-                    return self.make(.{ .boolean = false });
-                }
-                return self.evalCompareOp(left.*, right.*, .lt);
-            },
-            .gt => {
-                if (left.* == .nil or right.* == .nil) {
-                    return self.make(.{ .boolean = false });
-                }
-                return self.evalCompareOp(left.*, right.*, .gt);
-            },
-            .lte => {
-                if (left.* == .nil or right.* == .nil) {
-                    return self.make(.{ .boolean = false });
-                }
-                return self.evalCompareOp(left.*, right.*, .lte);
-            },
-            .gte => {
-                if (left.* == .nil or right.* == .nil) {
-                    return self.make(.{ .boolean = false });
-                }
-                return self.evalCompareOp(left.*, right.*, .gte);
+            .lt, .gt, .lte, .gte => {
+                if (left.* == .nil or right.* == .nil) return boolean(false);
+                return self.evalCompareOp(left, right, switch (op) {
+                    .lt => .lt,
+                    .gt => .gt,
+                    .lte => .lte,
+                    else => .gte,
+                });
             },
             .and_op, .or_op => unreachable,
         }
     }
 
+    noinline fn eqlOut(left: *const Value, right: *const Value) bool {
+        return left.eql(right.*);
+    }
+
+    noinline fn evalAddSlow(self: *Evaluator, left: *const Value, right: *const Value) EvalError!*const Value {
+        switch (left.*) {
+            .integer => |a| switch (right.*) {
+                .float => |b| return self.make(.{ .float = @as(f64, @floatFromInt(a)) + b }),
+                else => return error.TypeError,
+            },
+            .float => |a| switch (right.*) {
+                .integer => |b| return self.make(.{ .float = a + @as(f64, @floatFromInt(b)) }),
+                .float => |b| return self.make(.{ .float = a + b }),
+                else => return error.TypeError,
+            },
+            .string => |a| switch (right.*) {
+                .string => |b| {
+                    const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
+                    @memcpy(new_str[0..a.len], a);
+                    @memcpy(new_str[a.len..], b);
+                    return self.make(.{ .string = new_str });
+                },
+                else => return self.typeError(left, right, "+"),
+            },
+            else => return self.typeError(left, right, "+"),
+        }
+    }
+
+    noinline fn evalConcatSlow(self: *Evaluator, left: *const Value, right: *const Value) EvalError!*const Value {
+        switch (left.*) {
+            .list => |a| switch (right.*) {
+                .list => |b| {
+                    var items = self.allocator.alloc(*const Value, a.len + b.len) catch return error.OutOfMemory;
+                    @memcpy(items[0..a.len], a);
+                    @memcpy(items[a.len..], b);
+                    return self.make(.{ .list = items });
+                },
+                else => return error.TypeError,
+            },
+            .string => |a| switch (right.*) {
+                .string => |b| {
+                    const new_str = self.allocator.alloc(u8, a.len + b.len) catch return error.OutOfMemory;
+                    @memcpy(new_str[0..a.len], a);
+                    @memcpy(new_str[a.len..], b);
+                    return self.make(.{ .string = new_str });
+                },
+                else => return error.TypeError,
+            },
+            else => return error.TypeError,
+        }
+    }
+
     const ArithOp = enum { sub, mul, div };
 
-    fn evalArithOp(self: *Evaluator, left: Value, right: Value, op: ArithOp) EvalError!*const Value {
-        switch (left) {
-            .integer => |a| switch (right) {
+    noinline fn evalArithOp(self: *Evaluator, left: *const Value, right: *const Value, op: ArithOp) EvalError!*const Value {
+        switch (left.*) {
+            .integer => |a| switch (right.*) {
                 .integer => |b| {
                     return self.make(switch (op) {
                         .sub => Value{ .integer = a -% b },
@@ -1483,7 +1509,7 @@ pub const Evaluator = struct {
                 },
                 else => return error.TypeError,
             },
-            .float => |a| switch (right) {
+            .float => |a| switch (right.*) {
                 .integer => |b| {
                     const fb: f64 = @floatFromInt(b);
                     return self.make(switch (op) {
@@ -1513,9 +1539,9 @@ pub const Evaluator = struct {
 
     const CmpOp = enum { lt, gt, lte, gte };
 
-    fn evalCompareOp(self: *Evaluator, left: Value, right: Value, op: CmpOp) EvalError!*const Value {
-        switch (left) {
-            .integer => |a| switch (right) {
+    noinline fn evalCompareOp(self: *Evaluator, left: *const Value, right: *const Value, op: CmpOp) EvalError!*const Value {
+        switch (left.*) {
+            .integer => |a| switch (right.*) {
                 .integer => |b| {
                     return self.make(.{
                         .boolean = switch (op) {
@@ -1539,7 +1565,7 @@ pub const Evaluator = struct {
                 },
                 else => return error.TypeError,
             },
-            .float => |a| switch (right) {
+            .float => |a| switch (right.*) {
                 .integer => |b| {
                     const fb: f64 = @floatFromInt(b);
                     return self.make(.{
@@ -1574,7 +1600,7 @@ pub const Evaluator = struct {
                 .integer => |n| {
                     // -minInt is not an i64, so negate by wrapping subtraction
                     // rather than `-n`, which panics on that one input.
-                    return self.make(.{ .integer = 0 -% n });
+                    return self.makeInt(0 -% n);
                 },
                 .float => |f| {
                     return self.make(.{ .float = -f });
@@ -1582,7 +1608,7 @@ pub const Evaluator = struct {
                 else => return error.TypeError,
             },
             .not => {
-                return self.make(.{ .boolean = !operand.truthy() });
+                return value_mod.interned.boolean(!operand.truthy());
             },
         }
     }
@@ -4290,4 +4316,19 @@ test "one fn literal made at two marks of the top level sees each its own" {
     try expectInt(alloc, &evaluator, "c1()", 10);
     try expectInt(alloc, &evaluator, "c2()", 20);
     try expectInt(alloc, &evaluator, "c1()", 10);
+}
+
+test "integer operators agree inside and outside the interned table" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    try expectInt(alloc, &evaluator, "4000 + 96", 4096);
+    try expectInt(alloc, &evaluator, "4000 + 97", 4097);
+    try expectInt(alloc, &evaluator, "0 - 1024 - 1", -1025);
+    try expectInt(alloc, &evaluator, "100000 * 100000", 10000000000);
+    try expectInt(alloc, &evaluator, "(0 - 9223372036854775807 - 1) / (0 - 1)", std.math.minInt(i64));
+    try std.testing.expect((try evalProgram(alloc, &evaluator, "5000 >= 5000")).boolean);
+    try std.testing.expect(!(try evalProgram(alloc, &evaluator, "5000 < 5000")).boolean);
+    try std.testing.expectError(error.DivisionByZero, evalProgram(alloc, &evaluator, "1 / 0"));
 }
