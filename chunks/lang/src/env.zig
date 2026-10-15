@@ -143,6 +143,16 @@ pub const Environment = struct {
         /// costs a search that would have happened anyway; there are no
         /// false negatives, so what the walk finds does not change.
         names: u64 = 0,
+        /// The OR of `names | captured_names` over this scope and every
+        /// scope below it except the top level: what `bindsLocally` used to
+        /// walk the whole stack to compute, on every builtin call (19 frames
+        /// on average on the Markdown bench).  A scope takes its parent's
+        /// value when it is pushed, and only the innermost scope's masks
+        /// change after that (`collapseTo` changes `base`'s, and pops what
+        /// was above it before anything reads), so every write to a mask
+        /// below adds the same bits here.  Conservative like the masks it is
+        /// made of: a set bit is a maybe.
+        stack_names: u64 = 0,
     };
 
     /// The bit this name claims in a scope's `names`.  Public because anything
@@ -173,7 +183,8 @@ pub const Environment = struct {
     pub fn pushScope(self: *Environment) void {
         const bindings = self.free_scopes.pop() orelse
             std.ArrayList(Binding){ .items = &.{}, .capacity = 0 };
-        self.scopes.append(self.allocator, .{ .bindings = bindings }) catch {};
+        const outer: u64 = if (self.scopes.items.len >= 1) self.scopes.items[self.scopes.items.len - 1].stack_names else 0;
+        self.scopes.append(self.allocator, .{ .bindings = bindings, .stack_names = outer }) catch {};
     }
 
     /// Lend the current scope a closure's captured bindings.
@@ -234,12 +245,14 @@ pub const Environment = struct {
                 }
                 const sc = &self.scopes.items[index];
                 sc.names |= nameBit(b.name);
+                if (index != 0) sc.stack_names |= nameBit(b.name);
                 sc.bindings.append(self.allocator, .{ .name = b.name, .val = b.val, .hash = b.hash }) catch {};
             }
         }
         const scope = &self.scopes.items[index];
         scope.captured = captured;
         scope.captured_names = names;
+        if (index != 0) scope.stack_names |= names;
         scope.lent_to = closure_id;
         // Everything already in the frame belongs to whoever ran here before.
         scope.own_base = scope.bindings.items.len;
@@ -252,6 +265,7 @@ pub const Environment = struct {
         const scope = &self.scopes.items[self.scopes.items.len - 1];
         scope.captured = items;
         scope.captured_names = names;
+        if (self.scopes.items.len > 1) scope.stack_names |= names;
     }
 
     /// The current top-level binding of `name`, the latest if it was defined
@@ -410,6 +424,7 @@ pub const Environment = struct {
             }
         }
         scope.names |= k.bit;
+        scope.stack_names |= k.bit;
         h.* = @intCast(items.len - scope.own_base);
         scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
     }
@@ -431,6 +446,7 @@ pub const Environment = struct {
         const scope = &self.scopes.items[self.scopes.items.len - 1];
         if (self.scopes.items.len == 1) return self.defineIn(0, name, k.hash, k.bit, value);
         scope.names |= k.bit;
+        scope.stack_names |= k.bit;
         scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
     }
 
@@ -453,10 +469,12 @@ pub const Environment = struct {
         // every local in the frame.
         if (scope.names & bit == 0) {
             scope.names |= bit;
+            scope.stack_names |= bit;
             scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = hash }) catch {};
             return;
         }
         scope.names |= bit;
+        scope.stack_names |= bit;
         // Only the current callee's own region is searched for an existing
         // binding. Reaching below `own_base` would update an entry a previous
         // callee left in this frame, and it would stay at that low index --
@@ -537,11 +555,38 @@ pub const Environment = struct {
     /// several names share a bit, so a true may be a false alarm; a false
     /// is certain.
     pub fn bindsLocally(self: *const Environment, bit: u64) bool {
-        if (self.scopes.items.len < 2) return false;
-        for (self.scopes.items[1..]) |*scope| {
-            if ((scope.names | scope.captured_names) & bit != 0) return true;
+        const n = self.scopes.items.len;
+        if (n < 2) return false;
+        return self.scopes.items.ptr[n - 1].stack_names & bit != 0;
+    }
+
+    /// True only if `lookupKeyed(name, key)` is certain to find nothing.
+    /// For a caller whose `bindsLocally` said maybe (a bit shared with
+    /// some frame's other names) and who needs to know whether a binding
+    /// really is there.  `lookupKeyed` answered that by walking all of the
+    /// frames, 19 on average on the Markdown bench; this stops at the first
+    /// frame whose `stack_names` says nothing at or below it can bind the
+    /// name, and answers false ("maybe bound") for any top-level binding of
+    /// the name without working out whether this frame's mark sees it.
+    pub fn unbound(self: *const Environment, name: []const u8, key: name_key.Key) bool {
+        const nk = if (key.isSet()) key else name_key.Key.of(name);
+        var i: usize = self.scopes.items.len;
+        while (i > 1) {
+            i -= 1;
+            const scope = &self.scopes.items[i];
+            if (scope.stack_names & nk.bit == 0) break;
+            if (scope.names & nk.bit != 0) {
+                for (scope.bindings.items) |b| {
+                    if (name_key.sameName(b.name, b.hash, name, nk.hash)) return false;
+                }
+            }
+            if (scope.captured_names & nk.bit != 0) {
+                for (scope.captured) |b| {
+                    if (name_key.sameName(b.name, b.hash, name, nk.hash)) return false;
+                }
+            }
         }
-        return false;
+        return self.globals.get(.{ .name = name, .hash = nk.hash }) == null;
     }
 
     /// A call site's memory of a top-level binding.
@@ -612,24 +657,91 @@ pub const Environment = struct {
         return self.lookupHinted(name, key, null);
     }
 
-    /// `lookupKeyed` with an inline cache: `hint` holds the offset from the
-    /// innermost frame's `own_base` at which this read found its name last
-    /// time.  It is only a guess to try first: the slot is used when it is in
-    /// range and holds the same hash and bytes, otherwise the scan runs.
-    /// Within a callee's own region a name appears once (`defineIn` overwrites
-    /// in place), so a validated slot is the binding the scan would find.
-    /// The offset is relative to `own_base` so a tail call that reuses the
-    /// frame, and moves `own_base`, still hits.
+    /// One frame out is this much in a hint.
+    pub const hint_frame_unit: u32 = 1 << 24;
+
+    fn setHint(hint: *u32, frames_out: usize, offset: usize) void {
+        if (frames_out >= 255 or offset >= hint_frame_unit) return;
+        hint.* = @intCast(frames_out << 24 | offset);
+    }
+
+    /// The hot case of `lookupHinted`, small enough to inline into the
+    /// evaluator: the hint names a slot in the innermost frame's own region
+    /// and the slot holds this very name (the same interned bytes).  Nothing
+    /// else is looked at: a name in that region is the first thing `lookup`
+    /// would find, whatever the masks or marks say.  A hint that points
+    /// outward is a number too large for the slot test, so it falls through
+    /// like every other miss.
+    pub inline fn lookupFast(self: *const Environment, name: []const u8, key: name_key.Key, hint: ?*u32) ?*const Value {
+        if (hint) |h| {
+            const n = self.scopes.items.len;
+            if (n >= 2) {
+                const scope = &self.scopes.items.ptr[n - 1];
+                const at = scope.own_base +% @as(usize, h.*);
+                if (at < scope.bindings.items.len) {
+                    const b = &scope.bindings.items.ptr[at];
+                    if (b.name.ptr == name.ptr and b.name.len == name.len) return b.val;
+                }
+            }
+        }
+        return self.lookupHinted(name, key, hint);
+    }
+
+    /// A hint that points `frames_out` scopes out, checked.  The scan would
+    /// reach that frame only if every scope above it fails to bind or
+    /// capture the name and reads no top-level mark, which is what is tested
+    /// here; a clear bit is certain, a set one is a false alarm at worst and
+    /// sends the read to the scan.
+    noinline fn outerHint(self: *const Environment, name: []const u8, bit: u64, h: u32) ?*const Value {
+        const frames_out: usize = h >> 24;
+        const n = self.scopes.items.len;
+        if (frames_out + 2 > n) return null;
+        const base = self.scopes.items.ptr;
+        var k: usize = n - 1;
+        const target = n - 1 - frames_out;
+        while (k > target) : (k -= 1) {
+            const s = &base[k];
+            if ((s.names | s.captured_names) & bit != 0) return null;
+            if (s.globals_mark | s.left_mark != 0) return null;
+        }
+        const scope = &base[target];
+        const at = scope.own_base +% @as(usize, h & (hint_frame_unit - 1));
+        if (at >= scope.bindings.items.len) return null;
+        const b = &scope.bindings.items.ptr[at];
+        if (b.name.ptr == name.ptr and b.name.len == name.len) return b.val;
+        return null;
+    }
+
+    /// `lookupKeyed` with an inline cache: `hint` says where this read found
+    /// its name last time.  It is only a guess to try first, validated on
+    /// every use, so a stale hint costs the scan and nothing else.
+    ///
+    /// The hint is `frames_out << 24 | offset`.  `offset` is the slot's
+    /// distance from that frame's `own_base`, so a tail call that reuses the
+    /// frame, and moves `own_base`, still hits.  `frames_out` is how many
+    /// scopes above that frame the read stood in: a `case` arm or a `for`
+    /// body pushes a scope, and a parameter read there lives one or two
+    /// scopes down.  Within a callee's own region a name appears once
+    /// (`defineIn` overwrites in place), so a validated slot is the binding
+    /// the scan would find, provided the scan would have reached that frame:
+    /// `outerHint` checks that no scope in between binds, captures or reads
+    /// the top level through a mark.
+    ///
+    /// The common case, the slot in the innermost frame, is `lookupFast`;
+    /// this function is what it falls back to.
     pub fn lookupHinted(self: *const Environment, name: []const u8, key: name_key.Key, hint: ?*u32) ?*const Value {
         const nk = if (key.isSet()) key else name_key.Key.of(name);
         const bit = nk.bit;
         const hash = nk.hash;
-        // The name's latest top-level binding, found once and only when a
-        // frame asks.  It used to be found again, a hash of the name each
-        // time, at every frame on the way out that reads the top level.  A
-        // builtin's name has no top-level binding, so a builtin called from
-        // twenty frames deep missed twenty times before `lookupTop` missed
-        // once more and the evaluator asked the builtin registry.
+        if (hint) |h| {
+            if (h.* >= hint_frame_unit) {
+                if (self.outerHint(name, bit, h.*)) |v| return v;
+            }
+        }
+        const top_i = self.scopes.items.len -% 1;
+        // True while every scope walked so far reads no top-level mark, so
+        // a hint written for a later frame can validate (`outerHint`).
+        var clean = true;
         var top: ?u32 = null;
         var top_known = false;
         var i: usize = self.scopes.items.len;
@@ -641,7 +753,7 @@ pub const Environment = struct {
             // then what an earlier callee left in a reused frame.
             if (scope.names & bit != 0) {
                 const items = scope.bindings.items;
-                if (hint != null and i == self.scopes.items.len - 1) {
+                if (hint != null and i == top_i) {
                     const at = scope.own_base +% @as(usize, hint.?.*);
                     if (at < items.len and name_key.sameName(items[at].name, items[at].hash, name, hash)) {
                         return items[at].val;
@@ -651,7 +763,7 @@ pub const Environment = struct {
                 while (j > scope.own_base) {
                     j -= 1;
                     if (name_key.sameName(items[j].name, items[j].hash, name, hash)) {
-                        if (hint != null and i == self.scopes.items.len - 1) hint.?.* = @intCast(j - scope.own_base);
+                        if (hint != null and clean) setHint(hint.?, top_i - i, j - scope.own_base);
                         return items[j].val;
                     }
                 }
@@ -688,6 +800,7 @@ pub const Environment = struct {
                 }
                 if (self.topFrom(top, scope.left_mark)) |v| return v;
             }
+            if (scope.globals_mark | scope.left_mark != 0) clean = false;
         }
         if (self.scopes.items.len == 0) return null;
         if (!top_known) top = self.globals.get(.{ .name = name, .hash = hash });
@@ -1151,4 +1264,201 @@ test "bindParam appends without looking for an existing binding" {
     try std.testing.expectEqual(@as(i64, 1), env.lookup("x").?.integer);
     try std.testing.expectEqual(@as(i64, 2), env.lookup("y").?.integer);
     env.popScope();
+}
+
+// A hint that points outward: the read stands in a block scope and the name
+// lives in the frame below it.  Each test sets the hint by a first read, then
+// changes the stack so that using it would be wrong.
+fn testVal(alloc: std.mem.Allocator, n: i64) !*const Value {
+    const v = try alloc.create(Value);
+    v.* = Value{ .integer = n };
+    return v;
+}
+
+test "an outward hint is written by the scan and answered without it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    const key = name_key.Key.of("x");
+    const captured: []const Value.CapturedBinding = &.{};
+
+    env.pushScope();
+    env.lendCaptured(captured, 0, 1, Environment.live);
+    env.define("p", try testVal(alloc, 0));
+    env.define("x", try testVal(alloc, 7));
+    env.pushScope(); // a case arm
+    env.pushScope(); // and a for body inside it
+    var hint: u32 = 0;
+    try std.testing.expectEqual(@as(i64, 7), env.lookupFast("x", key, &hint).?.integer);
+    try std.testing.expectEqual(@as(u32, 2 << 24 | 1), hint);
+    // Second read: answered by outerHint from the validated slot alone.
+    try std.testing.expectEqual(@as(i64, 7), env.lookupFast("x", key, &hint).?.integer);
+
+    // The inner scope now binds x: the hint would be wrong, and is refused.
+    env.define("x", try testVal(alloc, 8));
+    try std.testing.expectEqual(@as(i64, 8), env.lookupFast("x", key, &hint).?.integer);
+    env.popScope();
+    // The scan rewrote the hint to the inner scope's own slot.  One scope
+    // out that slot does not exist: refused, scanned, rewritten for this
+    // depth.
+    try std.testing.expectEqual(@as(i64, 7), env.lookupFast("x", key, &hint).?.integer);
+    try std.testing.expectEqual(@as(u32, 1 << 24 | 1), hint);
+    env.popScope();
+    // In the frame itself the hint is the plain slot again.
+    try std.testing.expectEqual(@as(i64, 7), env.lookupFast("x", key, &hint).?.integer);
+    try std.testing.expectEqual(@as(u32, 1), hint);
+    env.popScope();
+}
+
+test "an outward hint never crosses a frame that reads the top level, binds, or captures the name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    const key = name_key.Key.of("x");
+    env.define("x", try testVal(alloc, 100)); // top level
+    const mark = env.globalsMark();
+
+    // Frame A binds x = 1 and reads it from a block scope: hint 1 out.
+    env.pushScope();
+    env.lendCaptured(&.{}, 0, 1, Environment.live);
+    env.define("x", try testVal(alloc, 1));
+    env.pushScope();
+    var hint: u32 = 0;
+    // Frame A is a top-level def (mark live), but its own x is found first.
+    try std.testing.expectEqual(@as(i64, 1), env.lookupFast("x", key, &hint).?.integer);
+    try std.testing.expectEqual(@as(u32, 1 << 24), hint);
+    env.popScope();
+
+    // Frame B, called from A, reads the top level (mark live) and does not
+    // bind x.  A hint of 2 out, from B's block scope, would reach A's x;
+    // lookup stops at B's mark and returns the global.
+    env.pushScope();
+    env.lendCaptured(&.{}, 0, 2, Environment.live);
+    env.pushScope();
+    hint = 2 << 24;
+    try std.testing.expectEqual(@as(i64, 100), env.lookupFast("x", key, &hint).?.integer);
+    env.popScope();
+    env.popScope();
+    env.popScope();
+
+    // A frame whose view of the top level ends before the redefinition
+    // sees the old global.
+    env.define("x", try testVal(alloc, 200));
+    env.pushScope();
+    env.lendCaptured(&.{}, 0, 5, Environment.live);
+    env.define("x", try testVal(alloc, 1));
+    env.pushScope();
+    env.lendCaptured(&.{}, 0, 3, mark);
+    env.pushScope();
+    hint = 2 << 24;
+    try std.testing.expectEqual(@as(i64, 100), env.lookupFast("x", key, &hint).?.integer);
+    env.popScope();
+    env.popScope();
+    env.popScope();
+
+    // A block scope that was lent the name (a state field) wins too.
+    env.pushScope();
+    env.lendCaptured(&.{}, 0, 4, Environment.live);
+    env.define("x", try testVal(alloc, 2));
+    env.pushScope();
+    const cap = [_]Value.CapturedBinding{.{ .name = "x", .val = try testVal(alloc, 3), .hash = key.hash }};
+    env.lendState(&cap, key.bit);
+    hint = 1 << 24;
+    try std.testing.expectEqual(@as(i64, 3), env.lookupFast("x", key, &hint).?.integer);
+    env.popScope();
+    env.popScope();
+}
+
+test "an outward hint survives a tail call that moves own_base, and compaction's reindex" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    const key = name_key.Key.of("n");
+    env.define("g", try testVal(alloc, 5));
+    env.pushScope();
+    var hint: u32 = 0;
+    var round: i64 = 0;
+    while (round < 4) : (round += 1) {
+        // Another callee takes the frame each round, so own_base moves.
+        env.lendCaptured(&.{}, 0, @intCast(9 + round), Environment.live);
+        env.define("pad", try testVal(alloc, 0));
+        env.define("n", try testVal(alloc, round));
+        env.pushScope();
+        try std.testing.expectEqual(round, env.lookupFast("n", key, &hint).?.integer);
+        try std.testing.expectEqual(round, env.lookupFast("n", key, &hint).?.integer);
+        env.popScope();
+        if (round == 2) env.reindexGlobals();
+        try std.testing.expectEqual(@as(i64, 5), env.lookup("g").?.integer);
+    }
+    env.popScope();
+}
+
+test "lookupFast takes a slot only for the same name, and defers to the scan otherwise" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    env.pushScope();
+    env.define("x", try testVal(alloc, 1));
+    env.define("y", try testVal(alloc, 2));
+    var hint: u32 = 1; // the slot of y
+    // x asked for y's slot: refused, scanned, rewritten.
+    try std.testing.expectEqual(@as(i64, 1), env.lookupFast("x", name_key.Key.of("x"), &hint).?.integer);
+    try std.testing.expectEqual(@as(u32, 0), hint);
+    // A copy of the name at another address is the same name.
+    const copy = try alloc.dupe(u8, "y");
+    try std.testing.expectEqual(@as(i64, 2), env.lookupFast(copy, name_key.Key.of("y"), &hint).?.integer);
+    // No hint at all.
+    try std.testing.expectEqual(@as(i64, 2), env.lookupFast("y", name_key.Key.of("y"), null).?.integer);
+    env.popScope();
+    // Only the top level on the stack: nothing to take a slot from.
+    try std.testing.expect(env.lookupFast("x", name_key.Key.of("x"), &hint) == null);
+}
+
+test "stack_names answers bindsLocally as the walk did, and unbound settles a shared bit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    // `size` and `sire` share a bit (same first byte, last byte, length).
+    const size_key = name_key.Key.of("size");
+    try std.testing.expectEqual(name_key.Key.of("sire").bit, size_key.bit);
+    try std.testing.expect(!env.bindsLocally(size_key.bit));
+    env.define("size", try testVal(alloc, 1)); // top level: not local
+    try std.testing.expect(!env.bindsLocally(size_key.bit));
+
+    env.pushScope();
+    env.define("sire", try testVal(alloc, 2));
+    env.pushScope();
+    env.pushScope();
+    try std.testing.expect(env.bindsLocally(size_key.bit)); // from two scopes up
+    try std.testing.expect(!env.unbound("size", size_key)); // the top level has one
+    env.popTo(1);
+
+    // A fresh stack, no top-level size: the shared bit is a false alarm.
+    var env2 = Environment.init(alloc);
+    env2.pushScope();
+    env2.define("sire", try testVal(alloc, 2));
+    env2.pushScope();
+    try std.testing.expect(env2.bindsLocally(size_key.bit));
+    try std.testing.expect(env2.unbound("size", size_key));
+    // A real binding in the inner scope, then after it is popped.
+    env2.define("size", try testVal(alloc, 3));
+    try std.testing.expect(!env2.unbound("size", size_key));
+    env2.popScope();
+    try std.testing.expect(env2.unbound("size", size_key));
+    env2.popScope();
+    try std.testing.expect(!env2.bindsLocally(size_key.bit));
+    env2.pushScope();
+    try std.testing.expect(!env2.bindsLocally(size_key.bit)); // a popped scope leaves nothing
+    const cap = [_]Value.CapturedBinding{.{ .name = "size", .val = try testVal(alloc, 4), .hash = size_key.hash }};
+    env2.lendCaptured(&cap, size_key.bit, 5, Environment.live);
+    try std.testing.expect(env2.bindsLocally(size_key.bit));
+    try std.testing.expect(!env2.unbound("size", size_key));
+    env2.pushScope();
+    try std.testing.expect(!env2.unbound("size", size_key));
+    env2.popTo(1);
 }

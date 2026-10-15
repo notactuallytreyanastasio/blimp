@@ -440,7 +440,7 @@ pub const Evaluator = struct {
 
             // Identifier
             .identifier => |*id| {
-                if (self.env.lookupHinted(id.name, id.key, id.hint)) |val| {
+                if (self.env.lookupFast(id.name, id.key, id.hint)) |val| {
                     return val;
                 }
                 return self.undefinedIdentifier(id);
@@ -1662,7 +1662,7 @@ pub const Evaluator = struct {
         const ptr = cache.builtin orelse return null;
         if (cache.globals_version != self.env.globals_version) return null;
         if (self.env.bindsLocally(if (call.key.isSet()) call.key.bit else Environment.nameBit(call.name))) {
-            if (self.env.lookupKeyed(call.name, call.key) != null) return null;
+            if (!self.env.unbound(call.name, call.key)) return null;
         }
         return @ptrCast(@alignCast(ptr));
     }
@@ -4424,4 +4424,69 @@ test "integer operators agree inside and outside the interned table" {
     try std.testing.expect((try evalProgram(alloc, &evaluator, "5000 >= 5000")).boolean);
     try std.testing.expect(!(try evalProgram(alloc, &evaluator, "5000 < 5000")).boolean);
     try std.testing.expectError(error.DivisionByZero, evalProgram(alloc, &evaluator, "1 / 0"));
+}
+
+// A parameter read inside a `case` arm or a `for` body lives one or two
+// scopes below the innermost.  The identifier's hint points outward; these
+// are the ways that could go wrong.
+test "a read through block scopes: shadowing, loops that reuse the frame, a caller's local" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    _ = try evalProgram(alloc, &evaluator,
+        \\def bump(x) do x + 1000 end
+        \\def shade(x) do
+        \\  case x do
+        \\    0 -> x
+        \\    _ -> bump(x) + x
+        \\  end
+        \\end
+        \\def total(n, acc) do
+        \\  case n do
+        \\    0 -> acc
+        \\    _ -> case acc >= 0 do
+        \\      true -> total(n - 1, acc + n)
+        \\      _ -> acc
+        \\    end
+        \\  end
+        \\end
+        \\def each_k(xs, k) do
+        \\  for x in xs do
+        \\    x + k
+        \\  end
+        \\  k
+        \\end
+        \\def peek() do secret end
+        \\def holder() do
+        \\  secret = 42
+        \\  case 1 do
+        \\    _ -> peek()
+        \\  end
+        \\end
+    );
+    for (0..3) |_| {
+        try expectInt(alloc, &evaluator, "shade(5)", 1010);
+        try expectInt(alloc, &evaluator, "shade(0)", 0);
+        try expectInt(alloc, &evaluator, "total(200, 0)", 20100);
+        try expectInt(alloc, &evaluator, "each_k([1, 2, 3], 6)", 6);
+        // A top-level def reads the caller's local until the top level has
+        // the name, and then reads the top level: the hint cannot remember
+        // the first answer across that.
+        try expectInt(alloc, &evaluator, "holder()", 42);
+    }
+    _ = try evalProgram(alloc, &evaluator, "secret = 7");
+    try expectInt(alloc, &evaluator, "holder()", 7);
+    // Redefining the function whose body holds the hinted read.
+    _ = try evalProgram(alloc, &evaluator,
+        \\def shade(y) do
+        \\  case y do
+        \\    0 -> 1
+        \\    _ -> y * 2
+        \\  end
+        \\end
+    );
+    try expectInt(alloc, &evaluator, "shade(5)", 10);
+    try expectInt(alloc, &evaluator, "shade(0)", 1);
+    try std.testing.expectEqual(@as(usize, 1), evaluator.env.depth());
 }
