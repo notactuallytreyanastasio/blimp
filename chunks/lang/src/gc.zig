@@ -240,6 +240,7 @@ const Copier = struct {
         const out = try self.to.alloc(Value.HandlerDef, defs.len);
         for (defs, 0..) |h, i| out[i] = .{
             .name = try self.str(h.name),
+            .hash = h.hash,
             .params = h.params,
             .guard = h.guard,
             .body = h.body,

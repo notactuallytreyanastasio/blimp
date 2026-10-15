@@ -92,16 +92,21 @@ that shadows `length` with a parameter, a local, a closure's capture, an
 actor's state field and a later top-level `def` prints the same on the build
 before and after.
 
-## What is still linear
+## What is still linear, and what turned out not to matter
 
-`runScheduler` (`src/eval.zig`) still walks every instance looking for a
-non-empty mailbox, and does so after every async send (`<--`). A program
-that sends asynchronously to a few of many actors pays for all of them on
-each send. The fix is a queue of actors with mail, which the `Scheduler`
-already has in outline; it is not done.
+`runScheduler` no longer walks every instance: the registry keeps the ids
+with mail in a bitset and a pass visits them in id order (scheduler.md). On
+a probe with 20,000 actors and 100,000 async sends that was 1585 ms to
+22 ms, and the Markdown bench 1.70 s to 1.53 s, most of it from the walk that
+ran every 4,000 reductions.
 
-A call to a top-level function still hashes its name once per call for the
-global map, and a reference to a global inside a handler walks out of the
-handler's scope first. The call-site cache covers builtins only; extending it
-to top-level closures needs the same version check plus a check that the
-binding found is the one cached, and is not done.
+The call-site cache was extended to top-level closures and to identifier
+references to top-level bindings, soundly (a slot holding the latest binding,
+its index and the globals version, used only when no frame claims the name's
+bit and the innermost frame that reads the top level sees that index), and
+it measured nothing: counting on the Markdown bench, of about 20 million
+lookups 18.0 million resolve to a parameter or a local in the current frame,
+1.6 million to a top-level call and 0.2 million to a top-level identifier.
+The extension is not in the tree. What a local read costs is the hash of
+its name, computed from the string on every lookup, and the scan of the
+frame; that is the next thing to remove.

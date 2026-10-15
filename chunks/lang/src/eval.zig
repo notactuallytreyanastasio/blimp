@@ -103,22 +103,13 @@ pub const Evaluator = struct {
         if (entry.mailbox.isEmpty()) self.registry.clearPending(entry.ref.id);
 
         // Find a matching handler
+        const msg_hash = Environment.hashName(msg.name);
         for (entry.handlers) |handler| {
-            if (!std.mem.eql(u8, handler.name, msg.name)) continue;
+            if (handler.hash != msg_hash or !std.mem.eql(u8, handler.name, msg.name)) continue;
             if (handler.params.len != msg.args.len) continue;
 
             // Execute the handler body
-            self.env.pushScope();
-
-            // Bind params
-            for (handler.params, 0..) |param, i| {
-                self.env.define(param.name, msg.args[i]);
-            }
-
-            // Bind state fields
-            for (entry.state_fields) |field| {
-                self.env.define(field.key, field.val);
-            }
+            const lend = self.enterHandler(entry, handler, msg.args);
 
             // Set actor context
             var ctx = ActorContext{ .entry = entry };
@@ -137,6 +128,7 @@ pub const Evaluator = struct {
 
             self.actor_ctx = prev_ctx;
             self.env.popScope();
+            leaveHandler(lend);
 
             // Deliver reply to sender if they're waiting
             if (msg.reply_slot) |slot| {
@@ -605,6 +597,7 @@ pub const Evaluator = struct {
                 .message_handler => |mh| {
                     handlers_list.append(self.allocator, .{
                         .name = mh.name,
+                        .hash = Environment.hashName(mh.name),
                         .params = mh.params,
                         .guard = mh.guard,
                         .body = mh.body,
@@ -1010,6 +1003,53 @@ pub const Evaluator = struct {
         }
     }
 
+    /// The actor's state fields as a borrowable slice, built on first use.
+    fn stateLend(self: *Evaluator, entry: *registry_mod.ActorEntry) ?*registry_mod.StateLend {
+        if (entry.lent) |l| return l;
+        const items = self.allocator.alloc(Value.CapturedBinding, entry.state_fields.len) catch return null;
+        var names: u64 = 0;
+        for (entry.state_fields, 0..) |f, i| {
+            items[i] = .{ .name = f.key, .val = f.val, .hash = Environment.hashName(f.key) };
+            names |= Environment.nameBit(f.key);
+        }
+        const l = self.allocator.create(registry_mod.StateLend) catch return null;
+        l.* = .{ .items = items, .names = names };
+        entry.lent = l;
+        return l;
+    }
+
+    /// Push a handler's scope and bind its parameters and the actor's state.
+    /// State is lent, not defined, unless a parameter shares a field's name:
+    /// `define` let the field overwrite the parameter, and a lent tier would
+    /// let the parameter win, so that case keeps the old path. Returns what
+    /// was lent; pass it to `leaveHandler` after the scope is popped.
+    fn enterHandler(self: *Evaluator, entry: *registry_mod.ActorEntry, handler: Value.HandlerDef, args: []const *const Value) ?*registry_mod.StateLend {
+        self.env.pushScope();
+        for (handler.params, 0..) |param, i| {
+            self.env.define(param.name, args[i]);
+        }
+        const lend = self.stateLend(entry) orelse {
+            for (entry.state_fields) |field| self.env.define(field.key, field.val);
+            return null;
+        };
+        for (handler.params) |param| {
+            if (Environment.nameBit(param.name) & lend.names == 0) continue;
+            for (entry.state_fields) |field| {
+                if (std.mem.eql(u8, field.key, param.name)) {
+                    for (entry.state_fields) |f| self.env.define(f.key, f.val);
+                    return null;
+                }
+            }
+        }
+        self.env.lendState(lend.items, lend.names);
+        lend.borrowers += 1;
+        return lend;
+    }
+
+    fn leaveHandler(lend: ?*registry_mod.StateLend) void {
+        if (lend) |l| l.borrowers -= 1;
+    }
+
     fn evalMessageSend(self: *Evaluator, ms: ast.Node.MessageSend) EvalError!*const Value {
         const target_val = try self.eval(ms.target.*);
 
@@ -1061,8 +1101,9 @@ pub const Evaluator = struct {
                 };
 
                 // Find a matching handler
+                const msg_hash = Environment.hashName(ms.message);
                 for (entry.handlers) |handler| {
-                    if (!std.mem.eql(u8, handler.name, ms.message)) continue;
+                    if (handler.hash != msg_hash or !std.mem.eql(u8, handler.name, ms.message)) continue;
 
                     // Check argument count
                     if (handler.params.len != ms.args.len) {
@@ -1077,17 +1118,10 @@ pub const Evaluator = struct {
                         // did.
                         var guard_slot: ArgSlot = .{};
                         const guard_args = try self.evalArgs(ms.args, &guard_slot, false);
-                        self.env.pushScope();
-                        defer self.env.popScope();
-
-                        // Bind handler params
-                        for (handler.params, 0..) |param, i| {
-                            self.env.define(param.name, guard_args[i]);
-                        }
-
-                        // Bind state fields
-                        for (entry.state_fields) |field| {
-                            self.env.define(field.key, field.val);
+                        const guard_lend = self.enterHandler(entry, handler, guard_args);
+                        defer {
+                            self.env.popScope();
+                            leaveHandler(guard_lend);
                         }
 
                         const guard_val = self.eval(guard.*) catch |err| return err;
@@ -1106,16 +1140,8 @@ pub const Evaluator = struct {
                     const arg_vals = try self.evalArgs(ms.args, &arg_slot, log_idx != null);
 
                     // Execute the handler body
-                    self.env.pushScope();
-                    for (handler.params, 0..) |param, i| {
-                        self.env.define(param.name, arg_vals[i]);
-                    }
+                    const lend = self.enterHandler(entry, handler, arg_vals);
                     if (log_idx) |li| self.msg_log[li].args = arg_vals;
-
-                    // Bind state fields as variables
-                    for (entry.state_fields) |field| {
-                        self.env.define(field.key, field.val);
-                    }
 
                     // Set actor context with bubble strategy from handler
                     var ctx = ActorContext{
@@ -1133,6 +1159,7 @@ pub const Evaluator = struct {
                         last_val = self.eval(stmt) catch |err| {
                             self.actor_ctx = prev_ctx;
                             self.env.popScope();
+                            leaveHandler(lend);
                             return err;
                         };
                         has_val = true;
@@ -1141,6 +1168,7 @@ pub const Evaluator = struct {
                     // Restore context
                     self.actor_ctx = prev_ctx;
                     self.env.popScope();
+                    leaveHandler(lend);
 
                     // Reply value if set, otherwise last value or nil
                     const reply_val: *const Value = if (ctx.reply_value) |rv| rv else if (has_val) last_val else blk: {
@@ -1186,6 +1214,29 @@ pub const Evaluator = struct {
         return out;
     }
 
+    /// Keep the lent copy of the state in step with a `become`. A handler
+    /// that is running holds the copy it was lent, and must keep seeing the
+    /// values it started with, so while anyone holds it the write goes to a
+    /// fresh copy and the old one is left to them.
+    fn becomeLent(self: *Evaluator, entry: *registry_mod.ActorEntry, fi: usize, val: *const Value) void {
+        const l = entry.lent orelse return;
+        if (l.borrowers == 0) {
+            l.items[fi].val = val;
+            return;
+        }
+        const items = self.allocator.dupe(Value.CapturedBinding, l.items) catch {
+            entry.lent = null;
+            return;
+        };
+        items[fi].val = val;
+        const nl = self.allocator.create(registry_mod.StateLend) catch {
+            entry.lent = null;
+            return;
+        };
+        nl.* = .{ .items = items, .names = l.names };
+        entry.lent = nl;
+    }
+
     fn evalBecomeStmt(self: *Evaluator, bs: ast.Node.BecomeStmt) EvalError!*const Value {
         const ctx = self.actor_ctx orelse {
             self.last_error = errors.becomeOutsideHandler(self.source);
@@ -1196,9 +1247,10 @@ pub const Evaluator = struct {
             const new_val = try self.eval(field.value);
 
             // Find the matching state field and update it in place via the registry entry
-            for (ctx.entry.state_fields) |*state_field| {
+            for (ctx.entry.state_fields, 0..) |*state_field, fi| {
                 if (std.mem.eql(u8, state_field.key, field.key)) {
                     state_field.val = new_val;
+                    self.becomeLent(ctx.entry, fi, new_val);
                     self.traceState(ctx.entry.ref, field.key, new_val);
                     break;
                 }
@@ -2161,17 +2213,12 @@ pub const Evaluator = struct {
                         }
 
                         // Find matching handler and execute
+                        const msg_hash = Environment.hashName(ms.message);
                         for (entry.handlers) |handler| {
-                            if (!std.mem.eql(u8, handler.name, ms.message)) continue;
+                            if (handler.hash != msg_hash or !std.mem.eql(u8, handler.name, ms.message)) continue;
                             if (handler.params.len != arg_vals.items.len) continue;
 
-                            self.env.pushScope();
-                            for (handler.params, 0..) |param, i| {
-                                self.env.define(param.name, arg_vals.items[i]);
-                            }
-                            for (entry.state_fields) |field| {
-                                self.env.define(field.key, field.val);
-                            }
+                            const lend = self.enterHandler(entry, handler, arg_vals.items);
 
                             var ctx = ActorContext{
                                 .entry = entry,
@@ -2187,6 +2234,7 @@ pub const Evaluator = struct {
                                 last_val = self.eval(stmt) catch |err| {
                                     self.actor_ctx = prev_ctx;
                                     self.env.popScope();
+                                    leaveHandler(lend);
                                     return err;
                                 };
                                 has_val = true;
@@ -2194,6 +2242,7 @@ pub const Evaluator = struct {
 
                             self.actor_ctx = prev_ctx;
                             self.env.popScope();
+                            leaveHandler(lend);
 
                             if (ctx.reply_value) |rv| return rv;
                             if (has_val) return last_val;
@@ -3919,4 +3968,88 @@ test "a builtin that refuses an argument says which one" {
     var again = Evaluator.init(alloc);
     try std.testing.expectError(error.TypeError, evalProgram(alloc, &again, "concat(\"a\")"));
     try std.testing.expectEqualStrings("RUNTIME ERROR", again.last_error.?.title);
+}
+
+// State is lent to a handler's scope rather than defined into it, and a
+// `become` writes the actor's state for the NEXT message. These are the
+// cases where lending the live array would show through: a become followed
+// by a read, two becomes, a send back into the same actor from inside a
+// handler, a closure made before a become, a parameter named like a field.
+// The expected values are what the interpreter gave before state was lent.
+test "become is a snapshot for the running handler, however state is bound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var evaluator = Evaluator.init(alloc);
+    const source =
+        \\actor T do
+        \\  state n: Int :: 1
+        \\  state m: Int :: 10
+        \\  on :bump do
+        \\    become n: n + 1
+        \\    reply n
+        \\  end
+        \\  on :twice do
+        \\    become n: n + 1
+        \\    become n: n + 1
+        \\    reply n
+        \\  end
+        \\  on :get do reply n end
+        \\  on :set(n: Int) do
+        \\    become m: n
+        \\    reply n
+        \\  end
+        \\  on :outer(other: Any) do
+        \\    before = n
+        \\    other <- :bump
+        \\    after = n
+        \\    reply [before, after, other <- :get]
+        \\  end
+        \\  on :guarded(x: Int) when x > n do reply [x, n] end
+        \\  on :guarded(x: Int) do reply [0, n] end
+        \\  on :mk do
+        \\    f = fn() do n end
+        \\    become n: n + 100
+        \\    reply [f(), n]
+        \\  end
+        \\end
+        \\t = spawn T
+        \\a = t <- :bump
+        \\b = t <- :get
+        \\c = t <- :twice
+        \\d = t <- :get
+        \\e = t <- :set(77)
+        \\g = t <- :get
+        \\u = spawn T
+        \\h = t <- :outer(u)
+        \\i = u <- :get
+        \\j = t <- :guarded(1000)
+        \\k = t <- :guarded(1)
+        \\l = t <- :mk
+        \\m = t <- :get
+        \\q = t <- :outer(t)
+        \\[a, b, c, d, e, g, h, i, j, k, l, m, q]
+    ;
+    const result = try evalProgram(alloc, &evaluator, source);
+    const expected = [_]i64{ 1, 2, 2, 3, 3, 3 };
+    const items = result.list;
+    try std.testing.expectEqual(@as(usize, 13), items.len);
+    for (expected, 0..) |want, i| try std.testing.expectEqual(want, items[i].integer);
+    // outer: before, after, and what the other actor says
+    try std.testing.expectEqual(@as(i64, 3), items[6].list[0].integer);
+    try std.testing.expectEqual(@as(i64, 3), items[6].list[1].integer);
+    try std.testing.expectEqual(@as(i64, 2), items[6].list[2].integer);
+    try std.testing.expectEqual(@as(i64, 2), items[7].integer);
+    // a guard sees the state as it was
+    try std.testing.expectEqual(@as(i64, 1000), items[8].list[0].integer);
+    try std.testing.expectEqual(@as(i64, 0), items[9].list[0].integer);
+    // a closure made before a become keeps the old n
+    try std.testing.expectEqual(@as(i64, 3), items[10].list[0].integer);
+    try std.testing.expectEqual(@as(i64, 3), items[10].list[1].integer);
+    try std.testing.expectEqual(@as(i64, 103), items[11].integer);
+    // a handler that sends to its own actor: its own n stays, the send sees the new one
+    try std.testing.expectEqual(@as(i64, 103), items[12].list[0].integer);
+    try std.testing.expectEqual(@as(i64, 103), items[12].list[1].integer);
+    try std.testing.expectEqual(@as(i64, 104), items[12].list[2].integer);
 }

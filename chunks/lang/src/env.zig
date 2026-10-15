@@ -237,6 +237,15 @@ pub const Environment = struct {
         scope.own_base = scope.bindings.items.len;
     }
 
+    /// Lend the current scope an actor's state fields as its captured tier.
+    /// The scope is a fresh handler scope: nothing was lent to it before.
+    pub fn lendState(self: *Environment, items: []const Value.CapturedBinding, names: u64) void {
+        if (self.scopes.items.len == 0) return;
+        const scope = &self.scopes.items[self.scopes.items.len - 1];
+        scope.captured = items;
+        scope.captured_names = names;
+    }
+
     /// The current top-level binding of `name`, the latest if it was defined
     /// more than once.
     pub fn lookupTop(self: *const Environment, name: []const u8) ?*const Value {

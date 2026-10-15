@@ -111,6 +111,11 @@ pub const Value = union(enum) {
 
     pub const HandlerDef = struct {
         name: []const u8,
+        /// `Environment.hashName(name)`. A send compares this before the
+        /// bytes: a Temper object has a getter and a setter per field and a
+        /// method for every one of its functions, with names that share long
+        /// prefixes, and the scan over them was a tenth of a send-heavy loop.
+        hash: u32,
         params: []const @import("ast.zig").Node.HandlerParam,
         guard: ?*const @import("ast.zig").Node,
         body: []const @import("ast.zig").Node,

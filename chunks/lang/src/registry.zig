@@ -16,6 +16,21 @@ pub const ActorStatus = enum {
     dead,
 };
 
+/// An instance's state fields in the shape `Scope.captured` borrows, so a
+/// handler can be lent them instead of defining them one by one.
+///
+/// This is a derived copy of `ActorEntry.state_fields`, in the same order,
+/// and `become` keeps it in step. A running handler holds a pointer to one
+/// of these and counts itself in `borrowers`; `become` writes in place only
+/// while no handler holds it, and otherwise swaps in a fresh copy, so the
+/// handler that is running (and every handler it called) keeps the values it
+/// started with.
+pub const StateLend = struct {
+    items: []Value.CapturedBinding,
+    names: u64,
+    borrowers: u32 = 0,
+};
+
 /// A spawned actor instance in the registry.
 pub const ActorEntry = struct {
     ref: ActorRef,
@@ -24,6 +39,10 @@ pub const ActorEntry = struct {
     status: ActorStatus,
     mailbox: Mailbox, // pending messages
     reductions: u32 = 4000, // remaining reductions this timeslice
+    /// Built on the first send, dropped by anything that replaces
+    /// `state_fields` wholesale (migrate, restart) and left null by a
+    /// compaction, which builds entries without it.
+    lent: ?*StateLend = null,
 };
 
 /// A registered actor template (from an actor definition).
@@ -117,6 +136,7 @@ pub const Registry = struct {
             }
         }
         entry.state_fields = state;
+        entry.lent = null;
         entry.handlers = template.handlers;
     }
 
@@ -255,6 +275,7 @@ pub const Registry = struct {
                 entry.state_fields[i] = default_field;
             }
         }
+        entry.lent = null;
         entry.status = .idle;
     }
 
@@ -275,6 +296,7 @@ pub const Registry = struct {
                         entry.state_fields[i] = default_field;
                     }
                 }
+                entry.lent = null;
                 entry.status = .idle;
             }
         }
