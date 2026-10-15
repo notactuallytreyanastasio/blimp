@@ -1,0 +1,145 @@
+# buf_*, sbuf_* and hmap_*: mutable buffers named by an Int handle.
+# Run: ./blimp test/handles_test.blimp --test
+
+def raises(code: String) -> Bool do
+  r = blimp_eval(code)
+  case type_of(r) == :map do
+    true -> lookup(r, "error") == "runtime error"
+    false -> false
+  end
+end
+
+actor ListBufferTests do
+  test "push, get, set, pop, len" do
+    b = buf_new()
+    buf_push(b, "a")
+    buf_push(b, "b")
+    buf_push(b, "c")
+    assert_eq(buf_len(b), 3)
+    assert_eq(buf_get(b, 1), "b")
+    assert_eq(buf_get(b, 3), nil)
+    assert_eq(buf_get(b, -1), nil)
+    buf_set(b, 0, "z")
+    assert_eq(buf_pop(b), "c")
+    assert_eq(buf_items(b), ["z", "b"])
+  end
+
+  test "buf_items is a snapshot: later pushes do not change it" do
+    b = buf_new()
+    buf_push(b, 1)
+    before = buf_items(b)
+    buf_push(b, 2)
+    assert_eq(before, [1])
+    assert_eq(buf_items(b), [1, 2])
+  end
+
+  test "replace, extend and clear" do
+    b = buf_new()
+    buf_replace(b, [1, 2])
+    buf_extend(b, [3, 4])
+    assert_eq(buf_items(b), [1, 2, 3, 4])
+    buf_clear(b)
+    assert_eq(buf_len(b), 0)
+  end
+
+  test "mistakes raise: an unknown handle, the wrong kind, pop of empty, set past the end" do
+    b = buf_new()
+    s = sbuf_new()
+    assert(raises("buf_len(99999)"))
+    assert(raises(concat("buf_len(", concat(to_string(s), ")"))))
+    assert(raises(concat("buf_pop(", concat(to_string(b), ")"))))
+    assert(raises(concat("buf_set(", concat(to_string(b), ", 0, 1)"))))
+  end
+
+  test "20000 pushes" do
+    b = buf_new()
+    each(range(1, 20000), fn(i: Int) do buf_push(b, i) end)
+    assert_eq(buf_len(b), 20000)
+    assert_eq(buf_get(b, 19999), 20000)
+  end
+end
+
+actor StringBufferTests do
+  test "append and read back, in bytes" do
+    s = sbuf_new()
+    sbuf_append(s, "hello, ")
+    sbuf_append(s, "é")
+    assert_eq(sbuf_string(s), "hello, é")
+    assert_eq(sbuf_len(s), 9)
+    sbuf_clear(s)
+    assert_eq(sbuf_string(s), "")
+  end
+
+  test "appending a non-string raises" do
+    assert(raises("sbuf_append(sbuf_new(), 5)"))
+  end
+end
+
+actor HashMapTests do
+  test "put, get, has, len with a default for a miss" do
+    m = hmap_new()
+    hmap_put(m, "a", 1)
+    hmap_put(m, "b", 2)
+    assert_eq(hmap_get(m, "a", nil), 1)
+    assert_eq(hmap_get(m, "zz", :none), :none)
+    assert(hmap_has(m, "b"))
+    refute(hmap_has(m, "c"))
+    assert_eq(hmap_len(m), 2)
+  end
+
+  test "Int 1 and String \"1\" are different keys" do
+    m = hmap_new()
+    hmap_put(m, 1, :int)
+    hmap_put(m, "1", :string)
+    assert_eq(hmap_get(m, 1, nil), :int)
+    assert_eq(hmap_get(m, "1", nil), :string)
+    assert_eq(hmap_len(m), 2)
+  end
+
+  test "list keys are compared by content" do
+    m = hmap_new()
+    hmap_put(m, ["a", "bc"], 1)
+    assert(hmap_has(m, ["a", "bc"]))
+    refute(hmap_has(m, ["ab", "c"]))
+  end
+
+  test "iteration is in insertion order and an overwrite keeps its place" do
+    m = hmap_new()
+    hmap_put(m, "x", 1)
+    hmap_put(m, "y", 2)
+    hmap_put(m, "x", 3)
+    assert_eq(hmap_keys(m), ["x", "y"])
+    assert_eq(hmap_values(m), [3, 2])
+    assert_eq(hmap_entries(m), [["x", 3], ["y", 2]])
+  end
+
+  test "remove answers the old value or the default" do
+    m = hmap_new()
+    hmap_put(m, "x", 1)
+    assert_eq(hmap_remove(m, "x", nil), 1)
+    assert_eq(hmap_remove(m, "x", :gone), :gone)
+    assert_eq(hmap_len(m), 0)
+  end
+
+  test "assign copies, it does not alias" do
+    a = hmap_new()
+    b = hmap_new()
+    hmap_put(a, "k", 1)
+    hmap_put(b, "other", 2)
+    hmap_assign(b, a)
+    hmap_put(b, "k", 99)
+    assert_eq(hmap_get(a, "k", nil), 1)
+    assert_eq(hmap_keys(b), ["k"])
+  end
+
+  test "a map, as a key, raises" do
+    assert(raises("hmap_has(hmap_new(), %{a: 1})"))
+  end
+
+  test "20000 String keys" do
+    m = hmap_new()
+    each(range(1, 20000), fn(i: Int) do hmap_put(m, to_string(i), i) end)
+    assert_eq(hmap_len(m), 20000)
+    assert_eq(hmap_get(m, "19999", nil), 19999)
+  end
+end

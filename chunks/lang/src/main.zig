@@ -570,6 +570,8 @@ const ValueHeap = struct {
     /// The same, saying how many unreachable actors it dropped (always 0
     /// with .keep_all, and when the copy fails).
     fn compactWith(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) usize {
+        // Buffers in handles.zig hold pointers into this heap; moving it would strand them.
+        if (@import("handles.zig").inUse()) return 0;
         const next = 1 - self.live;
         const dropped = gc.compactWith(eval, self.halves[next].allocator(), self.scratch, actors) catch return 0;
         _ = self.halves[self.live].reset(.free_all);
