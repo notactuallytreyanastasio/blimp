@@ -77,6 +77,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    // main.zig imports eval.zig by path, so builtins.zig and native_ext.zig
+    // (which @cInclude sqlite3.h) compile in the exe's own module, not
+    // lib_mod. On macOS the SDK's sqlite3.h hid the missing path; a
+    // x86_64-linux-musl cross-build, which is what the site ships, failed
+    // with "sqlite3.h not found".
+    exe.root_module.addIncludePath(b.path("vendor/sqlite"));
 
     // -- Run step --
     const run_step = b.step("run", "Run the Blimp parser");
@@ -107,6 +113,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    main_tests.root_module.addIncludePath(b.path("vendor/sqlite"));
     const run_main_tests = b.addRunArtifact(main_tests);
 
     const test_step = b.step("test", "Run all tests");
