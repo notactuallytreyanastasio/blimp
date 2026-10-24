@@ -978,8 +978,29 @@ pub fn pgStart(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
         }
     }
 
+    // A slot, and room under the thread cap, before anything is allocated:
+    // the -1 answer then has nothing to free. A worker whose query timed out
+    // keeps running (it cancels on the server, then closes) after pg_result
+    // has given its slot back, so in_flight, not the slots, bounds threads;
+    // without this a program reissuing timed-out queries piled up detached
+    // workers and sockets with no limit.
+    var free_i: ?usize = null;
+    for (&slots, 0..) |*slot, i| {
+        if (slot.job == null) {
+            free_i = i;
+            break;
+        }
+    }
+    // Every slot busy, or slots_max workers still alive: -1, as http_start
+    // answers, and pg_result(-1) raises.
+    const slot_i = free_i orelse return box(allocator, .{ .integer = -1 });
+    if (in_flight.load(.monotonic) >= slots_max) return box(allocator, .{ .integer = -1 });
+
     const job = pa.create(Job) catch return error.OutOfMemory;
     job.* = .{ .arena = .init(pa) };
+    // The only free of a job that never reached a worker. No path below
+    // frees it by hand: an error return runs this, and a second free was a
+    // double deinit of the arena.
     errdefer freeJob(job);
     // the worker owns copies: the interpreter's heap is compacted under it
     const a = job.arena.allocator();
@@ -995,28 +1016,15 @@ pub fn pgStart(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     for (args[2].list, 0..) |p, i| params[i] = try paramText(a, p, i);
     job.params = params;
 
-    var free_i: ?usize = null;
-    for (&slots, 0..) |*slot, i| {
-        if (slot.job == null) {
-            free_i = i;
-            break;
-        }
-    }
-    // Every slot busy: -1, as http_start answers, and pg_result(-1) raises.
-    const i = free_i orelse {
-        freeJob(job);
-        return box(allocator, .{ .integer = -1 });
-    };
     job.deadline = monoMs() + timeout_ms;
     _ = in_flight.fetchAdd(1, .monotonic);
     const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
         _ = in_flight.fetchSub(1, .monotonic);
-        freeJob(job);
-        return error.NotSupported;
+        return error.NotSupported; // the errdefer frees the job
     };
     thread.detach();
-    slots[i] = .{ .job = job, .deadline = job.deadline };
-    return box(allocator, .{ .integer = @intCast(i) });
+    slots[slot_i] = .{ .job = job, .deadline = job.deadline };
+    return box(allocator, .{ .integer = @intCast(slot_i) });
 }
 
 fn decodeCell(allocator: std.mem.Allocator, oid: i32, text: []const u8) EvalError!union(enum) { ok: *const Value, bad: []const u8 } {
