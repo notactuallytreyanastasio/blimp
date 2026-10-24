@@ -191,6 +191,18 @@ pub const Environment = struct {
         return env;
     }
 
+    /// `list.append(...) catch {}` with the common case inline.  `append`
+    /// calls `ensureTotalCapacity` out of line even when there is room, and
+    /// a recycled frame almost always has room: that call was 4% of
+    /// rendering the site's posts, from bindParam and pushScope.  What
+    /// happens on a failed grow is unchanged.
+    inline fn appendFast(comptime T: type, allocator: std.mem.Allocator, list: *std.ArrayList(T), item: T) void {
+        if (list.items.len < list.capacity) {
+            list.items.len += 1;
+            list.items[list.items.len - 1] = item;
+        } else list.append(allocator, item) catch {};
+    }
+
     /// Record that `hash` names something bound below the top level.
     inline fn markLocal(self: *Environment, hash: u32) void {
         self.ever_local[hash >> 22] |= @as(u64, 1) << @as(u6, @truncate(hash >> 16));
@@ -208,7 +220,7 @@ pub const Environment = struct {
         const bindings = self.free_scopes.pop() orelse
             std.ArrayList(Binding){ .items = &.{}, .capacity = 0 };
         const outer: u64 = if (self.scopes.items.len >= 1) self.scopes.items[self.scopes.items.len - 1].stack_names else 0;
-        self.scopes.append(self.allocator, .{ .bindings = bindings, .stack_names = outer }) catch {};
+        appendFast(Scope, self.allocator, &self.scopes, .{ .bindings = bindings, .stack_names = outer });
     }
 
     /// Lend the current scope a closure's captured bindings.
@@ -463,7 +475,7 @@ pub const Environment = struct {
         scope.stack_names |= k.bit;
         self.markLocal(k.hash);
         h.* = @intCast(items.len - scope.own_base);
-        scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
+        appendFast(Binding, self.allocator, &scope.bindings, .{ .name = name, .val = value, .hash = k.hash });
     }
 
     /// Bind a parameter at call entry.  The callee's own region is empty
@@ -485,7 +497,7 @@ pub const Environment = struct {
         scope.names |= k.bit;
         scope.stack_names |= k.bit;
         self.markLocal(k.hash);
-        scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
+        appendFast(Binding, self.allocator, &scope.bindings, .{ .name = name, .val = value, .hash = k.hash });
     }
 
     fn defineIn(self: *Environment, index: usize, name: []const u8, hash: u32, bit: u64, value: *const Value) void {
@@ -509,7 +521,7 @@ pub const Environment = struct {
         if (scope.names & bit == 0) {
             scope.names |= bit;
             scope.stack_names |= bit;
-            scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = hash }) catch {};
+            appendFast(Binding, self.allocator, &scope.bindings, .{ .name = name, .val = value, .hash = hash });
             return;
         }
         scope.names |= bit;
@@ -525,7 +537,7 @@ pub const Environment = struct {
                 return;
             }
         }
-        scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = hash }) catch {};
+        appendFast(Binding, self.allocator, &scope.bindings, .{ .name = name, .val = value, .hash = hash });
     }
 
     /// Return all bindings visible from the current scope (innermost wins).
