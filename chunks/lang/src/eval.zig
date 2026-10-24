@@ -1304,32 +1304,26 @@ pub const Evaluator = struct {
         return val;
     }
 
-    /// Check if a value matches an expected type name.
-    fn checkType(self: *Evaluator, val: *const Value, expected: []const u8) bool {
-        _ = self;
-        // Any accepts everything
-        if (std.mem.eql(u8, expected, "Any")) return true;
-        // Built-in types
-        if (std.mem.eql(u8, expected, "Int")) return val.* == .integer;
-        if (std.mem.eql(u8, expected, "Float")) return val.* == .float;
-        if (std.mem.eql(u8, expected, "String")) return val.* == .string;
-        if (std.mem.eql(u8, expected, "Atom")) return val.* == .atom;
-        if (std.mem.eql(u8, expected, "Bool")) return val.* == .boolean;
-        if (std.mem.eql(u8, expected, "Nil")) return val.* == .nil;
-        if (std.mem.eql(u8, expected, "List")) return val.* == .list;
-        if (std.mem.eql(u8, expected, "Tuple")) return val.* == .tuple;
-        if (std.mem.eql(u8, expected, "Map")) return val.* == .map;
-        if (std.mem.eql(u8, expected, "Function")) return val.* == .closure;
-        // List type: [Int], [String], etc.
-        if (expected.len > 2 and expected[0] == '[' and expected[expected.len - 1] == ']') {
-            return val.* == .list; // TODO: check element types
-        }
-        // Actor type: matches actor_ref with the right type_name
-        if (val.* == .actor_ref) {
-            return std.mem.eql(u8, val.actor_ref.type_name, expected);
-        }
-        // Unknown type: allow through (future: check actor templates)
-        return true;
+    /// Whether a value is accepted by a typed parameter.  The checks are
+    /// the ones the annotation's string used to be compared for on every
+    /// call; `TypeCheck.of` did that comparison once, at parse time.
+    fn checkType(val: *const Value, param: ast.Node.HandlerParam) bool {
+        return switch (param.check) {
+            .any => true,
+            .int => val.* == .integer,
+            .float => val.* == .float,
+            .string => val.* == .string,
+            .atom => val.* == .atom,
+            .boolean => val.* == .boolean,
+            .nil => val.* == .nil,
+            .list, .list_of => val.* == .list,
+            .tuple => val.* == .tuple,
+            .map => val.* == .map,
+            .function => val.* == .closure,
+            // Actor type: matches actor_ref with the right type_name.
+            // Unknown type otherwise: allow through (future: check actor templates).
+            .named => val.* != .actor_ref or std.mem.eql(u8, val.actor_ref.type_name, param.type_name.?),
+        };
     }
 
     fn typeError(self: *Evaluator, left: *const Value, right: *const Value, op_str: []const u8) EvalError {
@@ -1933,7 +1927,7 @@ pub const Evaluator = struct {
             // Bind parameters with runtime type checking
             for (c.params, 0..) |param, i| {
                 if (param.type_name) |expected_type| {
-                    if (!self.checkType(args[i], expected_type)) {
+                    if (!checkType(args[i], param)) {
                         self.env.popTo(base);
                         self.last_error = errors.typeMismatchDetailed(
                             args[i].typeName(),
@@ -4583,4 +4577,69 @@ test "true and wildcard branches: an assigning branch does not leak, a plain one
     try std.testing.expectEqualStrings("done", result.list[4].atom);
     try std.testing.expectEqualStrings("other", result.list[5].atom);
     try std.testing.expectEqualStrings("yes", result.list[6].atom);
+}
+
+test "a typed parameter accepts what its annotation names, resolved at parse time" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Each row: a parameter type, an argument it takes, one it refuses.
+    const rows = [_][3][]const u8{
+        .{ "Int", "1", "1.5" },
+        .{ "Float", "1.5", "1" },
+        .{ "String", "\"s\"", ":s" },
+        .{ "Atom", ":s", "\"s\"" },
+        .{ "Bool", "true", "nil" },
+        .{ "Nil", "nil", "false" },
+        .{ "List", "[1]", "{1}" },
+        .{ "[Int]", "[\"not checked\"]", "%{}" },
+        .{ "Tuple", "{1}", "[1]" },
+        .{ "Map", "%{}", "[]" },
+        .{ "Function", "fn(x: Int) -> Int do x end", "1" },
+    };
+    for (rows) |row| {
+        const ok = try std.fmt.allocPrint(alloc, "def f(x: {s}) -> Int do 7 end\nf({s})", .{ row[0], row[1] });
+        var e1 = Evaluator.init(alloc);
+        try std.testing.expectEqual(@as(i64, 7), (try evalProgram(alloc, &e1, ok)).integer);
+        const bad = try std.fmt.allocPrint(alloc, "def f(x: {s}) -> Int do 7 end\nf({s})", .{ row[0], row[2] });
+        var e2 = Evaluator.init(alloc);
+        try std.testing.expectError(error.TypeError, evalProgram(alloc, &e2, bad));
+    }
+
+    // Any and a name that is no builtin type take everything but an actor
+    // of another type.
+    var e3 = Evaluator.init(alloc);
+    const named =
+        \\actor A do
+        \\  on :ping do
+        \\    reply 1
+        \\  end
+        \\end
+        \\actor B do
+        \\  on :ping do
+        \\    reply 2
+        \\  end
+        \\end
+        \\def f(x: A) -> Int do 7 end
+        \\def g(x: Any) -> Int do 8 end
+        \\f(spawn A) + f(3) + g(spawn B) + g("s")
+    ;
+    try std.testing.expectEqual(@as(i64, 30), (try evalProgram(alloc, &e3, named)).integer);
+    var e4 = Evaluator.init(alloc);
+    const wrong_actor =
+        \\actor A do
+        \\  on :ping do
+        \\    reply 1
+        \\  end
+        \\end
+        \\actor B do
+        \\  on :ping do
+        \\    reply 2
+        \\  end
+        \\end
+        \\def f(x: A) -> Int do 7 end
+        \\f(spawn B)
+    ;
+    try std.testing.expectError(error.TypeError, evalProgram(alloc, &e4, wrong_actor));
 }

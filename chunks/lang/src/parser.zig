@@ -253,6 +253,7 @@ pub const Parser = struct {
                     .name = param_name,
                     .key = NameKey.of(param_name),
                     .type_name = param_type,
+                    .check = Node.TypeCheck.of(param_type),
                 }) catch return error.OutOfMemory;
                 if (self.current.kind == .comma) self.advance();
             }
@@ -1229,6 +1230,7 @@ pub const Parser = struct {
                 .name = param_name,
                 .key = NameKey.of(param_name),
                 .type_name = type_name,
+                .check = Node.TypeCheck.of(type_name),
             }) catch return error.OutOfMemory;
 
             if (self.current.kind == .comma) self.advance();
