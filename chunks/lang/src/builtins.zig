@@ -762,6 +762,25 @@ fn builtinConcat(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     return result;
 }
 
+/// The first index at or after `from` where the non-empty `sep` starts in
+/// `str`.  The separator's first byte is found with `indexOfScalarPos`, which
+/// scans a vector at a time, and only there is the rest compared.  The loop
+/// it replaces compared the whole separator at every byte, 1.7% of rendering
+/// the site's posts; `std.mem.indexOfPos` does the same for a separator of
+/// two to four bytes.
+fn findSeparator(str: []const u8, from: usize, sep: []const u8) ?usize {
+    if (sep.len > str.len) return null;
+    // A match must start at or before here.
+    const last_start = str.len - sep.len;
+    var i = from;
+    while (i <= last_start) {
+        const at = std.mem.indexOfScalarPos(u8, str[0 .. last_start + 1], i, sep[0]) orelse return null;
+        if (std.mem.eql(u8, str[at + 1 .. at + sep.len], sep[1..])) return at;
+        i = at + 1;
+    }
+    return null;
+}
+
 /// split("a,b,c", ",") => ["a", "b", "c"]
 fn builtinSplit(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2) return error.TypeError;
@@ -771,8 +790,23 @@ fn builtinSplit(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
 
     var parts: std.ArrayList(*const Value) = .{ .items = &.{}, .capacity = 0 };
     var start: usize = 0;
+    if (sep.len != 0) {
+        // Searching from the byte after a match keeps "a,,b" at three fields.
+        while (findSeparator(str, start, sep)) |at| {
+            const part = allocator.create(Value) catch return error.OutOfMemory;
+            part.* = Value{ .string = str[start..at] };
+            parts.append(allocator, part) catch return error.OutOfMemory;
+            start = at + sep.len;
+        }
+        const tail = allocator.create(Value) catch return error.OutOfMemory;
+        tail.* = Value{ .string = str[start..] };
+        parts.append(allocator, tail) catch return error.OutOfMemory;
+        const out = allocator.create(Value) catch return error.OutOfMemory;
+        out.* = Value{ .list = parts.toOwnedSlice(allocator) catch return error.OutOfMemory };
+        return out;
+    }
     var i: usize = 0;
-    // No continue-expression: after a match `i` must land exactly on the byte
+    // The empty separator.  No continue-expression: after a match `i` must land exactly on the byte
     // following the separator, or a separator that starts there is skipped
     // and "a,,b" splits into two fields instead of three. An empty separator
     // matches at every byte, so it still has to step one to make progress.
@@ -6508,4 +6542,52 @@ test "process_stats answers what the process has used, all of it counted" {
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) try std.testing.expect(m[1].val.integer > 0);
     try std.testing.expect(m[3].val.integer >= 1);
     try std.testing.expectError(error.TypeError, builtinProcessStats(a, &.{v}));
+}
+
+test "split agrees with a byte-by-byte reference on every separator length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const cases = [_][2][]const u8{
+        .{ "a,b,c", "," },  .{ "a,,b", "," },   .{ ",a,", "," },   .{ "", "," },
+        .{ "abc", "abcd" }, .{ "abab", "ab" },  .{ "aaa", "aa" },  .{ "x--y----z", "--" },
+        .{ "a\r\nb\r\n", "\r\n" }, .{ "ab", "" }, .{ "", "" },     .{ "**a**b**", "**" },
+        .{ "a<br/>b<br/", "<br/>" },
+    };
+    var prng = std.Random.DefaultPrng.init(42);
+    var all: std.ArrayList([2][]const u8) = .empty;
+    try all.appendSlice(alloc, &cases);
+    // Random strings over a two-letter alphabet hit overlapping and
+    // adjacent separators far more often than prose does.
+    for (0..300) |_| {
+        const r = prng.random();
+        const s = try alloc.alloc(u8, r.uintLessThan(usize, 24));
+        for (s) |*c| c.* = "ab"[r.uintLessThan(usize, 2)];
+        const sep = try alloc.alloc(u8, 1 + r.uintLessThan(usize, 3));
+        for (sep) |*c| c.* = "ab"[r.uintLessThan(usize, 2)];
+        try all.append(alloc, .{ s, sep });
+    }
+    for (all.items) |c| {
+        const str = c[0];
+        const sep = c[1];
+        // The loop split used before: compare at every byte.
+        var want: std.ArrayList([]const u8) = .empty;
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i + sep.len <= str.len) {
+            if (std.mem.eql(u8, str[i .. i + sep.len], sep)) {
+                try want.append(alloc, str[start..i]);
+                i += sep.len;
+                start = i;
+                if (sep.len == 0) i += 1;
+            } else i += 1;
+        }
+        try want.append(alloc, str[start..]);
+
+        const a = try make(alloc, .{ .string = str });
+        const b = try make(alloc, .{ .string = sep });
+        const got = (try builtinSplit(alloc, &.{ a, b })).list;
+        try std.testing.expectEqual(want.items.len, got.len);
+        for (want.items, got) |w, g| try std.testing.expectEqualStrings(w, g.string);
+    }
 }
