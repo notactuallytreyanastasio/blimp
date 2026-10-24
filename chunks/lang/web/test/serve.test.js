@@ -91,11 +91,23 @@ test('a failing command reports and the site keeps serving', async (t) => {
 test('memory comes back down while it serves', async (t) => {
   const s = await start(t);
   const burst = async (n) => { for (let i = 0; i < n; i++) await get(s.port); };
-  await burst(15000);
-  const stats = await control(s.sock, ':stats');
-  const compactions = Number(stats.match(/compactions (\d+)/)[1]);
-  assert.ok(compactions >= 1, `no compaction after 15000 requests: ${stats}`);
-  assert.strictEqual(await control(s.sock, 'server <- :served'), '=> 15000\n');
+  // A compaction comes after 16MB of allocation, and the heap grows in arena
+  // chunks half again as large as the last, so where it crosses 16MB moves
+  // by thousands of requests with the size the heap started at: 15000 at
+  // once sat right on that edge. Burst until one has happened, within a
+  // bound well past it.
+  let served = 0;
+  let stats = '';
+  let compactions = 0;
+  while (served < 40000) {
+    await burst(2500);
+    served += 2500;
+    stats = await control(s.sock, ':stats');
+    compactions = Number(stats.match(/compactions (\d+)/)[1]);
+    if (compactions >= 1) break;
+  }
+  assert.ok(compactions >= 1, `no compaction after ${served} requests: ${stats}`);
+  assert.strictEqual(await control(s.sock, 'server <- :served'), `=> ${served}\n`);
 });
 
 test('a large body reaches a slow reader whole, on a non-blocking socket', { timeout: 20000 }, async (t) => {

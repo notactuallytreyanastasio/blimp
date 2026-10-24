@@ -91,8 +91,93 @@ pub const Actors = enum {
 /// a ref printed before the drop still names nothing rather than someone
 /// else.
 pub fn compactWith(eval: *Evaluator, from: ?*const std.heap.ArenaAllocator, to: std.mem.Allocator, scratch: std.mem.Allocator, actors: Actors) CompactError!usize {
+    const r = try compactPlan(eval, .{ .from = from, .to = to, .scratch = scratch, .actors = actors });
+    return r.dropped;
+}
+
+/// An address range [lo, hi) that one compare-and-subtract answers for.
+pub const Region = struct {
+    lo: usize = 0,
+    hi: usize = 0,
+
+    pub fn of(bytes: []const u8) Region {
+        return .{ .lo = @intFromPtr(bytes.ptr), .hi = @intFromPtr(bytes.ptr) + bytes.len };
+    }
+
+    pub inline fn has(self: Region, addr: usize) bool {
+        return addr -% self.lo < self.hi -% self.lo;
+    }
+
+    pub fn len(self: Region) usize {
+        return self.hi - self.lo;
+    }
+};
+
+/// Everything a compaction needs to know.
+///
+/// The old space.  A long-lived server builds most of its heap once, at
+/// boot (prebuilt pages, parsed data files), and never changes it; copying
+/// all of that on every compaction made each pause as long as the whole
+/// live set.  A *promotion* (`promote_into`) writes the immutable data it
+/// copies (values, strings, element lists, map entries, closures, captures,
+/// view nodes, handler tables) into one caller-owned region instead of
+/// `to`.  Later compactions pass that region as `keep`: a value, string or
+/// handler table inside it is returned unchanged and not followed.
+///
+/// That is sound because of what goes in the region and what does not.
+/// Values are immutable, and a promotion copies a value's children before
+/// anything can point at the copy, so the region only ever points into
+/// itself, at interned names, at the static small values, and at AST nodes
+/// (which outlive every compaction).  Nothing old can come to point at
+/// something young.  What *is* mutated after it is made -- the scope
+/// binding lists (rebound in place), each actor's entry and its
+/// `state_fields` (written by `become`), mailboxes, the registry's lists,
+/// handle tables -- is never put in the region: it is allocated from `to`
+/// on every compaction, promotion included, and walked as a root each time.
+/// The test "a binding and an actor's state rebound after promotion survive
+/// compaction" fails if one of those ends up in the region.
+pub const Plan = struct {
+    /// The arena the evaluator allocates from now (see `compact`).
+    from: ?*const std.heap.ArenaAllocator,
+    to: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    actors: Actors = .keep_all,
+    /// The current old space: kept where it is, never followed.
+    keep: Region = .{},
+    /// Promote: put every immutable thing copied into this region.  When it
+    /// is too small the compaction fails with OutOfMemory and changes
+    /// nothing.  `keep` must not overlap it; to re-promote, pass the
+    /// previous old space as `also_from` instead of `keep`, and free it
+    /// after.
+    promote_into: ?[]u8 = null,
+    /// More from-space beside `from`: a previous old space being folded
+    /// into a new one.
+    also_from: Region = .{},
+    /// The actor ids the values in `keep` name (`Result.old_refs` of the
+    /// promotion that made it).  The copier does not look inside `keep`, so
+    /// without these `.drop_unreachable` would drop an actor that only an
+    /// old value holds -- the site's own top-level actors, for one.
+    keep_refs: []const u64 = &.{},
+};
+
+pub const Result = struct {
+    /// Actor instances left behind (see `compactWith`).
+    dropped: usize,
+    /// Bytes of `promote_into` used, from its start.
+    promoted: usize = 0,
+    /// After a promotion: every actor id a promoted value names, allocated
+    /// from `scratch` and owned by the caller, to pass back as `keep_refs`.
+    old_refs: []u64 = &.{},
+};
+
+pub fn compactPlan(eval: *Evaluator, plan: Plan) CompactError!Result {
+    const to = plan.to;
+    const scratch = plan.scratch;
+    const from = plan.from;
+    const actors = plan.actors;
     var copier = Copier{
         .to = to,
+        .keep = plan.keep,
         .values = std.AutoHashMap(usize, *const Value).init(scratch),
         .handlers = std.AutoHashMap(usize, []const Value.HandlerDef).init(scratch),
         .seen = std.AutoHashMap(u64, void).init(scratch),
@@ -103,7 +188,12 @@ pub fn compactWith(eval: *Evaluator, from: ?*const std.heap.ArenaAllocator, to: 
     defer copier.handlers.deinit();
     defer copier.seen.deinit();
     defer copier.pending.deinit(scratch);
-    if (from) |arena| copier.old = try Forwarding.init(scratch, arena);
+    if (plan.promote_into) |region| copier.bump = .{ .buf = region, .fixed = true };
+    var old_ids = std.AutoHashMap(u64, void).init(scratch);
+    defer old_ids.deinit();
+    if (plan.promote_into != null) copier.old_ids = &old_ids;
+    for (plan.keep_refs) |id| try copier.see(id);
+    if (from) |arena| copier.old = try Forwarding.init(scratch, arena, plan.also_from);
     defer copier.old.deinit(scratch);
     copier.interned = try internedRanges(scratch);
     defer scratch.free(copier.interned);
@@ -149,6 +239,12 @@ pub fn compactWith(eval: *Evaluator, from: ?*const std.heap.ArenaAllocator, to: 
     // The builtin table's storage is in the heap being left; its contents
     // are static, so it is copied rather than built again.
     const builtins = try eval.builtins.cloneInto(to);
+    const old_refs = try scratch.alloc(u64, old_ids.count());
+    {
+        var it = old_ids.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |k| : (i += 1) old_refs[i] = k.*;
+    }
 
     eval.env.scopes = scopes;
     // The recycled binding lists belong to the allocator being dropped.
@@ -164,7 +260,8 @@ pub fn compactWith(eval: *Evaluator, from: ?*const std.heap.ArenaAllocator, to: 
     eval.builtins = builtins;
     eval.allocator = to;
     handles_mod.relocate(handle_new);
-    return dropped;
+    const promoted = if (plan.promote_into) |region| @intFromPtr(copier.bump.buf.ptr) - @intFromPtr(region.ptr) else 0;
+    return .{ .dropped = dropped, .promoted = promoted, .old_refs = old_refs };
 }
 
 /// An address range, [lo, hi).
@@ -230,9 +327,14 @@ const Forwarding = struct {
 
     const grain = @sizeOf(Value);
 
-    fn init(scratch: std.mem.Allocator, arena: *const std.heap.ArenaAllocator) CompactError!Forwarding {
-        const ranges = try arenaRanges(scratch, arena);
+    fn init(scratch: std.mem.Allocator, arena: *const std.heap.ArenaAllocator, extra: Region) CompactError!Forwarding {
+        var ranges = try arenaRanges(scratch, arena);
         errdefer scratch.free(ranges);
+        if (extra.len() > 0) {
+            ranges = try scratch.realloc(ranges, ranges.len + 1);
+            ranges[ranges.len - 1] = .{ .lo = extra.lo, .hi = extra.hi };
+            std.mem.sort(Range, ranges, {}, Range.lessThan);
+        }
         var total: usize = 0;
         for (ranges) |*r| {
             r.first_slot = total;
@@ -292,6 +394,9 @@ const Forwarding = struct {
 /// registry's) are allocated from `to` directly.
 const Bump = struct {
     buf: []u8 = &.{},
+    /// A promotion's region: everything goes in `buf`, and running out of
+    /// it is running out of memory.
+    fixed: bool = false,
 
     /// Small next to the arena's own chunks (which grow by half each time):
     /// when a block does not fit the rest of a chunk the arena starts a new
@@ -307,6 +412,7 @@ const Bump = struct {
             self.buf = self.buf[pad + n ..];
             return p;
         }
+        if (self.fixed) return error.OutOfMemory;
         // rawAlloc: `alloc` would fill the memory with 0xaa in a safe
         // build, a second pass over every byte about to be written.
         if (n > block / 4) return to.rawAlloc(n, .fromByteUnits(alignment), @returnAddress()) orelse error.OutOfMemory;
@@ -320,6 +426,9 @@ const Copier = struct {
     to: std.mem.Allocator,
     bump: Bump = .{},
     old: Forwarding = .{},
+    keep: Region = .{},
+    /// Promoting: the actor ids promoted values name (Result.old_refs).
+    old_ids: ?*std.AutoHashMap(u64, void) = null,
     interned: []Range = &.{},
     /// Values outside the old heap, by address.
     values: std.AutoHashMap(usize, *const Value),
@@ -350,6 +459,7 @@ const Copier = struct {
     /// freed: kept when they are an interned name, copied otherwise.
     fn str(self: *Copier, s: []const u8) CompactError![]const u8 {
         if (s.len == 0) return s;
+        if (self.keep.has(@intFromPtr(s.ptr))) return s;
         if (findRange(self.interned, @intFromPtr(s.ptr)) != null) return s;
         const out = try self.alloc(u8, s.len);
         @memcpy(out, s);
@@ -362,6 +472,7 @@ const Copier = struct {
 
     fn value(self: *Copier, v: *const Value) CompactError!*const Value {
         if (value_mod.interned.isStatic(v)) return v;
+        if (self.keep.has(@intFromPtr(v))) return v;
         // Record the copy before recursing so shared and cyclic references
         // resolve to it.
         var nv: *Value = undefined;
@@ -387,6 +498,7 @@ const Copier = struct {
             .map => |entries| .{ .map = try self.mapEntries(entries) },
             .actor_ref => |r| blk: {
                 try self.see(r.id);
+                if (self.old_ids) |ids| try ids.put(r.id, {});
                 break :blk .{ .actor_ref = .{ .id = r.id, .type_name = try self.str(r.type_name) } };
             },
             .closure => |c| .{ .closure = try self.closure(c) },
@@ -452,6 +564,7 @@ const Copier = struct {
     // memo them by slice address to keep that sharing.
     fn handlerDefs(self: *Copier, defs: []const Value.HandlerDef) CompactError![]const Value.HandlerDef {
         if (defs.len == 0) return defs;
+        if (self.keep.has(@intFromPtr(defs.ptr))) return defs;
         if (self.handlers.get(@intFromPtr(defs.ptr))) |done| return done;
         const out = try self.alloc(Value.HandlerDef, defs.len);
         for (defs, 0..) |h, i| out[i] = .{
@@ -510,10 +623,15 @@ const Copier = struct {
     }
 
     fn entry(self: *Copier, e: *const registry_mod.ActorEntry) CompactError!*registry_mod.ActorEntry {
-        const ne = try self.create(registry_mod.ActorEntry);
+        // The entry and its state are written in place (`become`, status,
+        // reductions), so they come from `to`, never from a promotion's
+        // region: see `Plan`.
+        const ne = try self.to.create(registry_mod.ActorEntry);
+        const state = try self.to.alloc(Value.MapEntry, e.state_fields.len);
+        for (e.state_fields, 0..) |f, i| state[i] = .{ .key = try self.str(f.key), .val = try self.value(f.val) };
         ne.* = .{
             .ref = .{ .id = e.ref.id, .type_name = try self.str(e.ref.type_name) },
-            .state_fields = try self.mapEntries(e.state_fields),
+            .state_fields = state,
             .handlers = try self.handlerDefs(e.handlers),
             .status = e.status,
             .mailbox = try self.mailbox(e.mailbox),
@@ -1095,7 +1213,7 @@ test "the old heap's chunks are found, and nothing outside them" {
         // big allocations in between force several chunks
         if (i % 100 == 0) _ = try arena.allocator().alloc(u8, 10_000 + i * 50);
     }
-    var fwd = try Forwarding.init(std.testing.allocator, &arena);
+    var fwd = try Forwarding.init(std.testing.allocator, &arena, .{});
     defer fwd.deinit(std.testing.allocator);
     try std.testing.expect(fwd.ranges.len > 1);
     for (ptrs) |p| {
@@ -1159,4 +1277,175 @@ test "without the old arena every value goes through the map, and still survives
     try checkProgram(&eval, code.allocator());
     const pair = try run(code.allocator(), &eval, "pair");
     try std.testing.expect(pair.tuple[0] == pair.tuple[1]);
+}
+
+// ── Old space (Plan.promote_into / Plan.keep) ────────────────
+
+fn regionHash(bytes: []const u8) u64 {
+    return std.hash.Wyhash.hash(0, bytes);
+}
+
+fn inRegion(region: []const u8, p: anytype) bool {
+    return Region.of(region).has(@intFromPtr(p));
+}
+
+test "a binding and an actor's state rebound after promotion survive compaction" {
+    @import("handles.zig").dropAll();
+    const ta = std.testing.allocator;
+    var code = std.heap.ArenaAllocator.init(ta);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{ std.heap.ArenaAllocator.init(ta), std.heap.ArenaAllocator.init(ta) };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+    var live: usize = 0;
+
+    var eval = Evaluator.init(heaps[live].allocator());
+    eval.code_allocator = code.allocator();
+    _ = try run(code.allocator(), &eval, program);
+    // `held` is an actor only a list names; once that list is old, nothing
+    // the copier walks names it.
+    _ = try run(code.allocator(), &eval, "held = [spawn Counter, count: 40]\nbig = \"#{range(1, 2000)}\"");
+
+    const region = try ta.alignedAlloc(u8, .@"16", 1 << 20);
+    defer ta.free(region);
+    @memset(region, 0);
+    const p = try compactPlan(&eval, .{
+        .from = &heaps[live],
+        .to = heaps[1 - live].allocator(),
+        .scratch = ta,
+        .actors = .drop_unreachable,
+        .promote_into = region,
+    });
+    defer ta.free(p.old_refs);
+    _ = heaps[live].reset(.free_all);
+    live = 1 - live;
+    try std.testing.expect(p.promoted > 0);
+
+    // What boot made is in the region now.
+    const shared_before = try run(code.allocator(), &eval, "shared");
+    try std.testing.expect(inRegion(region, shared_before));
+    try std.testing.expect(inRegion(region, (try run(code.allocator(), &eval, "big")).string.ptr));
+    const sum = regionHash(region[0..p.promoted]);
+
+    // Rebind after promotion: a top-level name to a value made now, a new
+    // top-level name, actor state through `become` (in place, on the
+    // entry), and a fresh actor. Every one of these is young, and the only
+    // thing pointing at it is something mutable.
+    _ = try run(code.allocator(), &eval,
+        \\greeting = concat("hel", "lo again")
+        \\fresh = [greeting, shared, concat("n", "ew")]
+        \\late = spawn Counter, count: 3
+        \\late <- :add(4)
+        \\c <- :add(100)
+        \\other <- :add(1)
+        \\wrapped = fn(x: Int) -> Int do twice(inc, x) + length(fresh) end
+    );
+
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        const dropped = (try compactPlan(&eval, .{
+            .from = &heaps[live],
+            .to = heaps[1 - live].allocator(),
+            .scratch = ta,
+            .actors = .drop_unreachable,
+            .keep = Region.of(region),
+            .keep_refs = p.old_refs,
+        })).dropped;
+        // The testing allocator poisons what reset hands back, so anything
+        // still pointing into the young heap just left reads garbage.
+        _ = heaps[live].reset(.free_all);
+        live = 1 - live;
+        try std.testing.expectEqual(@as(usize, 0), dropped);
+
+        try std.testing.expectEqualStrings("hello again", (try run(code.allocator(), &eval, "greeting")).string);
+        const fresh = try run(code.allocator(), &eval, "fresh");
+        try std.testing.expectEqual(@as(usize, 3), fresh.list.len);
+        try std.testing.expectEqualStrings("new", fresh.list[2].string);
+        // the old value it holds was kept where it was, not copied
+        try std.testing.expect(fresh.list[1] == shared_before);
+        try std.testing.expect((try run(code.allocator(), &eval, "shared")) == shared_before);
+        try std.testing.expectEqual(@as(i64, 7), (try run(code.allocator(), &eval, "late <- :count")).integer);
+        try std.testing.expectEqual(@as(i64, 105 + @as(i64, @intCast(round))), (try run(code.allocator(), &eval, "c <- :count")).integer);
+        try std.testing.expectEqual(@as(i64, if (round == 0) 100 else 1), (try run(code.allocator(), &eval, "head(c <- :log)")).integer);
+        try std.testing.expectEqual(@as(i64, 11), (try run(code.allocator(), &eval, "other <- :count")).integer);
+        try std.testing.expectEqual(@as(i64, 6), (try run(code.allocator(), &eval, "wrapped(1)")).integer);
+        // only an old list names this actor
+        try std.testing.expectEqual(@as(i64, 40), (try run(code.allocator(), &eval, "head(held) <- :count")).integer);
+        try std.testing.expect((try run(code.allocator(), &eval, "big")).string.len > 5000);
+        try checkProgramAfterPromotion(&eval, code.allocator());
+        _ = try run(code.allocator(), &eval, "c <- :add(1)");
+        // Nothing wrote into the old space: not `become`, not a rebinding,
+        // not a compaction.
+        try std.testing.expectEqual(sum, regionHash(region[0..p.promoted]));
+    }
+}
+
+fn checkProgramAfterPromotion(eval: *Evaluator, code: std.mem.Allocator) !void {
+    try std.testing.expectEqualStrings("counter", (try run(code, eval, "c <- :kind")).atom);
+    try std.testing.expectEqual(@as(i64, 3), (try run(code, eval, "twice(inc, 1)")).integer);
+    try std.testing.expect((try run(code, eval, "pair")).eql((try run(code, eval, "{[1, 2, 3], [1, 2, 3]}")).*));
+    const panel = try run(code, eval, "c <- :panel");
+    try std.testing.expectEqual(@as(usize, 3), panel.view_node.children.len);
+}
+
+test "a promotion that does not fit its region changes nothing" {
+    @import("handles.zig").dropAll();
+    const ta = std.testing.allocator;
+    var code = std.heap.ArenaAllocator.init(ta);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(ta);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(ta);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    _ = try run(code.allocator(), &eval, program);
+    const region = try ta.alignedAlloc(u8, .@"16", 256);
+    defer ta.free(region);
+    try std.testing.expectError(error.OutOfMemory, compactPlan(&eval, .{
+        .from = &heap_a,
+        .to = heap_b.allocator(),
+        .scratch = ta,
+        .promote_into = region,
+    }));
+    // still on heap_a, and working
+    try checkProgram(&eval, code.allocator());
+}
+
+test "re-promotion folds the previous old space in, and it can be freed" {
+    @import("handles.zig").dropAll();
+    const ta = std.testing.allocator;
+    var code = std.heap.ArenaAllocator.init(ta);
+    defer code.deinit();
+    var heaps = [2]std.heap.ArenaAllocator{ std.heap.ArenaAllocator.init(ta), std.heap.ArenaAllocator.init(ta) };
+    defer heaps[0].deinit();
+    defer heaps[1].deinit();
+
+    var eval = Evaluator.init(heaps[0].allocator());
+    eval.code_allocator = code.allocator();
+    _ = try run(code.allocator(), &eval, program);
+    _ = try run(code.allocator(), &eval, "held = [spawn Counter, count: 40]");
+
+    const first = try ta.alignedAlloc(u8, .@"16", 1 << 20);
+    const p1 = try compactPlan(&eval, .{ .from = &heaps[0], .to = heaps[1].allocator(), .scratch = ta, .actors = .drop_unreachable, .promote_into = first });
+    defer ta.free(p1.old_refs);
+    _ = heaps[0].reset(.free_all);
+
+    _ = try run(code.allocator(), &eval, "young = concat(\"made \", \"later\")\nc <- :add(2)");
+
+    const second = try ta.alignedAlloc(u8, .@"16", 1 << 20);
+    defer ta.free(second);
+    const p2 = try compactPlan(&eval, .{ .from = &heaps[1], .to = heaps[0].allocator(), .scratch = ta, .actors = .drop_unreachable, .promote_into = second, .also_from = Region.of(first) });
+    defer ta.free(p2.old_refs);
+    _ = heaps[1].reset(.free_all);
+    // the previous old space is gone; poison it to be sure nothing reads it
+    @memset(first, 0xaa);
+    ta.free(first);
+
+    try std.testing.expect(inRegion(second, try run(code.allocator(), &eval, "shared")));
+    try std.testing.expect(inRegion(second, try run(code.allocator(), &eval, "young")));
+    try std.testing.expectEqualStrings("made later", (try run(code.allocator(), &eval, "young")).string);
+    try std.testing.expectEqual(@as(i64, 7), (try run(code.allocator(), &eval, "c <- :count")).integer);
+    try std.testing.expectEqual(@as(i64, 40), (try run(code.allocator(), &eval, "head(held) <- :count")).integer);
+    try checkProgramAfterPromotion(&eval, code.allocator());
 }
