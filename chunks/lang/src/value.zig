@@ -37,6 +37,15 @@ pub const interned = struct {
         return if (n >= min_int and n <= max_int) &ints[@intCast(n - min_int)] else null;
     }
 
+    /// Whether `p` is one of the table's own values, which live in static
+    /// storage for the life of the process (gc compaction leaves them be).
+    pub fn isStatic(p: *const Value) bool {
+        const a = @intFromPtr(p);
+        const lo = @intFromPtr(&ints[0]);
+        const hi = lo + @sizeOf(@TypeOf(ints));
+        return (a >= lo and a < hi) or p == &yes or p == &no or p == &nothing;
+    }
+
     /// The shared pointer for `v`, or null when `v` has to be allocated.
     pub fn get(v: Value) ?*const Value {
         return switch (v) {
