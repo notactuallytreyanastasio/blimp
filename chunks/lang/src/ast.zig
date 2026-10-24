@@ -271,6 +271,10 @@ pub const Node = struct {
     pub const CallCache = struct {
         builtin: ?*const anyopaque = null,
         globals_version: u32 = 0,
+        /// The name had no top-level binding when `builtin` was filled; with
+        /// `globals_version` unchanged it still has none.  What `unbound`
+        /// would answer once no frame can hold the name.
+        no_global: bool = false,
         /// The top-level closure this site resolved to; see
         /// `Environment.topHit` for when it may be used again.
         top: Environment.TopSlot = .{},

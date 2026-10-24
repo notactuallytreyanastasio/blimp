@@ -55,6 +55,19 @@ pub const Environment = struct {
     /// overwriting one -- so a closure can see the top level as it was when
     /// the closure was made (Closure.globals_mark) by walking this chain.
     global_prev: std.ArrayList(u32) = .{ .items = &.{}, .capacity = 0 },
+    /// Every name this environment has ever bound in a scope other than the
+    /// top level, or lent to one as a capture or as actor state: one bit per
+    /// value of the top 16 bits of `hashName`, set before the binding exists
+    /// and never cleared.  A clear bit is certain: no frame now on the stack
+    /// can hold the name.
+    ///
+    /// `bindsLocally` asks the same question of a 64-bit mask, and on a
+    /// program the size of the site every bit of that mask is set somewhere
+    /// on the stack: on rendering the posts, `builtinHit` fell through to
+    /// `unbound` -- a walk of every frame and a probe of `globals` -- for most
+    /// builtin calls.  A builtin's name is almost never a local's, so here it
+    /// almost never shares a bit with one.
+    ever_local: [1024]u64 = [_]u64{0} ** 1024,
 
     pub const no_prev: u32 = std.math.maxInt(u32);
     /// A `globals_mark` that reads the top-level scope as it is now.
@@ -178,6 +191,17 @@ pub const Environment = struct {
         return env;
     }
 
+    /// Record that `hash` names something bound below the top level.
+    inline fn markLocal(self: *Environment, hash: u32) void {
+        self.ever_local[hash >> 22] |= @as(u64, 1) << @as(u6, @truncate(hash >> 16));
+    }
+
+    /// False only if no scope but the top level has ever bound, captured or
+    /// been lent a name with this `hashName`, so none on the stack holds it.
+    pub inline fn everLocal(self: *const Environment, hash: u32) bool {
+        return self.ever_local[hash >> 22] & (@as(u64, 1) << @as(u6, @truncate(hash >> 16))) != 0;
+    }
+
     /// Push a new scope (entering a block), reusing a recycled binding list
     /// when one is going spare.
     pub fn pushScope(self: *Environment) void {
@@ -249,6 +273,11 @@ pub const Environment = struct {
                 sc.bindings.append(self.allocator, .{ .name = b.name, .val = b.val, .hash = b.hash }) catch {};
             }
         }
+        // A closure may come from another environment (a message carries
+        // it), so what it captured is marked here, where it is lent, not
+        // where it was made.  Self-recursion returned above; a top-level
+        // def lends an empty slice.
+        if (index != 0) for (captured) |b| self.markLocal(b.hash);
         const scope = &self.scopes.items[index];
         scope.captured = captured;
         scope.captured_names = names;
@@ -263,6 +292,7 @@ pub const Environment = struct {
     pub fn lendState(self: *Environment, items: []const Value.CapturedBinding, names: u64) void {
         if (self.scopes.items.len == 0) return;
         const scope = &self.scopes.items[self.scopes.items.len - 1];
+        if (self.scopes.items.len > 1) for (items) |b| self.markLocal(b.hash);
         scope.captured = items;
         scope.captured_names = names;
         if (self.scopes.items.len > 1) scope.stack_names |= names;
@@ -425,6 +455,7 @@ pub const Environment = struct {
         }
         scope.names |= k.bit;
         scope.stack_names |= k.bit;
+        self.markLocal(k.hash);
         h.* = @intCast(items.len - scope.own_base);
         scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
     }
@@ -447,6 +478,7 @@ pub const Environment = struct {
         if (self.scopes.items.len == 1) return self.defineIn(0, name, k.hash, k.bit, value);
         scope.names |= k.bit;
         scope.stack_names |= k.bit;
+        self.markLocal(k.hash);
         scope.bindings.append(self.allocator, .{ .name = name, .val = value, .hash = k.hash }) catch {};
     }
 
@@ -467,6 +499,7 @@ pub const Environment = struct {
         // so the scan for one to overwrite is skipped.  Every assignment in a
         // loop body is a define, and each used to compare its name against
         // every local in the frame.
+        self.markLocal(hash);
         if (scope.names & bit == 0) {
             scope.names |= bit;
             scope.stack_names |= bit;
@@ -587,6 +620,11 @@ pub const Environment = struct {
             }
         }
         return self.globals.get(.{ .name = name, .hash = nk.hash }) == null;
+    }
+
+    /// Whether the top level binds `name` at all, at any mark.
+    pub fn hasGlobal(self: *const Environment, name: []const u8, key: name_key.Key) bool {
+        return self.globals.get(.{ .name = name, .hash = if (key.isSet()) key.hash else name_key.hashName(name) }) != null;
     }
 
     /// A call site's memory of a top-level binding.
@@ -1461,4 +1499,33 @@ test "stack_names answers bindsLocally as the walk did, and unbound settles a sh
     env2.pushScope();
     try std.testing.expect(!env2.unbound("size", size_key));
     env2.popTo(1);
+}
+
+test "everLocal: set by every way a name reaches a frame, never by the top level" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = Environment.init(alloc);
+    const names = [_][]const u8{ "by_define", "by_param", "by_hint", "by_capture", "by_state", "top_only" };
+    for (names) |n| try std.testing.expect(!env.everLocal(name_key.hashName(n)));
+
+    env.define("top_only", try testVal(alloc, 0));
+    env.bindParam("top_only", name_key.Key.of("top_only"), try testVal(alloc, 0)); // one scope: top level
+    try std.testing.expect(!env.everLocal(name_key.hashName("top_only")));
+
+    env.pushScope();
+    env.define("by_define", try testVal(alloc, 1));
+    env.bindParam("by_param", name_key.Key.of("by_param"), try testVal(alloc, 2));
+    var hint: u32 = 0;
+    env.defineHinted("by_hint", name_key.Key.of("by_hint"), &hint, try testVal(alloc, 3));
+    const cap = [_]Value.CapturedBinding{.{ .name = "by_capture", .val = try testVal(alloc, 4), .hash = name_key.hashName("by_capture") }};
+    env.lendCaptured(&cap, name_key.nameBit("by_capture"), 9, Environment.live);
+    env.pushScope();
+    const st = [_]Value.CapturedBinding{.{ .name = "by_state", .val = try testVal(alloc, 5), .hash = name_key.hashName("by_state") }};
+    env.lendState(&st, name_key.nameBit("by_state"));
+    env.popTo(1);
+
+    // Popping does not clear them: a clear bit must be certain, not current.
+    for (names[0..5]) |n| try std.testing.expect(env.everLocal(name_key.hashName(n)));
+    try std.testing.expect(!env.everLocal(name_key.hashName("top_only")));
 }

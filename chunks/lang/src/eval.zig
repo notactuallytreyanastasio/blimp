@@ -16,6 +16,7 @@ pub const EvalError = builtins_mod.EvalError;
 
 /// Tree-walking interpreter for Blimp expressions.
 const literal = @import("literal.zig");
+const name_key = @import("name_key.zig");
 
 pub const Evaluator = struct {
     allocator: std.mem.Allocator,
@@ -1655,8 +1656,14 @@ pub const Evaluator = struct {
         const cache = call.cache orelse return null;
         const ptr = cache.builtin orelse return null;
         if (cache.globals_version != self.env.globals_version) return null;
-        if (self.env.bindsLocally(if (call.key.isSet()) call.key.bit else Environment.nameBit(call.name))) {
-            if (!self.env.unbound(call.name, call.key)) return null;
+        const key = if (call.key.isSet()) call.key else name_key.Key.of(call.name);
+        if (self.env.bindsLocally(key.bit)) {
+            // No frame has ever held a name with this hash: the walk
+            // `unbound` would make finds nothing, and its answer is whether
+            // the top level binds the name, which was settled at fill time.
+            if (!self.env.everLocal(key.hash)) {
+                if (!cache.no_global) return null;
+            } else if (!self.env.unbound(call.name, key)) return null;
         }
         return @ptrCast(@alignCast(ptr));
     }
@@ -1699,6 +1706,7 @@ pub const Evaluator = struct {
         if (call.cache) |cache| {
             cache.builtin = @ptrCast(func);
             cache.globals_version = self.env.globals_version;
+            cache.no_global = !self.env.hasGlobal(call.name, call.key);
         }
         return self.callBuiltin(func, call);
     }
@@ -4642,4 +4650,41 @@ test "a typed parameter accepts what its annotation names, resolved at parse tim
         \\f(spawn B)
     ;
     try std.testing.expectError(error.TypeError, evalProgram(alloc, &e4, wrong_actor));
+}
+
+test "a call site cached as a builtin defers to a local of that name bound after the cache was filled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var evaluator = Evaluator.init(alloc);
+    // g's `length(xs)` resolves to the builtin on the first call and is
+    // cached; h then binds `length` as a local closure, k as a parameter,
+    // mk as a capture, and g -- which sees its caller's frame -- must call
+    // those.  A state field of that name is not callable and leaves the
+    // builtin in place.
+    const source =
+        \\def g(xs: List) -> Int do length(xs) end
+        \\def h(n: Int) -> Int do
+        \\  length = fn(x: Any) -> Int do 99 end
+        \\  g([1, 2])
+        \\end
+        \\def k(length: Function) -> Int do g([1]) end
+        \\def mk(n: Int) -> Function do
+        \\  length = fn(x: Any) -> Int do 55 end
+        \\  fn(xs: List) -> Int do g(xs) end
+        \\end
+        \\actor A do
+        \\  state length: Int :: 5
+        \\  on :go do
+        \\    reply g([1, 2, 3])
+        \\  end
+        \\end
+        \\a = spawn A
+        \\c = mk(0)
+        \\[g([1, 2]), h(0), k(fn(x: Any) -> Int do 77 end), c([1]), g([1, 2]), a <- :go]
+    ;
+    const got = try evalProgram(alloc, &evaluator, source);
+    const want = [_]i64{ 2, 99, 77, 55, 2, 3 };
+    try std.testing.expectEqual(want.len, got.list.len);
+    for (want, got.list) |w, v| try std.testing.expectEqual(w, v.integer);
 }
