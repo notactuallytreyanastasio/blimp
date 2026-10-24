@@ -2348,7 +2348,8 @@ pub const Evaluator = struct {
             const tail_val = try self.eval(tail_node);
             const tail_items = if (tail_val.* == .list) tail_val.list else &[_]*const Value{};
             const total = list.elements.len + tail_items.len;
-            const items = self.allocator.alloc(*const Value, total) catch return error.OutOfMemory;
+            // Every slot is written below before the list is made.
+            const items = builtins_mod.allocNoFill(self.allocator, *const Value, total) catch return error.OutOfMemory;
             for (list.elements, 0..) |*elem, i| {
                 items[i] = try self.eval(elem);
             }
@@ -2358,7 +2359,7 @@ pub const Evaluator = struct {
             return self.make(.{ .list = items });
         }
         // Simple list literal [a, b, c]
-        const items = self.allocator.alloc(*const Value, list.elements.len) catch return error.OutOfMemory;
+        const items = builtins_mod.allocNoFill(self.allocator, *const Value, list.elements.len) catch return error.OutOfMemory;
         for (list.elements, 0..) |*elem, i| {
             items[i] = try self.eval(elem);
         }

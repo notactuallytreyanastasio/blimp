@@ -235,7 +235,10 @@ pub const Environment = struct {
             // second copy appended -- otherwise a loop grows its frame once
             // per iteration, which `memory_test` measures and rejects.
             const scope = &self.scopes.items[index];
-            scope.bindings.shrinkRetainingCapacity(scope.own_base);
+            // Not shrinkRetainingCapacity, which fills what it drops (see
+            // `recycle`); every iteration of a tail-recursive loop comes here.
+            std.debug.assert(scope.own_base <= scope.bindings.items.len);
+            scope.bindings.items.len = scope.own_base;
             return;
         }
         // A different callee taking over the frame. Its view of the top level
@@ -363,8 +366,11 @@ pub const Environment = struct {
     /// instead is what made a deep recursion grow without bound.
     fn recycle(self: *Environment, scope: Scope) void {
         // `names` belongs to the scope, not to the buffer being kept.
+        // The length is set directly: `clearRetainingCapacity` fills the
+        // dropped bindings with 0xAA in a safe build, and ReleaseSafe is what
+        // ships, so every return from a call paid a memset of its frame.
         var bindings = scope.bindings;
-        bindings.clearRetainingCapacity();
+        bindings.items.len = 0;
         self.free_scopes.append(self.allocator, bindings) catch {};
     }
 

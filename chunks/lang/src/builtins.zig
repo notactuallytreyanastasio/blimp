@@ -722,6 +722,19 @@ fn builtinFormatTime(allocator: std.mem.Allocator, args: []const *const Value) E
 
 // ── String builtins ─────────────────────────────────────
 
+/// `allocator.alloc(T, n)` without the fill.  `alloc` writes 0xAA over the
+/// new memory in a safe build, and ReleaseSafe is the build that ships; for a
+/// buffer the caller overwrites in full straight away (concat, join, a list
+/// literal's items) that wrote every byte twice.  The caller must write all
+/// `n` elements before anything reads them.
+pub fn allocNoFill(allocator: std.mem.Allocator, comptime T: type, n: usize) error{OutOfMemory}![]T {
+    if (n == 0) return allocator.alloc(T, 0);
+    const bytes = std.math.mul(usize, @sizeOf(T), n) catch return error.OutOfMemory;
+    const p = allocator.rawAlloc(bytes, .of(T), @returnAddress()) orelse return error.OutOfMemory;
+    const typed: [*]T = @ptrCast(@alignCast(p));
+    return typed[0..n];
+}
+
 /// concat("hello", " ", "world") => "hello world"
 fn builtinConcat(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len < 2) return error.TypeError;
@@ -736,7 +749,8 @@ fn builtinConcat(allocator: std.mem.Allocator, args: []const *const Value) EvalE
             else => return error.TypeError,
         }
     }
-    var buf = allocator.alloc(u8, total_len) catch return error.OutOfMemory;
+    // Every byte up to `pos` is written below; the result is buf[0..pos].
+    var buf = allocNoFill(allocator, u8, total_len) catch return error.OutOfMemory;
     var pos: usize = 0;
     for (args) |arg| {
         switch (arg.*) {
@@ -849,7 +863,7 @@ fn builtinJoin(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
         if (i > 0) total += sep.len;
     }
 
-    const buf = allocator.alloc(u8, total) catch return error.OutOfMemory;
+    const buf = allocNoFill(allocator, u8, total) catch return error.OutOfMemory;
     var pos: usize = 0;
     for (parts, 0..) |part, i| {
         if (i > 0) {
@@ -4963,14 +4977,19 @@ fn builtinTcpAcceptNative(allocator: std.mem.Allocator, args: []const *const Val
     return make(allocator, .{ .integer = @intCast(client_fd) });
 }
 
+threadlocal var tcp_read_buf: [65536]u8 = undefined;
+
 /// tcp_read(fd: Int) -> String | nil
 /// Reads up to 64KB. Returns nil if socket is non-blocking and no data
 /// is available (WouldBlock/EAGAIN).
 fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .integer) return error.TypeError;
     const fd: std.posix.fd_t = @intCast(args[0].integer);
-    var buf: [65536]u8 = undefined;
-    const n = std.posix.read(fd, &buf) catch |err| {
+    // Not a local: a 64 KB `undefined` array on the stack is filled with
+    // 0xAA on every call in a safe build (the disassembly calls memset before
+    // read), and every request the server reads comes through here.
+    const buf = &tcp_read_buf;
+    const n = std.posix.read(fd, buf) catch |err| {
         if (err == error.WouldBlock) {
             // Non-blocking mode: no data available, return nil
             return make(allocator, .nil);
@@ -4984,7 +5003,9 @@ fn builtinTcpReadNative(allocator: std.mem.Allocator, args: []const *const Value
         }
         return error.NotSupported;
     };
-    const owned = allocator.dupe(u8, buf[0..n]) catch return error.OutOfMemory;
+    // `dupe` is `alloc` (a fill) and then a copy over the same bytes.
+    const owned = allocNoFill(allocator, u8, n) catch return error.OutOfMemory;
+    @memcpy(owned, buf[0..n]);
     const result = allocator.create(Value) catch return error.OutOfMemory;
     result.* = Value{ .string = owned };
     return result;
