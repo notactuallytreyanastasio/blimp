@@ -1605,6 +1605,30 @@ actor CryptoTests do
     assert(raises("tcp_poll_write([\"a\"], 0)"))
   end
 
+  test "tcp_poll_rw: one wait answers both directions, and a timeout answers two empty lists" do
+    l = tcp_listen(47312)
+    c = tcp_connect("127.0.0.1", 47312)
+    s = tcp_accept(l)
+    # nothing to read on s, room to write on it
+    assert_eq(tcp_poll_rw([s], [s], 0), {[], [s]})
+    tcp_write_some(c, "ping")
+    got = tcp_poll_rw([s], [], 1000)
+    assert_eq(elem(got, 0), [s])
+    assert_eq(elem(got, 1), [])
+    assert_eq(tcp_read(s), "ping")
+    t0 = now_ms()
+    assert_eq(tcp_poll_rw([s], [], 50), {[], []})
+    assert(now_ms() - t0 >= 40)
+    # a peer that hung up is readable: the read will not wait, it says ""
+    tcp_close(c)
+    assert_eq(elem(tcp_poll_rw([s], [], 1000), 0), [s])
+    tcp_close(s)
+    tcp_close(l)
+    assert(raises("tcp_poll_rw([], 0)"))
+    assert(raises("tcp_poll_rw(3, [], 0)"))
+    assert(raises("tcp_poll_rw([], [\"a\"], 0)"))
+  end
+
   test "ws_open refuses what is not a ws(s) url, and the others a handle that is not open" do
     assert(raises("ws_open(\"https://example.com/\", %{})"))
     assert(raises("ws_open(\"ws://example.com/\", %{\"X-A\": 1})"))

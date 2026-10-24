@@ -242,6 +242,7 @@ pub const BuiltinRegistry = struct {
         reg.register("tcp_poll", &builtinTcpPoll_impl);
         reg.register("tcp_write_some", &builtinTcpWriteSome_impl);
         reg.register("tcp_poll_write", &builtinTcpPollWrite_impl);
+        reg.register("tcp_poll_rw", &builtinTcpPollRw_impl);
         reg.register("sleep_ms", &builtinSleepMs_impl);
         reg.register("read_line", &builtinReadLine_impl);
         reg.register("random_bytes", &builtinRandomBytes_impl);
@@ -3528,6 +3529,7 @@ const builtinTcpSetNonblocking_impl = if (is_wasm) native_stub.stub else builtin
 const builtinTcpPoll_impl = if (is_wasm) native_stub.stub else builtinTcpPollNative;
 const builtinTcpWriteSome_impl = if (is_wasm) native_stub.stub else builtinTcpWriteSomeNative;
 const builtinTcpPollWrite_impl = if (is_wasm) native_stub.stub else builtinTcpPollWriteNative;
+const builtinTcpPollRw_impl = if (is_wasm) native_stub.stub else builtinTcpPollRwNative;
 const builtinSleepMs_impl = if (is_wasm) native_stub.stub else builtinSleepMsNative;
 const builtinReadLine_impl = if (is_wasm) native_stub.stub else builtinReadLineNative;
 const builtinRandomBytes_impl = if (is_wasm) native_stub.stub else builtinRandomBytesNative;
@@ -5150,6 +5152,53 @@ fn builtinTcpPollWriteNative(allocator: std.mem.Allocator, args: []const *const 
         ready.append(allocator, try make(allocator, .{ .integer = @intCast(pfd.fd) })) catch return error.OutOfMemory;
     }
     return make(allocator, .{ .list = ready.toOwnedSlice(allocator) catch return error.OutOfMemory });
+}
+
+/// tcp_poll_rw(read_fds: List of Int, write_fds: List of Int, timeout_ms: Int)
+///   -> {readable: List of Int, writable: List of Int}
+///
+/// One wait for both directions. A server that has requests to read and
+/// responses parked behind a slow reader needs to wake for either; with
+/// only tcp_poll and tcp_poll_write it had to wait on reads with a short
+/// timeout and then ask about writes, which put that timeout under every
+/// refill of every parked response (10 ms a send-buffer: a 4.8 MB file to a
+/// fast reader went from 2 ms to 25 ms). Ready means what it does in
+/// tcp_poll and tcp_poll_write: an fd that has hung up, failed or is not
+/// open is reported in the list it was asked about, because the read or
+/// write will not wait. An fd may be in both lists.
+fn builtinTcpPollRwNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 3 or args[0].* != .list or args[1].* != .list or args[2].* != .integer) return error.TypeError;
+    if (args[2].integer < -1 or args[2].integer > std.math.maxInt(i32)) return error.TypeError;
+    const reads = args[0].list;
+    const writes = args[1].list;
+    const timeout_ms: i32 = @intCast(args[2].integer);
+    sweepLingering();
+    const pollfds = allocator.alloc(std.posix.pollfd, reads.len + writes.len) catch return error.OutOfMemory;
+    for (reads, 0..) |fd_val, i| {
+        if (fd_val.* != .integer) return error.TypeError;
+        pollfds[i] = .{ .fd = @intCast(fd_val.integer), .events = std.posix.POLL.IN, .revents = 0 };
+    }
+    for (writes, 0..) |fd_val, i| {
+        if (fd_val.* != .integer) return error.TypeError;
+        pollfds[reads.len + i] = .{ .fd = @intCast(fd_val.integer), .events = std.posix.POLL.OUT, .revents = 0 };
+    }
+    _ = std.posix.poll(pollfds, timeout_ms) catch return error.NotSupported;
+    const gone = std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL;
+    var readable: std.ArrayList(*const Value) = .empty;
+    var writable: std.ArrayList(*const Value) = .empty;
+    for (pollfds, 0..) |pfd, i| {
+        const want: i16 = if (i < reads.len) std.posix.POLL.IN else std.posix.POLL.OUT;
+        if (pfd.revents & (want | gone) == 0) continue;
+        const v = try make(allocator, .{ .integer = @intCast(pfd.fd) });
+        if (i < reads.len)
+            readable.append(allocator, v) catch return error.OutOfMemory
+        else
+            writable.append(allocator, v) catch return error.OutOfMemory;
+    }
+    const pair = allocator.alloc(*const Value, 2) catch return error.OutOfMemory;
+    pair[0] = try make(allocator, .{ .list = readable.toOwnedSlice(allocator) catch return error.OutOfMemory });
+    pair[1] = try make(allocator, .{ .list = writable.toOwnedSlice(allocator) catch return error.OutOfMemory });
+    return make(allocator, .{ .tuple = pair });
 }
 
 // ============================================================
