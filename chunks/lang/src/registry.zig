@@ -54,6 +54,10 @@ pub const ActorTemplate = struct {
 
 /// The actor registry: owns templates and spawned instances.
 pub const Registry = struct {
+    const page_shift = 8;
+    const page_mask: u64 = (1 << page_shift) - 1;
+    const Page = [1 << page_shift]?*ActorEntry;
+
     allocator: std.mem.Allocator,
     templates: std.ArrayList(ActorTemplate),
     /// Instances are boxed, not stored inline.  `getInstance` hands out a
@@ -63,13 +67,22 @@ pub const Registry = struct {
     /// spawn's append reallocate the backing array and leave every
     /// outstanding pointer dangling.  A box stays put.
     instances: std.ArrayList(*ActorEntry),
-    /// `by_id[id]` is the instance with that id, or null once a compaction
-    /// dropped it.  Ids are dense and never reused, so this is one slot per
-    /// actor ever spawned, and `getInstance` is one load.  It used to scan
-    /// `instances`, which made every send cost as much as the number of
-    /// actors alive: a Temper program, where every object is an actor,
-    /// paid 40 us per field read once a few thousand objects existed.
-    by_id: std.ArrayList(?*ActorEntry),
+    /// The instance with id `id` is `by_id[id >> page_shift][id & page_mask]`,
+    /// null once a compaction dropped it.  `getInstance` is two loads.  It
+    /// used to scan `instances`, which made every send cost as much as the
+    /// number of actors alive: a Temper program, where every object is an
+    /// actor, paid 40 us per field read once a few thousand objects existed.
+    ///
+    /// Why pages and not one slot per id: ids are never reused, so once
+    /// compaction drops unreachable actors the live ids are a few old ones
+    /// (the program's top-level actors) and a band of recent ones, with
+    /// everything between them dead.  A flat array was one slot per actor
+    /// *ever* spawned, rebuilt by `reindex` on every compaction: Snake in the
+    /// browser, compacting after every send, spent most of a frame walking
+    /// 900,000 empty slots after 100 restarts and carried 3.6 MB of them.  A
+    /// page exists only where some live id falls, so the index is as big as
+    /// the live set plus one directory word per 256 ids.
+    by_id: std.ArrayList(?*Page),
     /// The ids whose mailbox is not empty, as a two-level bitset: `pending`
     /// has bit `id` set, `pending_words` has bit `w` set when `pending[w]`
     /// is not zero.  `runScheduler` used to walk every instance looking for
@@ -187,9 +200,15 @@ pub const Registry = struct {
     }
 
     fn indexEntry(self: *Registry, entry: *ActorEntry) void {
-        const id: usize = @intCast(entry.ref.id);
-        while (self.by_id.items.len <= id) self.by_id.append(self.allocator, null) catch return;
-        self.by_id.items[id] = entry;
+        const pi: usize = @intCast(entry.ref.id >> page_shift);
+        while (self.by_id.items.len <= pi) self.by_id.append(self.allocator, null) catch return;
+        const page = self.by_id.items[pi] orelse blk: {
+            const p = self.allocator.create(Page) catch return;
+            @memset(p, null);
+            self.by_id.items[pi] = p;
+            break :blk p;
+        };
+        page[@intCast(entry.ref.id & page_mask)] = entry;
     }
 
     /// Rebuild `by_id` from `instances`, in the registry's current allocator.
@@ -259,9 +278,10 @@ pub const Registry = struct {
     /// Look up a spawned instance by ref.  The pointer stays valid for the
     /// life of the instance, including across later spawns.
     pub fn getInstance(self: *Registry, ref: ActorRef) ?*ActorEntry {
-        const id: usize = @intCast(ref.id);
-        if (id < self.by_id.items.len) return self.by_id.items[id];
-        return null;
+        const pi: usize = @intCast(ref.id >> page_shift);
+        if (pi >= self.by_id.items.len) return null;
+        const page = self.by_id.items[pi] orelse return null;
+        return page[@intCast(ref.id & page_mask)];
     }
 
     /// Restart a single actor: reset its state to template defaults.

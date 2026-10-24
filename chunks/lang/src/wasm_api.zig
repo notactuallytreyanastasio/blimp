@@ -41,6 +41,7 @@ fn freshEvaluator() Evaluator {
     _ = heaps[0].reset(.free_all);
     _ = heaps[1].reset(.free_all);
     live_heap = 0;
+    compact_at = 0;
     var eval = Evaluator.init(heap());
     // Source and ASTs live on `allocator`, which compaction never frees.
     eval.code_allocator = allocator;
@@ -49,14 +50,43 @@ fn freshEvaluator() Evaluator {
 
 /// Copy the live evaluator data into the idle arena and free the busy one.
 /// If the copy fails the evaluator keeps using its current arena.
+///
+/// Actors nothing can reach are dropped, as `blimp --serve` drops them.
+/// This used to keep every instance ever spawned, on the theory that the
+/// host might hold an actor's id where no Blimp value does. It cannot: JS
+/// names an actor only by the global binding that holds it (blimp_send's
+/// target, BlimpView's actorVar, the timers, effects and keys the view
+/// declares all send to that one name), and a ref printed in the REPL is
+/// text that nothing parses back. The bindings are roots, so whatever the
+/// host can name survives. Keeping everything cost a Temper program, whose
+/// classes compile to actors, every object it ever made: Snake kept ~8,700
+/// actors per restart, and since this runs after every send, copying them
+/// all was most of each frame.
+///
+/// It runs when the arena has grown to twice what the last compaction left
+/// plus 256 KiB, not after every call: with the garbage gone the live set is
+/// small, and copying it twice a frame was the rest of an idle frame's cost
+/// (0.12 ms -> 0.02 ms for Snake between games). Every caller is a safe
+/// point -- an eval or send has returned and nothing interpreted is on the
+/// stack -- so `compactNow` may run at any of them.
+var compact_at: usize = 0;
+const compact_slack = 256 * 1024;
 fn compactHeap() void {
-    var eval = &(evaluator orelse return);
+    const eval = &(evaluator orelse return);
+    // The error, if any, was already formatted into err_out; a stale one
+    // must not be taken for the next call's (blimp_send asks whether
+    // last_error is set).
+    defer eval.last_error = null;
+    if (heaps[live_heap].queryCapacity() < compact_at) return;
+    compactNow(eval);
+}
+
+fn compactNow(eval: *Evaluator) void {
     const next = 1 - live_heap;
-    gc.compact(eval, &heaps[live_heap], heaps[next].allocator(), allocator) catch return;
+    _ = gc.compactWith(eval, &heaps[live_heap], heaps[next].allocator(), allocator, .drop_unreachable) catch return;
     _ = heaps[live_heap].reset(.free_all);
     live_heap = next;
-    // Error details were already formatted into err_out.
-    eval.last_error = null;
+    compact_at = heaps[live_heap].queryCapacity() * 2 + compact_slack;
 }
 
 /// Bytes currently held by the evaluator's arena (for host-side monitoring).
@@ -403,7 +433,11 @@ fn updateStateJson() void {
     const w = state.begin(&aw, &g);
 
     w.writeAll("{\"vars\":[") catch {};
-    const bindings = eval.env.allBindings(allocator);
+    // On the collected heap: the list (and the name set allBindings builds
+    // to find it) is garbage once written, and on `allocator` it was never
+    // freed -- about 12 KB a call for Snake's 534 bindings, every time a
+    // page asked for the state.
+    const bindings = eval.env.allBindings(heap());
     for (bindings, 0..) |b, i| {
         if (i > 0) w.writeAll(",") catch {};
         w.writeAll("{\"name\":\"") catch {};
@@ -646,7 +680,11 @@ export fn blimp_get_error_len() u32 {
 /// after every evaluation; send does not (it is the cheap path), so a host
 /// that runs its program by send and draws it -- the blog's games and their
 /// canvases -- asks for it when it wants it.
+///
+/// It compacts first, so the actors it lists are the ones still alive, not
+/// the garbage the growth trigger has not got round to yet.
 export fn blimp_refresh_state() void {
+    if (evaluator) |*eval| compactNow(eval);
     updateStateJson();
 }
 
