@@ -85,6 +85,13 @@ pub const Node = struct {
         name: []const u8,
         key: NameKey = .{},
         type_name: ?[]const u8 = null, // null = untyped (legacy, checker will reject)
+        /// `type_name` resolved once, by the parser, to what a call checks
+        /// an argument against.  No default: a HandlerParam built anywhere
+        /// must say, so one built without it fails to compile rather than
+        /// skipping its check.  The evaluator used to resolve the string on
+        /// every call -- up to ten `std.mem.eql` per typed parameter, 6% of
+        /// rendering the site's posts.
+        check: TypeCheck,
         /// A later parameter of the same name wins, so this one is not bound
         /// (it is still type-checked).  Set by the parser.
         shadowed: bool = false,
@@ -96,6 +103,46 @@ pub const Node = struct {
                     if (std.mem.eql(u8, p.name, q.name)) p.shadowed = true;
                 }
             }
+        }
+    };
+
+    /// What a typed parameter accepts, from its annotation.
+    pub const TypeCheck = enum {
+        /// No annotation, `Any`, or a name that is neither a builtin type
+        /// nor (at call time) compared against an actor reference: accepts
+        /// everything, as the string comparison did.
+        any,
+        int,
+        float,
+        string,
+        atom,
+        boolean,
+        nil,
+        list,
+        tuple,
+        map,
+        function,
+        /// `[T]`: any list; element types are not checked.
+        list_of,
+        /// Any other name: an actor reference must carry this type name;
+        /// every other value is let through.
+        named,
+
+        pub fn of(type_name: ?[]const u8) TypeCheck {
+            const t = type_name orelse return .any;
+            const table = .{
+                .{ "Any", TypeCheck.any },        .{ "Int", TypeCheck.int },
+                .{ "Float", TypeCheck.float },    .{ "String", TypeCheck.string },
+                .{ "Atom", TypeCheck.atom },      .{ "Bool", TypeCheck.boolean },
+                .{ "Nil", TypeCheck.nil },        .{ "List", TypeCheck.list },
+                .{ "Tuple", TypeCheck.tuple },    .{ "Map", TypeCheck.map },
+                .{ "Function", TypeCheck.function },
+            };
+            inline for (table) |e| {
+                if (std.mem.eql(u8, t, e[0])) return e[1];
+            }
+            if (t.len > 2 and t[0] == '[' and t[t.len - 1] == ']') return .list_of;
+            return .named;
         }
     };
 
@@ -224,6 +271,10 @@ pub const Node = struct {
     pub const CallCache = struct {
         builtin: ?*const anyopaque = null,
         globals_version: u32 = 0,
+        /// The name had no top-level binding when `builtin` was filled; with
+        /// `globals_version` unchanged it still has none.  What `unbound`
+        /// would answer once no frame can hold the name.
+        no_global: bool = false,
         /// The top-level closure this site resolved to; see
         /// `Environment.topHit` for when it may be used again.
         top: Environment.TopSlot = .{},
