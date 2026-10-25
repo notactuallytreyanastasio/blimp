@@ -38,6 +38,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     thread.join();
 }
 
+/// Microseconds on the monotonic clock, for timing pauses.
+fn nowMicros() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, @intCast(ts.sec)) * 1_000_000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1000);
+}
+
 /// Milliseconds since the epoch. zig 0.16 removed `std.time.milliTimestamp`.
 fn nowMillis() i64 {
     var ts: std.c.timespec = undefined;
@@ -564,6 +571,11 @@ const ValueHeap = struct {
     halves: [2]std.heap.ArenaAllocator,
     live: usize = 0,
     scratch: std.mem.Allocator,
+    /// The old space (gc.Plan): what the last `promote` copied, in one
+    /// region taken from `scratch`.  Compactions keep it where it is.
+    old: []u8 = &.{},
+    /// The actor ids values in `old` name; see gc.Plan.keep_refs.
+    old_refs: []u64 = &.{},
 
     fn init(backing: std.mem.Allocator) ValueHeap {
         return .{
@@ -578,7 +590,11 @@ const ValueHeap = struct {
     fn deinit(self: *ValueHeap) void {
         self.halves[0].deinit();
         self.halves[1].deinit();
+        if (self.old.len > 0) self.scratch.rawFree(self.old, old_align, @returnAddress());
+        self.scratch.free(self.old_refs);
     }
+
+    const old_align: std.mem.Alignment = .fromByteUnits(std.heap.page_size_min);
 
     fn allocator(self: *ValueHeap) std.mem.Allocator {
         return self.halves[self.live].allocator();
@@ -595,12 +611,67 @@ const ValueHeap = struct {
     /// with .keep_all, and when the copy fails).
     fn compactWith(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) usize {
         const next = 1 - self.live;
-        const dropped = gc.compactWith(eval, &self.halves[self.live], self.halves[next].allocator(), self.scratch, actors) catch return 0;
+        const r = gc.compactPlan(eval, .{
+            .from = &self.halves[self.live],
+            .to = self.halves[next].allocator(),
+            .scratch = self.scratch,
+            .actors = actors,
+            .keep = gc.Region.of(self.old),
+            .keep_refs = self.old_refs,
+        }) catch return 0;
         _ = self.halves[self.live].reset(.free_all);
         self.live = next;
         // Its details have already been formatted for the user.
         eval.last_error = null;
-        return dropped;
+        return r.dropped;
+    }
+
+    /// A compaction that moves everything still live into a new old space,
+    /// which later compactions never copy (gc.Plan).  The previous old
+    /// space, if any, is folded in and freed, so this is also how its
+    /// garbage is reclaimed.  On failure the evaluator stays as it was and
+    /// the caller is told (servePromote prints it).
+    fn promote(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) error{OutOfMemory}!usize {
+        // What survives fits in what is allocated now, give or take values
+        // outside the heap (literals the parser built) and alignment; a
+        // region that turns out too small is tried once more at twice the
+        // size.  The site's boot arena holds 575MB of chunks for a 96MB
+        // promotion, so the first guess is generous, and the unused tail is
+        // given back below.
+        var size = std.mem.alignForward(usize, self.halves[self.live].queryCapacity() + self.old.len + (1 << 20), std.heap.page_size_min);
+        var tries: usize = 0;
+        while (true) : (tries += 1) {
+            // rawAlloc: pages nobody writes are never touched, so the slack
+            // costs address space until it is given back below, not memory.
+            const p = self.scratch.rawAlloc(size, old_align, @returnAddress()) orelse return error.OutOfMemory;
+            const region = p[0..size];
+            const next = 1 - self.live;
+            const r = gc.compactPlan(eval, .{
+                .from = &self.halves[self.live],
+                .to = self.halves[next].allocator(),
+                .scratch = self.scratch,
+                .actors = actors,
+                .promote_into = region,
+                .also_from = gc.Region.of(self.old),
+            }) catch {
+                self.scratch.rawFree(region, old_align, @returnAddress());
+                _ = self.halves[next].reset(.free_all);
+                if (tries == 0) {
+                    size *= 2;
+                    continue;
+                }
+                return error.OutOfMemory;
+            };
+            _ = self.halves[self.live].reset(.free_all);
+            self.live = next;
+            if (self.old.len > 0) self.scratch.rawFree(self.old, old_align, @returnAddress());
+            self.scratch.free(self.old_refs);
+            self.old_refs = r.old_refs;
+            const used = std.mem.alignForward(usize, @max(r.promoted, 1), std.heap.page_size_min);
+            self.old = if (used < size and self.scratch.rawResize(region, old_align, used, @returnAddress())) region[0..used] else region;
+            eval.last_error = null;
+            return r.dropped;
+        }
     }
 };
 
@@ -1408,9 +1479,12 @@ test "preloadSource refuses a file whose top level fails" {
 //   - puts the environment and the actor context back to top level, so a
 //     tick that failed half-way leaves nothing behind;
 //   - empties the message log, which otherwise fills once and stays full;
-//   - compacts when the heap has grown by as much as what survived the last
-//     compaction (and at least 16MB), not after every tick: a compaction
-//     costs time in proportion to what is live;
+//   - compacts when 16MB has been allocated since the last compaction. What
+//     boot built was promoted to the old space right after boot, so a
+//     compaction copies only what is live and younger than that, and its
+//     pause does not grow with the boot heap (see serve_compact_budget);
+//   - promotes again when the control socket says `:promote`, folding
+//     everything live into a new old space (a full collection);
 //   - answers the control socket, where each message is Blimp source,
 //     evaluated at top level like a REPL line. That is how a person, or a
 //     tool, redefines part of the site while it runs.
@@ -1449,8 +1523,17 @@ const ServeStats = struct {
     ticks: u64 = 0,
     errors: u64 = 0,
     compactions: u64 = 0,
-    compact_ms: i64 = 0,
+    compact_us: i64 = 0,
+    last_pause_us: i64 = 0,
+    max_pause_us: i64 = 0,
+    /// Heap bytes after the last compaction, old space included.
     live_after_compact: usize = 0,
+    /// Bytes of old space (ValueHeap.old).
+    old_bytes: usize = 0,
+    promotions: u64 = 0,
+    promote_us: i64 = 0,
+    /// `:promote` on the control socket asks; the loop does it between ticks.
+    promote_requested: bool = false,
     actors_dropped: u64 = 0,
     started_ms: i64 = 0,
 };
@@ -1487,9 +1570,10 @@ fn serve(allocator: std.mem.Allocator, heap_limit: *HeapLimit, opts: ServeOpts) 
 
     var stats = ServeStats{ .started_ms = nowMillis() };
     serveResetToTop(&evaluator);
-    stats.actors_dropped += heap.compactWith(&evaluator, .drop_unreachable);
-    stats.live_after_compact = heap_limit.used;
-    std.debug.print("[serve] booted {s}; live heap {d} bytes; control socket {s}\n", .{ opts.path, heap_limit.used, opts.control });
+    // What boot built is nearly all of what the site will ever hold, and it
+    // does not change: promote it, so no later compaction copies it again.
+    servePromote(&heap, &evaluator, heap_limit, &stats);
+    std.debug.print("[serve] booted {s}; live heap {d} bytes ({d} of it old space, promoted in {d}ms); control socket {s}\n", .{ opts.path, heap_limit.used, stats.old_bytes, @divTrunc(stats.promote_us, 1000), opts.control });
 
     var control = Control.open(opts.control);
     defer control.close();
@@ -1507,19 +1591,66 @@ fn serve(allocator: std.mem.Allocator, heap_limit: *HeapLimit, opts: ServeOpts) 
         control.service(arena.allocator(), &evaluator, heap_limit, &stats);
         serveResetToTop(&evaluator);
 
+        if (stats.promote_requested) {
+            stats.promote_requested = false;
+            servePromote(&heap, &evaluator, heap_limit, &stats);
+        }
+
         const grown = heap_limit.used -| stats.live_after_compact;
-        if (grown >= @max(stats.live_after_compact, 16 * 1024 * 1024)) {
-            const c0 = nowMillis();
+        if (grown >= serve_compact_budget) {
+            const c0 = nowMicros();
             // A served program's only host is the tick, so an actor no value
             // can name will never get another message: drop it. Temper's
             // classes are actors, and a page that builds a query from them
             // made thirty that nothing ever freed.
             stats.actors_dropped += heap.compactWith(&evaluator, .drop_unreachable);
-            stats.compact_ms += nowMillis() - c0;
+            const pause = nowMicros() - c0;
+            stats.compact_us += pause;
+            stats.last_pause_us = pause;
+            stats.max_pause_us = @max(stats.max_pause_us, pause);
             stats.compactions += 1;
             stats.live_after_compact = heap_limit.used;
         }
     }
+}
+
+/// Allocation between compactions of a served program.
+///
+/// It used to be `max(live, 16MB)`: a compaction copied everything live, so
+/// it had to be rare in proportion to how much that was.  With boot's heap
+/// in the old space a compaction copies only what was made since (the young
+/// live set: per-request state, caches, actor state), so its cost no longer
+/// depends on the boot heap and the budget can be flat.  The number trades
+/// memory held as garbage against how often a pause comes.  Measured on the
+/// site (96MB old space, about 0.6MB young live), one minute of a curl loop
+/// over 19 pages, about 170 requests a second:
+///
+///   budget   compactions   pause mean / max    GC time   RSS after
+///    4MB        1064        0.26ms / 0.42ms     273ms     139MB
+///   16MB         270        0.40ms / 0.68ms     107ms     142MB
+///   64MB          65        0.88ms / 1.26ms      57ms     201MB
+///
+/// A pause has a floor of about a quarter millisecond (the roots: the
+/// top-level scope, every actor, the handle tables) and grows slowly with
+/// the budget; memory grows with it one for one.  16MB keeps every pause
+/// under a millisecond for 0.2% of the time and 16MB of garbage at most.
+const serve_compact_budget: usize = 16 * 1024 * 1024;
+
+/// Promote, and say so loudly if it could not be done: the site keeps
+/// running on plain compactions then, each one copying the whole heap.
+fn servePromote(heap: *ValueHeap, evaluator: *Evaluator, heap_limit: *HeapLimit, stats: *ServeStats) void {
+    const t0 = nowMicros();
+    const dropped = heap.promote(evaluator, .drop_unreachable) catch {
+        std.debug.print("[serve] PROMOTION FAILED (out of memory, heap {d} bytes): no old space; every compaction copies the whole heap\n", .{heap_limit.used});
+        stats.actors_dropped += heap.compactWith(evaluator, .drop_unreachable);
+        stats.live_after_compact = heap_limit.used;
+        return;
+    };
+    stats.actors_dropped += dropped;
+    stats.promote_us += nowMicros() - t0;
+    stats.promotions += 1;
+    stats.old_bytes = heap.old.len;
+    stats.live_after_compact = heap_limit.used;
 }
 
 /// Back to the state a top-level eval starts from: one scope, no actor
@@ -1642,9 +1773,17 @@ fn writeAll(fd: c_int, bytes: []const u8) void {
 fn controlEval(src: []const u8, code: std.mem.Allocator, evaluator: *Evaluator, heap_limit: *HeapLimit, stats: *ServeStats, w: *std.Io.Writer) void {
     const trimmed = std.mem.trim(u8, src, " \t\r\n");
     if (std.mem.eql(u8, trimmed, ":stats")) {
-        w.print("ticks {d}, errors {d}, compactions {d} ({d}ms), heap {d} bytes, live after last compaction {d}, actors {d} ({d} unreachable dropped), up {d}s\n", .{
-            stats.ticks, stats.errors, stats.compactions, stats.compact_ms, heap_limit.used, stats.live_after_compact, evaluator.registry.instances.items.len, stats.actors_dropped, @divTrunc(nowMillis() - stats.started_ms, 1000),
+        w.print("ticks {d}, errors {d}, compactions {d} ({d}ms; pause last {d}us, max {d}us), heap {d} bytes, live after last compaction {d}, old space {d} bytes ({d} promotions, {d}ms), actors {d} ({d} unreachable dropped), up {d}s\n", .{
+            stats.ticks,                               stats.errors,     stats.compactions, @divTrunc(stats.compact_us, 1000), stats.last_pause_us, stats.max_pause_us,
+            heap_limit.used,                           stats.live_after_compact, stats.old_bytes, stats.promotions, @divTrunc(stats.promote_us, 1000),
+            evaluator.registry.instances.items.len,    stats.actors_dropped, @divTrunc(nowMillis() - stats.started_ms, 1000),
         }) catch {};
+        return;
+    }
+    if (std.mem.eql(u8, trimmed, ":promote")) {
+        // Done by the loop once this message is answered, between ticks.
+        stats.promote_requested = true;
+        w.writeAll("promoting everything live to the old space after this message\n") catch {};
         return;
     }
     var parser = Parser.init(code, src);
