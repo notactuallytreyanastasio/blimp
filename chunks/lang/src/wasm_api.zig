@@ -52,7 +52,7 @@ fn freshEvaluator() Evaluator {
 fn compactHeap() void {
     var eval = &(evaluator orelse return);
     const next = 1 - live_heap;
-    gc.compact(eval, heaps[next].allocator(), allocator) catch return;
+    gc.compact(eval, &heaps[live_heap], heaps[next].allocator(), allocator) catch return;
     _ = heaps[live_heap].reset(.free_all);
     live_heap = next;
     // Error details were already formatted into err_out.

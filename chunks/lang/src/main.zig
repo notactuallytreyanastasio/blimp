@@ -595,7 +595,7 @@ const ValueHeap = struct {
     /// with .keep_all, and when the copy fails).
     fn compactWith(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) usize {
         const next = 1 - self.live;
-        const dropped = gc.compactWith(eval, self.halves[next].allocator(), self.scratch, actors) catch return 0;
+        const dropped = gc.compactWith(eval, &self.halves[self.live], self.halves[next].allocator(), self.scratch, actors) catch return 0;
         _ = self.halves[self.live].reset(.free_all);
         self.live = next;
         // Its details have already been formatted for the user.

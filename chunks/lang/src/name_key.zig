@@ -75,6 +75,18 @@ pub fn intern(name: []const u8) []const u8 {
     return got.key_ptr.*;
 }
 
+/// The intern table's arena, held still until `unlockArena`, so gc
+/// compaction can tell a name that lives here (and so outlives every
+/// compaction) from bytes it must copy.
+pub fn lockArena() *const std.heap.ArenaAllocator {
+    while (lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    return &arena;
+}
+
+pub fn unlockArena() void {
+    lock.store(false, .release);
+}
+
 /// Whether two names are the same name.  Interned names answer on the
 /// pointer; a name built at run time falls back to the hashes and the
 /// bytes.  A pointer match with equal length is equality: the same bytes.

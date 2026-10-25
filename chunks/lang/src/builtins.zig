@@ -301,6 +301,18 @@ pub const BuiltinRegistry = struct {
     pub fn get(self: *const BuiltinRegistry, name: []const u8) ?BuiltinFn {
         return self.by_name.get(name);
     }
+
+    /// The same table on another allocator, for gc compaction. The names
+    /// and functions are static, so this is two block copies; building it
+    /// again with `init` hashed and inserted every builtin per compaction.
+    pub fn cloneInto(self: *const BuiltinRegistry, allocator: std.mem.Allocator) error{OutOfMemory}!BuiltinRegistry {
+        const items = try allocator.dupe(BuiltinEntry, self.entries.items);
+        return .{
+            .entries = .{ .items = items, .capacity = items.len },
+            .by_name = try self.by_name.clone(allocator),
+            .allocator = allocator,
+        };
+    }
 };
 
 // ============================================================

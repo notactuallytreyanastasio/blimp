@@ -11,16 +11,39 @@
 //! environment, the actor registry with each instance's state and mailbox,
 //! and a few evaluator fields) into a fresh allocator and points the
 //! evaluator at it.  The caller then frees the old allocator.  Values are
-//! immutable and closures capture flat binding lists, so a deep copy with a
-//! pointer memo preserves sharing and terminates on cycles.  AST nodes and
-//! source text are not copied: closures and handlers keep pointing at them,
-//! so those must live in an allocator that outlives every compaction.
+//! immutable and closures capture flat binding lists, so a deep copy that
+//! remembers where each value went preserves sharing and terminates on
+//! cycles.  AST nodes and source text are not copied: closures and handlers
+//! keep pointing at them, so those must live in an allocator that outlives
+//! every compaction.
+//!
+//! Where each value went is a forwarding table, not a hash map.  The old
+//! heap is an `ArenaAllocator`, a short list of large chunks, so a value in
+//! it is named by (chunk, offset / @sizeOf(Value)): two distinct values
+//! never overlap, so no two share a slot.  The table is one pointer per
+//! @sizeOf(Value) bytes of old heap, mapped fresh (and so zeroed) per
+//! compaction.  It is kept beside the heap rather than written over the old
+//! values: the old heap must stay intact until the copy has succeeded,
+//! because a compaction that runs out of memory part-way leaves the
+//! evaluator on the old heap (see `compactWith`).  A value outside the old
+//! heap (a literal the parser built in the code arena, say) still goes
+//! through a hash map, as every value used to; the small integers, the
+//! booleans and nil from `value.interned` are static and are kept as they
+//! are.
+//!
+//! Strings are copied only when their bytes are in the old heap.  A name
+//! the parser interned (name_key.zig) is kept as is, so its pointer stays
+//! the one every AST node holds and `sameName` keeps answering on the
+//! pointer after a compaction; copying it used to un-intern every binding
+//! and map key the first time the heap was compacted.
 //!
 //! Only call this between evals.  Nothing on the Zig stack may hold a value
 //! pointer (no active handler, no actor context) when it runs.
 
 const std = @import("std");
-const Value = @import("value.zig").Value;
+const builtin = @import("builtin");
+const value_mod = @import("value.zig");
+const Value = value_mod.Value;
 const Evaluator = @import("eval.zig").Evaluator;
 const Environment = @import("env.zig").Environment;
 const registry_mod = @import("registry.zig");
@@ -28,16 +51,19 @@ const Registry = registry_mod.Registry;
 const mailbox_mod = @import("mailbox.zig");
 const Mailbox = mailbox_mod.Mailbox;
 const Message = mailbox_mod.Message;
-const BuiltinRegistry = @import("builtins.zig").BuiltinRegistry;
+const name_key = @import("name_key.zig");
 
 pub const CompactError = error{OutOfMemory};
 
 /// Copy the evaluator's live data into `to` and make `to` its allocator.
-/// `scratch` holds the pointer memo for the duration of the call and is
-/// left clean.  On error the evaluator is untouched (everything already
-/// copied into `to` is simply abandoned there).
-pub fn compact(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocator) CompactError!void {
-    _ = try compactWith(eval, to, scratch, .keep_all);
+/// `from` is the arena the evaluator allocates from now, when the caller
+/// has one; without it every value is looked up in a hash map, which is
+/// correct and several times slower.  `scratch` holds the bookkeeping for
+/// the duration of the call and is left clean.  On error the evaluator is
+/// untouched (everything already copied into `to` is simply abandoned
+/// there).
+pub fn compact(eval: *Evaluator, from: ?*const std.heap.ArenaAllocator, to: std.mem.Allocator, scratch: std.mem.Allocator) CompactError!void {
+    _ = try compactWith(eval, from, to, scratch, .keep_all);
 }
 
 /// What a compaction does with actors nothing can reach.
@@ -64,7 +90,7 @@ pub const Actors = enum {
 /// the rest of the garbage. Ids are never reused (`next_id` only grows), so
 /// a ref printed before the drop still names nothing rather than someone
 /// else.
-pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.Allocator, actors: Actors) CompactError!usize {
+pub fn compactWith(eval: *Evaluator, from: ?*const std.heap.ArenaAllocator, to: std.mem.Allocator, scratch: std.mem.Allocator, actors: Actors) CompactError!usize {
     var copier = Copier{
         .to = to,
         .values = std.AutoHashMap(usize, *const Value).init(scratch),
@@ -77,6 +103,10 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
     defer copier.handlers.deinit();
     defer copier.seen.deinit();
     defer copier.pending.deinit(scratch);
+    if (from) |arena| copier.old = try Forwarding.init(scratch, arena);
+    defer copier.old.deinit(scratch);
+    copier.interned = try internedRanges(scratch);
+    defer scratch.free(copier.interned);
 
     // Build every replacement first, then swap them in, so a failure
     // part-way leaves the evaluator consistent.
@@ -116,6 +146,9 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
             .message = try copier.str(e.message),
         };
     }
+    // The builtin table's storage is in the heap being left; its contents
+    // are static, so it is copied rather than built again.
+    const builtins = try eval.builtins.cloneInto(to);
 
     eval.env.scopes = scopes;
     // The recycled binding lists belong to the allocator being dropped.
@@ -128,14 +161,167 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
     eval.registry.reindex();
     eval.bubble_reason = bubble_reason;
     for (0..eval.msg_log_count) |i| eval.msg_log[i] = msg_log[i];
-    eval.builtins = BuiltinRegistry.init(to);
+    eval.builtins = builtins;
     eval.allocator = to;
     handles_mod.relocate(handle_new);
     return dropped;
 }
 
+/// An address range, [lo, hi).
+const Range = struct {
+    lo: usize,
+    hi: usize,
+    /// Forwarding: the table index of the slot for address `lo`.
+    first_slot: usize = 0,
+
+    fn lessThan(_: void, a: Range, b: Range) bool {
+        return a.lo < b.lo;
+    }
+};
+
+/// The chunks an arena has handed out, sorted by address.
+///
+/// This reads `ArenaAllocator`'s private node list (zig 0.16's layout: each
+/// chunk starts with a node whose `size`, low bit masked, is the chunk's
+/// length, header included).  The test "the old heap's chunks are found"
+/// fails if a std upgrade changes that.  Only `used_list` holds memory that
+/// was handed out; `free_list` chunks were never or are no longer in use.
+fn arenaRanges(scratch: std.mem.Allocator, arena: *const std.heap.ArenaAllocator) CompactError![]Range {
+    var n: usize = 0;
+    var it = arena.state.used_list;
+    while (it) |node| : (it = node.next) n += 1;
+    const out = try scratch.alloc(Range, n);
+    it = arena.state.used_list;
+    var i: usize = 0;
+    while (it) |node| : (it = node.next) {
+        const size = @as(usize, @bitCast(node.size)) & ~@as(usize, 1);
+        out[i] = .{ .lo = @intFromPtr(node), .hi = @intFromPtr(node) + size };
+        i += 1;
+    }
+    std.mem.sort(Range, out, {}, Range.lessThan);
+    return out;
+}
+
+fn findRange(ranges: []const Range, addr: usize) ?*const Range {
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (addr < ranges[mid].lo) {
+            hi = mid;
+        } else if (addr >= ranges[mid].hi) {
+            lo = mid + 1;
+        } else return &ranges[mid];
+    }
+    return null;
+}
+
+fn internedRanges(scratch: std.mem.Allocator) CompactError![]Range {
+    const arena = name_key.lockArena();
+    defer name_key.unlockArena();
+    return arenaRanges(scratch, arena);
+}
+
+/// Where each value of the old heap went: one slot per @sizeOf(Value)
+/// bytes of every chunk.
+const Forwarding = struct {
+    ranges: []Range = &.{},
+    slots: []?*const Value = &.{},
+
+    const grain = @sizeOf(Value);
+
+    fn init(scratch: std.mem.Allocator, arena: *const std.heap.ArenaAllocator) CompactError!Forwarding {
+        const ranges = try arenaRanges(scratch, arena);
+        errdefer scratch.free(ranges);
+        var total: usize = 0;
+        for (ranges) |*r| {
+            r.first_slot = total;
+            total += (r.hi - r.lo) / grain + 1;
+        }
+        return .{ .ranges = ranges, .slots = try zeroedSlots(scratch, total) };
+    }
+
+    fn deinit(self: *Forwarding, scratch: std.mem.Allocator) void {
+        scratch.free(self.ranges);
+        freeSlots(scratch, self.slots);
+        self.* = .{};
+    }
+
+    /// The slot for `v`, or null when `v` is not in the old heap.
+    inline fn slot(self: *const Forwarding, v: *const Value) ?*?*const Value {
+        const addr = @intFromPtr(v);
+        const r = findRange(self.ranges, addr) orelse return null;
+        return &self.slots[r.first_slot + (addr - r.lo) / grain];
+    }
+
+    // Natively the table comes straight from mmap, which hands back zeroed
+    // pages and materialises only the ones touched; a heap of 170MB needs a
+    // 43MB table, so a memset of it would cost more than the lookups save.
+    // WASM's page allocator reuses memory, so it is cleared there.
+    const use_pages = !builtin.target.cpu.arch.isWasm();
+
+    fn zeroedSlots(scratch: std.mem.Allocator, n: usize) CompactError![]?*const Value {
+        if (n == 0) return &.{};
+        if (use_pages) {
+            // rawAlloc, not alloc: in safe builds `alloc` fills the memory
+            // with 0xaa, which both touches every page and reads as a
+            // forwarding pointer.
+            const bytes = n * @sizeOf(?*const Value);
+            const p = std.heap.page_allocator.rawAlloc(bytes, .of(?*const Value), @returnAddress()) orelse return error.OutOfMemory;
+            const slots: [*]?*const Value = @ptrCast(@alignCast(p));
+            return slots[0..n];
+        }
+        const out = try scratch.alloc(?*const Value, n);
+        @memset(out, null);
+        return out;
+    }
+
+    fn freeSlots(scratch: std.mem.Allocator, slots: []?*const Value) void {
+        if (slots.len == 0) return;
+        if (use_pages) {
+            std.heap.page_allocator.rawFree(std.mem.sliceAsBytes(slots), .of(?*const Value), @returnAddress());
+        } else scratch.free(slots);
+    }
+};
+
+/// Bump allocation in large blocks taken from `to`.  Every value the copier
+/// makes is immutable and is never freed or resized on its own (the whole
+/// heap goes at the next compaction), so there is no reason to pay the
+/// arena's per-allocation atomics for each of a million small objects.
+/// Lists the evaluator appends to later (scopes, bindings, mailboxes, the
+/// registry's) are allocated from `to` directly.
+const Bump = struct {
+    buf: []u8 = &.{},
+
+    /// Small next to the arena's own chunks (which grow by half each time):
+    /// when a block does not fit the rest of a chunk the arena starts a new
+    /// one and the rest is wasted, so a big block wastes a big tail. 4MB
+    /// blocks made a 106MB heap measure 176MB, and 64KB ones 109MB.
+    const block = 16 * 1024;
+
+    fn bytes(self: *Bump, to: std.mem.Allocator, n: usize, comptime alignment: usize) CompactError![*]u8 {
+        const base = @intFromPtr(self.buf.ptr);
+        const pad = std.mem.alignForward(usize, base, alignment) - base;
+        if (pad + n <= self.buf.len) {
+            const p = self.buf.ptr + pad;
+            self.buf = self.buf[pad + n ..];
+            return p;
+        }
+        // rawAlloc: `alloc` would fill the memory with 0xaa in a safe
+        // build, a second pass over every byte about to be written.
+        if (n > block / 4) return to.rawAlloc(n, .fromByteUnits(alignment), @returnAddress()) orelse error.OutOfMemory;
+        const fresh = to.rawAlloc(block, .@"16", @returnAddress()) orelse return error.OutOfMemory;
+        self.buf = fresh[n..block];
+        return fresh;
+    }
+};
+
 const Copier = struct {
     to: std.mem.Allocator,
+    bump: Bump = .{},
+    old: Forwarding = .{},
+    interned: []Range = &.{},
+    /// Values outside the old heap, by address.
     values: std.AutoHashMap(usize, *const Value),
     handlers: std.AutoHashMap(usize, []const Value.HandlerDef),
     /// Every actor id a copied value holds, and those not yet visited.
@@ -143,13 +329,31 @@ const Copier = struct {
     pending: std.ArrayList(u64),
     scratch: std.mem.Allocator,
 
+    fn create(self: *Copier, comptime T: type) CompactError!*T {
+        comptime std.debug.assert(@alignOf(T) <= 16);
+        return @ptrCast(@alignCast(try self.bump.bytes(self.to, @sizeOf(T), @alignOf(T))));
+    }
+
+    fn alloc(self: *Copier, comptime T: type, n: usize) CompactError![]T {
+        comptime std.debug.assert(@alignOf(T) <= 16);
+        if (n == 0) return &.{};
+        const p: [*]T = @ptrCast(@alignCast(try self.bump.bytes(self.to, @sizeOf(T) * n, @alignOf(T))));
+        return p[0..n];
+    }
+
     fn see(self: *Copier, id: u64) CompactError!void {
         const got = try self.seen.getOrPut(id);
         if (!got.found_existing) try self.pending.append(self.scratch, id);
     }
 
+    /// The bytes of `s` where they will still be after the old heap is
+    /// freed: kept when they are an interned name, copied otherwise.
     fn str(self: *Copier, s: []const u8) CompactError![]const u8 {
-        return self.to.dupe(u8, s);
+        if (s.len == 0) return s;
+        if (findRange(self.interned, @intFromPtr(s.ptr)) != null) return s;
+        const out = try self.alloc(u8, s.len);
+        @memcpy(out, s);
+        return out;
     }
 
     fn optStr(self: *Copier, s: ?[]const u8) CompactError!?[]const u8 {
@@ -157,11 +361,23 @@ const Copier = struct {
     }
 
     fn value(self: *Copier, v: *const Value) CompactError!*const Value {
-        if (self.values.get(@intFromPtr(v))) |done| return done;
-        const nv = try self.to.create(Value);
-        // Register before recursing so shared and cyclic references resolve
-        // to this copy.
-        try self.values.put(@intFromPtr(v), nv);
+        if (value_mod.interned.isStatic(v)) return v;
+        // Record the copy before recursing so shared and cyclic references
+        // resolve to it.
+        var nv: *Value = undefined;
+        if (self.old.slot(v)) |s| {
+            if (s.*) |done| return done;
+            nv = try self.create(Value);
+            s.* = nv;
+        } else {
+            const got = try self.values.getOrPut(@intFromPtr(v));
+            if (got.found_existing) return got.value_ptr.*;
+            nv = self.create(Value) catch |err| {
+                _ = self.values.remove(@intFromPtr(v));
+                return err;
+            };
+            got.value_ptr.* = nv;
+        }
         nv.* = switch (v.*) {
             .integer, .float, .boolean, .nil, .hole => v.*,
             .string => |s| .{ .string = try self.str(s) },
@@ -180,7 +396,7 @@ const Copier = struct {
     }
 
     fn viewNode(self: *Copier, n: *const Value.ViewNode) CompactError!*const Value.ViewNode {
-        const out = try self.to.create(Value.ViewNode);
+        const out = try self.create(Value.ViewNode);
         out.* = .{
             .tag = try self.str(n.tag),
             .attrs = try self.attrs(n.attrs),
@@ -190,7 +406,7 @@ const Copier = struct {
     }
 
     fn closure(self: *Copier, c: *const Value.Closure) CompactError!*const Value.Closure {
-        const out = try self.to.create(Value.Closure);
+        const out = try self.create(Value.Closure);
         out.* = .{
             .params = c.params,
             .body = c.body,
@@ -209,25 +425,25 @@ const Copier = struct {
     }
 
     fn valueList(self: *Copier, items: []const *const Value) CompactError![]const *const Value {
-        const out = try self.to.alloc(*const Value, items.len);
+        const out = try self.alloc(*const Value, items.len);
         for (items, 0..) |item, i| out[i] = try self.value(item);
         return out;
     }
 
     fn mapEntries(self: *Copier, entries: []const Value.MapEntry) CompactError![]Value.MapEntry {
-        const out = try self.to.alloc(Value.MapEntry, entries.len);
+        const out = try self.alloc(Value.MapEntry, entries.len);
         for (entries, 0..) |e, i| out[i] = .{ .key = try self.str(e.key), .val = try self.value(e.val) };
         return out;
     }
 
     fn captured(self: *Copier, bindings: []const Value.CapturedBinding) CompactError![]const Value.CapturedBinding {
-        const out = try self.to.alloc(Value.CapturedBinding, bindings.len);
+        const out = try self.alloc(Value.CapturedBinding, bindings.len);
         for (bindings, 0..) |b, i| out[i] = .{ .name = try self.str(b.name), .val = try self.value(b.val), .hash = b.hash };
         return out;
     }
 
     fn attrs(self: *Copier, list: []const Value.ViewNode.ViewAttr) CompactError![]const Value.ViewNode.ViewAttr {
-        const out = try self.to.alloc(Value.ViewNode.ViewAttr, list.len);
+        const out = try self.alloc(Value.ViewNode.ViewAttr, list.len);
         for (list, 0..) |a, i| out[i] = .{ .key = try self.str(a.key), .val = try self.value(a.val) };
         return out;
     }
@@ -237,7 +453,7 @@ const Copier = struct {
     fn handlerDefs(self: *Copier, defs: []const Value.HandlerDef) CompactError![]const Value.HandlerDef {
         if (defs.len == 0) return defs;
         if (self.handlers.get(@intFromPtr(defs.ptr))) |done| return done;
-        const out = try self.to.alloc(Value.HandlerDef, defs.len);
+        const out = try self.alloc(Value.HandlerDef, defs.len);
         for (defs, 0..) |h, i| out[i] = .{
             .name = try self.str(h.name),
             .hash = h.hash,
@@ -294,7 +510,7 @@ const Copier = struct {
     }
 
     fn entry(self: *Copier, e: *const registry_mod.ActorEntry) CompactError!*registry_mod.ActorEntry {
-        const ne = try self.to.create(registry_mod.ActorEntry);
+        const ne = try self.create(registry_mod.ActorEntry);
         ne.* = .{
             .ref = .{ .id = e.ref.id, .type_name = try self.str(e.ref.type_name) },
             .state_fields = try self.mapEntries(e.state_fields),
@@ -421,7 +637,7 @@ test "compact keeps actors, closures, bindings and views alive after the old hea
     _ = try run(code.allocator(), &eval, program);
     try checkProgram(&eval, code.allocator());
 
-    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    try compact(&eval, &heap_a, heap_b.allocator(), std.testing.allocator);
     _ = heap_a.reset(.free_all);
 
     try checkProgram(&eval, code.allocator());
@@ -445,7 +661,7 @@ test "compact can run after every eval, swapping heaps back and forth" {
     while (i < 20) : (i += 1) {
         _ = try run(code.allocator(), &eval, "c <- :add(1)");
         const next = 1 - live;
-        try compact(&eval, heaps[next].allocator(), std.testing.allocator);
+        try compact(&eval, &heaps[live], heaps[next].allocator(), std.testing.allocator);
         _ = heaps[live].reset(.free_all);
         live = next;
         try std.testing.expectEqual(5 + i + 1, (try run(code.allocator(), &eval, "c <- :count")).integer);
@@ -464,7 +680,7 @@ test "compact preserves sharing between references to one value" {
 
     var eval = Evaluator.init(heap_a.allocator());
     _ = try run(code.allocator(), &eval, program);
-    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    try compact(&eval, &heap_a, heap_b.allocator(), std.testing.allocator);
     _ = heap_a.reset(.free_all);
 
     const pair = try run(code.allocator(), &eval, "pair");
@@ -487,7 +703,7 @@ test "compact copies a full message log" {
         _ = try run(code.allocator(), &eval, "c <- :count");
     }
 
-    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    try compact(&eval, &heap_a, heap_b.allocator(), std.testing.allocator);
     _ = heap_a.reset(.free_all);
 
     try std.testing.expectEqual(@as(i64, 5), (try run(code.allocator(), &eval, "c <- :count")).integer);
@@ -514,7 +730,7 @@ test "an actor defined by blimp_eval survives compaction" {
     var i: usize = 0;
     while (i < 3) : (i += 1) {
         const next = 1 - live;
-        try compact(&eval, heaps[next].allocator(), std.testing.allocator);
+        try compact(&eval, &heaps[live], heaps[next].allocator(), std.testing.allocator);
         // free_all hands the pages back; the testing allocator poisons them,
         // so a handler still pointing into the old heap reads garbage
         _ = heaps[live].reset(.free_all);
@@ -549,7 +765,7 @@ test "a top-level def sees the current definition of the defs it calls" {
 
     // redefined the way the control socket does it: another top-level def
     _ = try run(code.allocator(), &eval, "def greet(who: String) -> String do concat(\"howdy \", who) end");
-    try compact(&eval, heaps[1].allocator(), std.testing.allocator);
+    try compact(&eval, &heaps[0], heaps[1].allocator(), std.testing.allocator);
     _ = heaps[0].reset(.free_all);
 
     try std.testing.expectEqualStrings("<p>howdy b</p>", (try run(code.allocator(), &eval, "page(\"b\")")).string);
@@ -622,7 +838,7 @@ test "a fn literal sees the top level as it was when it was made, and globals de
         try std.testing.expectEqual(@as(i64, 20), (try run(code.allocator(), &eval, "g()")).integer);
         if (round == 0) {
             // and all of it survives compaction, which rebuilds the index
-            try compact(&eval, heaps[1].allocator(), std.testing.allocator);
+            try compact(&eval, &heaps[0], heaps[1].allocator(), std.testing.allocator);
             _ = heaps[0].reset(.free_all);
         }
     }
@@ -689,7 +905,7 @@ test "redefining an actor updates its running instances and keeps their state" {
         \\  on :show do reply "#{label}: #{n}" end
         \\end
     );
-    try compact(&eval, heaps[1].allocator(), std.testing.allocator);
+    try compact(&eval, &heaps[0], heaps[1].allocator(), std.testing.allocator);
     _ = heaps[0].reset(.free_all);
 
     // the running instance: new handlers, its n kept, the new field defaulted
@@ -752,7 +968,7 @@ test "drop_unreachable keeps every actor a value can name, and only those" {
     // plus 50 that scratch/1 spawned and let go.
     try std.testing.expectEqual(@as(usize, 57), eval.registry.instances.items.len);
 
-    const dropped = try compactWith(&eval, heap_b.allocator(), std.testing.allocator, .drop_unreachable);
+    const dropped = try compactWith(&eval, &heap_a, heap_b.allocator(), std.testing.allocator, .drop_unreachable);
     _ = heap_a.reset(.free_all);
     try std.testing.expectEqual(@as(usize, 50), dropped);
     try std.testing.expectEqual(@as(usize, 7), eval.registry.instances.items.len);
@@ -786,7 +1002,7 @@ test "keep_all still keeps every actor" {
         \\one(1)
         \\one(2)
     );
-    try std.testing.expectEqual(@as(usize, 0), try compactWith(&eval, heap_b.allocator(), std.testing.allocator, .keep_all));
+    try std.testing.expectEqual(@as(usize, 0), try compactWith(&eval, &heap_a, heap_b.allocator(), std.testing.allocator, .keep_all));
     _ = heap_a.reset(.free_all);
     try std.testing.expectEqual(@as(usize, 2), eval.registry.instances.items.len);
 }
@@ -818,7 +1034,7 @@ test "a literal built once by the parser survives compaction, bound and re-evalu
     for (nodes) |*node| last = try eval.eval(node);
     try std.testing.expect(last.list[0] == lit.prebuilt.?);
 
-    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    try compact(&eval, &heap_a, heap_b.allocator(), std.testing.allocator);
     _ = heap_a.reset(.free_all);
 
     // The bindings hold copies; the AST's own values were never in heap_a.
@@ -835,7 +1051,7 @@ test "a literal built once by the parser survives compaction, bound and re-evalu
     try std.testing.expectEqualStrings("n=5000!", last.list[4].string);
 
     // A second compaction copies the shared prebuilt values by value.
-    try compact(&eval, heap_a.allocator(), std.testing.allocator);
+    try compact(&eval, &heap_b, heap_a.allocator(), std.testing.allocator);
     _ = heap_b.reset(.free_all);
     try std.testing.expectEqualStrings("a\tb", (try run(code.allocator(), &eval, "s")).string);
 }
@@ -859,10 +1075,88 @@ test "a call site cached before compaction is not used after it" {
     try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
     try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
 
-    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    try compact(&eval, &heap_a, heap_b.allocator(), std.testing.allocator);
     _ = heap_a.reset(.free_all);
 
     // Were the cache trusted now it would read freed memory.
     try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
     try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+}
+
+test "the old heap's chunks are found, and nothing outside them" {
+    // arenaRanges reads ArenaAllocator's private node list; a std upgrade
+    // that changes it must fail here, not corrupt a heap.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ptrs: [2000]*Value = undefined;
+    for (&ptrs, 0..) |*p, i| {
+        p.* = try arena.allocator().create(Value);
+        p.*.* = .{ .integer = @intCast(i) };
+        // big allocations in between force several chunks
+        if (i % 100 == 0) _ = try arena.allocator().alloc(u8, 10_000 + i * 50);
+    }
+    var fwd = try Forwarding.init(std.testing.allocator, &arena);
+    defer fwd.deinit(std.testing.allocator);
+    try std.testing.expect(fwd.ranges.len > 1);
+    for (ptrs) |p| {
+        const s = fwd.slot(p) orelse return error.TestUnexpectedResult;
+        // every value has its own slot, and all start empty
+        try std.testing.expect(s.* == null);
+        s.* = p;
+    }
+    var outside: Value = .nil;
+    try std.testing.expect(fwd.slot(&outside) == null);
+    try std.testing.expect(fwd.slot(value_mod.interned.boolean(true)) == null);
+}
+
+test "compaction keeps interned names interned and the small-integer table shared" {
+    @import("handles.zig").dropAll();
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    _ = try run(code.allocator(), &eval,
+        \\counter_name = 7
+        \\m = %{counter_name: 7}
+    );
+    try compact(&eval, &heap_a, heap_b.allocator(), std.testing.allocator);
+    _ = heap_a.reset(.free_all);
+    try compact(&eval, &heap_b, heap_a.allocator(), std.testing.allocator);
+    _ = heap_b.reset(.free_all);
+
+    const interned = name_key.intern("counter_name");
+    var found = false;
+    for (eval.env.scopes.items[0].bindings.items) |b| {
+        if (std.mem.eql(u8, b.name, "counter_name")) {
+            try std.testing.expect(b.name.ptr == interned.ptr);
+            try std.testing.expect(b.val == value_mod.interned.intPtr(7).?);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+    const m = try run(code.allocator(), &eval, "m");
+    try std.testing.expect(m.map[0].key.ptr == interned.ptr);
+    try std.testing.expectEqual(@as(i64, 7), (try run(code.allocator(), &eval, "counter_name")).integer);
+}
+
+test "without the old arena every value goes through the map, and still survives" {
+    @import("handles.zig").dropAll();
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    _ = try run(code.allocator(), &eval, program);
+    try compact(&eval, null, heap_b.allocator(), std.testing.allocator);
+    _ = heap_a.reset(.free_all);
+    try checkProgram(&eval, code.allocator());
+    const pair = try run(code.allocator(), &eval, "pair");
+    try std.testing.expect(pair.tuple[0] == pair.tuple[1]);
 }
