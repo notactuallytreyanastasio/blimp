@@ -44,7 +44,7 @@ var failure_len: ?usize = null;
 
 /// Record why the call failed and answer TypeError, which is what a caller
 /// passing the wrong thing gets from every other builtin.
-fn failArg(comptime fmt: []const u8, args: anytype) EvalError {
+pub fn failArg(comptime fmt: []const u8, args: anytype) EvalError {
     const msg = std.fmt.bufPrint(&failure_buf, fmt, args) catch failure_buf[0..];
     failure_len = msg.len;
     return error.TypeError;
@@ -149,6 +149,7 @@ pub const BuiltinRegistry = struct {
         reg.register("size", &builtinSize);
         reg.register("empty?", &builtinIsEmpty);
         reg.register("flat", &builtinFlat);
+        reg.register("flat_deep", &builtinFlatDeep);
         reg.register("zip", &builtinZip);
         reg.register("uniq", &builtinUniq);
         reg.register("sum", &builtinSum);
@@ -239,6 +240,17 @@ pub const BuiltinRegistry = struct {
         reg.register("random_token", &builtinRandomToken_impl);
         reg.register("getenv", &builtinGetenv_impl);
         reg.register("argv", &builtinArgv_impl);
+        reg.register("append_file", &builtinAppendFile_impl);
+        reg.register("fd_close", &builtinFdClose_impl);
+        reg.register("pbkdf2_sha256", &builtinPbkdf2Sha256_impl);
+        reg.register("constant_time_eq", &builtinConstantTimeEq_impl);
+        reg.register("sqlite_open", &builtinSqliteOpen_impl);
+        reg.register("sqlite_close", &builtinSqliteClose_impl);
+        reg.register("sqlite_exec", &builtinSqliteExec_impl);
+        reg.register("sqlite_query", &builtinSqliteQuery_impl);
+        reg.register("sqlite_last_id", &builtinSqliteLastId_impl);
+        reg.register("sqlite_changes", &builtinSqliteChanges_impl);
+        reg.register("exec", &builtinExec_impl);
         // P-256 and AES-128-GCM, for Web Push (RFC 8291 / RFC 8292)
         reg.register("p256_keypair", &builtinP256Keypair_impl);
         reg.register("p256_public_key", &builtinP256PublicKey);
@@ -1867,6 +1879,59 @@ fn builtinFlat(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     return result;
 }
 
+/// flat_deep([1, [2, [3, "x"]], "y"]) => [1, 2, 3, "x", "y"]
+///
+/// Flattens lists nested to any depth into one list, in order, and keeps the
+/// elements that are not lists. `flat` takes off one level only:
+/// flat([1, [2, [3]]]) => [1, 2, [3]]. Iterative, with an explicit stack, so
+/// depth is bounded by memory and not by the native stack. Raises TypeError
+/// for an argument that is not a list.
+fn builtinFlatDeep(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .list) return error.TypeError;
+    const Frame = struct { items: []const *const Value, i: usize };
+    var stack: std.ArrayList(Frame) = .empty;
+    defer stack.deinit(allocator);
+    var out: std.ArrayList(*const Value) = .empty;
+    stack.append(allocator, .{ .items = args[0].list, .i = 0 }) catch return error.OutOfMemory;
+    while (stack.items.len > 0) {
+        const top = &stack.items[stack.items.len - 1];
+        if (top.i == top.items.len) {
+            _ = stack.pop();
+            continue;
+        }
+        const item = top.items[top.i];
+        top.i += 1;
+        if (item.* == .list) {
+            stack.append(allocator, .{ .items = item.list, .i = 0 }) catch return error.OutOfMemory;
+        } else {
+            out.append(allocator, item) catch return error.OutOfMemory;
+        }
+    }
+    const result = allocator.create(Value) catch return error.OutOfMemory;
+    result.* = Value{ .list = out.toOwnedSlice(allocator) catch return error.OutOfMemory };
+    return result;
+}
+
+test "flat_deep flattens depth 3, keeps non-lists and order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const one = try make(a, .{ .integer = 1 });
+    const x = try make(a, .{ .string = "x" });
+    const empty = try make(a, .{ .list = &.{} });
+    const l3 = try make(a, .{ .list = try a.dupe(*const Value, &.{ try make(a, .{ .integer = 3 }), x }) });
+    const l2 = try make(a, .{ .list = try a.dupe(*const Value, &.{ try make(a, .{ .integer = 2 }), l3, empty }) });
+    const top = try make(a, .{ .list = try a.dupe(*const Value, &.{ one, l2, try make(a, .{ .string = "y" }) }) });
+    const r = try builtinFlatDeep(a, &.{top});
+    try std.testing.expectEqual(@as(usize, 5), r.list.len);
+    try std.testing.expectEqual(@as(i64, 1), r.list[0].integer);
+    try std.testing.expectEqual(@as(i64, 2), r.list[1].integer);
+    try std.testing.expectEqual(@as(i64, 3), r.list[2].integer);
+    try std.testing.expectEqualStrings("x", r.list[3].string);
+    try std.testing.expectEqualStrings("y", r.list[4].string);
+    try std.testing.expectError(error.TypeError, builtinFlatDeep(a, &.{one}));
+}
+
 /// zip([1,2,3], [:a,:b,:c]) => [{1,:a},{2,:b},{3,:c}]
 fn builtinZip(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 2 or args[0].* != .list or args[1].* != .list) return error.TypeError;
@@ -3377,6 +3442,17 @@ const builtinRandomBytes_impl = if (is_wasm) native_stub.stub else builtinRandom
 const builtinRandomToken_impl = if (is_wasm) native_stub.stub else builtinRandomTokenNative;
 const builtinGetenv_impl = if (is_wasm) native_stub.stub else builtinGetenvNative;
 const builtinArgv_impl = if (is_wasm) native_stub.stub else builtinArgvNative;
+const builtinExec_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").exec;
+const builtinSqliteOpen_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteOpen;
+const builtinSqliteClose_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteClose;
+const builtinSqliteExec_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteExec;
+const builtinSqliteQuery_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteQuery;
+const builtinSqliteLastId_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteLastId;
+const builtinSqliteChanges_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteChanges;
+const builtinPbkdf2Sha256_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").pbkdf2Sha256;
+const builtinConstantTimeEq_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").constantTimeEq;
+const builtinAppendFile_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").appendFile;
+const builtinFdClose_impl = if (is_wasm) native_stub.stub else builtinFdCloseNative;
 
 /// getenv(name) -> the variable's value as a String, or nil when it is not
 /// set. A set-but-empty variable is "", not nil.
@@ -5168,6 +5244,52 @@ fn builtinTcpCloseNative(allocator: std.mem.Allocator, args: []const *const Valu
     lingering[lingering_len] = .{ .fd = fd, .deadline = monoMs() + linger_ms };
     lingering_len += 1;
     return make(allocator, .nil);
+}
+
+/// fd_close(fd: Int) -> nil
+///
+/// A plain close(2): no shutdown, no lingering drain. For a parent that has
+/// forked a child which now owns the socket: tcp_close would shutdown(SHUT_WR)
+/// the shared connection under the child and keep the fd open, reading, for up
+/// to linger_ms. If the fd is on the lingering table it is dropped from it
+/// (and closed once), so it is never closed twice. Raises on a non-Int.
+fn builtinFdCloseNative(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+    if (args.len != 1 or args[0].* != .integer) return error.TypeError;
+    const fd: std.posix.fd_t = @intCast(args[0].integer);
+    var i: usize = 0;
+    while (i < lingering_len) {
+        if (lingering[i].fd == fd) {
+            lingering_len -= 1;
+            lingering[i] = lingering[lingering_len];
+        } else i += 1;
+    }
+    _ = std.c.close(fd);
+    return make(allocator, .nil);
+}
+
+test "fd_close closes once, without shutdown, and forgets a lingering fd" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var sv: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sv));
+    defer _ = std.c.close(sv[1]);
+
+    // Pretend tcp_close parked sv[0] for lingering; fd_close must drop the entry.
+    lingering[lingering_len] = .{ .fd = sv[0], .deadline = monoMs() + linger_ms };
+    lingering_len += 1;
+    const before = lingering_len;
+
+    const r = try builtinFdCloseNative(a, &.{try make(a, .{ .integer = sv[0] })});
+    try std.testing.expect(r.* == .nil);
+    try std.testing.expectEqual(before - 1, lingering_len);
+    // Closed: the descriptor is gone, and the peer sees EOF rather than a drained, half-open socket.
+    try std.testing.expect(std.c.fcntl(sv[0], std.posix.F.GETFL, @as(c_int, 0)) < 0);
+    var b: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), std.c.read(sv[1], &b, 1));
+
+    try std.testing.expectError(error.TypeError, builtinFdCloseNative(a, &.{try make(a, .{ .string = "3" })}));
 }
 
 // ============================================================

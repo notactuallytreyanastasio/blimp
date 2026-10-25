@@ -28,6 +28,7 @@ test {
     _ = @import("memory_test.zig");
     _ = @import("websocket.zig");
     _ = @import("unicode_builtins.zig");
+    _ = @import("native_ext.zig");
     _ = @import("vendor/zig_std/tls_client.zig");
     _ = @import("vendor/zig_std/flate_decompress.zig");
 }

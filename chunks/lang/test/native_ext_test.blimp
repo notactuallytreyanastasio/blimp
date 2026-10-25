@@ -1,0 +1,148 @@
+# SQLite, subprocesses, PBKDF2, constant-time compare, append_file, fd_close
+# and flat_deep: the builtins a Temper web application leans on.
+
+def raises(code: String) -> Bool do
+  r = blimp_eval(code)
+  case type_of(r) == :map do
+    true -> lookup(r, "error") == "runtime error"
+    false -> false
+  end
+end
+
+actor SqliteTests do
+  test "round trip: NULL, ints, quotes and unicode all come back as text" do
+    db = sqlite_open(":memory:")
+    assert_eq(sqlite_exec(db, "create table t(id integer primary key, name text, n integer); create index tn on t(n)"), 0)
+    ins = sqlite_query(db, "insert into t(name, n) values (?, ?), (?, ?), (?, ?)", ["it's \"q\"", 42, "héllo ❤️", nil, nil, 7])
+    assert_eq(ins, [["changes"], ["3"]])
+    assert_eq(sqlite_changes(db), 3)
+    assert_eq(sqlite_last_id(db), 3)
+    rows = sqlite_query(db, "select id, name, n from t order by id", [])
+    assert_eq(rows, [["id", "name", "n"], ["1", "it's \"q\"", "42"], ["2", "héllo ❤️", nil], ["3", nil, "7"]])
+    sqlite_close(db)
+  end
+
+  test "a select that matches nothing is just the header row" do
+    db = sqlite_open(":memory:")
+    sqlite_exec(db, "create table t(a, b)")
+    assert_eq(sqlite_query(db, "select a, b from t", []), [["a", "b"]])
+    sqlite_close(db)
+  end
+
+  test "floats bind natively, blobs come back as hex, ints are text" do
+    db = sqlite_open(":memory:")
+    assert_eq(sqlite_query(db, "select ? as f, x'00ff' as b, 5 as i", [2.5]), [["f", "b", "i"], ["2.5", "00ff", "5"]])
+    sqlite_close(db)
+  end
+
+  test "sqlite_exec counts changes across a script" do
+    db = sqlite_open(":memory:")
+    sqlite_exec(db, "create table t(a)")
+    assert_eq(sqlite_exec(db, "insert into t values (1); insert into t values (2); update t set a = a + 1"), 4)
+    sqlite_close(db)
+  end
+
+  test "mistakes raise, and a stale handle does too" do
+    db = sqlite_open(":memory:")
+    assert(raises("sqlite_query(1, \"select * from nope\", [])"))
+    assert(raises("sqlite_query(1, \"select 1; select 2\", [])"))
+    assert(raises("sqlite_query(1, \"select ?\", [])"))
+    assert(raises("sqlite_query(1, \"select ?\", [[1]])"))
+    sqlite_close(db)
+    assert(raises("sqlite_changes(1)"))
+    assert(raises("sqlite_open(\"/no/such/dir/x.db\")"))
+  end
+
+  test "a file database keeps its rows across handles" do
+    path = "/tmp/blimp-native-ext-test.db"
+    exec(["rm", "-f", path, concat(path, "-wal"), concat(path, "-shm")], "", nil)
+    db = sqlite_open(path)
+    sqlite_exec(db, "create table t(x); insert into t values ('kept')")
+    sqlite_close(db)
+    db2 = sqlite_open(path)
+    assert_eq(sqlite_query(db2, "select x from t", []), [["x"], ["kept"]])
+    assert_eq(sqlite_query(db2, "pragma journal_mode", []), [["journal_mode"], ["wal"]])
+    sqlite_close(db2)
+    exec(["rm", "-f", path, concat(path, "-wal"), concat(path, "-shm")], "", nil)
+  end
+end
+
+actor ExecTests do
+  test "exec of /bin/echo answers a list of status, stdout, stderr" do
+    assert_eq(exec(["/bin/echo", "hello world"], "", nil), [0, "hello world\n", ""])
+  end
+
+  test "exec feeds stdin and reports a failing command's status and stderr" do
+    assert_eq(exec(["cat"], "from stdin", nil), [0, "from stdin", ""])
+    assert_eq(exec(["sh", "-c", "echo out; echo err 1>&2; exit 3"], "", nil), [3, "out\n", "err\n"])
+    assert_eq(elem(exec(["no-such-program-xyz"], "", nil), 0), 127)
+    assert_eq(elem(exec(["sh", "-c", "kill -9 $$"], "", nil), 0), -9)
+  end
+
+  test "exec moves more than a pipe holds in both directions" do
+    big = random_token(300000)
+    r = exec(["cat"], big, nil)
+    assert_eq(elem(r, 0), 0)
+    assert(elem(r, 1) == big)
+  end
+
+  test "exec runs in cwd when one is given" do
+    assert_eq(exec(["pwd"], "", "/"), [0, "/\n", ""])
+  end
+
+  test "exec refuses an empty argv" do
+    assert(raises("exec([], \"\", nil)"))
+  end
+end
+
+actor CryptoAndFileTests do
+  test "pbkdf2_sha256 matches RFC 7914 section 11 and hashlib" do
+    assert_eq(pbkdf2_sha256("passwd", hex_encode("salt"), 1, 64), "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783")
+    assert_eq(pbkdf2_sha256("password", hex_encode("salt"), 1, 32), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+    assert(raises("pbkdf2_sha256(\"p\", \"zz\", 1, 32)"))
+    assert(raises("pbkdf2_sha256(\"p\", \"00\", 0, 32)"))
+  end
+
+  test "constant_time_eq" do
+    assert(constant_time_eq("abc", "abc"))
+    assert(constant_time_eq("", ""))
+    refute(constant_time_eq("abc", "abd"))
+    refute(constant_time_eq("abc", "ab"))
+  end
+
+  test "append_file creates the file, then appends" do
+    path = "/tmp/blimp-native-ext-test.log"
+    exec(["rm", "-f", path], "", nil)
+    append_file(path, "one\n")
+    append_file(path, "two\n")
+    assert_eq(read_file(path), "one\ntwo\n")
+    exec(["rm", "-f", path], "", nil)
+  end
+
+  test "fd_close closes a socket without shutting the connection down first" do
+    l = tcp_listen(47312)
+    c = tcp_connect("127.0.0.1", 47312)
+    s = tcp_accept(l)
+    assert_eq(fd_close(c), nil)
+    assert(raises("fd_close(\"x\")"))
+    tcp_close(s)
+    tcp_close(l)
+  end
+
+  test "flat_deep flattens any depth and keeps the non-lists" do
+    assert_eq(flat_deep([1, [2, [3, "x"]], "y"]), [1, 2, 3, "x", "y"])
+    assert_eq(flat_deep([]), [])
+    assert_eq(flat_deep([[], [[]], "a"]), ["a"])
+    assert(raises("flat_deep(3)"))
+  end
+
+  test "flat takes off one level, flat_deep all of them" do
+    assert_eq(flat([1, [2, [3]]]), [1, 2, [3]])
+    assert_eq(flat_deep([1, [2, [3]]]), [1, 2, 3])
+  end
+
+  test "flat_deep walks 100000 levels without using the native stack" do
+    deep = reduce(range(0, 100000), [7], fn(acc: List, i: Int) do [acc] end)
+    assert_eq(flat_deep(deep), [7])
+  end
+end
