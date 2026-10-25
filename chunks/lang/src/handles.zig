@@ -38,8 +38,9 @@
 //! O(n) per pair (what it cost before, not more).
 //!
 //! The values a buffer holds are pointers into the evaluator's heap. gc.compact
-//! moves that heap, so main.zig does not compact while any buffer exists
-//! (`inUse`). fork() copies the table with the rest of the process, which is
+//! moves that heap, and carries what the buffers point at through
+//! `valuePointers` and `relocate` (docs/lang_design/handles.md); `inUse` is
+//! what the REPL and --serve check. fork() copies the table with the rest of the process, which is
 //! what is wanted. Handles are never reused or closed: a builder lives as long
 //! as the process, like every actor. Single-threaded: only the evaluator
 //! touches the table. Native only (builtins.zig stubs these on WASM).
@@ -89,9 +90,99 @@ const Obj = union(enum) { list: ListBuf, str: StrBuf, map: HMap };
 var table: std.ArrayList(Obj) = .empty;
 var scratch: std.ArrayList(u8) = .empty;
 
-/// True once any buffer exists. main.zig will not compact the heap then.
+/// True once any buffer exists.
 pub fn inUse() bool {
     return table.items.len > 0;
+}
+
+/// Empty the table and free what it owned.  For tests, and only tests: a
+/// program's buffers live as long as the process.  The table is
+/// process-global, so a test that made buffers and then freed the arena
+/// their values live in leaves pointers behind, and the next test that
+/// compacts follows them into freed memory ("switch on corrupt value" in
+/// gc.Copier.value, from the handles tests into the gc test).  Every test
+/// that makes a buffer defers this.
+pub fn dropAll() void {
+    for (table.items) |*o| switch (o.*) {
+        .list => |*b| b.items.deinit(gpa),
+        .str => |*b| b.bytes.deinit(gpa),
+        .map => |*m| {
+            clearMap(m);
+            m.slots.deinit(gpa);
+            m.index.deinit(gpa);
+        },
+    };
+    table.clearAndFree(gpa);
+}
+
+/// Every pointer into the value heap that a buffer or a map holds, in a
+/// fixed order, so a compaction can copy what they point at.  `relocate`
+/// takes the copies back in the same order.  Nothing may touch the tables
+/// in between; a compaction runs with nothing else happening.
+pub fn valuePointers(allocator: std.mem.Allocator) error{OutOfMemory}![]*const Value {
+    var out: std.ArrayList(*const Value) = .empty;
+    for (table.items) |*o| switch (o.*) {
+        .list => |*b| {
+            for (b.items.items) |v| try out.append(allocator, v);
+            if (b.snap) |s| try out.append(allocator, s);
+        },
+        .str => |*b| {
+            if (b.snap) |s| try out.append(allocator, s);
+        },
+        .map => |*m| {
+            for (m.slots.items) |slot| {
+                try out.append(allocator, slot.key);
+                try out.append(allocator, slot.val);
+            }
+            if (m.keys_snap) |s| try out.append(allocator, s);
+            if (m.values_snap) |s| try out.append(allocator, s);
+            if (m.entries_snap) |s| try out.append(allocator, s);
+        },
+    };
+    return out.toOwnedSlice(allocator);
+}
+
+/// Write the copies `valuePointers` listed back into the tables.
+pub fn relocate(moved: []const *const Value) void {
+    var i: usize = 0;
+    for (table.items) |*o| switch (o.*) {
+        .list => |*b| {
+            for (b.items.items) |*v| {
+                v.* = moved[i];
+                i += 1;
+            }
+            if (b.snap != null) {
+                b.snap = moved[i];
+                i += 1;
+            }
+        },
+        .str => |*b| {
+            if (b.snap != null) {
+                b.snap = moved[i];
+                i += 1;
+            }
+        },
+        .map => |*m| {
+            for (m.slots.items) |*slot| {
+                slot.key = moved[i];
+                slot.val = moved[i + 1];
+                i += 2;
+            }
+            if (m.keys_snap != null) {
+                m.keys_snap = moved[i];
+                i += 1;
+            }
+            if (m.values_snap != null) {
+                m.values_snap = moved[i];
+                i += 1;
+            }
+            if (m.entries_snap != null) {
+                m.entries_snap = moved[i];
+                i += 1;
+            }
+        },
+    };
+    std.debug.assert(i == moved.len);
 }
 
 fn box(allocator: std.mem.Allocator, v: Value) EvalError!*const Value {
@@ -450,6 +541,7 @@ test "buf_push, get, set, pop, items, replace, clear" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const h = try bufNew(a, &.{});
     for (0..100) |i| _ = try bufPush(a, &.{ h, try iv(a, @intCast(i * 1000)) });
     try std.testing.expectEqual(@as(i64, 100), (try bufLen(a, &.{h})).integer);
@@ -479,6 +571,7 @@ test "sbuf appends bytes and snapshots" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const h = try sbufNew(a, &.{});
     for (0..20000) |_| _ = try sbufAppend(a, &.{ h, try sv(a, "0123456789") });
     try std.testing.expectEqual(@as(i64, 200000), (try sbufLen(a, &.{h})).integer);
@@ -495,6 +588,7 @@ test "hmap keeps Int 1 and String \"1\" apart, in insertion order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const none = try box(a, .{ .atom = "none" });
     const h = try hmapNew(a, &.{});
     _ = try hmapPut(a, &.{ h, try sv(a, "1"), try iv(a, 10) });
@@ -525,6 +619,7 @@ test "hmap remove, sweep and assign" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    defer dropAll();
     const none = try box(a, .{ .atom = "none" });
     const h = try hmapNew(a, &.{});
     var buf: [16]u8 = undefined;

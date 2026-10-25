@@ -942,7 +942,7 @@ pub const Evaluator = struct {
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
-            captured[i] = .{ .name = b.name, .val = b.val };
+            captured[i] = .{ .name = b.name, .val = b.val, .hash = b.hash };
             captured_names |= Environment.nameBit(b.name);
         }
 
@@ -1040,7 +1040,7 @@ pub const Evaluator = struct {
         var captured = self.allocator.alloc(Value.CapturedBinding, bindings.len) catch return error.OutOfMemory;
         var captured_names: u64 = 0;
         for (bindings, 0..) |b, i| {
-            captured[i] = .{ .name = b.name, .val = b.val };
+            captured[i] = .{ .name = b.name, .val = b.val, .hash = b.hash };
             captured_names |= Environment.nameBit(b.name);
         }
 
@@ -1590,6 +1590,19 @@ pub const Evaluator = struct {
     }
 
     fn evalFuncCall(self: *Evaluator, call: ast.Node.FuncCall) EvalError!*const Value {
+        // A call site that resolved to a builtin before, with no top-level
+        // definition added since and no frame binding the name, is that
+        // builtin again: no walk of the stack, no hash of the name.
+        if (call.cache) |cache| {
+            if (cache.builtin) |ptr| {
+                if (cache.globals_version == self.env.globals_version and
+                    !self.env.bindsLocally(Environment.nameBit(call.name)))
+                {
+                    const func: builtins_mod.BuiltinFn = @ptrCast(@alignCast(ptr));
+                    return self.callBuiltin(func, call);
+                }
+            }
+        }
         // First check if the name refers to a closure in the environment
         if (self.env.lookup(call.name)) |val| {
             if (val.* == .closure) {
@@ -1622,7 +1635,14 @@ pub const Evaluator = struct {
             self.last_error = errors.unknownFunction(call.name, self.source);
             return error.UndefinedVariable;
         };
+        if (call.cache) |cache| {
+            cache.builtin = @ptrCast(func);
+            cache.globals_version = self.env.globals_version;
+        }
+        return self.callBuiltin(func, call);
+    }
 
+    fn callBuiltin(self: *Evaluator, func: builtins_mod.BuiltinFn, call: ast.Node.FuncCall) EvalError!*const Value {
         // Evaluate arguments.  A builtin reads its argument vector and never
         // keeps it -- what it keeps are the values, which live on the heap --
         // so the vector belongs on this frame, not in an allocator that hands

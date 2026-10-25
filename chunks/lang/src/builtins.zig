@@ -67,11 +67,16 @@ const BuiltinEntry = struct {
 /// Uses a simple array list with linear search (same pattern as checker.zig).
 pub const BuiltinRegistry = struct {
     entries: std.ArrayList(BuiltinEntry),
+    /// Name to function.  `get` used to walk `entries` comparing strings,
+    /// two hundred of them, on every call of a builtin; a program that is
+    /// mostly `slice` and `elem` spent a visible share of its time there.
+    by_name: std.StringHashMapUnmanaged(BuiltinFn),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) BuiltinRegistry {
         var reg = BuiltinRegistry{
             .entries = .{ .items = &.{}, .capacity = 0 },
+            .by_name = .{},
             .allocator = allocator,
         };
         reg.register("length", &builtinLength);
@@ -290,13 +295,11 @@ pub const BuiltinRegistry = struct {
 
     fn register(self: *BuiltinRegistry, name: []const u8, func: BuiltinFn) void {
         self.entries.append(self.allocator, .{ .name = name, .func = func }) catch {};
+        self.by_name.put(self.allocator, name, func) catch {};
     }
 
     pub fn get(self: *const BuiltinRegistry, name: []const u8) ?BuiltinFn {
-        for (self.entries.items) |entry| {
-            if (std.mem.eql(u8, entry.name, name)) return entry.func;
-        }
-        return null;
+        return self.by_name.get(name);
     }
 };
 

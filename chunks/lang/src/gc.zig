@@ -86,6 +86,18 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
     if (eval.scheduler) |sched| {
         for (sched.run_queue.items) |id| try copier.see(id);
     }
+    // Buffers and hash maps (handles.zig) hold pointers into the heap being
+    // left; their storage is outside it.  The copies are made here, before
+    // the instances, because a value in a buffer may name an actor, and
+    // written back with the rest of the swap at the end.  Compaction used
+    // to refuse once any buffer existed, so a Temper program, whose
+    // ListBuilder is a buffer, never freed anything.
+    const handles_mod = @import("handles.zig");
+    const handle_old = try handles_mod.valuePointers(scratch);
+    defer scratch.free(handle_old);
+    const handle_new = try scratch.alloc(*const Value, handle_old.len);
+    defer scratch.free(handle_new);
+    for (handle_old, 0..) |v, i| handle_new[i] = try copier.value(v);
     const old_instances = eval.registry.instances.items;
     const instances = switch (actors) {
         .keep_all => try copier.instances(old_instances),
@@ -113,10 +125,12 @@ pub fn compactWith(eval: *Evaluator, to: std.mem.Allocator, scratch: std.mem.All
     eval.registry.templates = templates;
     eval.registry.instances = instances;
     eval.registry.allocator = to;
+    eval.registry.reindex();
     eval.bubble_reason = bubble_reason;
     for (0..eval.msg_log_count) |i| eval.msg_log[i] = msg_log[i];
     eval.builtins = BuiltinRegistry.init(to);
     eval.allocator = to;
+    handles_mod.relocate(handle_new);
     return dropped;
 }
 
@@ -208,7 +222,7 @@ const Copier = struct {
 
     fn captured(self: *Copier, bindings: []const Value.CapturedBinding) CompactError![]const Value.CapturedBinding {
         const out = try self.to.alloc(Value.CapturedBinding, bindings.len);
-        for (bindings, 0..) |b, i| out[i] = .{ .name = try self.str(b.name), .val = try self.value(b.val) };
+        for (bindings, 0..) |b, i| out[i] = .{ .name = try self.str(b.name), .val = try self.value(b.val), .hash = b.hash };
         return out;
     }
 
@@ -247,7 +261,7 @@ const Copier = struct {
             for (scope.bindings.items) |b| {
                 const name = try self.str(b.name);
                 names |= Environment.nameBit(name);
-                bindings.appendAssumeCapacity(.{ .name = name, .val = try self.value(b.val) });
+                bindings.appendAssumeCapacity(.{ .name = name, .val = try self.value(b.val), .hash = b.hash });
             }
             out.appendAssumeCapacity(.{ .bindings = bindings, .names = names });
         }
@@ -392,6 +406,9 @@ fn checkProgram(eval: *Evaluator, code: std.mem.Allocator) !void {
 }
 
 test "compact keeps actors, closures, bindings and views alive after the old heap is freed" {
+    // The handle table is process-global; nothing an earlier test left there
+    // may be followed by this compaction.
+    @import("handles.zig").dropAll();
     var code = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer code.deinit();
     var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);

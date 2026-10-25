@@ -207,7 +207,18 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
 
     // Default: evaluate the file. --trace streams one line per spawn, send,
     // cast and state change to stderr (scripts/trace_receipt.py reads it).
-    var evaluator = Evaluator.init(arena.allocator());
+    //
+    // The values live in a two-half heap, and between two top-level
+    // statements, when nothing on the Zig stack holds a value, the live ones
+    // are copied into the idle half once the heap has grown by as much as
+    // what survived the last copy (and at least 16 MB), as the REPL and
+    // --serve do between their evaluations.  A plain run used to free
+    // nothing: a test suite of three hundred tests, emitted as one statement
+    // per test, reached the 8 GB ceiling and ran none of them.
+    var heap = ValueHeap.init(program_heap);
+    defer heap.deinit();
+    var evaluator = Evaluator.init(heap.allocator());
+    evaluator.code_allocator = arena.allocator();
     evaluator.setSource(source);
     if (args.len >= 3 and std.mem.eql(u8, args[2], "--trace")) {
         evaluator.trace_fn = traceToStderr;
@@ -227,7 +238,20 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     var restart_argv = try arena.allocator().alloc([:0]const u8, args.len);
     for (args, 0..) |a, i| restart_argv[i] = try arena.allocator().dupeZ(u8, a);
     evaluator.restart_argv = restart_argv;
+    var live_after_compact: usize = heap_limit.used;
     for (nodes) |node| {
+        defer {
+            const grown = heap_limit.used -| live_after_compact;
+            if (grown >= @max(live_after_compact, 16 * 1024 * 1024)) {
+                // Actors nothing can reach go too.  A plain run has no host
+                // holding an actor's id, unlike the REPL and the browser, and
+                // a Temper program spawns an actor per object: keeping them
+                // all made the live set grow by every test's objects, and a
+                // library of 43 router tests still hit the 2 GB ceiling.
+                _ = heap.compactWith(&evaluator, .drop_unreachable);
+                live_after_compact = heap_limit.used;
+            }
+        }
         _ = evaluator.eval(node) catch |err| {
             if (heap_limit.hit) {
                 heap_limit.report();
@@ -570,8 +594,6 @@ const ValueHeap = struct {
     /// The same, saying how many unreachable actors it dropped (always 0
     /// with .keep_all, and when the copy fails).
     fn compactWith(self: *ValueHeap, eval: *Evaluator, actors: gc.Actors) usize {
-        // Buffers in handles.zig hold pointers into this heap; moving it would strand them.
-        if (@import("handles.zig").inUse()) return 0;
         const next = 1 - self.live;
         const dropped = gc.compactWith(eval, self.halves[next].allocator(), self.scratch, actors) catch return 0;
         _ = self.halves[self.live].reset(.free_all);

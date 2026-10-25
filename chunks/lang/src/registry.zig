@@ -44,6 +44,13 @@ pub const Registry = struct {
     /// spawn's append reallocate the backing array and leave every
     /// outstanding pointer dangling.  A box stays put.
     instances: std.ArrayList(*ActorEntry),
+    /// `by_id[id]` is the instance with that id, or null once a compaction
+    /// dropped it.  Ids are dense and never reused, so this is one slot per
+    /// actor ever spawned, and `getInstance` is one load.  It used to scan
+    /// `instances`, which made every send cost as much as the number of
+    /// actors alive: a Temper program, where every object is an actor,
+    /// paid 40 us per field read once a few thousand objects existed.
+    by_id: std.ArrayList(?*ActorEntry),
     next_id: u64,
 
     pub fn init(allocator: std.mem.Allocator) Registry {
@@ -51,6 +58,7 @@ pub const Registry = struct {
             .allocator = allocator,
             .templates = .{ .items = &.{}, .capacity = 0 },
             .instances = .{ .items = &.{}, .capacity = 0 },
+            .by_id = .{ .items = &.{}, .capacity = 0 },
             .next_id = 1,
         };
     }
@@ -138,16 +146,30 @@ pub const Registry = struct {
             .mailbox = Mailbox.init(),
         };
         self.instances.append(self.allocator, entry) catch {};
+        self.indexEntry(entry);
 
         return ref;
+    }
+
+    fn indexEntry(self: *Registry, entry: *ActorEntry) void {
+        const id: usize = @intCast(entry.ref.id);
+        while (self.by_id.items.len <= id) self.by_id.append(self.allocator, null) catch return;
+        self.by_id.items[id] = entry;
+    }
+
+    /// Rebuild `by_id` from `instances`, in the registry's current allocator.
+    /// A compaction copies the instances into a new allocator and swaps the
+    /// list; the index lived in the old one and must follow.
+    pub fn reindex(self: *Registry) void {
+        self.by_id = .{ .items = &.{}, .capacity = 0 };
+        for (self.instances.items) |entry| self.indexEntry(entry);
     }
 
     /// Look up a spawned instance by ref.  The pointer stays valid for the
     /// life of the instance, including across later spawns.
     pub fn getInstance(self: *Registry, ref: ActorRef) ?*ActorEntry {
-        for (self.instances.items) |entry| {
-            if (entry.ref.id == ref.id) return entry;
-        }
+        const id: usize = @intCast(ref.id);
+        if (id < self.by_id.items.len) return self.by_id.items[id];
         return null;
     }
 
