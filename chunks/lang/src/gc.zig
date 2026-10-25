@@ -68,13 +68,16 @@ pub fn compact(eval: *Evaluator, from: ?*const std.heap.ArenaAllocator, to: std.
 
 /// What a compaction does with actors nothing can reach.
 pub const Actors = enum {
-    /// Copy every instance, reachable or not. The REPL and the browser keep
-    /// this: a host (blimp.js) may hold an actor's id where no Blimp value
-    /// does, so "unreachable from Blimp" does not mean unreachable.
+    /// Copy every instance, reachable or not. The native REPL keeps this.
+    /// The browser kept it too, on the theory that blimp.js might hold an
+    /// actor's id where no Blimp value does; it never could (see
+    /// wasm_api.compactHeap), and Snake from Temper carried 870,000 dead
+    /// actors after 100 restarts because of it.
     keep_all,
     /// Copy only the instances a live value can still name, and those with
-    /// work pending. `blimp --serve` uses this: its only host is the tick,
-    /// and every actor a program means to keep is bound somewhere.
+    /// work pending. `blimp --serve` and the browser build use this: their
+    /// hosts name actors only through top-level bindings, so every actor a
+    /// program means to keep is bound somewhere.
     drop_unreachable,
 };
 
@@ -1098,6 +1101,51 @@ test "drop_unreachable keeps every actor a value can name, and only those" {
     try std.testing.expectEqual(@as(i64, 0), (try run(code.allocator(), &eval, "(head(lookup(elem(chain <- :held, 0) <- :held, :next))) <- :n")).integer);
     try std.testing.expectEqual(@as(i64, 0), (try run(code.allocator(), &eval, "f() <- :n")).integer);
     try std.testing.expectEqual(@as(i64, 0), (try run(code.allocator(), &eval, "bound <- :n")).integer);
+}
+
+test "after a drop the actor index holds pages only where live ids fall" {
+    // Ids are never reused, so the survivors of a long run are an old actor
+    // and a few new ones with thousands of dead ids between them. The index
+    // used to be one slot per id ever spawned, rebuilt on every compaction.
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    _ = try run(code.allocator(), &eval,
+        \\actor Box do
+        \\  state n: Int :: 0
+        \\  on :bump do become n: n + 1 end
+        \\  on :n do reply n end
+        \\end
+        \\def many(i: Int) -> Int do
+        \\  case i >= 3000 do
+        \\    true -> i
+        \\    false ->
+        \\      spawn Box
+        \\      many(i + 1)
+        \\  end
+        \\end
+        \\old = spawn Box
+        \\many(0)
+        \\young = spawn Box
+    );
+    _ = try compactWith(&eval, &heap_a, heap_b.allocator(), std.testing.allocator, .drop_unreachable);
+    _ = heap_a.reset(.free_all);
+    try std.testing.expectEqual(@as(usize, 2), eval.registry.instances.items.len);
+    var pages: usize = 0;
+    for (eval.registry.by_id.items) |p| pages += @intFromBool(p != null);
+    try std.testing.expectEqual(@as(usize, 2), pages);
+    _ = try run(code.allocator(), &eval, "old <- :bump");
+    _ = try run(code.allocator(), &eval, "young <- :bump");
+    try std.testing.expectEqual(@as(i64, 1), (try run(code.allocator(), &eval, "old <- :n")).integer);
+    try std.testing.expectEqual(@as(i64, 1), (try run(code.allocator(), &eval, "young <- :n")).integer);
+    // A dead id in a page that exists, and one in a page that does not.
+    try std.testing.expect(eval.registry.getInstance(.{ .id = 2, .type_name = "Box" }) == null);
+    try std.testing.expect(eval.registry.getInstance(.{ .id = 1500, .type_name = "Box" }) == null);
 }
 
 test "keep_all still keeps every actor" {
