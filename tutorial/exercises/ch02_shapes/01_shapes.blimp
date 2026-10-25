@@ -1,0 +1,131 @@
+# Chapter 2 -- Shapes are data
+# Run: blimp exercises/ch02_shapes/01_shapes.blimp --test
+#
+# Seven kinds of piece, four rotations each, four cells a rotation. The
+# table is written out for you below. Tetris.Shapes answers questions about
+# it, and the Piece from chapter 1 asks it where its own cells are.
+
+actor Tetris do
+  state name: String :: "blimp tetris"
+end
+
+# Kinds 1..7 are I O T S Z J L. Each is a list of 4 rotations, and each
+# rotation is a list of 4 {x, y} offsets inside a 4x4 box.
+actor Tetris.Shapes do
+  state table: List :: [
+    [[{0, 1}, {1, 1}, {2, 1}, {3, 1}], [{2, 0}, {2, 1}, {2, 2}, {2, 3}], [{0, 2}, {1, 2}, {2, 2}, {3, 2}], [{1, 0}, {1, 1}, {1, 2}, {1, 3}]],
+    [[{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {2, 1}]],
+    [[{1, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {1, 1}, {2, 1}, {1, 2}], [{0, 1}, {1, 1}, {2, 1}, {1, 2}], [{1, 0}, {0, 1}, {1, 1}, {1, 2}]],
+    [[{1, 0}, {2, 0}, {0, 1}, {1, 1}], [{1, 0}, {1, 1}, {2, 1}, {2, 2}], [{1, 1}, {2, 1}, {0, 2}, {1, 2}], [{0, 0}, {0, 1}, {1, 1}, {1, 2}]],
+    [[{0, 0}, {1, 0}, {1, 1}, {2, 1}], [{2, 0}, {1, 1}, {2, 1}, {1, 2}], [{0, 1}, {1, 1}, {1, 2}, {2, 2}], [{1, 0}, {0, 1}, {1, 1}, {0, 2}]],
+    [[{0, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {2, 0}, {1, 1}, {1, 2}], [{0, 1}, {1, 1}, {2, 1}, {2, 2}], [{1, 0}, {1, 1}, {0, 2}, {1, 2}]],
+    [[{2, 0}, {0, 1}, {1, 1}, {2, 1}], [{1, 0}, {1, 1}, {1, 2}, {2, 2}], [{0, 1}, {1, 1}, {2, 1}, {0, 2}], [{0, 0}, {1, 0}, {1, 1}, {1, 2}]]
+  ]
+
+  # Exercise: the offsets for one kind in one rotation. Kinds count from
+  # 1, list positions count from 0.
+  on :offsets(kind: Int, rot: Int) do
+    reply :TODO
+  end
+
+  # Exercise: how many kinds the table has.
+  on :kinds do
+    reply :TODO
+  end
+
+  test "seven kinds" do
+    shapes = spawn Tetris.Shapes
+    assert_eq(shapes <- :kinds, 7)
+  end
+
+  test "every rotation of every kind is 4 cells inside the 4x4 box" do
+    shapes = spawn Tetris.Shapes
+    counts = for kind in range(1, 7) do
+      for rot in range(0, 3) do
+        offs = shapes <- :offsets(kind, rot)
+        inside = filter(offs, fn(o: Tuple) do
+          case o do
+            {x, y} -> x >= 0 and x <= 3 and y >= 0 and y <= 3
+          end
+        end)
+        length(inside)
+      end
+    end
+    assert_eq(flat(counts), for i in range(1, 28) do 4 end)
+  end
+
+  test "O looks the same in every rotation" do
+    shapes = spawn Tetris.Shapes
+    assert_eq(shapes <- :offsets(2, 0), shapes <- :offsets(2, 3))
+  end
+
+  test "I stands up in rotation 1" do
+    shapes = spawn Tetris.Shapes
+    assert_eq(shapes <- :offsets(1, 1), [{2, 0}, {2, 1}, {2, 2}, {2, 3}])
+  end
+end
+
+# The Piece from chapter 1, now holding a reference to a Tetris.Shapes. The
+# default runs once, when the actor is defined, so every Piece shares it.
+actor Tetris.Piece do
+  state kind: Int :: 1
+  state rot: Int :: 0
+  state x: Int :: 3
+  state y: Int :: 0
+  state shapes: Tetris.Shapes :: spawn Tetris.Shapes
+
+  on :spawn(new_kind: Int) do
+    become kind: new_kind, rot: 0, x: 3, y: 0
+    reply :ok
+  end
+
+  on :info do
+    reply %{kind: kind, x: x, y: y, rot: rot}
+  end
+
+  # Exercise: the board cells the piece would cover if it were shifted by
+  # dx and dy and turned by drot, without moving it. Ask shapes for the
+  # offsets, then add the piece's position to each one.
+  on :cells_for(dx: Int, dy: Int, drot: Int) do
+    reply :TODO
+  end
+
+  # Exercise: the cells the piece covers where it is now.
+  on :cells do
+    reply :TODO
+  end
+
+  on :move(dx: Int, dy: Int) do
+    become x: x + dx, y: y + dy
+    reply :ok
+  end
+
+  on :rotate(dir: Int) do
+    become rot: rem(rot + dir + 4, 4)
+    reply :ok
+  end
+
+  test "T cells at spawn" do
+    piece = spawn Tetris.Piece
+    piece <- :spawn(3)
+    assert_eq(piece <- :cells, [{4, 0}, {3, 1}, {4, 1}, {5, 1}])
+  end
+
+  test "the cells follow the piece when it moves" do
+    piece = spawn Tetris.Piece
+    piece <- :spawn(2)
+    piece <- :move(-3, 18)
+    assert_eq(piece <- :cells, [{1, 18}, {2, 18}, {1, 19}, {2, 19}])
+  end
+
+  test "cells_for shifts and rotates without moving the piece" do
+    piece = spawn Tetris.Piece
+    piece <- :spawn(3)
+    assert_eq(piece <- :cells_for(1, 2, 1), [{5, 2}, {5, 3}, {6, 3}, {5, 4}])
+    assert_eq(piece <- :cells_for(0, 0, -1), [{4, 0}, {3, 1}, {4, 1}, {4, 2}])
+    info = piece <- :info
+    assert_eq(lookup(info, :x), 3)
+    assert_eq(lookup(info, :y), 0)
+    assert_eq(lookup(info, :rot), 0)
+  end
+end

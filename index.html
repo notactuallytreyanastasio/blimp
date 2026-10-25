@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blimp: the actor language that runs bobbby.online</title>
+<meta name="description" content="Blimp is an actor language with an interpreter in Zig. One blimp --serve process answers most of bobbby.online, and the same interpreter compiled to WebAssembly runs its pages in the browser. What works, measured, and what does not yet.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Blimp: the actor language that runs bobbby.online">
+<meta property="og:description" content="One blimp --serve process answers most of bobbby.online; the same interpreter, compiled to WebAssembly, runs its pages in the browser. Measured, with what does not work yet.">
+<meta property="og:url" content="https://blimp.bobbby.online">
+<meta property="og:site_name" content="Blimp">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Blimp: the actor language that runs bobbby.online">
+<meta name="twitter:description" content="One blimp --serve process answers most of bobbby.online; the same interpreter, compiled to WebAssembly, runs its pages in the browser.">
+<style>
+:root {
+  --bg: #f7f6f2;
+  --fg: #1d1d1b;
+  --muted: #6b6a64;
+  --rule: #dddbd2;
+  --panel: #efede6;
+  --accent: #0b5cad;
+  --accent-soft: #dfe9f5;
+  --warn: #9a3412;
+  --warn-soft: #fbeee6;
+  --code-bg: #16181d;
+  --code-fg: #d8dbe2;
+  --code-dim: #7d8490;
+  --code-kw: #f0a35e;
+  --code-str: #9ccc65;
+  --code-atom: #7fb8f0;
+  --mono: 'IBM Plex Mono', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121316;
+    --fg: #e4e4e0;
+    --muted: #9a9a93;
+    --rule: #2a2c31;
+    --panel: #1a1c20;
+    --accent: #7fb3ec;
+    --accent-soft: #1b2838;
+    --warn: #f0a878;
+    --warn-soft: #2a1d16;
+    --code-bg: #0b0c0f;
+  }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--mono); font-size: 0.88em; background: var(--panel); padding: 0.05em 0.3em; border-radius: 3px; }
+.wrap { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+
+/* top bar */
+.top { border-bottom: 1px solid var(--rule); }
+.top .wrap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem 1.4rem; padding-top: 14px; padding-bottom: 14px; }
+.brand { font-family: var(--mono); font-weight: 700; letter-spacing: 0.08em; color: var(--fg); margin-right: auto; }
+.top nav { display: flex; flex-wrap: wrap; gap: 0.3rem 1.1rem; font-family: var(--mono); font-size: 0.85rem; }
+
+/* hero */
+header.hero { padding: 56px 0 28px; }
+.hero h1 { font-family: var(--mono); font-size: 2.6rem; line-height: 1.15; letter-spacing: -0.02em; font-weight: 700; max-width: 20ch; }
+.hero .lede { font-size: 1.2rem; margin-top: 1.2rem; max-width: 60ch; }
+.hero .lede + p { margin-top: 0.9rem; color: var(--muted); max-width: 60ch; }
+
+/* measured facts */
+.facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin: 28px 0 8px; }
+.fact { background: var(--bg); padding: 16px 16px 14px; }
+.fact .n { font-family: var(--mono); font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
+.fact .l { font-size: 0.88rem; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+.facts-note { font-size: 0.8rem; color: var(--muted); }
+
+/* sections */
+section { padding: 44px 0 8px; border-top: 1px solid var(--rule); margin-top: 36px; }
+section h2 { font-family: var(--mono); font-size: 1.35rem; line-height: 1.3; letter-spacing: -0.01em; margin-bottom: 0.9rem; }
+section h2 .num { color: var(--muted); font-weight: 400; margin-right: 0.4em; }
+section h3 { font-size: 1rem; margin: 1.6rem 0 0.4rem; }
+section p { margin: 0.8rem 0; max-width: 68ch; }
+section ul { margin: 0.6rem 0 0.8rem 1.2rem; max-width: 68ch; }
+section li { margin: 0.35rem 0; }
+
+pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.55;
+  padding: 16px 18px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 1rem 0;
+  -webkit-overflow-scrolling: touch;
+}
+pre .c { color: var(--code-dim); }
+pre .k { color: var(--code-kw); }
+pre .s { color: var(--code-str); }
+pre .a { color: var(--code-atom); }
+.cap { font-size: 0.82rem; color: var(--muted); margin-top: -0.6rem; margin-bottom: 1rem; }
+.cap code { font-size: 0.95em; }
+
+/* page cards */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 1.2rem 0; }
+.card { display: block; border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; color: var(--fg); background: var(--bg); }
+.card:hover { border-color: var(--accent); text-decoration: none; }
+.card .p { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 0.95rem; }
+.card .d { font-size: 0.86rem; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+.card.wide { grid-column: 1 / -1; background: var(--accent-soft); border-color: transparent; }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.92rem; }
+.tbl th, .tbl td { text-align: left; vertical-align: top; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--rule); }
+.tbl th { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-weight: 400; text-transform: uppercase; letter-spacing: 0.05em; }
+.tbl td:first-child { font-family: var(--mono); white-space: nowrap; }
+.tbl td.num { font-family: var(--mono); white-space: nowrap; }
+
+/* gaps */
+.gaps { list-style: none; margin-left: 0 !important; }
+.gaps li { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 10px 14px; margin: 10px 0; }
+.gaps li strong { color: var(--warn); }
+
+/* archive */
+.archive { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 28px; margin: 1rem 0; }
+.archive a { font-family: var(--mono); font-size: 0.92rem; }
+.archive div { padding: 6px 0; border-bottom: 1px solid var(--rule); }
+.archive .d { display: block; font-size: 0.84rem; color: var(--muted); }
+
+footer { border-top: 1px solid var(--rule); margin-top: 48px; padding: 22px 0 48px; font-size: 0.85rem; color: var(--muted); }
+
+@media (max-width: 720px) {
+  body { font-size: 16px; }
+  .wrap { padding: 0 16px; }
+  header.hero { padding: 32px 0 16px; }
+  .hero h1 { font-size: 1.85rem; }
+  .hero .lede { font-size: 1.06rem; }
+  .facts { grid-template-columns: 1fr 1fr; }
+  .fact .n { font-size: 1.35rem; }
+  .cards { grid-template-columns: 1fr 1fr; }
+  .archive { grid-template-columns: 1fr; }
+  pre { font-size: 12px; padding: 12px 12px; margin-left: -16px; margin-right: -16px; border-radius: 0; }
+  section { padding-top: 32px; margin-top: 24px; }
+  .tbl tr:first-child { display: none; }
+  .tbl tr { display: block; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+  .tbl td { display: block; border: 0; padding: 2px 0; }
+  .tbl td:last-child { color: var(--muted); font-size: 0.86rem; }
+  .tbl td:last-child::before { content: "found by: "; }
+}
+@media (max-width: 420px) {
+  .cards { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="wrap">
+    <a class="brand" href="/">BLIMP</a>
+    <nav>
+      <a href="#tetris">build tetris</a>
+      <a href="#server">server</a>
+      <a href="#browser">browser</a>
+      <a href="#temper">temper</a>
+      <a href="#web">web</a>
+      <a href="#gaps">gaps</a>
+      <a href="https://github.com/notactuallytreyanastasio/blimp">github</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <h1>Blimp runs bobbby.online.</h1>
+  <p class="lede">Blimp is an actor language with a tree-walking interpreter written in Zig. One <code>blimp --serve</code> process answers most of <a href="https://bobbby.online/">bobbby.online</a>: the homepage, the blog, about forty other pages, their WebSocket rooms, a Postgres client, outbound HTTPS and a Bluesky firehose. The same interpreter, compiled to WebAssembly, runs the games and tools on those pages in your browser.</p>
+  <p>Much of the site's pure logic is written in <a href="https://github.com/notactuallytreyanastasio/temper-blimp">Temper</a> and compiled to Blimp. A web framework is being written in Blimp so the last Phoenix pages can move over. This page is the state of all that on 30 September 2026, with what does not work yet <a href="#gaps">listed by name</a>.</p>
+
+  <div class="facts">
+    <div class="fact"><div class="n">0.65 s</div><div class="l">site boot, 16 posts rendered at boot. It was 6.2 s before <a href="https://github.com/notactuallytreyanastasio/blimp/pull/64">#64</a>.</div></div>
+    <div class="fact"><div class="n">33.5 MB</div><div class="l">live heap after boot, the whole site</div></div>
+    <div class="fact"><div class="n">0.39 ms</div><div class="l">median response for <code>/blog</code>, 200 local requests (p99 0.51 ms)</div></div>
+    <div class="fact"><div class="n">641</div><div class="l">interpreter tests passing (<code>zig build test</code>, 25 s)</div></div>
+    <div class="fact"><div class="n">437 KB</div><div class="l"><code>blimp.wasm</code>, the interpreter the browser pages load</div></div>
+    <div class="fact"><div class="n">87</div><div class="l">path patterns production's Caddy sends to the Blimp process</div></div>
+  </div>
+  <p class="facts-note">Measured on an Apple M4 Pro with blimp <code>896614f</code> and the blog at <code>9ef753a</code>, the site built by its own <code>build.sh</code> and booted with <code>FIREHOSE=off</code> and no database (the museum then comes from <code>data/*.tsv</code>). The Caddy count is from <code>deploy/Caddyfile.snippet</code>.</p>
+</header>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="tetris">
+  <h2><span class="num">0</span>Start here: build Tetris</h2>
+  <p>The way to learn Blimp is the <a href="/tutorial/">tutorial</a>, which builds the Tetris that runs on <a href="https://bobbby.online/tetris">bobbby.online/tetris</a> (the same program), one actor a chapter. Each chapter has an exercise in the page: an editor holding the chapter's file with the handlers left for you, the tests that say when you are done, and the answer behind a tab. Nothing to install: the interpreter runs in the page as WebAssembly. In chapter 8 the game you wrote plays there too.</p>
+  <pre><span class="k">actor</span> Tetris.Piece <span class="k">do</span>
+  <span class="k">state</span> kind: Int :: 1
+  <span class="k">state</span> rot: Int :: 0
+  <span class="k">state</span> x: Int :: 3
+  <span class="k">state</span> y: Int :: 0
+
+  <span class="k">on</span> <span class="a">:rotate</span>(dir: Int) <span class="k">do</span>
+    <span class="k">become</span> rot: rem(rot + dir + 4, 4)
+    <span class="k">reply</span> <span class="a">:ok</span>
+  <span class="k">end</span>
+<span class="k">end</span></pre>
+  <p class="cap">Chapter 1's piece. It does not know its shape yet; chapter 2 gives it a <code>Tetris.Shapes</code> to ask.</p>
+  <div class="cards">
+    <a class="card wide" href="/tutorial/#ch00"><div class="p">0. What you are building</div><div class="d">Play the finished game, meet its seven actors and who sends what to whom, and run an exercise locally with <code>blimp FILE --test</code>.</div></a>
+    <a class="card" href="/tutorial/#ch01"><div class="p">1. The falling piece</div><div class="d"><code>Tetris.Piece</code>: state, <code>become</code>, <code>reply</code>, your first tests.</div></a>
+    <a class="card" href="/tutorial/#ch02"><div class="p">2. Shapes are data</div><div class="d"><code>Tetris.Shapes</code>: 7 kinds, 4 rotations, 4 cells. An actor that holds another.</div></a>
+    <a class="card" href="/tutorial/#ch03"><div class="p">3. The board</div><div class="d"><code>Tetris.Board</code>: a 10x20 grid of lists, guards, <code>reduce</code>, <code>set_at</code>.</div></a>
+    <a class="card" href="/tutorial/#ch04"><div class="p">4. Lines and score</div><div class="d">Sweeping full rows; <code>Tetris.Score</code> pays for them and sets the speed.</div></a>
+    <a class="card" href="/tutorial/#ch05"><div class="p">5. The bag</div><div class="d"><code>Tetris.Bag</code>: seven pieces shuffled, and how to test something random.</div></a>
+    <a class="card" href="/tutorial/#ch06"><div class="p">6. The game takes input</div><div class="d"><code>Tetris.Game</code> coordinates the rest: moves, rotation, wall kicks, pause.</div></a>
+    <a class="card" href="/tutorial/#ch07"><div class="p">7. Gravity</div><div class="d">A tick is one row. Landing, locking, clearing, game over.</div></a>
+    <a class="card" href="/tutorial/#ch08"><div class="p">8. The screen</div><div class="d"><code>Tetris.Screen</code>: views are values. Then play what you built.</div></a>
+    <a class="card" href="/tutorial/#ch09"><div class="p">9. Where to take it</div><div class="d">Hold, a longer queue, and the other things the game does not do yet.</div></a>
+    <a class="card" href="/tutorial/#ch10"><div class="p">10. A page of your own</div><div class="d">A guestbook: a form that arrives as a map, a keyed list, <code>show</code>, a modal dialog, storage. Then sign it.</div></a>
+  </div>
+  <p class="cap">The finished program is <a href="https://github.com/notactuallytreyanastasio/blimp/blob/main/chunks/lang/examples/tetris.blimp"><code>examples/tetris.blimp</code></a>, 801 lines with 34 tests. Chapters 3 to 8 are cut from it by <code>exercises/build_tetris.py</code>, so a change to the game reaches the exercises by running one script.</p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="server">
+  <h2><span class="num">1</span>One process answers the site</h2>
+  <p>The production container runs a single command. There is no framework under it, no Elixir and no Node: <code>--serve</code> loads one Blimp file, then evaluates the tick expression forever and compacts the heap between ticks.</p>
+<pre><span class="c"># blimp_site/Dockerfile</span>
+CMD ["blimp", "--serve", "_build/site.blimp", "--tick", "site &lt;- :tick", "--control", "site.sock"]</pre>
+  <p>Blimp has no imports, so <code>build.sh</code> concatenates the used part of the Temper output, every <code>src/*.blimp</code> and <code>main.blimp</code> into one 540 KB file. Booting it locally:</p>
+<pre>blimp blog: 16 posts rendered in 645ms, museum from data/*.tsv, listening on :4191
+[serve] booted _build/site-4191.blimp; live heap 33552352 bytes; control socket .../site.sock
+GET / 200 0ms</pre>
+  <p>In production every response it sends carries its name:</p>
+<pre>$ curl -sI https://bobbby.online/ | grep served
+x-served-by: blimp</pre>
+
+  <h3>What is in that process</h3>
+  <ul>
+    <li><strong>Pages rendered at boot.</strong> The <a href="https://bobbby.online/">desktop homepage</a>, <a href="https://bobbby.online/blog">/blog</a> and every <code>/post/*</code>, through a Markdown renderer and syntax highlighter written in Blimp and Temper. Each post page ships the same renderer to your browser, which renders the post a second time.</li>
+    <li><strong>WebSocket rooms</strong> on <code>/live/*</code>, each an actor stepped from the tick: <a href="https://bobbby.online/pong">Pong</a>, <a href="https://bobbby.online/wordle">Wordle</a>, <a href="https://bobbby.online/blackjack">Blackjack</a> (the tables live on the server), <a href="https://bobbby.online/cursor-tracker">shared cursors</a>, <a href="https://bobbby.online/map">a map of pins</a>, <a href="https://bobbby.online/mta-bus-map">MTA buses</a> (one poller for every visitor), <a href="https://bobbby.online/reddit-links">the Bluesky firehose</a>.</li>
+    <li><strong>A Postgres client written in Blimp</strong> (<code>src/80_postgres.blimp</code>, 424 lines, SCRAM-SHA-256 login) over the runtime's TCP builtins. The homepage museum, /map's pins, <a href="https://bobbby.online/phish">/phish</a> and <a href="https://bobbby.online/role-call">/role-call</a> read it.</li>
+    <li><strong>Outbound HTTPS</strong> with <code>http_start</code> / <code>http_result</code> (<a href="https://github.com/notactuallytreyanastasio/blimp/pull/60">#60</a>). The request runs on a worker thread and the program polls for it, so a slow remote does not stop the site. <a href="https://bobbby.online/hacker-news">Hacker News</a>, MTA Bus Time, iCloud and the OpenAI calls behind <a href="https://bobbby.online/ziggy">/ziggy</a> all use it.</li>
+    <li><strong>A TLS WebSocket client</strong>, <code>ws_open</code> / <code>ws_recv</code> (<a href="https://github.com/notactuallytreyanastasio/blimp/pull/67">#67</a>). It holds Bluesky's Jetstream at about 38 frames a second; under <code>--serve</code>, five minutes of it stayed between 14.5 and 29 MB.</li>
+    <li><strong>A control socket.</strong> <code>blimp --attach site.sock</code> is a prompt on the running program:</li>
+  </ul>
+<pre>$ blimp --attach site.sock
+<span class="a">:stats</span>
+ticks 1611, errors 0, compactions 2 (8ms), heap 60860208 bytes, live after last compaction 33552352, up 141s
+site &lt;- <span class="a">:served</span>
+=&gt; 224
+length(posts)
+=&gt; 16</pre>
+
+  <p>An actor that talks to the outside world never waits for it. This is the Hacker News poller, a state machine the site's tick steps once per tick (from <code>src/99_hacker_news.blimp</code>, shortened):</p>
+<pre><span class="k">on</span> <span class="a">:step</span> <span class="k">do</span>
+  t = now()
+  <span class="k">case</span> phase <span class="k">do</span>
+    <span class="a">:idle</span> -&gt;
+      <span class="k">case</span> t &gt;= next_at <span class="k">do</span>
+        false -&gt; <span class="k">reply</span> <span class="a">:idle</span>
+        true -&gt;
+          h = http_start(<span class="s">"GET"</span>, concat(HN_API, <span class="s">"/topstories.json"</span>), %{}, <span class="s">""</span>)
+          <span class="k">become</span> phase: <span class="a">:ids</span>, ids_handle: h, started: t
+          <span class="k">reply</span> <span class="a">:started</span>
+      <span class="k">end</span>
+    <span class="a">:ids</span> -&gt;
+      r = http_result(ids_handle)
+      <span class="k">case</span> r <span class="k">do</span>
+        nil -&gt; <span class="k">reply</span> (<span class="k">self</span> &lt;- <span class="a">:give_up_if_late</span>(t))
+        {<span class="a">:ok</span>, 200, body} -&gt;
+          ids = hn_take(elem(json_decode(body), 1), 50, [])
+          ranked = zip(ids, range(1, length(ids)))
+          <span class="k">become</span> phase: <span class="a">:items</span>, queue: ranked, flying: [], got: []
+          <span class="k">reply</span> <span class="a">:items</span>
+        _ -&gt;
+          <span class="k">become</span> phase: <span class="a">:idle</span>, next_at: t + 60, last_error: concat(<span class="s">"topstories: "</span>, to_string(r))
+          <span class="k">reply</span> <span class="a">:failed</span>
+      <span class="k">end</span>
+    <span class="c"># :items keeps up to HN_IN_FLIGHT story requests going the same way</span></pre>
+  <p>The whole site as a graph, from Temper source through every build step, file, process and service to the page on your screen, is at <a href="https://bobbby.online/stack">bobbby.online/stack</a>. It is itself a Blimp program drawn over a layout computed in Temper. Start there for the map of the system.</p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="browser">
+  <h2><span class="num">2</span>The same interpreter runs in your browser</h2>
+  <p>The Zig interpreter also compiles to WebAssembly. A page loads <code>blimp.wasm</code>, fetches a <code>.blimp</code> file from the server and runs it. The program's last expression is a view: <code>el(tag, attrs, children...)</code> builds real DOM elements with the page's own CSS classes, including SVG and <code>&lt;dialog&gt;</code>, and events come back to an actor as messages (<code>click:</code>, <code>input:</code>, <code>submit:</code> with the form as a map, <code>swipe:</code>, <code>drag:</code>, keys, <code>timer(ms, :msg)</code>, <code>fetch(url, :msg)</code>). The view also holds a WebSocket (<code>socket()</code>), remembers between visits (<code>stored()</code> and <code>store()</code>), and keeps a list's rows by <code>key:</code>. <code>draw()</code> paints a canvas for pages with thousands of points. <a href="/view/reference.html">The view reference</a> has every piece, and <a href="/tutorial/#ch10">tutorial chapter 10</a> builds a page with most of them.</p>
+  <p>Since 1 October 2026 <a href="https://bobbby.online/aim">bobbby.online/aim</a> has no script of its own: its chat socket, its stored screen name, its draggable windows, its sounds and its clock are all the Blimp program.</p>
+  <p>Every such page has a small window that draws that program's own actors and the messages between them, live, from the interpreter's state while you play.</p>
+
+<pre><span class="c"># static/twenty48/twenty48.blimp: the rules are Temper (below), the actor and view are Blimp</span>
+<span class="k">def</span> t48_add_tile(board: List) -&gt; Tuple <span class="k">do</span>
+  empty = t48_empties(board)
+  <span class="k">case</span> empty <span class="k">do</span>
+    [] -&gt; {board, -1}
+    _ -&gt;
+      at = elem(empty, random(0, length(empty) - 1))
+      value = <span class="k">case</span> random(1, 10) == 1 <span class="k">do</span>
+        true -&gt; 4
+        false -&gt; 2
+      <span class="k">end</span>
+      {t48_set(board, at, value), at}
+  <span class="k">end</span>
+<span class="k">end</span>
+
+<span class="k">actor</span> Twenty48 <span class="k">do</span>
+  <span class="k">state</span> board: List :: []
+  <span class="k">state</span> size: Int :: 8
+  <span class="k">state</span> score: Int :: 0
+  <span class="c"># ... eleven more fields</span>
+
+  <span class="k">on</span> <span class="a">:new_game</span> <span class="k">do</span>
+    one = t48_add_tile(t48_blank(size))
+    two = t48_add_tile(elem(one, 0))
+    <span class="k">become</span> board: elem(two, 0), score: 0, over: false, won: false, fresh: elem(two, 1), <span class="c"># ...</span>
+    <span class="k">reply</span> <span class="a">:ok</span>
+  <span class="k">end</span>
+  <span class="c"># ...</span>
+<span class="k">end</span>
+
+<span class="c"># part of the view</span>
+el(<span class="s">"button"</span>, %{class: <span class="s">"howto-start"</span>, click: <span class="a">:start_game</span>}, <span class="s">"START"</span>)</pre>
+  <p class="cap">The file ends <code>x &lt;- :view</code>; the view is the old Phoenix LiveView's template, element for element, so the old CSS still draws it.</p>
+
+  <div class="cards">
+    <a class="card wide" href="https://bobbby.online/stack"><div class="p">/stack</div><div class="d">The site's whole build and runtime graph. Click a box to see what it comes from and what it feeds. 147 KB of Blimp over a Temper layout.</div></a>
+    <a class="card" href="https://bobbby.online/2048"><div class="p">/2048</div><div class="d">Blitz 2048 on boards up to 12x12. 29 KB program.</div></a>
+    <a class="card" href="https://bobbby.online/tetris"><div class="p">/tetris</div><div class="d">Tetris, all actors. 24 KB program.</div></a>
+    <a class="card" href="https://bobbby.online/chess-lv"><div class="p">/chess-lv</div><div class="d">Chess-9 against a bot, rules in Temper, identical to the Elixir on 2,800 plies. 113 KB.</div></a>
+    <a class="card" href="https://bobbby.online/phish"><div class="p">/phish</div><div class="d">phangraphs: song stats read from Postgres with <code>fetch</code>. 76 KB.</div></a>
+    <a class="card" href="https://bobbby.online/art"><div class="p">/art</div><div class="d">A generative studio drawing SVG; the engine is Temper. 58 KB.</div></a>
+    <a class="card" href="https://bobbby.online/phish_lab"><div class="p">/phish_lab</div><div class="d">A 19,814-point scatter in one <code>draw()</code>.</div></a>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="temper">
+  <h2><span class="num">3</span>Temper compiles to Blimp</h2>
+  <p><a href="https://github.com/notactuallytreyanastasio/temper-blimp">temper-blimp</a> adds a Blimp backend to the Temper compiler. <code>temper build -b blimp</code> turns the site's Temper library (22 modules of literate Temper under <code>blimp_site/temper/src</code>, about 10,000 lines with their prose) into one Blimp file, and <code>temper/prune.pl</code> gives each program only the definitions it calls. The server never runs Java; it gets Blimp.</p>
+  <p>The rules of 2048, Wordle, Blackjack and Chess-9, the Markdown and highlighting helpers, the moon-phase math, the /stack layout and the /sky layout are Temper now. An exported Temper function compiles to a plain <code>def</code> with the same name, so no Blimp caller had to change:</p>
+<pre><span class="c">// blimp_site/temper/src/twenty48/twenty48.temper.md</span>
+<span class="k">export let</span> t48_slide_line(values: List&lt;Int&gt;): List&lt;List&lt;Int&gt;&gt; {
+  <span class="k">let</span> z = values.filter { (v): Boolean =&gt; v != 0 };
+  <span class="k">if</span> (z.isEmpty) { <span class="k">return</span> [values, [0], []]; }
+  <span class="k">if</span> (!t48_any_pair(z, 0)) { <span class="k">return</span> t48_pad(z, values.length); }
+  <span class="k">let</span> starts = t48_range(z.length).map { (k): Boolean =&gt; t48_starts(z, k) };
+  <span class="k">let</span> kept = t48_range(z.length).filter { (k): Boolean =&gt; k == 0 || !starts[k - 1] };
+  <span class="k">let</span> out = kept.map { (k): Int =&gt; <span class="k">if</span> (starts[k]) { z[k] * 2 } <span class="k">else</span> { z[k] } };
+  <span class="k">let</span> merges = t48_range(kept.length).filter { (j): Boolean =&gt; starts[kept[j]] };
+  <span class="k">let</span> points = merges.reduceFrom(0) { (acc: Int, j: Int): Int =&gt; acc + out[j] };
+  <span class="k">let</span> n = out.length;
+  <span class="k">let</span> padded = t48_range(values.length).map { (j): Int =&gt; <span class="k">if</span> (j &lt; n) { out[j] } <span class="k">else</span> { 0 } };
+  [padded, [points], merges]
+}</pre>
+  <p>What stays in Blimp stays for specific reasons. A Temper class becomes a Blimp actor, and actors are never collected, so every module is written as functions. Temper has no tuples, no atoms and no case mapping on strings, so records, anything that lower-cases, and parsers that return tagged tuples stayed Blimp. Actors and views are Blimp by design.</p>
+  <p>Temper's output has many top-level names, and that exposed two costs in the interpreter: top-level lookup walked a list, and every closure copied every global. <a href="https://github.com/notactuallytreyanastasio/blimp/pull/64">#64</a> put the globals behind a hash table:</p>
+<pre>boot (data/*.tsv)    6210 ms -&gt;  539 ms
+render 15 posts      1089 ms -&gt;  313 ms
+site tests          29240 ms -&gt; 3020 ms</pre>
+  <p>The long account, with the backend's output, what was changed in the compiler and why, is the post <a href="https://bobbby.online/post/this-site-is-blimp-now">This site is Blimp now</a>.</p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="changes">
+  <h2><span class="num">4</span>What the site forced into the interpreter</h2>
+  <p>Every recent interpreter change came from a page that broke or a number that was too big. Eight of the last nine, all merged on 29 and 30 September (the ninth, #61, fixed a test that #60 merged failing):</p>
+  <table class="tbl">
+    <tr><th>PR</th><th>What changed</th><th>Found by</th></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/60">#60</a></td><td><code>http_start</code> / <code>http_result</code>: HTTPS on a worker thread, polled from the program. 32 in flight, 8 MiB bodies.</td><td>pages that read Hacker News, GitHub, MTA</td></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/62">#62</a></td><td>A program driven by <code>send</code> can be drawn: its state is current after the send.</td><td>the actor window on every page</td></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/63">#63</a></td><td>The state JSON grows instead of being cut at 256 KiB.</td><td>Snake from Temper: 810 actors after one frame, the window showed "0 actors"</td></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/64">#64</a></td><td>Top-level names found by hash; a closure no longer copies the globals. Boot 6.2 s to 0.54 s.</td><td>every Temper port made the site slower</td></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/65">#65</a></td><td><code>blimp.wasm</code>'s view and result buffers grow; capped ones say what they dropped.</td><td>nine chess boards, 131 KB of view, cut at 64 KiB</td></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/66">#66</a></td><td>A view with a <code>\r</code> in it mounts, and JSON the page cannot parse says where.</td><td>a mount error that named the wrong cause</td></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/67">#67</a></td><td><code>ws_open</code> / <code>ws_recv</code>: a wss client. Jetstream at 38 frames/s for 5 minutes in 15 to 29 MB.</td><td>/reddit-links, /emoji-skeets and /jetstream_comparison, which read the Bluesky firehose</td></tr>
+    <tr><td><a href="https://github.com/notactuallytreyanastasio/blimp/pull/68">#68</a></td><td>Closing a socket with the request unread reset large responses; <code>tcp_write</code> now waits on time, not refill count.</td><td>a 2.9 MB body failing one run in three</td></tr>
+  </table>
+  <p>Before these came <a href="https://github.com/notactuallytreyanastasio/blimp/pull/48">#48</a> (one program for as long as the site runs, changeable while it runs), <a href="https://github.com/notactuallytreyanastasio/blimp/pull/49">#49</a> (the standard library a website needs: JSON, hashing, the OS, time, a real sort), <a href="https://github.com/notactuallytreyanastasio/blimp/pull/50">#50</a> (bytes for a Postgres client) and <a href="https://github.com/notactuallytreyanastasio/blimp/pull/51">#51</a>&ndash;<a href="https://github.com/notactuallytreyanastasio/blimp/pull/59">#59</a> (<code>el()</code>, <code>draw()</code>, <code>fetch()</code> and SVG in the browser).</p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="web">
+  <h2><span class="num">5</span>In progress: a web framework in Blimp</h2>
+  <p>What is still on Phoenix is chiefly <a href="https://bobbby.online/blinks">/blinks</a> and its API, which take writes. To move them, the site needs what a framework gives: request bodies, a router with parameters, pipelines of plugs, sessions, CSRF, and rooms with presence. It is being written in Blimp, as ordinary functions over a <code>conn</code> map:</p>
+<pre><span class="c"># blimp_site/src/41_web.blimp (blog PR #100, not merged)</span>
+<span class="k">def</span> web_demo_routes() -&gt; List <span class="k">do</span>
+  [
+    web_route(<span class="s">"GET"</span>, <span class="s">"/web/echo"</span>, WEB_BROWSER, web_echo_page),
+    web_route(<span class="s">"POST"</span>, <span class="s">"/web/echo"</span>, WEB_BROWSER, web_echo_post),
+    web_route(<span class="s">"PATCH"</span>, <span class="s">"/web/echo/:id"</span>, WEB_BROWSER, web_echo_item),
+    web_route(<span class="s">"DELETE"</span>, <span class="s">"/web/echo/:id"</span>, WEB_BROWSER, web_echo_item),
+    web_route(<span class="s">"POST"</span>, <span class="s">"/web/api/echo"</span>, WEB_API, web_echo_api)
+  ]
+<span class="k">end</span>
+
+<span class="k">def</span> web_echo_post(conn: Map) -&gt; Map <span class="k">do</span>
+  count = web_or(web_get_session(conn, <span class="s">"count"</span>), 0) + 1
+  message = web_or(web_param(conn, <span class="s">"message"</span>), <span class="s">""</span>)
+  c = web_put_session(web_put_session(conn, <span class="s">"count"</span>, count), <span class="s">"last"</span>, to_string(message))
+  <span class="c"># ... answers JSON or redirects, depending on the request's content type</span></pre>
+  <p class="cap"><code>WEB_BROWSER</code> is <code>[web_fetch_session, web_protect_from_forgery]</code>; <code>WEB_API</code> is <code>[web_fetch_session, web_require_json]</code>.</p>
+  <ul>
+    <li><strong>Written, in review:</strong> bodies read to Content-Length (1 MiB cap), a router with <code>:params</code>, plug pipelines, HMAC-signed cookie sessions and CSRF tokens (<a href="https://github.com/notactuallytreyanastasio/blog/pull/100">blog #100</a>).</li>
+    <li><strong>Also in review:</strong> rooms with presence, one queued flush per tick (<a href="https://github.com/notactuallytreyanastasio/blog/pull/102">blog #102</a>), and a read-only /blinks served by Blimp at /blinks-next, 20 of 27 API fixtures byte-identical to production (<a href="https://github.com/notactuallytreyanastasio/blog/pull/103">blog #103</a>).</li>
+    <li><strong>Planned:</strong> the rest of /blinks: writes, the iOS app's comment room, push, and the cutover (<a href="https://github.com/notactuallytreyanastasio/blog/pull/99">blog #99</a>).</li>
+  </ul>
+  <p>The framework's own documentation is at <a href="/web/">/web/</a>.</p>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="gaps">
+  <h2><span class="num">6</span>What does not work yet</h2>
+  <p>Each of these was hit by a port of a page and probed, by that port or again for this page.</p>
+  <ul class="gaps">
+    <li><strong>A handler that raises leaves its client waiting.</strong> The language has <code>try do ... catch e do ... end</code>, and it catches an error raised inside an actor's handler (<code>a &lt;- :crash</code> where the handler divides by zero gives <code>division_by_zero</code>). The site's request path does not use it yet. <code>--serve</code> logs the failed tick and keeps running, but the request that tick was answering never gets a response (found by the web framework port).</li>
+    <li><strong>Strings are bytes.</strong> <code>length("&#10084;&#65039;")</code> is <code>6</code>, and <code>slice</code> can cut a character in half.</li>
+    <li><strong>No P-256 or AES-GCM.</strong> <code>ecdh_p256</code> is an unknown function, so Web Push payloads cannot be encrypted in Blimp. HKDF built from <code>hmac_sha256</code> does pass RFC 5869.</li>
+    <li><strong><code>http_start</code> has no timeout</strong>, so a remote that never answers holds one of the 32 slots. It stops after 3 redirects, and <code>http_result</code> returns no response headers.</li>
+    <li><strong>No HTTP/2</strong>, so Apple push (APNs) cannot be reached.</li>
+    <li><strong>The server is one thread.</strong> A client that reads slowly can stall every other request for up to 10 s, so production's Caddy buffers the multi-megabyte files.</li>
+    <li><strong>Actors are never collected.</strong> A Temper class compiles to an actor, so Temper Snake adds about 500 permanent actors a frame.</li>
+    <li><strong>The server's <code>random</code> is unseeded.</strong> It gives the same sequence after every restart unless a program seeds it from <code>random_bytes</code>.</li>
+    <li><strong>Phoenix still answers some pages.</strong> <code>/blinks</code>, <code>/api/blinks</code> and <code>/python-demo</code> come back with Phoenix's headers today.</li>
+  </ul>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── -->
+<section id="archive">
+  <h2><span class="num">7</span>Learn it, and where it came from</h2>
+  <p>The tutorial is <a href="#tetris">above</a>. The rest was written in March, before the site, and describes a language that has changed since: the March posts talk about reference counting and LLVM compilation, while the interpreter serving the site frees nothing while it evaluates and compacts its heap between ticks.</p>
+  <div class="archive">
+    <div><a href="/tutorial/">tutorial</a><span class="d">Build Tetris: ten chapters, one actor each, with exercises and the game running in the page. Then a guestbook: forms, lists, a dialog, storage.</span></div>
+    <div><a href="/manifesto/">manifesto</a><span class="d">Why actors are the only abstraction. Live examples.</span></div>
+    <div><a href="/blog/">design journal</a><span class="d">Four posts from March, and Tetris from September.</span></div>
+    <div><a href="/blog/playground.html">playground</a><span class="d">A REPL in the browser.</span></div>
+    <div><a href="https://github.com/notactuallytreyanastasio/blimp/tree/main/docs/lang_design">language design notes</a><span class="d">Nineteen notes: actors, views, sessions, websockets, the parser.</span></div>
+    <div><a href="https://github.com/notactuallytreyanastasio/blimp">source</a><span class="d">The interpreter is <code>chunks/lang</code>. The site is <a href="https://github.com/notactuallytreyanastasio/blog/tree/main/blimp_site">blog/blimp_site</a>.</span></div>
+  </div>
+</section>
+
+<footer>
+  Written by Bobby Grayson with Claude. Numbers are from running the code named next to them; the commit messages linked above have the rest.
+</footer>
+
+</div>
+</body>
+</html>

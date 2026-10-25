@@ -1,0 +1,194 @@
+# Chapter 10 -- A page of your own: a guestbook
+# Run: blimp exercises/ch10_page/01_guestbook.blimp --test
+#
+# Four parts are yours, marked "# Exercise:". The answers are in
+# solutions/01_guestbook.blimp.
+#
+# Tetris drew itself with heading, row and stack, and listened with keys
+# and a timer. Most pages are forms and lists. This one is a guestbook:
+# people leave a note, the newest goes on top, a note can be taken down
+# after a "are you sure?", and the book is still there after a reload.
+# Press Play when the tests pass.
+
+# One note as a list item: who, when (in the reader's own time zone),
+# what, and a button to take it down. key: n.id tells the page which
+# note this is, so a new one on top is one new element and the rest stay
+# as they are.
+def gb_note(n: Map, newest: Int) -> Any do
+  # Exercise: an el("li") for note n. Give it key: n.id, and the class
+  # "note", plus "fresh" when n.id is newest (a class map does that). Inside:
+  # a div of class "who" with the name in bold and " at " and gb_time(n.at),
+  # a p with the text, and a button of class "small" that sends
+  # :ask_delete with n.id.
+  :TODO
+end
+
+# "3:42 PM", in the reader's zone: now() and utc_offset() come from the page
+def gb_time(at: Int) -> String do
+  t = format_time(at + utc_offset(), "%I:%M %p")
+  case slice(t, 0, 1) == "0" do
+    true -> slice(t, 1, length(t))
+    false -> t
+  end
+end
+
+# Blimp has no trim of its own (bobbby.online's comes from its Temper
+# library), so here is one: spaces, tabs and newlines off both ends.
+def gb_space(c: String) -> Bool do
+  c == " " or c == "\n" or c == "\t" or c == "\r"
+end
+
+def gb_trim(s: String) -> String do
+  n = length(s)
+  case n > 0 and gb_space(slice(s, 0, 1)) do
+    true -> gb_trim(slice(s, 1, n))
+    false ->
+      case n > 0 and gb_space(slice(s, n - 1, n)) do
+        true -> gb_trim(slice(s, 0, n - 1))
+        false -> s
+      end
+  end
+end
+
+# The highest id in the book, or 0.
+def gb_top(notes: List) -> Int do
+  reduce(notes, 0, fn(acc: Int, n: Map) -> Int do max(acc, n.id) end)
+end
+
+actor Guestbook do
+  state notes: List :: []
+  state next: Int :: 1
+  state name: String :: ""
+  # the note the "are you sure?" dialog is about, or 0 when it is closed
+  state confirming: Int :: 0
+
+  # The form's fields arrive as a map: %{"name": "amy", "text": "hi"}.
+  # A note needs some text; a name it can do without.
+  on :post(f: Map) do
+    # Exercise: f is the form as a map: f.name and f.text. Trim both
+    # (gb_trim). No text: reply :ignored. Otherwise put a note,
+    # %{id: next, name: ..., text: ..., at: now()}, at the front of notes,
+    # with the name "anonymous" if none was given; count next up; keep the
+    # name in state so the form remembers it; reply :posted.
+    reply :TODO
+  end
+
+  on :ask_delete(id: Int) do
+    become confirming: id
+    reply :ok
+  end
+
+  on :cancel do
+    become confirming: 0
+    reply :ok
+  end
+
+  on :delete do
+    # Exercise: take the note whose id is confirming out of notes, and
+    # close the dialog (confirming back to 0).
+    reply :TODO
+  end
+
+  # What the page kept from last time (stored(), below): the book as JSON,
+  # "" if there was none. Anything that is not a list of notes is ignored.
+  on :remembered(text: String) do
+    # Exercise: text is what store() kept last time, or "". json_decode
+    # it; if it is {:ok, a list}, those are the notes, and next is one more
+    # than the highest id (gb_top). Anything else is an empty book. Reply
+    # how many notes there are now.
+    reply :TODO
+  end
+
+  on :remembered_name(n: String) do
+    become name: n
+    reply :ok
+  end
+
+  on :view do
+    newest = case notes do
+      [] -> 0
+      [n | _] -> n.id
+    end
+    sure = el("dialog", %{modal: true, dismiss: :cancel},
+      el("p", %{}, "Take this note down?"),
+      el("button", %{click: :delete}, "Take it down"),
+      el("button", %{click: :cancel}, "Keep it"))
+    reply el("div", %{class: "guestbook"},
+      el("h2", %{}, "Guestbook"),
+      el("form", %{submit: :post, reset_on_submit: true},
+        el("input", %{name: "name", value: name, placeholder: "your name"}),
+        el("textarea", %{name: "text", placeholder: "say something", submit_on_enter: true, focus: true}),
+        el("button", %{type: "submit"}, "Sign")),
+      show(notes == [], el("p", %{class: "empty"}, "Nobody has signed yet.")),
+      el("ul", %{class: "notes"}, map(notes, fn(n: Map) -> Any do gb_note(n, newest) end)),
+      show(confirming != 0, sure),
+      stored("guestbook.notes", :remembered),
+      stored("guestbook.name", :remembered_name),
+      store("guestbook.notes", json_encode(notes)),
+      store("guestbook.name", name))
+  end
+
+  test "a note goes on top, trimmed, with a name or without" do
+    g = spawn Guestbook
+    assert_eq(g <- :post(%{"name": " amy ", "text": " hello "}), :posted)
+    assert_eq(g <- :post(%{"name": "", "text": "second"}), :posted)
+    notes = (g <- :state).notes
+    assert_eq(map(notes, fn(n: Map) -> String do n.text end), ["second", "hello"])
+    assert_eq(map(notes, fn(n: Map) -> String do n.name end), ["anonymous", "amy"])
+    assert_eq(map(notes, fn(n: Map) -> Int do n.id end), [2, 1])
+  end
+
+  test "a note with no text is not a note" do
+    g = spawn Guestbook
+    assert_eq(g <- :post(%{"name": "amy", "text": "   "}), :ignored)
+    assert_eq((g <- :state).notes, [])
+  end
+
+  test "taking a note down asks first, and keeping it changes nothing" do
+    g = spawn Guestbook
+    g <- :post(%{"name": "amy", "text": "one"})
+    g <- :post(%{"name": "bo", "text": "two"})
+    g <- :ask_delete(1)
+    assert_eq((g <- :state).confirming, 1)
+    g <- :cancel
+    assert_eq(length((g <- :state).notes), 2)
+    g <- :ask_delete(1)
+    g <- :delete
+    st = g <- :state
+    assert_eq(map(st.notes, fn(n: Map) -> String do n.text end), ["two"])
+    assert_eq(st.confirming, 0)
+  end
+
+  test "the book comes back from what the page kept, and goes on numbering" do
+    g = spawn Guestbook
+    assert_eq(g <- :remembered("[{\"id\":7,\"name\":\"amy\",\"text\":\"hi\",\"at\":0}]"), 1)
+    g <- :post(%{"name": "bo", "text": "after"})
+    assert_eq(map((g <- :state).notes, fn(n: Map) -> Int do n.id end), [8, 7])
+    h = spawn Guestbook
+    assert_eq(h <- :remembered(""), 0)
+    assert_eq(h <- :remembered("{\"not\":\"a list\"}"), 0)
+  end
+
+  test "the page: the empty book, then notes newest first, then the dialog" do
+    g = spawn Guestbook
+    assert(contains(to_html(g <- :view), "Nobody has signed yet."))
+    g <- :post(%{"name": "amy", "text": "first"})
+    g <- :post(%{"name": "bo", "text": "second"})
+    v = to_html(g <- :view)
+    assert(not(contains(v, "Nobody has signed yet.")))
+    assert(contains(v, "<li class=\"note fresh\">"))
+    assert(index_of(v, "second") < index_of(v, "first"))
+    assert(not(contains(v, "<dialog")))
+    g <- :ask_delete(2)
+    assert(contains(to_html(g <- :view), "<dialog>"))
+  end
+
+  on :state do
+    reply %{notes: notes, next: next, name: name, confirming: confirming}
+  end
+end
+
+# The page runs this file and draws what the last line replies. The
+# tutorial's Play tab talks to an actor called game.
+game = spawn Guestbook
+game <- :view

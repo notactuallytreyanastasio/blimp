@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Test</title>
+</head>
+<body style="background:#1a1a2e;color:#a6e22e;font-family:monospace;padding:2rem;">
+<h1>Mobile Test</h1>
+<p>If you see this green text on a dark background, HTML/CSS works.</p>
+<p id="js">JS not loaded</p>
+<p id="wasm">WASM not tested</p>
+<script>
+document.getElementById('js').textContent = 'JS works. UA: ' + navigator.userAgent;
+</script>
+<script src="repl/blimp.js"></script>
+<script>
+(async function() {
+  var el = document.getElementById('wasm');
+  try {
+    var b = new Blimp();
+    await b.init('repl/blimp.wasm');
+    var r = b.eval('1 + 2');
+    el.textContent = 'WASM works: 1+2 = ' + r.value;
+    el.style.color = '#a6e22e';
+  } catch(e) {
+    el.textContent = 'WASM FAILED: ' + e.message;
+    el.style.color = '#f92672';
+  }
+})();
+</script>
+</body>
+</html>

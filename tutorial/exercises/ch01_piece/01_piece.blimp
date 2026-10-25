@@ -1,0 +1,76 @@
+# Chapter 1 -- The falling piece
+# Run: blimp exercises/ch01_piece/01_piece.blimp --test
+#
+# One actor: the piece that is falling right now. It knows which kind of
+# piece it is, which way it is turned, and where it is. It does not know
+# what shape it has yet; that is chapter 2.
+
+actor Tetris do
+  state name: String :: "blimp tetris"
+end
+
+actor Tetris.Piece do
+  state kind: Int :: 1
+  state rot: Int :: 0
+  state x: Int :: 3
+  state y: Int :: 0
+
+  # Exercise: start over as a new kind, turned to rotation 0, at column 3
+  # of the top row. Reply :ok.
+  on :spawn(new_kind: Int) do
+    reply :TODO
+  end
+
+  # Exercise: reply with a map of kind, x, y and rot, in that order (two
+  # maps with the same keys in a different order are not equal).
+  on :info do
+    reply :TODO
+  end
+
+  # Exercise: add dx to x and dy to y. Reply :ok.
+  on :move(dx: Int, dy: Int) do
+    reply :TODO
+  end
+
+  # Exercise: turn by dir (1 is clockwise, -1 is anticlockwise). There are
+  # four rotations, 0 to 3, and turning past either end wraps around.
+  # Reply :ok.
+  on :rotate(dir: Int) do
+    reply :TODO
+  end
+
+  test "a new piece is an I at the top, column 3, rotation 0" do
+    piece = spawn Tetris.Piece
+    assert_eq(piece <- :info, %{kind: 1, x: 3, y: 0, rot: 0})
+  end
+
+  test "spawn starts over as the given kind" do
+    piece = spawn Tetris.Piece
+    piece <- :move(2, 7)
+    piece <- :rotate(1)
+    assert_eq(piece <- :spawn(3), :ok)
+    info = piece <- :info
+    assert_eq(lookup(info, :kind), 3)
+    assert_eq(lookup(info, :x), 3)
+    assert_eq(lookup(info, :y), 0)
+    assert_eq(lookup(info, :rot), 0)
+  end
+
+  test "move adds to x and y" do
+    piece = spawn Tetris.Piece
+    assert_eq(piece <- :move(-2, 5), :ok)
+    info = piece <- :info
+    assert_eq(lookup(info, :x), 1)
+    assert_eq(lookup(info, :y), 5)
+  end
+
+  test "rotate wraps both ways" do
+    piece = spawn Tetris.Piece
+    piece <- :rotate(-1)
+    assert_eq(lookup(piece <- :info, :rot), 3)
+    piece <- :rotate(1)
+    assert_eq(lookup(piece <- :info, :rot), 0)
+    for i in range(1, 5) do piece <- :rotate(1) end
+    assert_eq(lookup(piece <- :info, :rot), 1)
+  end
+end

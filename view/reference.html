@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blimp view reference</title>
+<meta name="description" content="Everything a Blimp program can put in a page: el and its instructions, the effect nodes, how a render patches the page, and the clock in the browser.">
+<link rel="stylesheet" href="../web/web.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">BLIMP</a>
+  <nav>
+    <a href="/tutorial/#ch10">tutorial: a page</a>
+    <a href="/view/reference.html" aria-current="page">view: reference</a>
+    <a href="/web/">web</a>
+    <a href="https://github.com/notactuallytreyanastasio/blimp">github</a>
+  </nav>
+</header>
+<main>
+
+<h1>View reference</h1>
+
+<p class="lede">What a Blimp program can put in a browser page, as <code>chunks/lang/web/blimp-view.js</code> and <code>src/builtins.zig</code> have it at Blimp main after <a href="https://github.com/notactuallytreyanastasio/blimp/pull/93">#93</a>. Every example below was run through the interpreter, and its output is pasted, not written. <a href="/tutorial/#ch10">Tutorial chapter 10</a> builds a page with most of it.</p>
+
+<nav class="toc" aria-label="On this page">
+<ol>
+  <li><a href="#host">How a page runs a program</a></li>
+  <li><a href="#el">el</a></li>
+  <li><a href="#children">Children, and show</a></li>
+  <li><a href="#instructions">Instructions on el</a></li>
+  <li><a href="#forms">Forms</a></li>
+  <li><a href="#dialog">Dialogs</a></li>
+  <li><a href="#effects">Effect nodes</a></li>
+  <li><a href="#socket">socket</a></li>
+  <li><a href="#patching">How a render patches the page</a></li>
+  <li><a href="#clock">The clock in the browser</a></li>
+  <li><a href="#builtins">The older builtins</a></li>
+  <li><a href="#gaps">What it does not do</a></li>
+</ol>
+</nav>
+
+<h2 id="host">How a page runs a program<a class="anchor" href="#host">#</a></h2>
+
+<p>A page loads <code>blimp.js</code> (the interpreter, as WebAssembly) and <code>blimp-view.js</code> (the host), fetches a <code>.blimp</code> file and mounts it:</p>
+
+<pre>var view = new BlimpView(blimp, containerEl, { send: true })
+view.mount(source, 'game')   // the source ends with: game &lt;- :view</pre>
+
+<p>The program's last expression must be a view: that is the first render. From then on every event is a message to that one actor, followed by <code>:view</code>, and the page is patched to the new view. In <code>{ send: true }</code> mode both go through <code>blimp.send</code> rather than evaluating source text, so a page that runs for an hour does not keep an hour of evaluations.</p>
+
+<p>The actor is the page's one top-level variable. A message from the page is <code>game &lt;- :msg</code> or <code>game &lt;- :msg(args)</code>, and its arguments are Blimp values written out as source: a string arrives as a <code>String</code>, a form as a <code>Map</code>, <code>with: 3</code> as an <code>Int</code>.</p>
+
+<p>Messages from outside a render (a socket frame, a stored value, a fetch's answer) are held until the current render has finished, so none lands in the middle of one. A socket's messages go through one queue and reach the program in the order they came.</p>
+
+<h2 id="el">el<a class="anchor" href="#el">#</a></h2>
+
+<p><code>el(tag, attrs, children...)</code> is a real element with the page's own classes and attributes. <code>to_html</code> prints what the page gets:</p>
+
+<pre>puts(to_html(el("p", %{class: "note"}, "hello")))</pre>
+<pre class="out">&lt;p class="note"&gt;hello&lt;/p&gt;</pre>
+
+<p><code>to_html</code> works on the command line and in the browser alike, so a test that checks a view's markup passes in both. Instructions and effect nodes never appear in it: it is the page without its program.</p>
+
+<p><strong>Tags.</strong> The common HTML elements, SVG (<code>svg</code>, <code>g</code>, <code>path</code>, <code>circle</code>, <code>rect</code>, <code>line</code>, <code>polyline</code>, <code>polygon</code>, <code>text</code>, <code>tspan</code>, <code>defs</code>, gradients, <code>ellipse</code>, <code>title</code>) and <code>dialog</code>. Nothing that loads or runs a document of its own: no <code>script</code>, <code>iframe</code>, <code>object</code>, <code>embed</code>, <code>style</code>, <code>link</code>, <code>meta</code> or <code>base</code>. An unknown tag is a <code>TypeError</code>.</p>
+
+<p><strong>Attribute values</strong> are strings, numbers, atoms, booleans or <code>nil</code>. <code>true</code> writes the bare attribute (<code>disabled</code>), and <code>false</code> or <code>nil</code> leaves it out. A key starting with <code>on</code> is refused, and so is a <code>javascript:</code> URL, however it is spelled, in <code>href</code>, <code>src</code>, <code>action</code>, <code>formaction</code>, <code>xlink:href</code> or <code>poster</code>.</p>
+
+<p><strong><code>class:</code> and <code>style:</code> take data.</strong> A class can be a list of names (with <code>nil</code>, <code>false</code> and <code>""</code> left out) or a map of names to booleans. A style can be a map, where a <code>nil</code> or <code>false</code> value leaves the property out. They are turned into text inside <code>el()</code>, so the page sees exactly what a string would have given.</p>
+
+<pre>puts(to_html(el("li", %{class: %{note: true, fresh: true}}, "hi")))
+puts(to_html(el("li", %{class: ["note", nil, "fresh"]}, "hi")))
+puts(to_html(el("div", %{style: %{translate: "12px 4px", "z-index": 4, color: nil}}, "x")))</pre>
+<pre class="out">&lt;li class="note fresh"&gt;hi&lt;/li&gt;
+&lt;li class="note fresh"&gt;hi&lt;/li&gt;
+&lt;div style="translate: 12px 4px; z-index: 4;"&gt;x&lt;/div&gt;</pre>
+
+<p>Numbers are written as they are: <code>"z-index": 4</code> is right, and a width wants <code>"12px"</code>. A class or style map whose key is a Blimp keyword (<code>on</code>, <code>do</code>, <code>end</code>, <code>when</code>) has to quote it: <code>%{"on": true}</code>.</p>
+
+<h2 id="children">Children, and show<a class="anchor" href="#children">#</a></h2>
+
+<p>Children are strings, nodes, or lists of either; a list is spliced in, one level deep. A child that is <code>nil</code> or <code>false</code> is nothing, so a helper can return <code>nil</code> for "nothing here".</p>
+
+<p><code>show(cond, node)</code> is <code>node</code> when <code>cond</code> is true and nothing when it is false. It is lazy: <code>node</code> is only built when <code>cond</code> is true, so it may read what <code>cond</code> guards. <code>cond</code> must be a <code>Bool</code>.</p>
+
+<pre>q = nil
+puts(to_html(el("div", %{}, show(q != nil, el("p", %{}, q.text)), "after")))</pre>
+<pre class="out">&lt;div&gt;after&lt;/div&gt;</pre>
+
+<p>(The first <code>show</code>, <a href="https://github.com/notactuallytreyanastasio/blimp/pull/89">#89</a>, built <code>node</code> first. Its first real use was the line above, and <code>q.text</code> failed before <code>show</code> saw the condition. <a href="https://github.com/notactuallytreyanastasio/blimp/pull/93">#93</a> made it lazy.)</p>
+
+<h2 id="instructions">Instructions on el<a class="anchor" href="#instructions">#</a></h2>
+
+<p>These keys in the attribute map are instructions to the page, not HTML. They never reach the markup:</p>
+
+<pre>puts(to_html(el("form", %{submit: :post, reset_on_submit: true},
+  el("textarea", %{name: "text", submit_on_enter: true, focus: true}))))</pre>
+<pre class="out">&lt;form&gt;&lt;textarea name="text"&gt;&lt;/textarea&gt;&lt;/form&gt;</pre>
+
+<div class="table-wrap"><table>
+<thead><tr><th>Instruction</th><th>What the actor gets, or what it does</th></tr></thead>
+<tbody>
+<tr><td class="sig"><code>click: :msg</code></td><td><code>:msg</code> on a click, or <code>:msg(with)</code> with <code>with:</code>. Only the innermost element with a <code>click:</code> runs: a close button inside a clickable backdrop closes it once.</td></tr>
+<tr><td class="sig"><code>with: value</code></td><td>The argument for <code>click:</code> and <code>drag:</code>: a string, number, atom or boolean.</td></tr>
+<tr><td class="sig"><code>input: :msg</code></td><td><code>:msg(value)</code> on every keystroke in a field. With <code>debounce: ms</code>, once typing has stopped for that long.</td></tr>
+<tr><td class="sig"><code>change: :msg</code></td><td><code>:msg(value)</code> when a field changes; a checkbox sends <code>true</code> or <code>false</code>, a <code>Bool</code>.</td></tr>
+<tr><td class="sig"><code>submit: :msg</code></td><td><code>:msg(fields)</code>, the form's fields as a <code>Map</code>. See <a href="#forms">Forms</a>.</td></tr>
+<tr><td class="sig"><code>reset_on_submit: true</code></td><td>On a form: empties it after sending its fields. The same element, so the focus stays.</td></tr>
+<tr><td class="sig"><code>submit_on_enter: true</code></td><td>On a field in a form: Enter submits the form; Shift+Enter, and a character being composed by an input method, do not.</td></tr>
+<tr><td class="sig"><code>focus: true</code></td><td>Has the focus whenever nothing else does and it is not disabled: when it appears, once the button that opened it is gone, after it was disabled for a while. Never on a touch screen, where focusing throws a keyboard up. Called with <code>preventScroll</code>.</td></tr>
+<tr><td class="sig"><code>scroll: :end</code></td><td>Kept at its bottom as it grows, unless the reader has scrolled up (more than 40px from the end) to read; back at the end, it sticks again. <code>:end</code> is the only value.</td></tr>
+<tr><td class="sig"><code>drag: :msg</code></td><td>While a pointer is held down on it and moved: <code>:msg(dx, dy)</code>, or <code>:msg(with, dx, dy)</code>, the whole pixels moved since the last one, at most once a frame. The pointer is held inside the window, so whatever was grabbed can be grabbed again. A press on a button, link or field inside it is that control's.</td></tr>
+<tr><td class="sig"><code>swipe: :msg</code></td><td>On a touch screen: <code>:msg(:left)</code>, <code>:right</code>, <code>:up</code> or <code>:down</code>, once per swipe of 12px or more.</td></tr>
+<tr><td class="sig"><code>key: k</code></td><td>On the children of an element: matches them by key instead of by position. See <a href="#patching">patching</a>.</td></tr>
+<tr><td class="sig"><code>modal: true</code>, <code>dismiss: :msg</code></td><td>On a <code>dialog</code>. See <a href="#dialog">Dialogs</a>.</td></tr>
+<tr><td class="sig"><code>select: :msg</code></td><td><code>:msg(start, end)</code> when a field's selection moves, in bytes.</td></tr>
+<tr><td class="sig"><code>selection: "a,b"</code></td><td>Sets a field's selection (bytes) and focuses it, when the value changes.</td></tr>
+<tr><td class="sig"><code>shortcut: :msg</code>, <code>shortcut_keys: "bi"</code></td><td>On a field: Ctrl or Cmd with one of those letters sends <code>:msg("b")</code> and does not reach the browser.</td></tr>
+<tr><td class="sig"><code>paste_image: :msg</code></td><td>An image pasted or dropped onto it: <code>:msg(data_url)</code>.</td></tr>
+<tr><td class="sig"><code>inner_html: html</code></td><td>The element's content is this HTML, as is. Its children are ignored. Only for HTML the program has made safe.</td></tr>
+</tbody>
+</table></div>
+
+<h2 id="forms">Forms<a class="anchor" href="#forms">#</a></h2>
+
+<p><code>submit:</code> sends the form's fields as a map with quoted keys, so <code>f.name</code>, <code>lookup(f, :name)</code> and <code>lookup(f, "size-pick")</code> all read it:</p>
+
+<pre>on :post(f: Map) do
+  text = f.text
+  ...</pre>
+
+<ul>
+  <li>A text field, textarea or select is its value, as a <code>String</code>.</li>
+  <li>A checkbox is <code>true</code> or <code>false</code>.</li>
+  <li>A group of radio buttons is the value of the checked one, and absent if none is checked.</li>
+  <li>Disabled fields, fields without a <code>name</code>, and buttons are left out.</li>
+</ul>
+
+<p>Until <a href="https://github.com/notactuallytreyanastasio/blimp/pull/90">#90</a> it was one JSON string, every handler started by decoding it, and every radio wrote its value whether checked or not.</p>
+
+<p>To empty the form after sending, use <code>reset_on_submit: true</code> on the form. The trick of changing the field's <code>id</code> so that a new element replaces it also loses the focus.</p>
+
+<h2 id="dialog">Dialogs<a class="anchor" href="#dialog">#</a></h2>
+
+<pre>show(confirming, el("dialog", %{modal: true, dismiss: :cancel},
+  el("p", %{}, "Take this note down?"),
+  el("button", %{click: :delete}, "Take it down")))</pre>
+
+<p>A <code>dialog</code> is open while it is in the view and closed when it is not. <code>modal: true</code> opens it with <code>showModal()</code>, which gives a <code>::backdrop</code>, keeps the focus inside, and makes the page behind it inert; without it, <code>show()</code>. <code>dismiss: :msg</code> is sent on Escape (the browser is told not to close it, so the program decides) and on a click on the backdrop, which is a click on the dialog element outside its box. A click inside the box, even on its padding, is not a dismissal.</p>
+
+<p>An overlay <code>div</code> with <code>click: :close</code> is the wrong shape, because only the innermost <code>click:</code> runs: a click on the dialog's text has nothing closer to land on than the overlay, and closes it.</p>
+
+<p>The browser's dialog comes with its own border, padding and position. Style <code>dialog</code> and <code>dialog::backdrop</code> in the page's CSS.</p>
+
+<h2 id="effects">Effect nodes<a class="anchor" href="#effects">#</a></h2>
+
+<p>These go anywhere in the view and draw nothing. After each render the page makes its timers, listeners, requests and storage match them.</p>
+
+<pre>puts(to_html(el("div", %{}, stored("k", :got), store("k", "v"), timer(1000, :tick), "only this")))</pre>
+<pre class="out">&lt;div&gt;only this&lt;/div&gt;</pre>
+
+<div class="table-wrap"><table>
+<thead><tr><th>Node</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td class="sig"><code>timer(ms, :msg)</code></td><td><code>:msg</code> every <code>ms</code> milliseconds while it is in the view.</td></tr>
+<tr><td class="sig"><code>key("ArrowLeft", :msg)</code></td><td>That key sends <code>:msg</code>, anywhere on the page except in a field, and not with Ctrl, Cmd, Alt or Shift held.</td></tr>
+<tr><td class="sig"><code>key("*", :msg)</code></td><td>Every key: <code>:msg("a")</code>, <code>:msg("Enter")</code>, not prevented.</td></tr>
+<tr><td class="sig"><code>key("ArrowUp", :down, :up)</code></td><td>A held key: <code>:down</code> once when it goes down and <code>:up</code> when it comes up; auto-repeat is not sent.</td></tr>
+<tr><td class="sig"><code>fetch("/path", :msg)</code></td><td>One GET to the page's own server while it is in the view: <code>:msg(status, body)</code>, status 0 if it failed. Asked for again after it leaves the view and comes back.</td></tr>
+<tr><td class="sig"><code>location_query("a=1")</code></td><td>The page's URL carries this query string (replaced, not pushed: no history entry per click).</td></tr>
+<tr><td class="sig"><code>stored("key", :msg)</code></td><td>Reads <code>key</code> from <code>localStorage</code> once, and sends <code>:msg(value)</code>, <code>""</code> if nothing is there.</td></tr>
+<tr><td class="sig"><code>store("key", "value")</code></td><td><code>localStorage</code> holds <code>value</code> under <code>key</code>; <code>""</code> removes it. Written only when it differs. A key is not written while a <code>stored()</code> read of it is on its way, so a page's first render cannot overwrite what it is about to read. Storage that refuses (a private window) reads <code>""</code> and drops writes.</td></tr>
+<tr><td class="sig"><code>socket(...)</code></td><td>A WebSocket. See <a href="#socket">below</a>.</td></tr>
+</tbody>
+</table></div>
+
+<h2 id="socket">socket<a class="anchor" href="#socket">#</a></h2>
+
+<pre>socket("/live/aim", %{frame: :frame, open: :connected, closed: :offline, sent: :sent},
+       out_first, outbox)</pre>
+
+<p>While the node is in the view, the page holds a WebSocket to that path on its own server (<code>ws://</code> or <code>wss://</code>, as the page is); a path to another host, <code>//host</code>, is refused. A drop is redialled after 0.5s, doubling to 10s, until the view lets it go.</p>
+
+<ul>
+  <li><code>frame:</code> (required): each text frame that arrives is <code>:frame(text)</code>, in the order it came.</li>
+  <li><code>open:</code> and <code>closed:</code> (optional): each connection and each drop.</li>
+  <li><code>sent:</code> (required), <code>out_first</code> and <code>outbox</code>: the program's queue of frames to send, the first numbered <code>out_first</code>. The page sends each number once, in order, while connected, and answers <code>:sent(n)</code>, the last number it has sent, so the program can drop them.</li>
+</ul>
+
+<pre>on :sent(n: Int) do
+  become outbox: drop(outbox, n - out_first + 1), out_first: n + 1
+  reply :ok
+end</pre>
+
+<p>(Blimp has no <code>drop</code> builtin. Write one, as bobbby.online's <code>aimp_drop</code>.) Frames still waiting when the socket drops go up when it is back, unless the program drops them in its <code>closed:</code> or <code>open:</code> handler, which is the program's call. <a href="https://bobbby.online/aim">/aim</a> signs on again instead.</p>
+
+<h2 id="patching">How a render patches the page<a class="anchor" href="#patching">#</a></h2>
+
+<p>A render patches the page it drew last, rather than drawing a new one. An element whose node did not change is the same element afterwards, with its focus, selection, scroll position and playing media. The rules for when an element is kept:</p>
+
+<ul>
+  <li>A different tag is a new element.</li>
+  <li>A different <code>id</code> is a new element. This is how a CSS animation restarts, or a sound plays again: <code>el("audio", %{id: concat("s", to_string(n)), src: ..., autoplay: true})</code>.</li>
+  <li>A changed attribute is set on the same element. An instruction that needs a listener the element does not have makes a new element.</li>
+  <li>Children are matched by <code>key:</code> when every child has one. A kept key keeps its element, patched; a new key is a new element; a key that went is removed. A kept element is moved only if the order of the kept ones changed, because a moved <code>&lt;iframe&gt;</code> reloads. Two children with one key is an error: <code>el: two children have key: 5</code>.</li>
+  <li>Otherwise children are matched by position: the children both views have are patched, and the rest are added or removed. That is right for a list that grows at the end, like a chat log, and wrong for one that grows at the top, which wants <code>key:</code>.</li>
+</ul>
+
+<p>Before <a href="https://github.com/notactuallytreyanastasio/blimp/pull/85">#85</a>, an element whose number of children changed was rebuilt. A chat log lost its scroll position with every line, and an <code>&lt;audio autoplay&gt;</code> in a parent that gained a child played again.</p>
+
+<h2 id="clock">The clock in the browser<a class="anchor" href="#clock">#</a></h2>
+
+<p>WebAssembly has no clock, so <code>blimp.js</code> hands the page's in before every evaluation and message (<code>blimp_set_clock</code>):</p>
+
+<ul>
+  <li><code>now()</code> is seconds since 1970.</li>
+  <li><code>now_ms()</code> is a monotonic clock in milliseconds (<code>performance.now()</code>), for measuring, not for dates.</li>
+  <li><code>utc_offset()</code> is seconds the reader's zone is ahead of UTC: -14400 in New York in summer.</li>
+</ul>
+
+<pre>format_time(now() + utc_offset(), "%I:%M %p")   # "03:42 PM": %I pads the hour</pre>
+
+<p>On a server <code>utc_offset()</code> is the process's zone (<code>TZ</code>), which in a container is usually UTC: 0. A host that never calls <code>blimp_set_clock</code> reads zeros, as every browser did before <a href="https://github.com/notactuallytreyanastasio/blimp/pull/84">#84</a>. <code>seed(n)</code> seeds <code>random</code>; a page should call it once, with the time, or every visitor gets the same numbers.</p>
+
+<h2 id="builtins">The older builtins<a class="anchor" href="#builtins">#</a></h2>
+
+<p>Before <code>el</code> there were builtins for common shapes, and the host still draws them, each with a <code>blimp-</code> class to style: <code>stack</code>, <code>row</code>, <code>grid</code>, <code>text</code>, <code>heading(text, level)</code>, <code>bold</code>, <code>italic</code>, <code>code</code>, <code>code_block</code>, <code>blockquote</code>, <code>divider</code>, <code>list</code>, <code>link(label, url)</code>, <code>image(src, alt)</code>, <code>video</code>, <code>canvas</code>, <code>button(label, :msg)</code>, and <code>draw(w, h, ops)</code>, a canvas painted from a display list. <a href="/tutorial/#ch08">Tutorial chapter 8</a> uses them.</p>
+
+<p><code>form</code>, <code>input</code>, <code>textarea</code>, <code>select</code>, <code>option</code> and <code>mount_root</code> are builtins too, but <code>blimp-view.js</code> has no case for them: in a browser page they render as a plain <code>&lt;div&gt;</code>, and a form made with <code>form()</code> sends nothing. Use <code>el("form", ...)</code>.</p>
+
+<h2 id="gaps">What it does not do<a class="anchor" href="#gaps">#</a></h2>
+
+<ul>
+  <li><strong>No <code>&lt;script&gt;</code>, <code>&lt;iframe&gt;</code> or <code>&lt;style&gt;</code>.</strong> A YouTube embed on bobbby.online is <code>inner_html</code>, built and checked by the program.</li>
+  <li><strong>No scrolling to a place</strong> other than <code>scroll: :end</code>, and no reading the window's size: a program cannot tell a phone from a laptop except by CSS.</li>
+  <li><strong>No binary frames on a socket</strong>, only text. A frame is the program's to decode, usually with <code>json_decode</code>, which turns atoms into strings and tuples into lists.</li>
+  <li><strong>No <code>trim</code>, <code>starts_with</code>, <code>ends_with</code>, <code>drop</code> or <code>take</code></strong> in Blimp itself. bobbby.online gets them from its Temper library or writes them per program.</li>
+  <li><strong>One actor per page talks to the host.</strong> It may spawn others and send them anything, but every event goes to the one named at mount.</li>
+</ul>
+
+</main>
+</body>
+</html>
