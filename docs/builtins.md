@@ -187,7 +187,7 @@ If `fd` is on the list `tcp_close` keeps for lingering, `fd_close` takes it off,
 
 The design is in [lang_design/processes.md](lang_design/processes.md#a-forked-child-owns-the-socket).
 
-The other builtins in this group, without an entry here: `tcp_listen`, `tcp_connect`, `tcp_accept`, `tcp_read`, `tcp_write`, `tcp_close`, `tcp_set_nonblocking`, `tcp_poll`, `tcp_write_some`, `tcp_poll_write`, `ws_open`, `ws_recv`, `ws_send`, `ws_close`, `ws_stats`, `ws_accept_key`, `ws_read_frame`, `ws_write_frame`, `http_start`, `http_result`. Postgres (`pg_start`, `pg_result`, `pg_stats`) has its own entry, next.
+The other builtins in this group, without an entry here: `tcp_listen`, `tcp_connect`, `tcp_accept`, `tcp_read`, `tcp_write`, `tcp_close`, `tcp_set_nonblocking`, `tcp_poll`, `tcp_write_some`, `tcp_poll_write`, `tcp_poll_rw`, `ws_open`, `ws_recv`, `ws_send`, `ws_close`, `ws_stats`, `ws_accept_key`, `ws_read_frame`, `ws_write_frame`, `http_start`, `http_result`. Postgres (`pg_start`, `pg_result`, `pg_stats`) has its own entry, next.
 
 ### pg_start(conn, sql, params) and pg_result(handle)
 
