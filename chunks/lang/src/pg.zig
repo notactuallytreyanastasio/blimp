@@ -39,8 +39,11 @@
 //!
 //! Connections: a worker takes an idle connection with the same host, port,
 //! user, password and database, or dials one. After a query that ended in
-//! ReadyForQuery (rows or a server error alike) the connection goes back to
-//! an idle pool of `pool_max`; one past that is closed. Anything else -- a
+//! ReadyForQuery (rows or a server error alike) outside any transaction, the
+//! connection goes back to an idle pool of `pool_max`; one past that is
+//! closed. One left inside a transaction block, failed or not, is closed:
+//! a transaction is one pg_start (a single statement, or a function), never
+//! a run of them. Anything else -- a
 //! timeout, a cut connection, a protocol surprise -- closes it. An idle
 //! connection the server has closed (Postgres restarted) is readable, and is
 //! dropped when it is taken instead of failing the query.
@@ -591,6 +594,9 @@ const Conn = struct {
     pid: i32 = 0,
     secret: i32 = 0,
     reader: Reader = .{},
+    /// ReadyForQuery's transaction status after the last query: 'I' idle,
+    /// 'T' inside a transaction block, 'E' inside a failed one.
+    tx_status: u8 = 'I',
 
     fn close(self: *Conn, polite: bool) void {
         if (polite) {
@@ -854,7 +860,10 @@ fn runQuery(job: *Job, conn: *Conn) Fail!bool {
                 if (!server_error) writeErrorText(m.body, &job.why);
                 server_error = true;
             },
-            'Z' => return !server_error,
+            'Z' => {
+                conn.tx_status = if (m.body.len >= 1) m.body[0] else 'E';
+                return !server_error;
+            },
             // ParseComplete, BindComplete, NoData, CommandComplete,
             // EmptyQueryResponse, Notice, ParameterStatus, Notification
             '1', '2', 'n', 'C', 'I', 'N', 'S', 'A' => {},
@@ -877,7 +886,15 @@ fn worker(job: *Job) void {
             conn.close(false);
             break :blk false;
         };
-        giveIdle(conn);
+        // Only a connection outside any transaction goes back to the pool.
+        // One left in a block ('T', after a BEGIN with no COMMIT) or a failed
+        // one ('E') would hand the next, unrelated pg_start someone else's
+        // transaction: after a failed statement every later query on it is
+        // ERROR 25P02 until it leaves the pool. Pooled connections were never
+        // a way to run a transaction across pg_starts (two calls may land on
+        // different connections), so closing it rolls back what nobody could
+        // have committed.
+        if (conn.tx_status == 'I') giveIdle(conn) else conn.close(true);
         break :blk clean;
     };
     _ = in_flight.fetchSub(1, .monotonic);
@@ -1491,6 +1508,39 @@ test "live: SCRAM login, types, a server error, and a timeout that cancels the s
     napMs(300);
     const left = try testQuery(a, conn, "select count(*)::int4 as n from pg_stat_activity where state = 'active' and query like '%pg-zig-live-cancel%' and pid <> pg_backend_pid()", &.{}, null);
     try testing.expectEqual(@as(i64, 0), left.tuple[1].list[0].map[0].val.integer);
+    try expectSlotsFree();
+    drainPool();
+}
+
+test "live: a connection left inside a transaction, failed or not, is closed, not pooled" {
+    const url = liveUrl("BLIMP_PG_TEST_URL") orelse return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    drainPool();
+    const conn = try box(a, .{ .string = url });
+    // 'T': a BEGIN with no COMMIT leaves the block open
+    const b = try testQuery(a, conn, "begin", &.{}, null);
+    try testing.expectEqualStrings("ok", b.tuple[0].atom);
+    try testing.expectEqual(@as(usize, 0), idleCount());
+    // a later, unrelated query is not inside it: no transaction id was
+    // assigned before this statement on its connection
+    const t = try testQuery(a, conn, "select pg_current_xact_id_if_assigned() is null as fresh", &.{}, null);
+    try testing.expectEqualStrings("ok", t.tuple[0].atom);
+    try testing.expect(t.tuple[1].list[0].map[0].val.boolean);
+    try testing.expectEqual(@as(usize, 1), idleCount());
+    drainPool();
+    // 'E': a failed statement inside a block used to make every later query
+    // on the pooled connection ERROR 25P02
+    _ = try testQuery(a, conn, "begin", &.{}, null);
+    _ = try testQuery(a, conn, "select 1/0", &.{}, null);
+    const after = try testQuery(a, conn, "select 2 as two", &.{}, null);
+    try testing.expectEqualStrings("ok", after.tuple[0].atom);
+    try testing.expectEqual(@as(i64, 2), after.tuple[1].list[0].map[0].val.integer);
     try expectSlotsFree();
     drainPool();
 }
