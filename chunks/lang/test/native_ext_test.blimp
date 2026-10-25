@@ -35,6 +35,19 @@ actor SqliteTests do
     sqlite_close(db)
   end
 
+  test "$N takes the N-th param whatever the order in the SQL" do
+    db = sqlite_open(":memory:")
+    assert_eq(sqlite_query(db, "select $2 as x, $1 as y", ["a", "b"]), [["x", "y"], ["b", "a"]])
+    sqlite_exec(db, "create table t(k text, a text); insert into t values ('key', 'old')")
+    sqlite_query(db, "update t set a = $2 where k = $1", ["key", "value"])
+    assert_eq(sqlite_query(db, "select k, a from t", []), [["k", "a"], ["key", "value"]])
+    assert_eq(sqlite_query(db, "select ? as x, ? as y", ["a", "b"]), [["x", "y"], ["a", "b"]])
+    assert_eq(sqlite_query(db, "select ?2 as x, ?1 as y", ["a", "b"]), [["x", "y"], ["b", "a"]])
+    assert(raises("sqlite_query(1, \"select $2, $1\", [\"a\"])"))
+    assert(raises("sqlite_query(1, \"select $1\", [\"a\", \"b\"])"))
+    sqlite_close(db)
+  end
+
   test "sqlite_exec counts changes across a script" do
     db = sqlite_open(":memory:")
     sqlite_exec(db, "create table t(a)")

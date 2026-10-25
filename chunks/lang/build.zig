@@ -32,6 +32,32 @@ pub fn build(b: *std.Build) void {
     const lib_mod = b.addModule("blimp", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
+        .link_libc = true,
+    });
+
+    // SQLite is compiled from the vendored amalgamation, not linked from the
+    // system: Apple's libsqlite3 segfaults across fork() (see
+    // vendor/sqlite/README), and Linux no longer needs libsqlite3-dev.
+    // It is attached to the library module only; the executable and the test
+    // binaries reach it through their import of `blimp`. The WASM build has
+    // its own root module below and never sees it: the builtins are stubs.
+    //
+    // Warnings are off for this one file (it is not ours). The flags are the
+    // ones the builtins lean on: THREADSAFE=1 because actors run on threads,
+    // DQS=0 so "x" is never silently a string literal, OMIT_LOAD_EXTENSION so
+    // there is no dlopen, FTS5 for search.
+    lib_mod.addIncludePath(b.path("vendor/sqlite"));
+    lib_mod.addCSourceFile(.{
+        .file = b.path("vendor/sqlite/sqlite3.c"),
+        .flags = &.{
+            "-w",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_OMIT_LOAD_EXTENSION",
+            "-DSQLITE_DQS=0",
+            "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+            "-DSQLITE_OMIT_DEPRECATED",
+            "-DSQLITE_ENABLE_FTS5",
+        },
     });
 
     // -- CLI executable --
@@ -50,7 +76,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.root_module.linkSystemLibrary("sqlite3", .{});
     b.installArtifact(exe);
 
     // -- Run step --
@@ -63,7 +88,6 @@ pub fn build(b: *std.Build) void {
     }
 
     // -- Tests --
-    lib_mod.linkSystemLibrary("sqlite3", .{});
     const lib_tests = b.addTest(.{
         .root_module = lib_mod,
     });
@@ -83,7 +107,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    main_tests.root_module.linkSystemLibrary("sqlite3", .{});
     const run_main_tests = b.addRunArtifact(main_tests);
 
     const test_step = b.step("test", "Run all tests");

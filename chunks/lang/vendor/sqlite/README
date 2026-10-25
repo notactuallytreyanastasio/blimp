@@ -1,0 +1,22 @@
+SQLite amalgamation, vendored unmodified.
+
+  version   3.54.0
+  source    https://sqlite.org/2026/sqlite-amalgamation-3540000.zip
+  fetched   2026-10-14
+  sha3-256  7b670a62fdfbd672b75fef004cb703c8a3e87d3a5cc7d675b4a08337004a2d93
+            (the zip; matches the value on https://sqlite.org/download.html)
+  files     sqlite3.c, sqlite3.h (shell.c and sqlite3ext.h are not needed)
+
+SQLite is in the public domain: https://sqlite.org/copyright.html
+
+Why it is here: Apple's /usr/lib/libsqlite3.dylib crashes across fork() (inside
+libsystem_trace, and inside sqlite3_open_v2 after an earlier open/close in the
+parent). Compiled from source there are no os_log or dispatch hooks to trip.
+It also removes the libsqlite3-dev requirement on Linux.
+
+Compiled by build.zig with -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION
+-DSQLITE_DQS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_OMIT_DEPRECATED
+-DSQLITE_ENABLE_FTS5. Not compiled for WASM.
+
+To upgrade: download the new amalgamation, check its SHA3-256 against the
+download page, replace sqlite3.c and sqlite3.h, and update this file.

@@ -189,16 +189,23 @@ fn closeAll(fds: []const c_int) void {
 
 // ── SQLite ──────────────────────────────────────────────────
 
+// The header is the vendored one (vendor/sqlite/sqlite3.h, on the library
+// module's include path), so the constants below are the compiled library's own
+// and a change to them is a build error here, not a silent mismatch. The
+// functions stay hand-declared: translate-c cannot express SQLITE_TRANSIENT,
+// and the declarations below say exactly which signatures this file relies on.
+const sq = @cImport(@cInclude("sqlite3.h"));
+
 const sqlite = struct {
-    const Db = opaque {};
-    const Stmt = opaque {};
-    const OK = 0;
-    const ROW = 100;
-    const DONE = 101;
-    const BLOB = 4;
-    const NULL = 5;
-    const OPEN_READWRITE = 0x2;
-    const OPEN_CREATE = 0x4;
+    const Db = sq.sqlite3;
+    const Stmt = sq.sqlite3_stmt;
+    const OK = sq.SQLITE_OK;
+    const ROW = sq.SQLITE_ROW;
+    const DONE = sq.SQLITE_DONE;
+    const BLOB = sq.SQLITE_BLOB;
+    const NULL = sq.SQLITE_NULL;
+    const OPEN_READWRITE = sq.SQLITE_OPEN_READWRITE;
+    const OPEN_CREATE = sq.SQLITE_OPEN_CREATE;
     // SQLITE_TRANSIENT is (void(*)(void*))-1: sqlite copies the bytes at once.
     const TRANSIENT: isize = -1; // declared as an integer: the ABI is the same and Zig will not align -1
 
@@ -213,6 +220,8 @@ const sqlite = struct {
     extern "c" fn sqlite3_total_changes64(db: *Db) i64;
     extern "c" fn sqlite3_last_insert_rowid(db: *Db) i64;
     extern "c" fn sqlite3_bind_parameter_count(stmt: *Stmt) c_int;
+    extern "c" fn sqlite3_bind_parameter_name(stmt: *Stmt, i: c_int) ?[*:0]const u8;
+    extern "c" fn sqlite3_bind_parameter_index(stmt: *Stmt, name: [*:0]const u8) c_int;
     extern "c" fn sqlite3_bind_null(stmt: *Stmt, i: c_int) c_int;
     extern "c" fn sqlite3_bind_int64(stmt: *Stmt, i: c_int, v: i64) c_int;
     extern "c" fn sqlite3_bind_double(stmt: *Stmt, i: c_int, v: f64) c_int;
@@ -321,7 +330,10 @@ pub fn sqliteChanges(allocator: std.mem.Allocator, args: []const *const Value) E
 /// sqlite_query(db: Int, sql: String, params: List) -> [[String|nil]]
 ///
 /// Runs ONE statement; a second statement after it is an error. `params` are
-/// bound by position (?, ?NNN, $1 ...): nil binds NULL, Int and Float bind
+/// bound like Postgres when the SQL uses `$N` (param i goes to `$<i+1>`, in any
+/// order of appearance), and by position otherwise (`?`, `?NNN`: param i goes
+/// to index i+1, which for `?NNN` is the N-th param too). A statement that
+/// mixes `$N` with other placeholders is an error. nil binds NULL, Int and Float bind
 /// natively, a String binds as TEXT, and a Bool or atom binds as its
 /// to_string; anything else (list, map, ...) is an error. The number of
 /// params must equal the statement's parameter count.
@@ -351,10 +363,36 @@ pub fn sqliteQuery(allocator: std.mem.Allocator, args: []const *const Value) Eva
         return builtins.failArg("sqlite_query: one statement per call, found more after the first", .{});
 
     const want: usize = @intCast(sqlite.sqlite3_bind_parameter_count(st));
-    if (want != params.len)
+    // SQLite numbers `$1` by order of first appearance, so `$2, $1` would bind
+    // param 0 to `$2`. Look each `$<i+1>` up by name instead.
+    var dollar = false;
+    for (1..want + 1) |k| {
+        if (sqlite.sqlite3_bind_parameter_name(st, @intCast(k))) |nm| {
+            if (nm[0] == '$') dollar = true;
+        }
+    }
+    if (dollar) {
+        for (1..want + 1) |k| {
+            const nm = sqlite.sqlite3_bind_parameter_name(st, @intCast(k)) orelse
+                return builtins.failArg("sqlite_query: an unnamed placeholder cannot be mixed with $N", .{});
+            const name = std.mem.span(nm);
+            const n = if (name[0] == '$') std.fmt.parseInt(usize, name[1..], 10) catch 0 else 0;
+            if (n == 0)
+                return builtins.failArg("sqlite_query: placeholder {s} cannot be mixed with $N; use $1, $2, ...", .{name});
+            if (n > params.len)
+                return builtins.failArg("sqlite_query: placeholder {s} has no param (got {d})", .{ name, params.len });
+        }
+    } else if (want != params.len) {
         return builtins.failArg("sqlite_query: statement has {d} parameters, got {d}", .{ want, params.len });
+    }
     for (params, 1..) |p, i| {
-        const idx: c_int = @intCast(i);
+        var idx: c_int = @intCast(i);
+        if (dollar) {
+            var buf: [24:0]u8 = undefined;
+            const name = std.fmt.bufPrintZ(&buf, "${d}", .{i}) catch unreachable;
+            idx = sqlite.sqlite3_bind_parameter_index(st, name.ptr);
+            if (idx == 0) return builtins.failArg("sqlite_query: param {d} has no placeholder ${d} in the statement", .{ i, i });
+        }
         const rc = switch (p.*) {
             .integer => |n| sqlite.sqlite3_bind_int64(st, idx, n),
             .float => |f| sqlite.sqlite3_bind_double(st, idx, f),
@@ -629,6 +667,38 @@ test "sqlite_query: nil, bool and atom params; wrong count, bad type, second sta
     _ = builtins.takeFailure();
     // A trailing semicolon and whitespace are not a second statement.
     _ = try sqliteQuery(a, &.{ db, try sv(a, "select 1; \n"), try lv(a, &.{}) });
+}
+
+test "sqlite_query: $N takes the N-th param whatever the order in the SQL; ? stays positional" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const db = try memDb(a);
+    const ab = try lv(a, &.{ try sv(a, "a"), try sv(a, "b") });
+
+    const r = try sqliteQuery(a, &.{ db, try sv(a, "select $2 as x, $1 as y, $2 as z"), ab });
+    try std.testing.expectEqualStrings("b", cell(r, 1, 0).string);
+    try std.testing.expectEqualStrings("a", cell(r, 1, 1).string);
+    try std.testing.expectEqualStrings("b", cell(r, 1, 2).string);
+
+    _ = try sqliteExec(a, &.{ db, try sv(a, "create table t(k text, a text); insert into t values ('key', 'old')") });
+    _ = try sqliteQuery(a, &.{ db, try sv(a, "update t set a = $2 where k = $1"), try lv(a, &.{ try sv(a, "key"), try sv(a, "value") }) });
+    const u = try sqliteQuery(a, &.{ db, try sv(a, "select k, a from t"), try lv(a, &.{}) });
+    try std.testing.expectEqualStrings("key", cell(u, 1, 0).string);
+    try std.testing.expectEqualStrings("value", cell(u, 1, 1).string);
+
+    const q = try sqliteQuery(a, &.{ db, try sv(a, "select ?, ?"), ab });
+    try std.testing.expectEqualStrings("a", cell(q, 1, 0).string);
+    try std.testing.expectEqualStrings("b", cell(q, 1, 1).string);
+    const n = try sqliteQuery(a, &.{ db, try sv(a, "select ?2, ?1"), ab });
+    try std.testing.expectEqualStrings("b", cell(n, 1, 0).string);
+
+    // $2 with only one param: the error names the placeholder.
+    try std.testing.expectError(error.TypeError, sqliteQuery(a, &.{ db, try sv(a, "select $2, $1"), try lv(a, &.{try sv(a, "a")}) }));
+    try std.testing.expect(std.mem.indexOf(u8, builtins.takeFailure().?, "$2") != null);
+    // A param with no $N in the statement.
+    try std.testing.expectError(error.TypeError, sqliteQuery(a, &.{ db, try sv(a, "select $1"), ab }));
+    try std.testing.expect(std.mem.indexOf(u8, builtins.takeFailure().?, "$2") != null);
 }
 
 test "sqlite errors carry sqlite's message" {

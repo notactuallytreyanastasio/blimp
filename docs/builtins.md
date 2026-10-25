@@ -52,6 +52,83 @@ A Blimp string is not a list, so it is never taken apart. A map is not a list ei
 
 The other builtins in this group, without an entry here: `length`, `append`, `reverse`, `head`, `tail`, `sort`, `sort_by_keys`, `range`, `elem`, `set_at`, `size`, `empty?`, `flat`, `zip`, `uniq`, `sum`, `map`, `filter`, `reduce`, `each`.
 
+## Buffers and hash maps
+
+Native only. The design, and what it costs, is in [lang_design/handles.md](lang_design/handles.md); read the section on compaction before using these in a program run with `--serve` or the REPL.
+
+A Blimp value is immutable, and the interpreter frees nothing inside a run, so `append(items, x)` copies the whole list and keeps the old copy. These builtins keep the mutable part outside the value heap and name it with an Int handle, the way `sqlite_open` names a database: a **list buffer** (`buf_*`), a **string buffer** (`sbuf_*`) and a **hash map** (`hmap_*`). All three kinds share one table of handles. A handle is an Int starting at 1; it is never reused, and a buffer is never freed. A handle that is not in the table raises `N is not a handle`, and a handle of the wrong kind raises `handle N is a different kind of buffer`.
+
+What they do not do: nothing is freed, the contents are not counted by `BLIMP_HEAP_LIMIT`, and a program that creates one buffer stops `--serve` and the REPL from compacting their heap. The numbers are in the design note.
+
+### List buffers: buf_*
+
+```
+buf_new() -> Int
+buf_push(h, v) -> nil          add v at the end
+buf_len(h) -> Int
+buf_get(h, i) -> v | nil       nil for an index below 0 or past the end
+buf_set(h, i, v) -> nil        TypeError for an index outside 0..len-1
+buf_pop(h) -> v                removes and answers the last; TypeError when empty
+buf_items(h) -> List           a snapshot
+buf_replace(h, list) -> nil    the buffer now holds exactly list
+buf_extend(h, list) -> nil     add every element of list at the end
+buf_clear(h) -> nil
+```
+
+`buf_push` is amortised O(1): the array doubles as it grows and the old array is freed. `buf_items` answers an ordinary immutable list, a copy, so later pushes do not change one already taken. The copy is cached until the next write, so reading a buffer that is not changing is O(1) after the first read. A loop that writes and reads in turn pays O(n) for each pair.
+
+```
+b = buf_new()
+buf_push(b, "a")
+buf_push(b, "b")
+buf_items(b)
+=> ["a", "b"]
+buf_get(b, 5)
+=> nil
+buf_pop(b)
+=> "b"
+```
+
+### String buffers: sbuf_*
+
+```
+sbuf_new() -> Int
+sbuf_append(h, s) -> nil       s must be a String
+sbuf_len(h) -> Int             bytes, not characters
+sbuf_string(h) -> String       a snapshot, cached until the next write
+sbuf_clear(h) -> nil
+```
+
+`sbuf_append` is amortised O(1) per byte. `sbuf_len` counts bytes: after appending `"hello, "` and `"é"` it is 9.
+
+### Hash maps: hmap_*
+
+```
+hmap_new() -> Int
+hmap_get(h, key, default) -> v | default
+hmap_has(h, key) -> Bool
+hmap_put(h, key, v) -> nil
+hmap_remove(h, key, default) -> old value | default
+hmap_len(h) -> Int
+hmap_clear(h) -> nil
+hmap_keys(h) -> List
+hmap_values(h) -> List
+hmap_entries(h) -> List        [[key, value], ...]
+hmap_assign(h, src) -> nil     h becomes a copy of src (not an alias)
+```
+
+Lookup, insert and remove are O(1) on average. Keys may be Strings, Ints, Floats, atoms, Bools, `nil`, actor references, and lists or tuples of those; the match is exactly the one `==` makes, so Int `1` and String `"1"` are different keys, and `["a", "bc"]` is not `["ab", "c"]`. Any other key (a map, a closure, a view node) raises `hmap: a map cannot be a map key` (with the kind in place of "map"), not a quiet miss. Iteration is in insertion order, and putting an existing key replaces its value and keeps its place. `hmap_keys`, `hmap_values` and `hmap_entries` are snapshots, cached until the next write.
+
+```
+m = hmap_new()
+hmap_put(m, "k", 1)
+hmap_put(m, 1, 2)
+hmap_entries(m)
+=> [["k", 1], [1, 2]]
+hmap_remove(m, "nope", :absent)
+=> :absent
+```
+
 ## Files
 
 ### append_file(path, data)
@@ -265,7 +342,7 @@ sqlite_query(db: Int, sql: String, params: List) -> List[List[String | nil]]
 
 Runs one statement with `params` bound to its parameters, and answers the result as text.
 
-**Parameters** are bound by position. `?`, `?1` and `$1` all work. For `$1` the number is only a name: SQLite numbers `$name` parameters in the order they first appear, so `select $2, $1` with `["a", "b"]` binds `"a"` to `$2`. Use `?1`, `?2` when the order in the SQL differs from the order of the list. The length of `params` must equal the statement's parameter count (a name used twice counts once). A `nil` binds NULL, an Int or a Float binds as that number, a String binds as TEXT, and a Bool or an atom binds as its text (`true`, `ok`). Anything else, such as a list or a map, is an error that names the parameter.
+**Parameters** are bound like Postgres when the SQL uses `$N`: param `i` (counting from 1) goes to `$i`, in whatever order the placeholders appear, so `select $2, $1` with `["a", "b"]` answers `b, a`. A `$N` used twice takes the same param twice. With `?` and `?NNN` the params bind by position, and `?2, ?1` also answers `b, a`. A statement that has any `$N` placeholder must have only `$N` placeholders; a `$N` with no param (`select $2` with one param), a param with no `$N` (`select $1` with two), or a `?` next to a `$1` raises, naming the placeholder. Without `$N`, the length of `params` must equal the statement's parameter count (a name used twice counts once). A `nil` binds NULL, an Int or a Float binds as that number, a String binds as TEXT, and a Bool or an atom binds as its text (`true`, `ok`). Anything else, such as a list or a map, is an error that names the parameter.
 
 **The result** is a list of rows, and every cell is a String or `nil`:
 
