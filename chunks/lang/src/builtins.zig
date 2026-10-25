@@ -219,6 +219,9 @@ pub const BuiltinRegistry = struct {
         reg.register("tcp_connect", &builtinTcpConnectNative);
         reg.register("http_start", &builtinHttpStart);
         reg.register("http_result", &builtinHttpResult);
+        reg.register("pg_start", &builtinPgStart_impl);
+        reg.register("pg_result", &builtinPgResult_impl);
+        reg.register("pg_stats", &builtinPgStats_impl);
         reg.register("ws_open", &builtinWsOpen_impl);
         reg.register("ws_recv", &builtinWsRecv_impl);
         reg.register("ws_send", &builtinWsSend_impl);
@@ -1309,7 +1312,7 @@ fn tagged(allocator: std.mem.Allocator, tag: []const u8, payload: *const Value) 
 /// Raises TypeError for: NaN and infinity (JSON has no spelling for them),
 /// a string or atom that is not valid UTF-8 (JSON text is UTF-8), closures,
 /// actor refs, view nodes and holes, and nesting deeper than json_max_depth.
-fn builtinJsonEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+pub fn builtinJsonEncode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
     var out: std.ArrayList(u8) = .empty;
     try jsonWrite(allocator, &out, args[0], 0);
@@ -1397,7 +1400,7 @@ fn jsonWriteString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []c
 /// nesting deeper than json_max_depth are errors too.
 ///
 /// Raises TypeError only when handed something that is not a String.
-fn builtinJsonDecode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
+pub fn builtinJsonDecode(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .string) return error.TypeError;
     // The parse tree (hash maps, array lists, unescaped strings) is thrown
     // away as soon as it is converted, so it lives in its own arena and not in
@@ -3564,6 +3567,9 @@ const builtinSqliteExec_impl = if (is_wasm) native_stub.stub else @import("nativ
 const builtinSqliteQuery_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteQuery;
 const builtinSqliteLastId_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteLastId;
 const builtinSqliteChanges_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").sqliteChanges;
+const builtinPgStart_impl = if (is_wasm) native_stub.stub else @import("pg.zig").pgStart;
+const builtinPgResult_impl = if (is_wasm) native_stub.stub else @import("pg.zig").pgResult;
+const builtinPgStats_impl = if (is_wasm) native_stub.stub else @import("pg.zig").pgStats;
 const builtinPbkdf2Sha256_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").pbkdf2Sha256;
 const builtinConstantTimeEq_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").constantTimeEq;
 const builtinAppendFile_impl = if (is_wasm) native_stub.stub else @import("native_ext.zig").appendFile;

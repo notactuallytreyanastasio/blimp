@@ -187,7 +187,24 @@ If `fd` is on the list `tcp_close` keeps for lingering, `fd_close` takes it off,
 
 The design is in [lang_design/processes.md](lang_design/processes.md#a-forked-child-owns-the-socket).
 
-The other builtins in this group, without an entry here: `tcp_listen`, `tcp_connect`, `tcp_accept`, `tcp_read`, `tcp_write`, `tcp_close`, `tcp_set_nonblocking`, `tcp_poll`, `tcp_write_some`, `tcp_poll_write`, `ws_open`, `ws_recv`, `ws_send`, `ws_close`, `ws_stats`, `ws_accept_key`, `ws_read_frame`, `ws_write_frame`, `http_start`, `http_result`.
+The other builtins in this group, without an entry here: `tcp_listen`, `tcp_connect`, `tcp_accept`, `tcp_read`, `tcp_write`, `tcp_close`, `tcp_set_nonblocking`, `tcp_poll`, `tcp_write_some`, `tcp_poll_write`, `ws_open`, `ws_recv`, `ws_send`, `ws_close`, `ws_stats`, `ws_accept_key`, `ws_read_frame`, `ws_write_frame`, `http_start`, `http_result`. Postgres (`pg_start`, `pg_result`, `pg_stats`) has its own entry, next.
+
+### pg_start(conn, sql, params) and pg_result(handle)
+
+```
+pg_start(conn: Map | String, sql: String, params: List) -> Int
+pg_start(conn: Map | String, sql: String, params: List, %{timeout_ms: Int}) -> Int
+pg_result(handle: Int) -> nil | {:ok, rows} | {:error, reason}
+pg_stats() -> %{in_flight: Int, idle: Int}
+```
+
+A Postgres query on a thread of its own, so a program that serves everyone from one thread does not stop while Postgres thinks. `pg_start` answers a handle at once; `pg_result` answers `nil` until the query is done, then its answer, once. 32 queries may be in flight; past that `pg_start` answers `-1`, which `pg_result` refuses.
+
+`conn` is `%{host:, port:, user:, password:, database:}` or `"postgres://user:password@host:port/database"` (`ecto://` too; `%XX` in the user or password is decoded, `+` is a plus). Parameters are `$1`, `$2`, ... in the extended protocol, sent as text: `nil` is NULL, `true`/`false` are `t`/`f`, an Int or Float as `to_string` writes it, a Map or List as `json_encode` writes it. A row is a map from column name to value: `bool` is a Bool, `int2`/`int4`/`int8`/`oid` an Int, `json`/`jsonb` what `json_decode` makes of it, NULL is `nil`, and anything else is its text as Postgres writes it. A server error is `{:error, "ERROR 42P01: relation \"x\" does not exist"}`.
+
+Every query has a deadline, `timeout_ms` (15000 unless given, at most 600000), for connecting, logging in and the query together. At the deadline `pg_result` answers `{:error, "timeout"}` and the worker sends Postgres a CancelRequest, so the statement stops on the server too. Login is trust, SCRAM-SHA-256 or md5; a cleartext password request is refused, and there is no TLS. Up to 4 idle connections are kept per process and reused by queries to the same place; two queries in flight at once run on different connections and are not ordered against each other.
+
+Raises TypeError for a `conn` it cannot read (a missing or unknown key, a URL that is not one), SQL with a NUL in it, a parameter of another type, or an option other than `timeout_ms` in range. Native only.
 
 ## Process
 
