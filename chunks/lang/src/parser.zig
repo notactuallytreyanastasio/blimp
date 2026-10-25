@@ -2,8 +2,13 @@ const std = @import("std");
 const Token = @import("token.zig").Token;
 const Lexer = @import("lexer.zig").Lexer;
 const ast = @import("ast.zig");
+const name_key = @import("name_key.zig");
+const NameKey = name_key.Key;
 const Node = ast.Node;
 const Loc = ast.Loc;
+const Value = @import("value.zig").Value;
+const interned = @import("value.zig").interned;
+const literal = @import("literal.zig");
 
 pub const ParseError = error{
     UnexpectedToken,
@@ -12,6 +17,16 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// A lowercase identifier token's lexeme becomes the interned copy of the name.
+/// Not `upper_identifier`: the parser slices a type annotation or a dotted actor
+/// name out of the source between two tokens' pointers, and an interned lexeme
+/// is not in the source.
+fn internName(tok: Token) Token {
+    var t = tok;
+    if (t.kind == .identifier) t.lexeme = name_key.intern(t.lexeme);
+    return t;
+}
+
 pub const Parser = struct {
     lexer: Lexer,
     current: Token,
@@ -19,7 +34,7 @@ pub const Parser = struct {
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         var lexer = Lexer.init(source);
-        const first = lexer.next();
+        const first = internName(lexer.next());
         return .{
             .lexer = lexer,
             .current = first,
@@ -187,7 +202,7 @@ pub const Parser = struct {
                 const gen_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
                 gen_ptr.* = gen_expr;
                 body.append(self.allocator, Node{
-                    .kind = .{ .given_stmt = .{ .name = var_name, .generator = gen_ptr } },
+                    .kind = .{ .given_stmt = .{ .name = var_name, .key = NameKey.of(var_name), .hint = try self.newHint(), .generator = gen_ptr } },
                     .loc = given_loc,
                 }) catch return error.OutOfMemory;
             } else {
@@ -236,6 +251,7 @@ pub const Parser = struct {
 
                 params.append(self.allocator, .{
                     .name = param_name,
+                    .key = NameKey.of(param_name),
                     .type_name = param_type,
                 }) catch return error.OutOfMemory;
                 if (self.current.kind == .comma) self.advance();
@@ -291,7 +307,7 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .message_handler = .{
                 .name = name,
-                .params = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+                .params = shadowedMarked(params.toOwnedSlice(self.allocator) catch return error.OutOfMemory),
                 .return_type = return_type,
                 .guard = guard,
                 .bubble_strategy = bubble_strategy,
@@ -534,10 +550,31 @@ pub const Parser = struct {
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
         }
 
+        const owned_body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        var mode: Node.Branch.Mode = .general;
+        var scoped = true;
+        if (pattern) |pat| {
+            switch (pat.kind) {
+                .bool_lit => |lit| mode = if (lit.value) .is_true else .is_false,
+                else => {},
+            }
+            if (mode != .general) {
+                scoped = Node.patternBinds(pat.*);
+            }
+        } else if (!(owned_body.len == 1 and owned_body[0].kind == .hole)) {
+            mode = .wild;
+            scoped = false;
+        }
+        if (mode != .general) {
+            if (guard) |g| scoped = scoped or Node.mayDefine(g.*);
+            for (owned_body) |stmt| scoped = scoped or Node.mayDefine(stmt);
+        }
         return .{
             .pattern = pattern,
             .guard = guard,
-            .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
+            .body = owned_body,
+            .mode = mode,
+            .scoped = scoped,
         };
     }
 
@@ -560,6 +597,8 @@ pub const Parser = struct {
                 return Node{
                     .kind = .{ .assign_stmt = .{
                         .name = expr.kind.identifier.name,
+                        .key = expr.kind.identifier.key,
+                        .hint = expr.kind.identifier.hint,
                         .value = value_ptr,
                     } },
                     .loc = expr.loc,
@@ -789,12 +828,113 @@ pub const Parser = struct {
             self.advance();
             const left_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
             left_ptr.* = left;
+            var da: Node.DotAccess = .{ .object = left_ptr, .field = field, .flat_checked = true };
+            da.flat = try self.flatActorName(da);
             left = Node{
-                .kind = .{ .dot_access = .{ .object = left_ptr, .field = field } },
+                .kind = .{ .dot_access = da },
                 .loc = left.loc,
             };
         }
         return left;
+    }
+
+    /// "App.Shop.Checkout" for a chain of identifiers and dot accesses whose
+    /// parts all start with an upper-case letter, else null. The evaluator
+    /// looks the name up as an actor; nothing else is ever bound with a dot
+    /// in it, so `order.total` skips the lookup altogether.
+    fn flatActorName(self: *Parser, da: Node.DotAccess) ParseError!?[]const u8 {
+        var parts: [16][]const u8 = undefined; // innermost field first
+        var count: usize = 0;
+        var total: usize = 0;
+        parts[0] = da.field;
+        count = 1;
+        total = da.field.len;
+        var current = da.object;
+        while (true) {
+            const part = switch (current.kind) {
+                .dot_access => |inner| inner.field,
+                .identifier => |id| id.name,
+                else => return null,
+            };
+            if (count >= 16) return null;
+            parts[count] = part;
+            count += 1;
+            total += part.len + 1;
+            switch (current.kind) {
+                .dot_access => |inner| current = inner.object,
+                else => break,
+            }
+        }
+        for (parts[0..count]) |part| {
+            if (part.len == 0 or part[0] < 'A' or part[0] > 'Z') return null;
+        }
+        const buf = self.allocator.alloc(u8, total) catch return error.OutOfMemory;
+        var pos: usize = 0;
+        var i: usize = count;
+        while (i > 0) {
+            i -= 1;
+            if (pos > 0) {
+                buf[pos] = '.';
+                pos += 1;
+            }
+            @memcpy(buf[pos .. pos + parts[i].len], parts[i]);
+            pos += parts[i].len;
+        }
+        return buf;
+    }
+
+    /// Split the inside of a string literal that has `#{...}` in it into
+    /// literal text (unescaped) and expressions (parsed), once.
+    pub fn interpParts(self: *Parser, s: []const u8) error{OutOfMemory}!Node.Interp {
+        var parts: std.ArrayList(Node.InterpPart) = .empty;
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        var i: usize = 0;
+        while (i < s.len) {
+            if (i + 1 < s.len and s[i] == '\\' and s[i + 1] == '#') {
+                // `\#{` is the way to write a literal `#{`.
+                try text.append(self.allocator, '#');
+                i += 2;
+            } else if (i + 1 < s.len and s[i] == '#' and s[i + 1] == '{') {
+                const start = i + 2;
+                var depth: u32 = 1;
+                var j = start;
+                while (j < s.len and depth > 0) {
+                    if (s[j] == '{') depth += 1;
+                    if (s[j] == '}') depth -= 1;
+                    if (depth > 0) j += 1;
+                }
+                if (depth != 0) return .{ .parts = &.{}, .bad = true };
+                var sub = Parser.init(self.allocator, s[start..j]);
+                const expr = sub.parseExpressionPublic() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return .{ .parts = &.{}, .bad = true },
+                };
+                if (text.items.len > 0) {
+                    try parts.append(self.allocator, .{ .text = try text.toOwnedSlice(self.allocator) });
+                }
+                const np = try self.allocator.create(Node);
+                np.* = expr;
+                try parts.append(self.allocator, .{ .expr = np });
+                i = j + 1;
+            } else {
+                // The literal text up to the next #{ gets the same escapes as
+                // a string with no interpolation in it.
+                const next = literal.nextInterpOrEscapedHash(s, i);
+                try literal.appendUnescaped(self.allocator, &text, s[i..next]);
+                i = next;
+            }
+        }
+        if (text.items.len > 0) {
+            try parts.append(self.allocator, .{ .text = try text.toOwnedSlice(self.allocator) });
+        }
+        return .{ .parts = try parts.toOwnedSlice(self.allocator) };
+    }
+
+    fn buildValue(self: *Parser, v: Value) ParseError!*const Value {
+        if (interned.get(v)) |shared| return shared;
+        const p = self.allocator.create(Value) catch return error.OutOfMemory;
+        p.* = v;
+        return p;
     }
 
     fn parsePrimary(self: *Parser) ParseError!Node {
@@ -803,23 +943,39 @@ pub const Parser = struct {
             .integer => {
                 const value = std.fmt.parseInt(i64, self.current.lexeme, 10) catch return error.InvalidNumber;
                 self.advance();
-                return Node{ .kind = .{ .integer_lit = .{ .value = value } }, .loc = loc };
+                const pre = try self.buildValue(.{ .integer = value });
+                return Node{ .kind = .{ .integer_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };
             },
             .float => {
                 const value = std.fmt.parseFloat(f64, self.current.lexeme) catch return error.InvalidNumber;
                 self.advance();
-                return Node{ .kind = .{ .float_lit = .{ .value = value } }, .loc = loc };
+                const pre = try self.buildValue(.{ .float = value });
+                return Node{ .kind = .{ .float_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };
             },
             .string => {
                 const value = self.current.lexeme;
                 self.advance();
-                return Node{ .kind = .{ .string_lit = .{ .value = value } }, .loc = loc };
+                const body = literal.stripQuotes(value);
+                if (literal.hasInterpolation(body)) {
+                    const ip = self.allocator.create(Node.Interp) catch return error.OutOfMemory;
+                    ip.* = try self.interpParts(body);
+                    return Node{ .kind = .{ .string_lit = .{ .value = value, .interp = ip } }, .loc = loc };
+                }
+                var text = body;
+                if (std.mem.indexOfScalar(u8, body, '\\') != null) {
+                    var buf: std.ArrayListUnmanaged(u8) = .empty;
+                    try literal.appendUnescaped(self.allocator, &buf, body);
+                    text = buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+                }
+                const pre = try self.buildValue(.{ .string = text });
+                return Node{ .kind = .{ .string_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };
             },
             .atom => {
                 const raw = self.current.lexeme;
                 const name = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
                 self.advance();
-                return Node{ .kind = .{ .atom_lit = .{ .name = name } }, .loc = loc };
+                const pre = try self.buildValue(.{ .atom = name });
+                return Node{ .kind = .{ .atom_lit = .{ .name = name, .prebuilt = pre } }, .loc = loc };
             },
             .true_lit => {
                 self.advance();
@@ -840,12 +996,12 @@ pub const Parser = struct {
                 if (self.current.kind == .lparen) {
                     return self.parseFuncCall(name, loc);
                 }
-                return Node{ .kind = .{ .identifier = .{ .name = name } }, .loc = loc };
+                return Node{ .kind = .{ .identifier = .{ .name = name, .key = NameKey.of(name), .hint = try self.newHint() } }, .loc = loc };
             },
             .upper_identifier => {
                 const name = self.current.lexeme;
                 self.advance();
-                return Node{ .kind = .{ .identifier = .{ .name = name } }, .loc = loc };
+                return Node{ .kind = .{ .identifier = .{ .name = name, .key = NameKey.of(name), .hint = try self.newHint() } }, .loc = loc };
             },
             .hole => {
                 self.advance();
@@ -947,6 +1103,7 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .for_expr = .{
                 .var_name = var_name,
+                .key = NameKey.of(var_name),
                 .iterable = iter_ptr,
                 .body = body.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
             } },
@@ -1070,13 +1227,16 @@ pub const Parser = struct {
 
             params.append(self.allocator, .{
                 .name = param_name,
+                .key = NameKey.of(param_name),
                 .type_name = type_name,
             }) catch return error.OutOfMemory;
 
             if (self.current.kind == .comma) self.advance();
         }
         try self.expect(.rparen);
-        return params.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        const owned = params.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        Node.HandlerParam.markShadowed(owned);
+        return owned;
     }
 
     fn parseDefStmt(self: *Parser) ParseError!Node {
@@ -1163,6 +1323,17 @@ pub const Parser = struct {
         };
     }
 
+    fn shadowedMarked(params: []Node.HandlerParam) []Node.HandlerParam {
+        Node.HandlerParam.markShadowed(params);
+        return params;
+    }
+
+    fn newHint(self: *Parser) ParseError!*u32 {
+        const h = self.allocator.create(u32) catch return error.OutOfMemory;
+        h.* = 0;
+        return h;
+    }
+
     fn parseFuncCall(self: *Parser, name: []const u8, loc: Loc) ParseError!Node {
         self.advance(); // skip (
         var args: std.ArrayList(Node) = .empty;
@@ -1179,6 +1350,7 @@ pub const Parser = struct {
         return Node{
             .kind = .{ .func_call = .{
                 .name = name,
+                .key = NameKey.of(name),
                 .args = args.toOwnedSlice(self.allocator) catch return error.OutOfMemory,
                 .cache = cache,
             } },
@@ -1545,7 +1717,7 @@ pub const Parser = struct {
     }
 
     fn advance(self: *Parser) void {
-        self.current = self.lexer.next();
+        self.current = internName(self.lexer.next());
     }
 
     fn skipNewlines(self: *Parser) void {

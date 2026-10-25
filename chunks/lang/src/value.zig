@@ -27,6 +27,16 @@ pub const interned = struct {
     const no: Value = .{ .boolean = false };
     const nothing: Value = .nil;
 
+    /// The shared pointer for a boolean, with no tag switch.
+    pub inline fn boolean(b: bool) *const Value {
+        return if (b) &yes else &no;
+    }
+
+    /// The shared pointer for an integer in the table, else null.
+    pub inline fn intPtr(n: i64) ?*const Value {
+        return if (n >= min_int and n <= max_int) &ints[@intCast(n - min_int)] else null;
+    }
+
     /// The shared pointer for `v`, or null when `v` has to be allocated.
     pub fn get(v: Value) ?*const Value {
         return switch (v) {
@@ -111,6 +121,11 @@ pub const Value = union(enum) {
 
     pub const HandlerDef = struct {
         name: []const u8,
+        /// `Environment.hashName(name)`. A send compares this before the
+        /// bytes: a Temper object has a getter and a setter per field and a
+        /// method for every one of its functions, with names that share long
+        /// prefixes, and the scan over them was a tenth of a send-heavy loop.
+        hash: u32,
         params: []const @import("ast.zig").Node.HandlerParam,
         guard: ?*const @import("ast.zig").Node,
         body: []const @import("ast.zig").Node,

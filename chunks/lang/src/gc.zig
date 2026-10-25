@@ -240,6 +240,7 @@ const Copier = struct {
         const out = try self.to.alloc(Value.HandlerDef, defs.len);
         for (defs, 0..) |h, i| out[i] = .{
             .name = try self.str(h.name),
+            .hash = h.hash,
             .params = h.params,
             .guard = h.guard,
             .body = h.body,
@@ -356,7 +357,7 @@ fn run(code: std.mem.Allocator, eval: *Evaluator, source: []const u8) !*const Va
     var parser = Parser.init(code, source);
     const nodes = try parser.parseFile();
     var last: *const Value = undefined;
-    for (nodes) |node| last = try eval.eval(node);
+    for (nodes) |*node| last = try eval.eval(node);
     return last;
 }
 
@@ -788,4 +789,80 @@ test "keep_all still keeps every actor" {
     try std.testing.expectEqual(@as(usize, 0), try compactWith(&eval, heap_b.allocator(), std.testing.allocator, .keep_all));
     _ = heap_a.reset(.free_all);
     try std.testing.expectEqual(@as(usize, 2), eval.registry.instances.items.len);
+}
+
+test "a literal built once by the parser survives compaction, bound and re-evaluated" {
+    @import("handles.zig").dropAll();
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var parser = Parser.init(code.allocator(),
+        \\s = "a\tb"
+        \\n = 5000
+        \\f = 2.5
+        \\k = :ok
+        \\t = "n=#{n}!"
+        \\[s, n, f, k, t]
+    );
+    const nodes = try parser.parseFile();
+    // The parser built the value once; every evaluation returns that pointer.
+    const lit = nodes[0].kind.assign_stmt.value.kind.string_lit;
+    try std.testing.expect(lit.prebuilt != null);
+
+    var eval = Evaluator.init(heap_a.allocator());
+    var last: *const Value = undefined;
+    for (nodes) |*node| last = try eval.eval(node);
+    try std.testing.expect(last.list[0] == lit.prebuilt.?);
+
+    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    _ = heap_a.reset(.free_all);
+
+    // The bindings hold copies; the AST's own values were never in heap_a.
+    try std.testing.expectEqualStrings("a\tb", (try run(code.allocator(), &eval, "s")).string);
+    try std.testing.expectEqual(@as(i64, 5000), (try run(code.allocator(), &eval, "n")).integer);
+    try std.testing.expectEqualStrings("n=5000!", (try run(code.allocator(), &eval, "t")).string);
+
+    // Evaluate the same nodes again after the swap.
+    for (nodes) |*node| last = try eval.eval(node);
+    try std.testing.expectEqualStrings("a\tb", last.list[0].string);
+    try std.testing.expectEqual(@as(i64, 5000), last.list[1].integer);
+    try std.testing.expectEqual(@as(f64, 2.5), last.list[2].float);
+    try std.testing.expectEqualStrings("ok", last.list[3].atom);
+    try std.testing.expectEqualStrings("n=5000!", last.list[4].string);
+
+    // A second compaction copies the shared prebuilt values by value.
+    try compact(&eval, heap_a.allocator(), std.testing.allocator);
+    _ = heap_b.reset(.free_all);
+    try std.testing.expectEqualStrings("a\tb", (try run(code.allocator(), &eval, "s")).string);
+}
+
+test "a call site cached before compaction is not used after it" {
+    @import("handles.zig").dropAll();
+    var code = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer code.deinit();
+    var heap_a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_a.deinit();
+    var heap_b = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer heap_b.deinit();
+
+    var eval = Evaluator.init(heap_a.allocator());
+    // `caller` holds the site; it lives in `code`, so it survives the swap,
+    // and the site's cached value points into heap_a.
+    _ = try run(code.allocator(), &eval,
+        \\def name() do "marginalia" end
+        \\def caller() do name() + "!" end
+    );
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+
+    try compact(&eval, heap_b.allocator(), std.testing.allocator);
+    _ = heap_a.reset(.free_all);
+
+    // Were the cache trusted now it would read freed memory.
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
+    try std.testing.expectEqualStrings("marginalia!", (try run(code.allocator(), &eval, "caller()")).string);
 }

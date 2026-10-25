@@ -1,4 +1,7 @@
 const std = @import("std");
+const Value = @import("value.zig").Value;
+const NameKey = @import("name_key.zig").Key;
+const Environment = @import("env.zig").Environment;
 
 /// Source location for error reporting.
 pub const Loc = struct {
@@ -80,7 +83,20 @@ pub const Node = struct {
 
     pub const HandlerParam = struct {
         name: []const u8,
+        key: NameKey = .{},
         type_name: ?[]const u8 = null, // null = untyped (legacy, checker will reject)
+        /// A later parameter of the same name wins, so this one is not bound
+        /// (it is still type-checked).  Set by the parser.
+        shadowed: bool = false,
+
+        /// Mark every parameter that a later one of the same name shadows.
+        pub fn markShadowed(params: []HandlerParam) void {
+            for (params, 0..) |*p, i| {
+                for (params[i + 1 ..]) |q| {
+                    if (std.mem.eql(u8, p.name, q.name)) p.shadowed = true;
+                }
+            }
+        }
     };
 
     pub const BecomeStmt = struct {
@@ -93,23 +109,56 @@ pub const Node = struct {
 
     pub const AssignStmt = struct {
         name: []const u8,
+        key: NameKey = .{},
         value: *const Node,
+        /// Slot hint, as `Identifier.hint` (see `Environment.defineHinted`).
+        hint: ?*u32 = null,
     };
 
+    // A literal's Value is built once by the parser, in the parser's own
+    // allocator, so it lives exactly as long as the node that points at it:
+    // the code arena in a plain run, the heap in the wasm `send` path (where
+    // the AST dies with it).  It is never in the heap a compaction replaces
+    // unless its node is too.  A node built by hand, as the tests do, has
+    // `prebuilt == null` and the evaluator builds the Value as it always did.
     pub const IntegerLit = struct {
         value: i64,
+        prebuilt: ?*const Value = null,
     };
 
     pub const FloatLit = struct {
         value: f64,
+        prebuilt: ?*const Value = null,
     };
 
+    /// `value` is the lexeme as written, quotes and escapes included (the
+    /// checker reads it).  The parser classifies it once: no interpolation
+    /// and the unescaped text is in `prebuilt`; interpolation and the parts
+    /// are in `interp`.
     pub const StringLit = struct {
         value: []const u8,
+        prebuilt: ?*const Value = null,
+        interp: ?*const Interp = null,
+    };
+
+    pub const InterpPart = union(enum) {
+        /// Literal text, already unescaped.
+        text: []const u8,
+        /// The expression inside `#{...}`, parsed once.
+        expr: *const Node,
+    };
+
+    pub const Interp = struct {
+        parts: []const InterpPart,
+        /// An unbalanced `#{` or an expression that does not parse.  It is
+        /// an error when the literal is evaluated, as it was when the
+        /// expression was parsed at every evaluation.
+        bad: bool = false,
     };
 
     pub const AtomLit = struct {
         name: []const u8,
+        prebuilt: ?*const Value = null,
     };
 
     pub const BoolLit = struct {
@@ -118,6 +167,11 @@ pub const Node = struct {
 
     pub const Identifier = struct {
         name: []const u8,
+        key: NameKey = .{},
+        /// Inline cache: where in the frame this read found its name last
+        /// time (see `Environment.lookupHinted`).  Null for a node built by
+        /// hand.
+        hint: ?*u32 = null,
     };
 
     pub const BinaryOp = struct {
@@ -154,6 +208,7 @@ pub const Node = struct {
 
     pub const FuncCall = struct {
         name: []const u8,
+        key: NameKey = .{},
         args: []const Node,
         /// What this call site resolved to last time, when the parser gave
         /// it a slot.  A node built by hand (the checker's tests) has none
@@ -169,6 +224,9 @@ pub const Node = struct {
     pub const CallCache = struct {
         builtin: ?*const anyopaque = null,
         globals_version: u32 = 0,
+        /// The top-level closure this site resolved to; see
+        /// `Environment.topHit` for when it may be used again.
+        top: Environment.TopSlot = .{},
     };
 
     pub const PipeExpr = struct {
@@ -193,6 +251,12 @@ pub const Node = struct {
     pub const DotAccess = struct {
         object: *const Node,
         field: []const u8,
+        /// Set by the parser (`flat_checked`): the chain flattened to
+        /// "App.Shop.Checkout" when the object is an identifier chain whose
+        /// every part starts with an upper-case letter, the only names
+        /// `actor` binds.  Null means "do not look it up, read the field".
+        flat: ?[]const u8 = null,
+        flat_checked: bool = false,
     };
 
     pub const Hole = struct {
@@ -213,7 +277,71 @@ pub const Node = struct {
         pattern: ?*const Node,
         guard: ?*const Node = null, // optional when guard
         body: []const Node,
+        /// Set by the parser; a Branch built by hand is `.general`, which
+        /// is the old path exactly.
+        mode: Mode = .general,
+        /// Whether taking the branch needs a scope of its own: its pattern
+        /// binds a name, or something it evaluates may define one in the
+        /// current scope (an assignment would otherwise leak into the
+        /// enclosing frame).  Only read when `mode` is not `.general`.
+        scoped: bool = true,
+
+        pub const Mode = enum {
+            general,
+            /// `_ ->` whose body is not a lone hole.
+            wild,
+            /// `true ->` and `false ->`.
+            is_true,
+            is_false,
+        };
     };
+
+    /// Does matching this pattern bind a name?  Only the literal patterns
+    /// are known not to.
+    pub fn patternBinds(pattern: Node) bool {
+        return switch (pattern.kind) {
+            .integer_lit, .float_lit, .string_lit, .atom_lit, .bool_lit, .nil_lit, .hole => false,
+            else => true,
+        };
+    }
+
+    /// False only when evaluating `node` provably defines nothing in the
+    /// current scope.  A whitelist: every kind not named here may define (an
+    /// assignment, a def, a destructuring, a pipe's temporary), so a branch
+    /// containing one keeps its scope.
+    pub fn mayDefine(node: Node) bool {
+        switch (node.kind) {
+            .integer_lit, .float_lit, .string_lit, .atom_lit, .bool_lit, .nil_lit, .identifier => return false,
+            .binary_op => |b| return mayDefine(b.left.*) or mayDefine(b.right.*),
+            .unary_op => |u| return mayDefine(u.operand.*),
+            .func_call => |c| {
+                for (c.args) |a| if (mayDefine(a)) return true;
+                return false;
+            },
+            .dot_access => |d| return mayDefine(d.object.*),
+            .list_lit => |l| {
+                for (l.elements) |e| if (mayDefine(e)) return true;
+                if (l.tail) |t| return mayDefine(t.*);
+                return false;
+            },
+            .tuple_lit => |t| {
+                for (t.elements) |e| if (mayDefine(e)) return true;
+                return false;
+            },
+            .case_expr => |c| return situationMayDefine(c.subject.*, c.branches),
+            .situation => |c| return situationMayDefine(c.subject.*, c.branches),
+            else => return true,
+        }
+    }
+
+    fn situationMayDefine(subject: Node, branches: []const Branch) bool {
+        if (mayDefine(subject)) return true;
+        for (branches) |b| {
+            if (b.guard) |g| if (mayDefine(g.*)) return true;
+            for (b.body) |stmt| if (mayDefine(stmt)) return true;
+        }
+        return false;
+    }
 
     pub const MessageSend = struct {
         target: *const Node,
@@ -279,12 +407,15 @@ pub const Node = struct {
     /// given x: generator -- binds a generated value
     pub const GivenStmt = struct {
         name: []const u8, // variable name
+        key: NameKey = .{},
         generator: *const Node, // generator expression (func_call)
+        hint: ?*u32 = null,
     };
 
     /// For loop: for x in list do ... end
     pub const ForExpr = struct {
         var_name: []const u8,
+        key: NameKey = .{},
         iterable: *const Node,
         body: []const Node,
     };

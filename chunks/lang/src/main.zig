@@ -252,7 +252,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
                 live_after_compact = heap_limit.used;
             }
         }
-        _ = evaluator.eval(node) catch |err| {
+        _ = evaluator.eval(&node) catch |err| {
             if (heap_limit.hit) {
                 heap_limit.report();
                 std.process.exit(1);
@@ -665,7 +665,7 @@ fn preloadSource(
     }
 
     evaluator.setSource(source);
-    for (nodes) |node| {
+    for (nodes) |*node| {
         _ = evaluator.eval(node) catch {
             if (evaluator.last_error) |rich_err| {
                 rich_err.formatPlain(writer);
@@ -771,7 +771,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
             evaluator.setSource(source);
             var last_result: ?*const Value = null;
             var had_error = false;
-            for (nodes) |node| {
+            for (nodes) |*node| {
                 last_result = evaluator.eval(node) catch {
                     if (heap_limit.hit) {
                         heap_limit.report();
@@ -803,7 +803,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
             };
 
             evaluator.setSource(source);
-            const result = evaluator.eval(node) catch {
+            const result = evaluator.eval(&node) catch {
                 if (heap_limit.hit) {
                     heap_limit.report();
                     heap_limit.hit = false;
@@ -905,7 +905,7 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
             stderr.writeStreamingAll(ioenv.io, "\n") catch {};
             std.process.exit(1);
         };
-        for (lib_nodes) |node| {
+        for (lib_nodes) |*node| {
             _ = evaluator.eval(node) catch {};
         }
     }
@@ -929,7 +929,7 @@ fn runSelfHosted(gpa: std.mem.Allocator, user_source: []const u8, _: []const ast
         .loc = .{ .line = 0, .col = 0 },
     };
 
-    const result = evaluator.eval(call_node) catch |err| {
+    const result = evaluator.eval(&call_node) catch |err| {
         if (evaluator.last_error) |blimp_err| {
             var buf: [2048]u8 = undefined;
             var fbs = std.Io.Writer.fixed(&buf);
@@ -1145,7 +1145,7 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const 
             evaluator.setSource(source);
             var last_result: ?*const Value = null;
             var had_error = false;
-            for (nodes) |node| {
+            for (nodes) |*node| {
                 last_result = evaluator.eval(node) catch {
                     const err_text = if (evaluator.last_error) |rich_err|
                         formatBlimpError(rich_err, arena.allocator())
@@ -1178,7 +1178,7 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const 
             };
 
             evaluator.setSource(source);
-            const result = evaluator.eval(node) catch {
+            const result = evaluator.eval(&node) catch {
                 const err_text = if (evaluator.last_error) |rich_err|
                     formatBlimpError(rich_err, arena.allocator())
                 else
@@ -1495,7 +1495,7 @@ fn serve(allocator: std.mem.Allocator, heap_limit: *HeapLimit, opts: ServeOpts) 
     defer control.close();
 
     while (true) {
-        _ = evaluator.eval(tick) catch {
+        _ = evaluator.eval(&tick) catch {
             stats.errors += 1;
             if (evaluator.last_error) |e| e.formatPlain(errw) else errw.print("[serve] tick failed\n", .{}) catch {};
             errw.flush() catch {};
@@ -1655,7 +1655,7 @@ fn controlEval(src: []const u8, code: std.mem.Allocator, evaluator: *Evaluator, 
     const saved = evaluator.source;
     evaluator.setSource(src);
     defer evaluator.setSource(saved);
-    for (nodes) |node| {
+    for (nodes) |*node| {
         const v = evaluator.eval(node) catch {
             if (evaluator.last_error) |e| e.formatPlain(w) else w.writeAll("error\n") catch {};
             evaluator.last_error = null;
