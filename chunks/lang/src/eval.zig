@@ -648,7 +648,7 @@ pub const Evaluator = struct {
                     }) catch return error.OutOfMemory;
                 },
                 // Not run here: `blimp test` collects them from the
-                // actor body (runTests, runPropertyTests).
+                // actor body (runTests, which runs properties too).
                 .test_def, .property_def => {},
                 .actor_def => |inner| return self.refuseInActorBody(body_node.loc, std.fmt.allocPrint(
                     self.allocator,
