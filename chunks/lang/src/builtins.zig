@@ -6224,6 +6224,57 @@ test "a float function takes an Int and answers a Float" {
     try std.testing.expectError(error.TypeError, sqrt(alloc, args));
 }
 
+test "to_int, floor, ceil and round refuse a Float with no Int, and say which" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const two_63: f64 = 9223372036854775808.0;
+    // The next double below -2^63; -2^63 itself is minInt and converts.
+    const below_min: f64 = -9223372036854777856.0;
+    const refused = [_]f64{
+        two_63,
+        below_min,
+        1e20,
+        -1e20,
+        std.math.inf(f64),
+        -std.math.inf(f64),
+        std.math.nan(f64),
+    };
+    const fns = .{
+        .{ "to_int", &builtinToInt },
+        .{ "floor", &builtinFloor },
+        .{ "ceil", &builtinCeil },
+        .{ "round", &builtinRound },
+    };
+
+    const arg = try alloc.create(Value);
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = arg;
+
+    inline for (fns) |entry| {
+        for (refused) |f| {
+            arg.* = Value{ .float = f };
+            try std.testing.expectError(error.TypeError, entry[1](alloc, args));
+            const why = takeFailure() orelse return error.TestExpectedFailureMessage;
+            try std.testing.expect(std.mem.startsWith(u8, why, entry[0] ++ ": "));
+        }
+
+        // The ends of the range still convert, exactly.
+        arg.* = Value{ .float = -two_63 };
+        try std.testing.expectEqual(std.math.minInt(i64), (try entry[1](alloc, args)).integer);
+        arg.* = Value{ .float = 9223372036854774784.0 }; // largest double below 2^63
+        try std.testing.expectEqual(@as(i64, 9223372036854774784), (try entry[1](alloc, args)).integer);
+    }
+
+    // Each still rounds its own way inside the range.
+    arg.* = Value{ .float = -2.5 };
+    try std.testing.expectEqual(@as(i64, -2), (try builtinToInt(alloc, args)).integer);
+    try std.testing.expectEqual(@as(i64, -3), (try builtinFloor(alloc, args)).integer);
+    try std.testing.expectEqual(@as(i64, -2), (try builtinCeil(alloc, args)).integer);
+    try std.testing.expectEqual(@as(i64, -3), (try builtinRound(alloc, args)).integer);
+}
+
 test "the transcendental functions agree with their identities" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

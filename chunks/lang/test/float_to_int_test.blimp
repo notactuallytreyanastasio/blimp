@@ -1,0 +1,114 @@
+# Regression test for issue #29: a Float whose integer part is not an Int
+# used to abort the interpreter ("integer part of floating point value out
+# of bounds", exit 134), and NaN quietly became 0. Each now refuses with a
+# catchable :type_error, the same answer to_int gives for the String
+# "100000000000000000000".
+#
+# 1e20 does not lex, and float division by zero is an error, so infinity is
+# exp(1000.0) and NaN is sqrt(-1.0). 9223372036854775808.0 is 2^63, the
+# first Float past maxInt; -9223372036854777856.0 is the first one below
+# minInt.
+
+actor FloatToIntTests do
+  test "to_int refuses 2^63" do
+    r = try do
+      to_int(9223372036854775808.0)
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "to_int refuses below minInt" do
+    r = try do
+      to_int(-9223372036854777856.0)
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "to_int refuses infinity" do
+    r = try do
+      to_int(exp(1000.0))
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "to_int refuses negative infinity" do
+    r = try do
+      to_int(-exp(1000.0))
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "to_int refuses NaN rather than answering 0" do
+    r = try do
+      to_int(sqrt(-1.0))
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "floor refuses 1e20" do
+    r = try do
+      floor(100000000000000000000.0)
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "ceil refuses negative infinity" do
+    r = try do
+      ceil(-exp(1000.0))
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "round refuses NaN" do
+    r = try do
+      round(sqrt(-1.0))
+    catch err do
+      err
+    end
+    assert_eq(r, :type_error)
+  end
+
+  test "the Float and String spellings of 1e20 agree" do
+    a = try do
+      to_int("100000000000000000000")
+    catch err do
+      err
+    end
+    b = try do
+      to_int(100000000000000000000.0)
+    catch err do
+      err
+    end
+    assert_eq(a, b)
+  end
+
+  test "the ends of the range still convert exactly" do
+    assert_eq(to_int(-9223372036854775808.0), 0 - 9223372036854775807 - 1)
+    assert_eq(to_int(9223372036854774784.0), 9223372036854774784)
+    assert_eq(floor(9223372036854774784.0), 9223372036854774784)
+    assert_eq(ceil(-9223372036854775808.0), 0 - 9223372036854775807 - 1)
+    assert_eq(round(9223372036854774784.0), 9223372036854774784)
+  end
+
+  test "in-range conversion is unchanged" do
+    assert_eq(to_int(-2.5), -2)
+    assert_eq(floor(-2.5), -3)
+    assert_eq(ceil(-2.5), -2)
+    assert_eq(round(-2.5), -3)
+    assert_eq(to_int(1.5), 1)
+  end
+end
