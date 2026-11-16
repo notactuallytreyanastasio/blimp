@@ -41,6 +41,10 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     /// Set just before a parse function returns an error it can explain.
     diagnostic: ?Diagnostic = null,
+    /// A case or situation already parsed at the start of a statement, for
+    /// the expression parser to take as its first primary when an operator
+    /// follows `end`. See parseBlockStatement.
+    pending_primary: ?Node = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         var lexer = Lexer.init(source);
@@ -69,7 +73,7 @@ pub const Parser = struct {
         return switch (self.current.kind) {
             .kw_actor => self.parseActorDef(),
             .kw_def => self.parseDefStmt(),
-            // case and situation are primaries: `case ... end + 1` is one expression.
+            .kw_case, .kw_situation => self.parseBlockStatement(),
             else => self.parseExpressionStatement(),
         };
     }
@@ -195,8 +199,54 @@ pub const Parser = struct {
             .kw_become => self.parseBecomeStmt(),
             .kw_reply => self.parseReplyStmt(),
             .kw_bubble => self.parseBubbleStmt(),
+            .kw_case, .kw_situation => self.parseBlockStatement(),
             else => self.parseExpressionStatement(),
         };
+    }
+
+    /// A statement that starts with case or situation. Nearly always the
+    /// block is the whole statement, and it is returned as soon as its `end`
+    /// is reached, without the ten calls of the precedence chain above
+    /// parsePrimary: 26,700 such statements cost 1.8ms more that way.
+    ///
+    /// When something else follows `end` on the line (`case ... end + 1`,
+    /// `... end |> f(_)`), the block is handed to parseExpressionStatement
+    /// as its first primary through `pending_primary`. Not re-parsed from a
+    /// saved lexer: a nested case that is also followed by an operator would
+    /// be parsed again inside each re-parse of its parent, 2^depth.
+    fn parseBlockStatement(self: *Parser) ParseError!Node {
+        const node = if (self.current.kind == .kw_case) try self.parseCase() else try self.parseSituation();
+        if (!continuesExpression(self.current.kind)) return node;
+        self.pending_primary = node;
+        const stmt = try self.parseExpressionStatement();
+        // Every token continuesExpression admits reaches parsePrimary's
+        // fallback (or parseUnary's) and takes the pending node. One that
+        // did not would have dropped the case on the floor.
+        if (self.pending_primary != null) return error.UnexpectedToken;
+        return stmt;
+    }
+
+    /// Tokens that, after a complete primary, make it the left operand of
+    /// something larger: postfix `.`, every infix operator, send, pipe and
+    /// orelse. Anything else after `end` starts the next statement, as it
+    /// did when case was statement-only.
+    fn continuesExpression(kind: Token.Kind) bool {
+        return switch (kind) {
+            .dot,
+            .plus, .minus, .plus_plus, .star, .slash,
+            .eq_eq, .bang_eq, .lt, .gt, .lt_eq, .gt_eq,
+            .amp_amp, .kw_and, .pipe_pipe, .kw_or,
+            .send_arrow, .async_send, .pipe_arrow, .kw_orelse,
+            => true,
+            else => false,
+        };
+    }
+
+    /// The primary that parseBlockStatement already parsed, taken once.
+    fn takePending(self: *Parser) ?Node {
+        const p = self.pending_primary orelse return null;
+        self.pending_primary = null;
+        return p;
     }
 
     /// Parse: state name: Type :: default, name: Type :: default
@@ -861,7 +911,8 @@ pub const Parser = struct {
     }
 
     fn parseUnary(self: *Parser) ParseError!Node {
-        if (self.current.kind == .minus) {
+        // `case ... end - 1`: the `-` is binary, its left operand pending.
+        if (self.current.kind == .minus and self.pending_primary == null) {
             const loc = self.currentLoc();
             self.advance();
             const operand = try self.parsePostfix();
@@ -1096,7 +1147,9 @@ pub const Parser = struct {
                 try self.expect(.rparen);
                 return expr;
             },
-            else => return error.UnexpectedToken,
+            // Reached only on a token no primary starts with, so a statement
+            // case's pending node costs the ordinary primaries nothing.
+            else => return self.takePending() orelse error.UnexpectedToken,
         }
     }
 
@@ -2680,6 +2733,49 @@ test "a case that starts a branch body line is that branch's body, not the next 
     try std.testing.expectEqual(@as(usize, 2), outer.branches.len);
     try std.testing.expectEqual(@as(usize, 1), outer.branches[0].body.len);
     try expectTag(.case_expr, outer.branches[0].body[0]);
+}
+
+test "a statement-level case followed by `- 1` is a subtraction, not a negation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const n = try parseOnly(&arena, "case x do _ -> 10 end - 1");
+    try std.testing.expectEqual(Node.BinaryOp.Op.sub, n.kind.binary_op.op);
+    try expectTag(.case_expr, n.kind.binary_op.left.*);
+
+    const send = try parseOnly(&arena, "situation x do _ -> a end <- :go");
+    try expectTag(.situation, send.kind.message_send.target.*);
+
+    const dot = try parseOnly(&arena, "case x do _ -> a end.field");
+    try expectTag(.case_expr, dot.kind.dot_access.object.*);
+
+    // A token that cannot continue an expression starts the next statement,
+    // as it did on origin/main when case was statement-only.
+    var p = Parser.init(arena.allocator(), "case x do _ -> a end [2]");
+    const two = try p.parseFile();
+    try std.testing.expectEqual(@as(usize, 2), two.len);
+    try expectTag(.case_expr, two[0]);
+    try expectTag(.list_lit, two[1]);
+}
+
+test "nested statement-level cases each followed by an operator parse in linear time" {
+    // A case that starts a statement is parsed once; when an operator
+    // follows its `end` the parsed node is handed to the expression parser
+    // rather than parsed again. Parsing again would be 2^depth here.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const depth = 40;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const a = arena.allocator();
+    for (0..depth) |_| try buf.appendSlice(a, "case x do\n_ ->\n");
+    try buf.appendSlice(a, "1\n");
+    for (0..depth) |_| try buf.appendSlice(a, "end + 1\n");
+    const n = try parseOnly(&arena, buf.items);
+    var cur = n;
+    var seen: usize = 0;
+    while (std.meta.activeTag(cur.kind) == .binary_op) : (seen += 1) {
+        cur = cur.kind.binary_op.left.kind.case_expr.branches[0].body[0];
+    }
+    try std.testing.expectEqual(@as(usize, depth), seen);
 }
 
 test "nested cases at the start of body lines parse in linear time" {
