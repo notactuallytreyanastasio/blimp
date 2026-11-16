@@ -1,4 +1,5 @@
 # Comprehensive lexer tests
+# prelude: lexer.blimp
 
 def lex(src: String) -> List do
   l = spawn Lexer

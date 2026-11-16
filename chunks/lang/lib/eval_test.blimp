@@ -1,4 +1,5 @@
 # Comprehensive evaluator tests
+# prelude: lexer.blimp parser.blimp eval.blimp
 
 actor EvalTests do
   # -- Literals --

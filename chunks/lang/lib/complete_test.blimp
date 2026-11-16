@@ -1,4 +1,5 @@
 # Tests for the self-hosted completion engine
+# prelude: complete.blimp
 
 def has_label(results: List, name: String) -> Bool do
   check_labels(results, name)

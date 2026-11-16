@@ -1,4 +1,5 @@
 # WASM codegen tests
+# prelude: lexer.blimp parser.blimp eval.blimp codegen.blimp
 # Each test compiles Blimp source to WASM bytes and validates the output.
 
 # Helper: check WASM magic bytes

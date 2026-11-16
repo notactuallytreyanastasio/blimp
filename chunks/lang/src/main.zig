@@ -201,6 +201,10 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     // Check for --test flag (run test blocks)
     if (args.len >= 3 and std.mem.eql(u8, args[2], "--test")) {
         var evaluator = Evaluator.init(arena.allocator());
+        var ebuf: [4096]u8 = undefined;
+        var ew = std.Io.File.stderr().writer(ioenv.io, &ebuf);
+        const dir = std.fs.path.dirname(args[1]) orelse ".";
+        loadTestPrelude(arena.allocator(), &evaluator, &ew.interface, dir, source) catch std.process.exit(1);
         evaluator.setSource(source);
         const start = nowMillis();
         const all_passed = evaluator.runTests(nodes);
@@ -749,6 +753,54 @@ fn preloadSource(
     }
 }
 
+/// The files a test file asks to have loaded before it: the rest of a
+/// `# prelude: a.blimp b.blimp` line in the comment block at its top, or null.
+///
+/// lib/lexer_test.blimp tests the lexer written in lib/lexer.blimp, and the
+/// language has no import, so without this `blimp test lib` ran those tests
+/// against nothing and reported 220 of them failed.
+fn testPrelude(source: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (line[0] != '#') return null;
+        const body = std.mem.trim(u8, line[1..], " \t");
+        if (std.mem.startsWith(u8, body, "prelude:")) {
+            return std.mem.trim(u8, body["prelude:".len..], " \t");
+        }
+    }
+    return null;
+}
+
+/// Load a test file's prelude into `evaluator`: each named file, relative to
+/// `dir`, read, parsed, type-checked and evaluated on its own, in order, the
+/// way `--preload` loads one. A file that is missing or fails is an error with
+/// its name on it, never a test run against a half-loaded environment.
+fn loadTestPrelude(
+    arena: std.mem.Allocator,
+    evaluator: *Evaluator,
+    writer: anytype,
+    dir: []const u8,
+    test_source: []const u8,
+) error{PreloadFailed}!void {
+    const names = testPrelude(test_source) orelse return;
+    var it = std.mem.tokenizeAny(u8, names, " \t");
+    while (it.next()) |name| {
+        const path = std.fs.path.join(arena, &.{ dir, name }) catch return error.PreloadFailed;
+        const source = std.Io.Dir.cwd().readFileAlloc(ioenv.io, path, arena, .limited(source_file_max)) catch |err| {
+            writer.print("prelude {s}: {}\n", .{ path, err }) catch {};
+            writer.flush() catch {};
+            return error.PreloadFailed;
+        };
+        preloadSource(arena, evaluator, writer, source) catch {
+            writer.print("prelude {s} did not load\n", .{path}) catch {};
+            writer.flush() catch {};
+            return error.PreloadFailed;
+        };
+    }
+}
+
 fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const u8) void {
     // Source text and the ASTs parsed from it outlive every compaction.
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1092,6 +1144,13 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
         _ = checker.checkFile(nodes);
 
         var evaluator = Evaluator.init(arena.allocator());
+        var ebuf: [4096]u8 = undefined;
+        var ew = stderr.writer(ioenv.io, &ebuf);
+        loadTestPrelude(arena.allocator(), &evaluator, &ew.interface, dir_path, source) catch {
+            stderr.writeStreamingAll(ioenv.io, "  \x1b[31mprelude failed; no tests run\x1b[0m\n") catch {};
+            any_failed = true;
+            continue;
+        };
         evaluator.setSource(source);
         if (!evaluator.runTests(nodes)) {
             any_failed = true;
@@ -1461,6 +1520,60 @@ test "preloadSource refuses a file whose top level fails" {
     try std.testing.expect(evaluator.env.lookup("f") != null);
 }
 
+test "testPrelude reads the file names on a leading # prelude: line" {
+    const src = "# Lexer tests\n# prelude: lexer.blimp parser.blimp\n\nactor T do end\n";
+    try std.testing.expectEqualStrings("lexer.blimp parser.blimp", testPrelude(src).?);
+}
+
+test "testPrelude is null for a file without one" {
+    try std.testing.expect(testPrelude("# Builtin tests\n\nactor T do end\n") == null);
+}
+
+test "testPrelude ignores a # prelude: line once code has started" {
+    // Only the header counts: a comment further down is prose, and loading
+    // files because of it would be a surprise nobody could see from the top.
+    try std.testing.expect(testPrelude("actor T do end\n# prelude: lexer.blimp\n") == null);
+}
+
+test "loadTestPrelude defines what the prelude file defines, before the tests run" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // A real Io: with the default failing one every read errors, and the
+    // refusal test below would pass for the wrong reason.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(ioenv.io, .{ .sub_path = "dbl.blimp", .data = "def dbl(n: Int) -> Int do\n  n * 2\nend\n" });
+    const dir = try tmp.dir.realPathFileAlloc(ioenv.io, ".", arena.allocator());
+
+    var evaluator = Evaluator.init(arena.allocator());
+    var buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try loadTestPrelude(arena.allocator(), &evaluator, &writer, dir, "# prelude: dbl.blimp\n");
+    try std.testing.expect(evaluator.env.lookup("dbl") != null);
+}
+
+test "loadTestPrelude refuses a prelude file that is not there" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // A real Io: with the default failing one every read errors, and the
+    // refusal test below would pass for the wrong reason.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    ioenv.install(threaded.io());
+    defer ioenv.io = .failing;
+    var evaluator = Evaluator.init(arena.allocator());
+    var buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try std.testing.expectError(
+        error.PreloadFailed,
+        loadTestPrelude(arena.allocator(), &evaluator, &writer, ".", "# prelude: no_such_file.blimp\n"),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "no_such_file.blimp") != null);
+}
 
 // ── blimp --serve ────────────────────────────────────────────
 //

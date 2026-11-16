@@ -1,4 +1,5 @@
 # Tests for secure string composition
+# prelude: safe_string.blimp
 
 # ── HTML Escaping Tests ──────────────────────────────
 
