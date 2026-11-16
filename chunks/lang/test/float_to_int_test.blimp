@@ -4,8 +4,9 @@
 # catchable :type_error, the same answer to_int gives for the String
 # "100000000000000000000".
 #
-# 1e20 does not lex, and float division by zero is an error, so infinity is
-# exp(1000.0) and NaN is sqrt(-1.0). 9223372036854775808.0 is 2^63, the
+# Float division by zero is an error, so NaN is sqrt(-1.0). Infinity is
+# spelled exp(1000.0); 1e400 would do as well (this header once said 1e20
+# does not lex, which was wrong). 9223372036854775808.0 is 2^63, the
 # first Float past maxInt; -9223372036854777856.0 is the first one below
 # minInt.
 
