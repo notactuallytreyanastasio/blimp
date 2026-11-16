@@ -1,0 +1,13 @@
+actor V do
+  state n: Int :: 0
+  on :div(x: Int) do
+    reply 10 / x
+  end
+end
+v = spawn V
+r = try do
+  v <- :div(0) orelse 7
+catch e do
+  e
+end
+r

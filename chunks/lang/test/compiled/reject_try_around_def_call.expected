@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  `try` around a call to `half`: a bubble or a division by zero inside a def cannot reach this catch in compiled code.
+
+4| r = try do
+        ^
+
+  Hint: Call the def outside the `try`, or run this file with the interpreter.
+
+1 construct cannot be compiled.

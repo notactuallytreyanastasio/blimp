@@ -1,0 +1,18 @@
+actor V do
+  state n: Int :: 0
+  on :go do
+    bubble :inner
+  end
+end
+v = spawn V
+r = try do
+  x = try do
+    v <- :go
+  catch e do
+    100
+  end
+  x + 1
+catch e do
+  0
+end
+r

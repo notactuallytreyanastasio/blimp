@@ -1,0 +1,14 @@
+--- stdout
+--- stderr
+
+-- UNCAUGHT BUBBLE ───────────────────────────────
+
+  A bubble reached the top of the program: :too_small
+
+6|       _ -> bubble :too_small
+                ^
+
+  Hint: Handle it with `try ... catch` or `orelse`.
+
+
+--- exit 1

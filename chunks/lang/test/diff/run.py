@@ -22,7 +22,8 @@ Every program lands in exactly one category:
 
   agree           both ran; stdout, exit status and stderr-presence match
   both-reject     both refused it before running (parse or type error)
-  unsupported     blimp-compile said `Codegen error: error.UnsupportedNode`
+  unsupported     blimp-compile refused it by name: a located `CANNOT COMPILE`
+                  report (or the bare `error.UnsupportedNode` it replaced)
   compile-error   blimp-compile failed any other way (LLVM verification,
                   link, parse) on a program the interpreter accepted, or
                   the other way round
@@ -156,6 +157,11 @@ def compiler_error(text, tmp):
     name it was.
     """
     line = first_line(text, tmp)
+    if "CANNOT COMPILE" in line:
+        # The report's first line is a rule; the sentence under it names the
+        # construct, and that is what a changed refusal should show up as.
+        rest = text[text.index("CANNOT COMPILE"):].split("\n", 1)
+        line = "CANNOT COMPILE: " + first_line(rest[1] if len(rest) > 1 else "", tmp)
     if line.startswith("Linker failed"):
         syms = [l.strip().split('"')[1] for l in text.splitlines()
                 if l.strip().startswith('"_') and '"' in l.strip()[1:]]
@@ -216,7 +222,7 @@ def classify(prog, interp, compiler, timeout):
             rec["category"] = "crash"
         elif b is None:
             ctext = c["stdout"] + c["stderr"]
-            if "error.UnsupportedNode" in ctext:
+            if "error.UnsupportedNode" in ctext or "CANNOT COMPILE" in ctext:
                 rec["category"] = "unsupported"
             elif rejected_before_running(c) and rejected_before_running(i1):
                 rec["category"] = "both-reject"

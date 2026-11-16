@@ -1,0 +1,4 @@
+--- stdout
+:division_by_zero
+--- stderr
+--- exit 0

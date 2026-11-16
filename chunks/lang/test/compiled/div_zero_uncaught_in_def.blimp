@@ -1,0 +1,4 @@
+def half(a: Int, b: Int) do
+  a / b
+end
+half(10, 0)

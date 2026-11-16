@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  The compiler does not handle this `binary_op` yet.
+
+2| y = "a" ++ "b"
+        ^
+
+  Hint: Run this file with the interpreter.
+
+1 construct cannot be compiled.

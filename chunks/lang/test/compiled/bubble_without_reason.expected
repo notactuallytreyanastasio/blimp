@@ -1,0 +1,14 @@
+--- stdout
+--- stderr
+
+-- UNCAUGHT BUBBLE ───────────────────────────────
+
+  A bubble reached the top of the program.
+
+4|     bubble
+         ^
+
+  Hint: Handle it with `try ... catch` or `orelse`.
+
+
+--- exit 1

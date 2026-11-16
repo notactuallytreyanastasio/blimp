@@ -1,0 +1,9 @@
+def half(a: Int, b: Int) do
+  a / b
+end
+r = try do
+  half(10, 0)
+catch e do
+  e
+end
+r

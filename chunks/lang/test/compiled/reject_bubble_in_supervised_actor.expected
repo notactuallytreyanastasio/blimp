@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  `bubble` in a handler of `Bank.Account` restarts it under its supervisor `Bank`; compiled actors have no supervisor, so the restart would not happen.
+
+7|     bubble :insufficient_funds
+        ^
+
+  Hint: Run this file with the interpreter, which supervises.
+
+1 construct cannot be compiled.

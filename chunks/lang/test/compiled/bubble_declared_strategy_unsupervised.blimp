@@ -1,0 +1,11 @@
+actor V do
+  state n: Int :: 0
+  on :check(x: Int) bubbles(CascadeBubble) do
+    situation x do
+      1 -> reply 10
+      _ -> bubble :too_small
+    end
+  end
+end
+v = spawn V
+v <- :check(0)

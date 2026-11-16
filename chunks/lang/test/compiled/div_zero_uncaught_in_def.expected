@@ -1,0 +1,14 @@
+--- stdout
+--- stderr
+
+-- DIVISION BY ZERO ──────────────────────────────
+
+  You're dividing by zero, which isn't defined.
+
+2|   a / b
+       ^
+
+  Hint: Check the denominator before dividing.
+
+
+--- exit 1
