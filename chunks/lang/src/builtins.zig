@@ -964,6 +964,24 @@ fn builtinToAtom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     }
 }
 
+/// The Int a whole-valued Float stands for, or a refusal naming `func`.
+///
+/// `@intFromFloat` is not this: past either end of Int it is a safety panic
+/// that takes the process down, and NaN is not caught by that check at all --
+/// ReleaseSafe hands back what the instruction gives, 0 on arm64. Saturating
+/// would be the same mistake spelled differently: 1e20 is not maxInt.
+///
+/// The bounds are compared as Floats. -2^63 is exactly representable and is
+/// minInt; 2^63 is the first Float past maxInt (maxInt itself has no Float),
+/// so the range is the half-open [-2^63, 2^63). NaN fails both comparisons.
+fn intOfFloat(comptime func: []const u8, whole: f64) EvalError!i64 {
+    const two_63: f64 = 9223372036854775808.0;
+    if (std.math.isNan(whole)) return failArg(func ++ ": NaN has no Int value", .{});
+    if (!(whole >= -two_63 and whole < two_63))
+        return failArg(func ++ ": {d} is outside Int's range, -2^63 to 2^63-1", .{whole});
+    return @intFromFloat(whole);
+}
+
 /// to_int("42") => 42
 fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
@@ -975,7 +993,7 @@ fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
             result.* = Value{ .integer = n };
         },
         .float => |f| {
-            result.* = Value{ .integer = @intFromFloat(f) };
+            result.* = Value{ .integer = try intOfFloat("to_int", @trunc(f)) };
         },
         .boolean => |b| {
             result.* = Value{ .integer = if (b) 1 else 0 };
@@ -1896,7 +1914,7 @@ fn builtinFloor(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .float => |f| result.* = Value{ .integer = @intFromFloat(@floor(f)) },
+        .float => |f| result.* = Value{ .integer = try intOfFloat("floor", @floor(f)) },
         .integer => return args[0],
         else => return error.TypeError,
     }
@@ -1908,7 +1926,7 @@ fn builtinCeil(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .float => |f| result.* = Value{ .integer = @intFromFloat(@ceil(f)) },
+        .float => |f| result.* = Value{ .integer = try intOfFloat("ceil", @ceil(f)) },
         .integer => return args[0],
         else => return error.TypeError,
     }
@@ -1920,7 +1938,7 @@ fn builtinRound(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .float => |f| result.* = Value{ .integer = @intFromFloat(@round(f)) },
+        .float => |f| result.* = Value{ .integer = try intOfFloat("round", @round(f)) },
         .integer => return args[0],
         else => return error.TypeError,
     }
@@ -6222,6 +6240,57 @@ test "a float function takes an Int and answers a Float" {
     text.* = Value{ .string = "16" };
     args[0] = text;
     try std.testing.expectError(error.TypeError, sqrt(alloc, args));
+}
+
+test "to_int, floor, ceil and round refuse a Float with no Int, and say which" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const two_63: f64 = 9223372036854775808.0;
+    // The next double below -2^63; -2^63 itself is minInt and converts.
+    const below_min: f64 = -9223372036854777856.0;
+    const refused = [_]f64{
+        two_63,
+        below_min,
+        1e20,
+        -1e20,
+        std.math.inf(f64),
+        -std.math.inf(f64),
+        std.math.nan(f64),
+    };
+    const fns = .{
+        .{ "to_int", &builtinToInt },
+        .{ "floor", &builtinFloor },
+        .{ "ceil", &builtinCeil },
+        .{ "round", &builtinRound },
+    };
+
+    const arg = try alloc.create(Value);
+    const args = try alloc.alloc(*const Value, 1);
+    args[0] = arg;
+
+    inline for (fns) |entry| {
+        for (refused) |f| {
+            arg.* = Value{ .float = f };
+            try std.testing.expectError(error.TypeError, entry[1](alloc, args));
+            const why = takeFailure() orelse return error.TestExpectedFailureMessage;
+            try std.testing.expect(std.mem.startsWith(u8, why, entry[0] ++ ": "));
+        }
+
+        // The ends of the range still convert, exactly.
+        arg.* = Value{ .float = -two_63 };
+        try std.testing.expectEqual(std.math.minInt(i64), (try entry[1](alloc, args)).integer);
+        arg.* = Value{ .float = 9223372036854774784.0 }; // largest double below 2^63
+        try std.testing.expectEqual(@as(i64, 9223372036854774784), (try entry[1](alloc, args)).integer);
+    }
+
+    // Each still rounds its own way inside the range.
+    arg.* = Value{ .float = -2.5 };
+    try std.testing.expectEqual(@as(i64, -2), (try builtinToInt(alloc, args)).integer);
+    try std.testing.expectEqual(@as(i64, -3), (try builtinFloor(alloc, args)).integer);
+    try std.testing.expectEqual(@as(i64, -2), (try builtinCeil(alloc, args)).integer);
+    try std.testing.expectEqual(@as(i64, -3), (try builtinRound(alloc, args)).integer);
 }
 
 test "the transcendental functions agree with their identities" {
