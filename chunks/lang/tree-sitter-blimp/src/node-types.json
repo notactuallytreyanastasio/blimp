@@ -190,6 +190,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -203,6 +207,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -251,6 +259,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -320,6 +332,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -333,6 +349,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -381,6 +401,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -621,6 +645,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -634,6 +662,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -682,6 +714,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -736,6 +772,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -749,6 +789,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -797,6 +841,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -990,6 +1038,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "dot_access",
           "named": true
         },
@@ -999,6 +1051,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -1035,6 +1091,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -1363,6 +1423,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -1376,6 +1440,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -1424,6 +1492,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -1512,6 +1584,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -1525,6 +1601,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -1573,6 +1653,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -1627,6 +1711,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -1640,6 +1728,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -1688,6 +1780,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -1916,6 +2012,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -1929,6 +2029,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -1977,6 +2081,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -2031,6 +2139,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -2044,6 +2156,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -2092,6 +2208,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -2161,6 +2281,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -2174,6 +2298,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -2222,6 +2350,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -2276,6 +2408,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -2289,6 +2425,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -2337,6 +2477,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -2391,6 +2535,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -2404,6 +2552,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -2452,6 +2604,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -2664,6 +2820,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -2677,6 +2837,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -2729,6 +2893,10 @@
         },
         {
           "type": "situation_branch",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -2969,6 +3137,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -2982,6 +3154,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -3030,6 +3206,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -3084,6 +3264,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -3097,6 +3281,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -3145,6 +3333,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -3219,6 +3411,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -3232,6 +3428,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -3280,6 +3480,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -3353,6 +3557,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -3366,6 +3574,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -3414,6 +3626,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -3483,6 +3699,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "dot_access",
           "named": true
         },
@@ -3492,6 +3712,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -3528,6 +3752,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
@@ -3570,6 +3798,10 @@
           "named": true
         },
         {
+          "type": "case_expression",
+          "named": true
+        },
+        {
           "type": "concat_expression",
           "named": true
         },
@@ -3583,6 +3815,10 @@
         },
         {
           "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
           "named": true
         },
         {
@@ -3631,6 +3867,10 @@
         },
         {
           "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
           "named": true
         },
         {
