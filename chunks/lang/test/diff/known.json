@@ -9,7 +9,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `dot_access` yet."
     },
     "category": "unsupported"
   },
@@ -23,7 +23,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
     },
     "category": "unsupported"
   },
@@ -37,7 +37,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `hole` yet."
     },
     "category": "unsupported"
   },
@@ -65,9 +65,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UndefinedVariable"
+      "error": "CANNOT COMPILE: Nothing called `nme` is in scope here."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "examples/errors/02_typo_function.blimp": {
     "interp": {
@@ -121,9 +121,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UndefinedVariable"
+      "error": "CANNOT COMPILE: Nothing called `class` is in scope here."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "examples/errors/08_var_let_const.blimp": {
     "interp": {
@@ -135,9 +135,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UndefinedVariable"
+      "error": "CANNOT COMPILE: Nothing called `var` is in scope here."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "examples/errors/09_if_keyword.blimp": {
     "interp": {
@@ -149,41 +149,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UndefinedVariable"
+      "error": "CANNOT COMPILE: Nothing called `if` is in scope here."
     },
-    "category": "compile-error"
-  },
-  "examples/errors/10_no_handler.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- NO MATCHING HANDLER \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "same as corpus/actor_unknown_message."
-  },
-  "examples/errors/11_division_by_zero.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- DIVISION BY ZERO \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "same as corpus/arith_div_by_zero_var."
+    "category": "unsupported"
   },
   "examples/game_actor.blimp": {
     "interp": {
@@ -195,7 +163,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
     },
     "category": "unsupported"
   },
@@ -209,7 +177,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
     },
     "category": "unsupported"
   },
@@ -223,7 +191,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `hole` yet."
     },
     "category": "unsupported"
   },
@@ -237,7 +205,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
     },
     "category": "unsupported"
   },
@@ -248,19 +216,12 @@
       "stdout": "",
       "stderr": "-- NO MATCHING HANDLER \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
     },
-    "compiled": {
+    "compiler": {
       "end": "exit",
-      "exit": 0,
-      "stdout": "4380385568\n",
-      "stderr": ""
+      "exit": 1,
+      "error": "CANNOT COMPILE: `bubble` in a handler of `Marketplace.AccountHolder.Account` restarts it under its supervisor `Marketplace.AccountHolder`; compiled actors have no supervisor, so the restart would not happen."
     },
-    "category": "flaky",
-    "compiled_second_run": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "4316864800\n",
-      "stderr": ""
-    },
+    "category": "unsupported",
     "note": "interpreter: NO MATCHING HANDLER, exit 1; compiled prints a heap address, exit 0."
   },
   "examples/pipeline.blimp": {
@@ -273,7 +234,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
     },
     "category": "unsupported"
   },
@@ -301,7 +262,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `hole` yet."
     },
     "category": "unsupported"
   },
@@ -315,7 +276,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
     },
     "category": "unsupported"
   },
@@ -345,9 +306,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UndefinedVariable"
+      "error": "CANNOT COMPILE: Nothing called `s` is in scope here."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "lib/codegen_test.blimp": {
     "interp": {
@@ -401,7 +362,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `spawn_expr` yet."
     },
     "category": "unsupported"
   },
@@ -415,7 +376,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `spawn_expr` yet."
     },
     "category": "unsupported"
   },
@@ -459,14 +420,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4304286620\n",
+      "stdout": "4300176412\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4332237724\n",
+      "stdout": "4372610076\n",
       "stderr": ""
     },
     "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
@@ -500,22 +461,6 @@
       "error": "Linker failed (exit 1): undefined: _length"
     },
     "category": "compile-error"
-  },
-  "test/diff/corpus/actor_unknown_message.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- NO MATCHING HANDLER \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "send of a message with no handler: compiled returns 0, exit 0. Interpreter: NO MATCHING HANDLER, exit 1."
   },
   "test/diff/corpus/arith_compare_eq.blimp": {
     "interp": {
@@ -564,38 +509,6 @@
     },
     "category": "diverge",
     "note": "Bool from a comparison prints as 1/0 in compiled code."
-  },
-  "test/diff/corpus/arith_div_by_zero_literal.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- DIVISION BY ZERO \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "same as arith_div_by_zero_var with a literal divisor."
-  },
-  "test/diff/corpus/arith_div_by_zero_var.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- DIVISION BY ZERO \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "compiled: 10 / 0 is 1, exit 0, no error. Interpreter: DIVISION BY ZERO, exit 1."
   },
   "test/diff/corpus/arith_float_large.blimp": {
     "interp": {
@@ -723,22 +636,6 @@
     "category": "diverge",
     "note": "Bool from || prints as 0/1 in compiled code."
   },
-  "test/diff/corpus/bubble_in_handler.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- UNCAUGHT BUBBLE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "uncaught bubble from a handler: compiled returns 0, exit 0. Interpreter: UNCAUGHT BUBBLE, exit 1. With `orelse` both agree (corpus/bubble_orelse_send)."
-  },
   "test/diff/corpus/bubble_orelse_def.blimp": {
     "interp": {
       "end": "exit",
@@ -749,9 +646,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Function return type does not match operand type of return inst!"
+      "error": "CANNOT COMPILE: `bubble` inside `def f` cannot be compiled: a def returns a bare value, so the reason would have nowhere to go."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/bubble_uncaught_from_def.blimp": {
     "interp": {
@@ -763,9 +660,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Function return type does not match operand type of return inst!"
+      "error": "CANNOT COMPILE: `bubble` inside `def f` cannot be compiled: a def returns a bare value, so the reason would have nowhere to go."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/builtin_abs_large.blimp": {
     "interp": {
@@ -867,9 +764,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UndefinedVariable"
+      "error": "CANNOT COMPILE: Nothing called `y` is in scope here."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/closure_map.blimp": {
     "interp": {
@@ -1012,22 +909,6 @@
     },
     "category": "compile-error"
   },
-  "test/diff/corpus/map_atom_value.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "%{color: :red}\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "%{color: :0}\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "an Atom inside a map prints as :<id> in compiled code."
-  },
   "test/diff/corpus/map_dot_access.blimp": {
     "interp": {
       "end": "exit",
@@ -1038,7 +919,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `dot_access` yet."
     },
     "category": "unsupported"
   },
@@ -1113,7 +994,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Codegen error: error.UnsupportedNode"
+      "error": "CANNOT COMPILE: The compiler does not handle this `binary_op` yet."
     },
     "category": "unsupported"
   },
