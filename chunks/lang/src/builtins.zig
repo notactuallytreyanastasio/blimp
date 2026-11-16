@@ -964,6 +964,24 @@ fn builtinToAtom(allocator: std.mem.Allocator, args: []const *const Value) EvalE
     }
 }
 
+/// The Int a whole-valued Float stands for, or a refusal naming `func`.
+///
+/// `@intFromFloat` is not this: past either end of Int it is a safety panic
+/// that takes the process down, and NaN is not caught by that check at all --
+/// ReleaseSafe hands back what the instruction gives, 0 on arm64. Saturating
+/// would be the same mistake spelled differently: 1e20 is not maxInt.
+///
+/// The bounds are compared as Floats. -2^63 is exactly representable and is
+/// minInt; 2^63 is the first Float past maxInt (maxInt itself has no Float),
+/// so the range is the half-open [-2^63, 2^63). NaN fails both comparisons.
+fn intOfFloat(comptime func: []const u8, whole: f64) EvalError!i64 {
+    const two_63: f64 = 9223372036854775808.0;
+    if (std.math.isNan(whole)) return failArg(func ++ ": NaN has no Int value", .{});
+    if (!(whole >= -two_63 and whole < two_63))
+        return failArg(func ++ ": {d} is outside Int's range, -2^63 to 2^63-1", .{whole});
+    return @intFromFloat(whole);
+}
+
 /// to_int("42") => 42
 fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1) return error.TypeError;
@@ -975,7 +993,7 @@ fn builtinToInt(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
             result.* = Value{ .integer = n };
         },
         .float => |f| {
-            result.* = Value{ .integer = @intFromFloat(f) };
+            result.* = Value{ .integer = try intOfFloat("to_int", @trunc(f)) };
         },
         .boolean => |b| {
             result.* = Value{ .integer = if (b) 1 else 0 };
@@ -1896,7 +1914,7 @@ fn builtinFloor(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .float => |f| result.* = Value{ .integer = @intFromFloat(@floor(f)) },
+        .float => |f| result.* = Value{ .integer = try intOfFloat("floor", @floor(f)) },
         .integer => return args[0],
         else => return error.TypeError,
     }
@@ -1908,7 +1926,7 @@ fn builtinCeil(allocator: std.mem.Allocator, args: []const *const Value) EvalErr
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .float => |f| result.* = Value{ .integer = @intFromFloat(@ceil(f)) },
+        .float => |f| result.* = Value{ .integer = try intOfFloat("ceil", @ceil(f)) },
         .integer => return args[0],
         else => return error.TypeError,
     }
@@ -1920,7 +1938,7 @@ fn builtinRound(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     if (args.len != 1) return error.TypeError;
     const result = allocator.create(Value) catch return error.OutOfMemory;
     switch (args[0].*) {
-        .float => |f| result.* = Value{ .integer = @intFromFloat(@round(f)) },
+        .float => |f| result.* = Value{ .integer = try intOfFloat("round", @round(f)) },
         .integer => return args[0],
         else => return error.TypeError,
     }
