@@ -544,6 +544,12 @@ fn parseProgram(arena: std.mem.Allocator, source: []const u8) []const ast.Node {
     if (parser.parseFilePublic()) |nodes| {
         return nodes;
     } else |_| {}
+    // The parser said why the file does not parse: say that, rather than
+    // retrying it as one expression and reporting line 1, col 1.
+    if (parser.diagnostic) |d| {
+        std.debug.print("Parse error at line {d}, col {d}: {s}\n", .{ d.line, d.col, d.message });
+        std.process.exit(1);
+    }
 
     var parser2 = Parser.init(arena, source);
     const expr = parser2.parseExpressionPublic() catch |err| {

@@ -258,7 +258,9 @@ export fn blimp_eval(source_ptr: [*]const u8, source_len: u32) i32 {
     var parser = Parser.init(allocator, source);
     const nodes = parser.parseFile() catch {
         // Parse error
-        setError("Parse error at line {}, col {}", .{
+        if (parser.diagnostic) |d| {
+            setError("Parse error at line {}, col {}: {s}", .{ d.line, d.col, d.message });
+        } else setError("Parse error at line {}, col {}", .{
             parser.current.line,
             parser.current.col,
         });
