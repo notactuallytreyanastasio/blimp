@@ -249,8 +249,15 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
     var restart_argv = try arena.allocator().alloc([:0]const u8, args.len);
     for (args, 0..) |a, i| restart_argv[i] = try arena.allocator().dupeZ(u8, a);
     evaluator.restart_argv = restart_argv;
+    // --print-last writes the value of the last top-level expression to
+    // stdout, formatted as the REPL formats it. A compiled program
+    // (blimp-compile) prints exactly that and nothing else it has no `puts`
+    // for, so this is the one output both implementations share, and what
+    // test/diff/run.py compares. A plain run prints nothing for it.
+    const print_last = args.len >= 3 and std.mem.eql(u8, args[2], "--print-last");
+    var last_text: ?[]const u8 = null;
     var live_after_compact: usize = heap_limit.used;
-    for (nodes) |node| {
+    for (nodes, 0..) |node, node_index| {
         defer {
             const grown = heap_limit.used -| live_after_compact;
             if (grown >= @max(live_after_compact, 16 * 1024 * 1024)) {
@@ -263,7 +270,7 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
                 live_after_compact = heap_limit.used;
             }
         }
-        _ = evaluator.eval(&node) catch |err| {
+        const value = evaluator.eval(&node) catch |err| {
             if (heap_limit.hit) {
                 heap_limit.report();
                 std.process.exit(1);
@@ -286,6 +293,15 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
             }
             std.process.exit(1);
         };
+        // Formatted before the compaction in the `defer` can move it.
+        if (print_last and node_index + 1 == nodes.len) {
+            last_text = formatValue(value, arena.allocator());
+        }
+    }
+    if (last_text) |text| {
+        const out = std.Io.File.stdout();
+        out.writeStreamingAll(ioenv.io, text) catch {};
+        out.writeStreamingAll(ioenv.io, "\n") catch {};
     }
 }
 
