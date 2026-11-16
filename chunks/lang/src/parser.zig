@@ -27,10 +27,20 @@ fn internName(tok: Token) Token {
     return t;
 }
 
+/// Why a parse failed, in words, where the parser knows more than the error
+/// name.  `error.UnexpectedToken` alone told the user only a line and column.
+pub const Diagnostic = struct {
+    message: []const u8,
+    line: u32,
+    col: u32,
+};
+
 pub const Parser = struct {
     lexer: Lexer,
     current: Token,
     allocator: std.mem.Allocator,
+    /// Set just before a parse function returns an error it can explain.
+    diagnostic: ?Diagnostic = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         var lexer = Lexer.init(source);
@@ -94,7 +104,7 @@ pub const Parser = struct {
 
         var body: std.ArrayList(Node) = .empty;
         while (self.current.kind != .kw_end and self.current.kind != .eof) {
-            const stmt = try self.parseActorBodyTopLevel();
+            const stmt = try self.parseActorBodyTopLevel(name);
             body.append(self.allocator, stmt) catch return error.OutOfMemory;
             self.skipNewlines();
         }
@@ -111,15 +121,58 @@ pub const Parser = struct {
 
     /// Parse a statement at the top level of an actor definition.
     /// Actor definitions should only contain state and on handlers at the top level.
-    fn parseActorBodyTopLevel(self: *Parser) ParseError!Node {
+    fn parseActorBodyTopLevel(self: *Parser, actor_name: []const u8) ParseError!Node {
         return switch (self.current.kind) {
             .kw_state => self.parseStateDef(),
             .kw_on => self.parseMessageHandler(),
             .kw_test => self.parseTestDef(),
             .kw_property => self.parsePropertyDef(),
+            .kw_actor => self.refuseNestedActor(actor_name),
             // Reject anything else - actor definition bodies should only have state, on, test, property
-            else => error.UnexpectedToken,
+            else => self.refuse("`{s}` at line {d} is not allowed in the body of actor `{s}`; an actor body holds only `state`, `on`, `test` and `property`", .{
+                if (self.current.kind == .eof) "end of file" else self.current.lexeme,
+                self.current.line,
+                actor_name,
+            }),
         };
+    }
+
+    /// An actor inside an actor.  What its name is could be read off the
+    /// flat form (`Shop.Checkout`), but whether its handlers may read the
+    /// outer actor's state, whether siblings reach each other by short name
+    /// and whether the outer actor spawns and supervises it are not decided,
+    /// so it is refused here rather than given a meaning.
+    fn refuseNestedActor(self: *Parser, outer: []const u8) ParseError!Node {
+        const line = self.current.line;
+        const col = self.current.col;
+        self.advance(); // actor
+        if (self.current.kind != .upper_identifier) {
+            return self.refuse("`actor` at line {d} inside actor `{s}` is not followed by an actor name", .{ line, outer });
+        }
+        const first = self.current.lexeme;
+        var end_ptr = first.ptr + first.len;
+        self.advance();
+        while (self.current.kind == .dot) {
+            self.advance();
+            if (self.current.kind != .upper_identifier) break;
+            end_ptr = self.current.lexeme.ptr + self.current.lexeme.len;
+            self.advance();
+        }
+        const inner = first.ptr[0 .. @intFromPtr(end_ptr) - @intFromPtr(first.ptr)];
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "nested actor `{s}` inside `{s}` at line {d} is not supported; define it at top level as `actor {s}.{s} do ... end`",
+            .{ inner, outer, line, outer, inner },
+        ) catch return error.OutOfMemory;
+        self.diagnostic = .{ .message = message, .line = line, .col = col };
+        return error.UnexpectedToken;
+    }
+
+    /// Record why the parse stops at the current token, then stop.
+    fn refuse(self: *Parser, comptime fmt: []const u8, args: anytype) ParseError!Node {
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return error.OutOfMemory;
+        self.diagnostic = .{ .message = message, .line = self.current.line, .col = self.current.col };
+        return error.UnexpectedToken;
     }
 
     /// Parse a statement inside a message handler body.
@@ -128,6 +181,18 @@ pub const Parser = struct {
         return switch (self.current.kind) {
             .kw_state => error.UnexpectedToken, // state not allowed in handlers
             .kw_on => error.UnexpectedToken, // nested handlers not allowed
+            .kw_actor => {
+                const line = self.current.line;
+                const col = self.current.col;
+                self.advance();
+                const name = if (self.current.kind == .upper_identifier) self.current.lexeme else "?";
+                self.diagnostic = .{
+                    .message = std.fmt.allocPrint(self.allocator, "actor `{s}` at line {d} cannot be defined inside a handler, test or case branch; define it at top level", .{ name, line }) catch return error.OutOfMemory,
+                    .line = line,
+                    .col = col,
+                };
+                return error.UnexpectedToken;
+            },
             .kw_become => self.parseBecomeStmt(),
             .kw_reply => self.parseReplyStmt(),
             .kw_bubble => self.parseBubbleStmt(),
@@ -375,9 +440,12 @@ pub const Parser = struct {
     fn looksLikeBranch(self: *Parser) bool {
         const saved_lexer = self.lexer;
         const saved_current = self.current;
+        const saved_diagnostic = self.diagnostic;
         defer {
             self.lexer = saved_lexer;
             self.current = saved_current;
+            // A failed trial parse explains nothing about the real one.
+            self.diagnostic = saved_diagnostic;
         }
         _ = self.parseExpression() catch return false;
         if (self.current.kind == .kw_when) {
@@ -2696,4 +2764,101 @@ test "parse dotted actor name in top-level message send" {
     try std.testing.expectEqualStrings("Shop", da.object.kind.identifier.name);
     try std.testing.expectEqualStrings("Checkout", da.field);
     try std.testing.expectEqualStrings("add", send.message);
+}
+
+// ── Actor bodies: what is not state/on/test/property is refused by name ──
+// A nested `actor` used to come back as a bare error.UnexpectedToken, which
+// main printed as "Parse error: error.UnexpectedToken at line 3, col 3".
+
+test "nested actor is refused with its name, its parent, its line and the flat spelling" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = Parser.init(arena.allocator(),
+        \\actor Shop do
+        \\  state region: Atom :: :us
+        \\  actor Checkout do
+        \\    on :ping do
+        \\      reply :pong
+        \\    end
+        \\  end
+        \\end
+    );
+    try std.testing.expectError(error.UnexpectedToken, parser.parseFile());
+    const d = parser.diagnostic orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(@as(u32, 3), d.line);
+    try std.testing.expectEqual(@as(u32, 3), d.col);
+    try std.testing.expectEqualStrings(
+        "nested actor `Checkout` inside `Shop` at line 3 is not supported; define it at top level as `actor Shop.Checkout do ... end`",
+        d.message,
+    );
+}
+
+test "nested dotted actor inside a dotted actor suggests the whole flat name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = Parser.init(arena.allocator(),
+        \\actor App.Shop do
+        \\  actor Checkout.Tax do
+        \\  end
+        \\end
+    );
+    try std.testing.expectError(error.UnexpectedToken, parser.parseFile());
+    const d = parser.diagnostic orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqualStrings(
+        "nested actor `Checkout.Tax` inside `App.Shop` at line 2 is not supported; define it at top level as `actor App.Shop.Checkout.Tax do ... end`",
+        d.message,
+    );
+}
+
+test "a def in an actor body is refused by name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = Parser.init(arena.allocator(),
+        \\actor Shop do
+        \\  state n: Int :: 0
+        \\  def helper() do
+        \\    1
+        \\  end
+        \\end
+    );
+    try std.testing.expectError(error.UnexpectedToken, parser.parseFile());
+    const d = parser.diagnostic orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(@as(u32, 3), d.line);
+    try std.testing.expectEqualStrings(
+        "`def` at line 3 is not allowed in the body of actor `Shop`; an actor body holds only `state`, `on`, `test` and `property`",
+        d.message,
+    );
+}
+
+test "an actor inside a handler body is refused by name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = Parser.init(arena.allocator(),
+        \\actor Shop do
+        \\  on :open do
+        \\    actor Checkout do
+        \\    end
+        \\    reply :ok
+        \\  end
+        \\end
+    );
+    try std.testing.expectError(error.UnexpectedToken, parser.parseFile());
+    const d = parser.diagnostic orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(@as(u32, 3), d.line);
+    try std.testing.expectEqualStrings(
+        "actor `Checkout` at line 3 cannot be defined inside a handler, test or case branch; define it at top level",
+        d.message,
+    );
+}
+
+test "a well-formed actor body leaves no diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = Parser.init(arena.allocator(),
+        \\actor Shop.Checkout do
+        \\  state n: Int :: 0
+        \\end
+    );
+    _ = try parser.parseFile();
+    try std.testing.expect(parser.diagnostic == null);
 }

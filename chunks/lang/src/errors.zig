@@ -699,3 +699,38 @@ pub fn parseError(source: []const u8) BlimpError {
         .hint = "Try a simpler expression:\n      42\n      x = [1, 2, 3]\n      length(x)",
     };
 }
+
+/// The parse error for `source`: the parser's own explanation, located, when it
+/// left one; otherwise the guesses `parseError` makes from the source text.
+pub fn parseErrorFor(source: []const u8, diagnostic: ?@import("parser.zig").Diagnostic) BlimpError {
+    const d = diagnostic orelse return parseError(source);
+    return .{
+        .title = "PARSE ERROR",
+        .source_line = lineAt(source, d.line),
+        .line = d.line,
+        .col = d.col,
+        .message = d.message,
+    };
+}
+
+test "a parse error the parser explained shows the parser's words and only the line it names" {
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const source = "actor Shop do\n  actor Checkout do\n  end\nend\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = @import("parser.zig").Parser.init(arena.allocator(), source);
+    _ = parser.parseFile() catch {};
+    parseErrorFor(source, parser.diagnostic).formatPlain(&w);
+    const out = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "nested actor `Checkout` inside `Shop` at line 2 is not supported") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "2|   actor Checkout do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "I couldn't understand") == null);
+}
+
+test "a parse error with no explanation falls back to the guesses from the source text" {
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    parseErrorFor("1 +", null).formatPlain(&w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "I couldn't understand this expression.") != null);
+}

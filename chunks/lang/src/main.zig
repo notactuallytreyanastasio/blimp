@@ -154,7 +154,11 @@ fn run(argv: std.process.Args, environ: std.process.Environ) !void {
 
     var parser = Parser.init(arena.allocator(), source);
     const nodes = parser.parseFile() catch |err| {
-        std.debug.print("Parse error: {} at line {}, col {}\n", .{ err, parser.current.line, parser.current.col });
+        if (parser.diagnostic) |d| {
+            std.debug.print("Parse error at line {d}, col {d}: {s}\n{d}| {s}\n", .{ d.line, d.col, d.message, d.line, errors.lineAt(source, d.line) });
+        } else {
+            std.debug.print("Parse error: {} at line {}, col {}\n", .{ err, parser.current.line, parser.current.col });
+        }
         std.process.exit(1);
     };
 
@@ -735,7 +739,7 @@ fn preloadSource(
 ) error{PreloadFailed}!void {
     var parser = Parser.init(arena, source);
     const nodes = parser.parseFilePublic() catch {
-        errors.parseError(source).formatPlain(writer);
+        errors.parseErrorFor(source, parser.diagnostic).formatPlain(writer);
         writer.flush() catch {};
         return error.PreloadFailed;
     };
@@ -901,7 +905,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
         if (is_multiline) {
             var parser = Parser.init(arena.allocator(), source);
             const nodes = parser.parseFilePublic() catch {
-                const parse_err = @import("errors.zig").parseError(source);
+                const parse_err = @import("errors.zig").parseErrorFor(source, parser.diagnostic);
                 parse_err.formatPlain(&stdout_writer.interface);
                 stdout_writer.interface.flush() catch {};
                 continue;
@@ -935,7 +939,7 @@ fn replPlain(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]c
         } else {
             var parser = Parser.init(arena.allocator(), source);
             const node = parser.parseStatementPublic() catch {
-                const parse_err = @import("errors.zig").parseError(source);
+                const parse_err = @import("errors.zig").parseErrorFor(source, parser.diagnostic);
                 parse_err.formatPlain(&stdout_writer.interface);
                 stdout_writer.interface.flush() catch {};
                 continue;
@@ -1151,7 +1155,12 @@ fn runTestDir(gpa: std.mem.Allocator, dir_path: []const u8) void {
 
         var parser = Parser.init(arena.allocator(), source);
         const nodes = parser.parseFile() catch {
-            stderr.writeStreamingAll(ioenv.io, "  \x1b[31mparse error\x1b[0m\n") catch {};
+            stderr.writeStreamingAll(ioenv.io, "  \x1b[31mparse error\x1b[0m") catch {};
+            if (parser.diagnostic) |d| {
+                const why = std.fmt.allocPrint(arena.allocator(), " at line {d}, col {d}: {s}", .{ d.line, d.col, d.message }) catch "";
+                stderr.writeStreamingAll(ioenv.io, why) catch {};
+            }
+            stderr.writeStreamingAll(ioenv.io, "\n") catch {};
             any_failed = true;
             continue;
         };
@@ -1280,7 +1289,7 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const 
         if (is_multiline) {
             var parser = Parser.init(arena.allocator(), source);
             const nodes = parser.parseFilePublic() catch {
-                const pe = @import("errors.zig").parseError(source);
+                const pe = @import("errors.zig").parseErrorFor(source, parser.diagnostic);
                 const err_text = formatBlimpError(pe, arena.allocator());
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
                 drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
@@ -1315,7 +1324,7 @@ fn repl(allocator: std.mem.Allocator, heap_limit: *HeapLimit, preload: ?[]const 
         } else {
             var parser = Parser.init(arena.allocator(), source);
             const node = parser.parseStatementPublic() catch {
-                const pe = @import("errors.zig").parseError(source);
+                const pe = @import("errors.zig").parseErrorFor(source, parser.diagnostic);
                 const err_text = formatBlimpError(pe, arena.allocator());
                 history.append(arena.allocator(), .{ .kind = .err, .text = err_text }) catch {};
                 drawScreen(stdout, &history, &evaluator, &draw_arena, total_rows, left_cols, right_cols);
@@ -1917,7 +1926,7 @@ fn controlEval(src: []const u8, code: std.mem.Allocator, evaluator: *Evaluator, 
     }
     var parser = Parser.init(code, src);
     const nodes = parser.parseFilePublic() catch {
-        errors.parseError(src).formatPlain(w);
+        errors.parseErrorFor(src, parser.diagnostic).formatPlain(w);
         return;
     };
     const saved = evaluator.source;
