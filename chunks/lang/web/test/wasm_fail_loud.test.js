@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 
 const Blimp = require('../blimp.js');
-const WASM = fs.readFileSync(path.join(__dirname, '..', 'blimp.wasm'));
+const WASM = fs.readFileSync(process.env.BLIMP_WASM || path.join(__dirname, '..', 'blimp.wasm'));
 const load = () => new Blimp().init(WASM);
 
 // Blimp source for a string holding every byte 0x01..0x1f, and what it is.

@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 
 const Blimp = require('../blimp.js');
-const WASM = fs.readFileSync(path.join(__dirname, '..', 'blimp.wasm'));
+const WASM = fs.readFileSync(process.env.BLIMP_WASM || path.join(__dirname, '..', 'blimp.wasm'));
 
 // A game in the shape Temper compiles to: every point is an actor, every
 // tick makes new ones and lets the old ones go, a restart throws away the
