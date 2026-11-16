@@ -1,4 +1,5 @@
-/// Tests for token.zig - run with: zig test src/token_test.zig -target x86_64-macos
+/// Tests for token.zig
+/// Run by `zig build test`, through the import in lib.zig's test block.
 const std = @import("std");
 const Token = @import("token.zig").Token;
 

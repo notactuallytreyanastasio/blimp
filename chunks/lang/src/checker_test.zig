@@ -1,4 +1,5 @@
-/// Tests for checker.zig - run with: zig test src/checker_test.zig --main-mod-path src
+/// Tests for checker.zig
+/// Run by `zig build test`, through the import in lib.zig's test block.
 const std = @import("std");
 const checker_mod = @import("checker.zig");
 const Checker = checker_mod.Checker;

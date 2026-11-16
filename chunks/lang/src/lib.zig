@@ -26,6 +26,10 @@ test {
     // Pull in tests from all modules
     @import("std").testing.refAllDecls(@This());
     _ = @import("memory_test.zig");
+    _ = @import("token_test.zig");
+    _ = @import("parser_test.zig");
+    _ = @import("checker_test.zig");
+    _ = @import("errors_test.zig");
     _ = @import("websocket.zig");
     _ = @import("unicode_builtins.zig");
     _ = @import("native_ext.zig");

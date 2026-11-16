@@ -1,7 +1,5 @@
-/// Tests for errors.zig - run with: zig test src/errors_test.zig -target x86_64-macos
-///
-/// Note: unknownFunction and noMatchingHandler use the pre-0.14 ArrayList API
-/// and cannot be tested until the source is updated. All other functions are tested here.
+/// Tests for errors.zig. unknownFunction and noMatchingHandler are not covered.
+/// Run by `zig build test`, through the import in lib.zig's test block.
 const std = @import("std");
 const errors = @import("errors.zig");
 const BlimpError = errors.BlimpError;
@@ -12,72 +10,72 @@ const BlimpError = errors.BlimpError;
 
 test "formatPlain includes title" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "TYPE MISMATCH",
         .message = "Types don't match.",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "TYPE MISMATCH") != null);
 }
 
 test "formatPlain includes message" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "SOME ERROR",
         .message = "Something went wrong here.",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "Something went wrong here.") != null);
 }
 
 test "formatPlain includes source line" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "PARSE ERROR",
         .source_line = "x = 1 + \"hello\"",
         .message = "Types don't match.",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "x = 1 + \"hello\"") != null);
 }
 
 test "formatPlain includes line number" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "ERROR",
         .source_line = "foo",
         .line = 5,
         .message = "msg",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "5|") != null);
 }
 
 test "formatPlain single caret when no col_end" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "ERROR",
         .source_line = "foo bar",
         .col = 0,
         .message = "msg",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "^") != null);
 }
 
 test "formatPlain region underline with col_end" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "ERROR",
         .source_line = "foo bar baz",
@@ -85,60 +83,60 @@ test "formatPlain region underline with col_end" {
         .col_end = 3,
         .message = "msg",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "^^^") != null);
 }
 
 test "formatPlain includes hint" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "ERROR",
         .message = "msg",
         .hint = "Try using `def` instead.",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "Hint:") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Try using `def` instead.") != null);
 }
 
 test "formatPlain includes post_message" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "ERROR",
         .message = "pre",
         .post_message = "Did you mean `foo`?",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "Did you mean `foo`?") != null);
 }
 
 test "formatPlain no source line omits gutter" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "ERROR",
         .message = "no source",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     // No | character from a line number gutter
     try std.testing.expect(std.mem.indexOf(u8, out, "|") == null);
 }
 
 test "formatPlain title separator dashes are present" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     const err = BlimpError{
         .title = "X",
         .message = "m",
     };
-    err.formatPlain(stream.writer());
-    const out = stream.getWritten();
+    err.formatPlain(&stream);
+    const out = stream.buffered();
     // Should have at least 5 dashes after title
     try std.testing.expect(std.mem.indexOf(u8, out, "-----") != null);
 }

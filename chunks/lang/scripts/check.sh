@@ -62,6 +62,20 @@ regression_spawn_in_send_arg() {
     [ "$out" = "1" ] || { echo "expected 1, got: $out"; return 1; }
 }
 
+# A *_test.zig nothing imports compiles to nothing and fails nothing: four of
+# them (134 tests) sat outside `zig build test` from March to November.
+zig_test_files_imported() {
+    local f rc=0
+    for f in src/*_test.zig; do
+        grep -q "@import(\"$(basename "$f")\")" src/lib.zig || {
+            echo "$f is not imported by src/lib.zig, so zig build test never runs it"
+            rc=1
+        }
+    done
+    return $rc
+}
+
+suite "every src/*_test.zig is imported" zig_test_files_imported
 suite "zig build test" "$ZIG" build test --summary all
 suite "blimp test test" "$BLIMP" test test
 suite "blimp test lib" "$BLIMP" test lib

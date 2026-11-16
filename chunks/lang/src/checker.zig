@@ -45,7 +45,7 @@ pub const ActorInfo = struct {
     state_fields: std.ArrayList(StateField),
     handlers: std.ArrayList(HandlerEntry),
 
-    fn init() ActorInfo {
+    pub fn init() ActorInfo {
         return .{
             .state_fields = .{ .items = &.{}, .capacity = 0 },
             .handlers = .{ .items = &.{}, .capacity = 0 },
