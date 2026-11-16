@@ -1,0 +1,13 @@
+actor V do
+  state n: Int :: 0
+  on :ping do
+    reply 1
+  end
+end
+v = spawn V
+r = try do
+  v <- :pong
+catch e do
+  e
+end
+r

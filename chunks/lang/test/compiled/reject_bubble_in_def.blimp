@@ -1,0 +1,7 @@
+def check(x: Int) do
+  situation x do
+    1 -> 5
+    _ -> bubble :nope
+  end
+end
+check(2)

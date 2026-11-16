@@ -1,0 +1,19 @@
+actor Inner do
+  state n: Int :: 0
+  on :go(x: Int) do
+    situation x do
+      1 -> reply 10
+      _ -> bubble :inner_failed
+    end
+  end
+end
+actor Outer do
+  state n: Int :: 0
+  on :run(who: Inner, x: Int) do
+    got = who <- :go(x)
+    reply got + 1
+  end
+end
+i = spawn Inner
+o = spawn Outer
+o <- :run(i, 0)

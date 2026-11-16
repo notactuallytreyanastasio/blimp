@@ -1,0 +1,11 @@
+actor Bank do
+  state name: Int :: 0
+end
+actor Bank.Account do
+  state balance: Int :: 0
+  on :overdraft bubbles(CascadeBubble) do
+    bubble :insufficient_funds
+  end
+end
+a = spawn Bank.Account
+a <- :overdraft orelse 0

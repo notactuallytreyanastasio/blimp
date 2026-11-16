@@ -1,0 +1,8 @@
+actor V do
+  state n: Int :: 0
+  on :div(x: Int) do
+    reply 10 / x
+  end
+end
+v = spawn V
+v <- :div(0) orelse 7

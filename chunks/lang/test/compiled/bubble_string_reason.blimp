@@ -1,0 +1,8 @@
+actor V do
+  state n: Int :: 0
+  on :go do
+    bubble "went wrong"
+  end
+end
+v = spawn V
+v <- :go

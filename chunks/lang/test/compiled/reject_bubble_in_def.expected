@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  `bubble` inside `def check` cannot be compiled: a def returns a bare value, so the reason would have nowhere to go.
+
+4|     _ -> bubble :nope
+             ^
+
+  Hint: Move the bubble into an actor handler, or run this file with the interpreter.
+
+1 construct cannot be compiled.

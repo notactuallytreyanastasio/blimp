@@ -1,0 +1,17 @@
+--- stdout
+--- stderr
+
+-- NO MATCHING HANDLER ───────────────────────────
+
+  I tried to send :pong to this actor, but it doesn't know how to handle it.
+
+8| v <- :pong
+     ^
+
+  Hint: Actor `V` has no handler for `:pong`.
+
+Define a handler with:
+      on :pong do ... end
+
+
+--- exit 1
