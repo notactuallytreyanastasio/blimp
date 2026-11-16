@@ -69,8 +69,7 @@ pub const Parser = struct {
         return switch (self.current.kind) {
             .kw_actor => self.parseActorDef(),
             .kw_def => self.parseDefStmt(),
-            .kw_situation => self.parseSituation(),
-            .kw_case => self.parseCase(),
+            // case and situation are primaries: `case ... end + 1` is one expression.
             else => self.parseExpressionStatement(),
         };
     }
@@ -196,11 +195,6 @@ pub const Parser = struct {
             .kw_become => self.parseBecomeStmt(),
             .kw_reply => self.parseReplyStmt(),
             .kw_bubble => self.parseBubbleStmt(),
-            .kw_situation => self.parseSituation(),
-            .kw_case => self.parseCase(),
-            .identifier, .upper_identifier => {
-                return self.parseExpressionStatement();
-            },
             else => self.parseExpressionStatement(),
         };
     }
@@ -437,7 +431,18 @@ pub const Parser = struct {
     /// the line, so a body line holding the string "-->" or a lambda
     /// `fn(v: Int) -> Int do ... end` was taken for the next branch and the
     /// parse failed on it.
+    ///
+    /// A line that starts with a block form is a body line, never a pattern,
+    /// and is answered without the trial parse. The trial would parse the
+    /// whole block, including its own branches' trial parses, so a `case` or
+    /// `for` at the start of a body line nested d deep cost 2^d parses: with
+    /// `for` that was already 0.19s at depth 18, and once `case` became a
+    /// primary every nested `case` would have paid it too.
     fn looksLikeBranch(self: *Parser) bool {
+        switch (self.current.kind) {
+            .kw_case, .kw_situation, .kw_for, .kw_fn, .kw_try => return false,
+            else => {},
+        }
         const saved_lexer = self.lexer;
         const saved_current = self.current;
         const saved_diagnostic = self.diagnostic;
@@ -651,16 +656,10 @@ pub const Parser = struct {
     fn parseExpressionStatement(self: *Parser) ParseError!Node {
         const expr = try self.parseExpression();
         // Check for assignment: identifier = expression
-        // Also allows: identifier = case/situation ... end  (block expressions)
         if (self.current.kind == .eq) {
             if (expr.kind == .identifier) {
                 self.advance();
-                // Allow case/situation on the RHS of an assignment
-                const value = switch (self.current.kind) {
-                    .kw_case => try self.parseCase(),
-                    .kw_situation => try self.parseSituation(),
-                    else => try self.parseExpression(),
-                };
+                const value = try self.parseExpression();
                 const value_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
                 value_ptr.* = value;
                 return Node{
@@ -1078,6 +1077,8 @@ pub const Parser = struct {
             },
             .kw_spawn => return self.parseSpawnExpr(),
             .kw_fn => return self.parseFnExpr(),
+            .kw_case => return self.parseCase(),
+            .kw_situation => return self.parseSituation(),
             .kw_try => return self.parseTryCatch(),
             .kw_for => return self.parseForExpr(),
             .kw_self => {
@@ -2528,6 +2529,178 @@ test "parse case with multiple body statements" {
 
     // Second branch has 1 statement
     try std.testing.expectEqual(@as(usize, 1), case_node.branches[1].body.len);
+}
+
+// ------------------------------------------------------------
+// case and situation are expressions wherever an expression is allowed.
+// They used to be legal only as a statement or an assignment's RHS, and
+// `reply case ...`, `f(case ...)`, `[case ...]`, `case ... end + 1` were
+// all error.UnexpectedToken.
+// ------------------------------------------------------------
+
+fn parseOnly(arena: *std.heap.ArenaAllocator, src: []const u8) !Node {
+    var p = Parser.init(arena.allocator(), src);
+    const nodes = try p.parseFile();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    return nodes[0];
+}
+
+fn expectTag(expected: std.meta.Tag(Node.Kind), node: Node) !void {
+    try std.testing.expectEqual(expected, std.meta.activeTag(node.kind));
+}
+
+test "case is an expression: reply operand" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const n = try parseOnly(&arena,
+        \\actor A do
+        \\  on :m do
+        \\    reply case x do
+        \\      1 -> 10
+        \\      _ -> 20
+        \\    end
+        \\  end
+        \\end
+    );
+    const reply = n.kind.actor_def.body[0].kind.message_handler.body[0].kind.reply_stmt;
+    try expectTag(.case_expr, reply.value.*);
+    try std.testing.expectEqual(@as(usize, 2), reply.value.kind.case_expr.branches.len);
+}
+
+test "case is an expression: become field value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const n = try parseOnly(&arena,
+        \\actor A do
+        \\  on :m do
+        \\    become v: case x do 1 -> 10 _ -> 20 end, w: 2
+        \\  end
+        \\end
+    );
+    const become = n.kind.actor_def.body[0].kind.message_handler.body[0].kind.become_stmt;
+    try std.testing.expectEqual(@as(usize, 2), become.fields.len);
+    try expectTag(.case_expr, become.fields[0].value);
+    try expectTag(.integer_lit, become.fields[1].value);
+}
+
+test "case is an expression: call argument, send argument, list and tuple element" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const call = try parseOnly(&arena, "f(case x do 1 -> 10 _ -> 20 end, 3)");
+    try std.testing.expectEqual(@as(usize, 2), call.kind.func_call.args.len);
+    try expectTag(.case_expr, call.kind.func_call.args[0]);
+
+    const send = try parseOnly(&arena, "a <- :m(case x do _ -> 1 end)");
+    try expectTag(.case_expr, send.kind.message_send.args[0]);
+
+    const list = try parseOnly(&arena,
+        \\[0, case x do
+        \\  1 -> 10
+        \\  _ -> 20
+        \\end, 2]
+    );
+    try std.testing.expectEqual(@as(usize, 3), list.kind.list_lit.elements.len);
+    try expectTag(.case_expr, list.kind.list_lit.elements[1]);
+
+    const tuple = try parseOnly(&arena, "{0, case x do _ -> 1 end}");
+    try expectTag(.case_expr, tuple.kind.tuple_lit.elements[1]);
+}
+
+test "situation is an expression: map value and call argument" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const map = try parseOnly(&arena, "%{k: situation x do 1 -> 10 _ -> 20 end}");
+    try expectTag(.situation, map.kind.map_lit.entries[0].value);
+
+    const call = try parseOnly(&arena,
+        \\print(situation x do
+        \\  1 -> 10
+        \\  _ -> 20
+        \\end)
+    );
+    try expectTag(.situation, call.kind.func_call.args[0]);
+}
+
+test "case is an expression: operand on either side of a binary operator" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // At statement level the `+ 1` after `end` belongs to the expression.
+    const left = try parseOnly(&arena, "case x do 1 -> 10 _ -> 20 end + 1");
+    try std.testing.expectEqual(Node.BinaryOp.Op.add, left.kind.binary_op.op);
+    try expectTag(.case_expr, left.kind.binary_op.left.*);
+
+    const right = try parseOnly(&arena, "1 == case x do 1 -> 10 _ -> 20 end");
+    try std.testing.expectEqual(Node.BinaryOp.Op.eq, right.kind.binary_op.op);
+    try expectTag(.case_expr, right.kind.binary_op.right.*);
+
+    const pipe = try parseOnly(&arena, "case x do _ -> 1 end |> f(_)");
+    try expectTag(.case_expr, pipe.kind.pipe_expr.left.*);
+
+    const orelse_ = try parseOnly(&arena, "nil orelse case x do _ -> 1 end");
+    try expectTag(.case_expr, orelse_.kind.orelse_expr.fallback.*);
+}
+
+test "case is an expression: assignment RHS keeps what follows end" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Before, the RHS special case returned at `end` and `+ 1` was a parse error.
+    const n = try parseOnly(&arena, "y = case x do 1 -> 10 _ -> 20 end + 1");
+    const v = n.kind.assign_stmt.value.*;
+    try std.testing.expectEqual(Node.BinaryOp.Op.add, v.kind.binary_op.op);
+    try expectTag(.case_expr, v.kind.binary_op.left.*);
+}
+
+test "case is an expression: case scrutinee" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const n = try parseOnly(&arena,
+        \\case case x do _ -> 10 end do
+        \\  10 -> :ten
+        \\  _ -> :other
+        \\end
+    );
+    try expectTag(.case_expr, n.kind.case_expr.subject.*);
+    try std.testing.expectEqual(@as(usize, 2), n.kind.case_expr.branches.len);
+}
+
+test "a case that starts a branch body line is that branch's body, not the next branch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const n = try parseOnly(&arena,
+        \\case a do
+        \\  1 ->
+        \\    case b do
+        \\      2 -> :x
+        \\      _ -> :y
+        \\    end
+        \\  _ -> :z
+        \\end
+    );
+    const outer = n.kind.case_expr;
+    try std.testing.expectEqual(@as(usize, 2), outer.branches.len);
+    try std.testing.expectEqual(@as(usize, 1), outer.branches[0].body.len);
+    try expectTag(.case_expr, outer.branches[0].body[0]);
+}
+
+test "nested cases at the start of body lines parse in linear time" {
+    // Each body line is tried as a branch pattern first (looksLikeBranch).
+    // With case a primary, that trial parses the whole nested case, whose
+    // own body lines do the same: 2^depth. 40 levels would not finish.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const depth = 40;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const a = arena.allocator();
+    for (0..depth) |_| try buf.appendSlice(a, "case x do\n_ ->\n");
+    try buf.appendSlice(a, "1\n");
+    for (0..depth) |_| try buf.appendSlice(a, "end\n");
+    const n = try parseOnly(&arena, buf.items);
+    var cur = n;
+    var seen: usize = 0;
+    while (std.meta.activeTag(cur.kind) == .case_expr) : (seen += 1) {
+        cur = cur.kind.case_expr.branches[0].body[0];
+    }
+    try std.testing.expectEqual(@as(usize, depth), seen);
 }
 
 test "parse dot-notation actor name" {

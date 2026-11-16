@@ -1,0 +1,162 @@
+# case and situation are expressions wherever an expression is allowed.
+# Run: ./blimp test/case_anywhere_test.blimp --test
+#
+# Until this file existed, every test below except the assignment and
+# statement ones was `Parse error: error.UnexpectedToken`, and the way round
+# it was to bind each case to a temporary first.
+
+def id(x: Any) -> Any do
+  x
+end
+
+def pick(n: Int) -> Atom do
+  case n do
+    1 -> :one
+    _ -> :other
+  end
+end
+
+actor CaseHolder do
+  state v: Any :: 0
+
+  on :reply_case(n: Int) do
+    reply case n do
+      1 -> :one
+      _ -> :other
+    end
+  end
+
+  on :reply_situation(n: Int) do
+    reply situation n do 1 -> :one _ -> :other end
+  end
+
+  on :become_case(n: Int) do
+    become v: case n do 1 -> :one _ -> :other end
+    reply :ok
+  end
+
+  on :get do
+    reply v
+  end
+
+  on :echo(x: Any) do
+    reply x
+  end
+
+  on :last_case(n: Int) do
+    case n do
+      1 -> 10
+      _ -> 20
+    end + 1
+  end
+end
+
+actor CaseAnywhereTests do
+  test "assignment RHS still works" do
+    x = case 1 do 1 -> :one _ -> :other end
+    assert_eq(x, :one)
+  end
+
+  test "assignment RHS keeps the operator after end" do
+    x = case 1 do 1 -> 10 _ -> 20 end + 1
+    assert_eq(x, 11)
+  end
+
+  test "reply operand: case" do
+    a = spawn CaseHolder
+    assert_eq(a <- :reply_case(1), :one)
+    assert_eq(a <- :reply_case(2), :other)
+  end
+
+  test "reply operand: situation" do
+    a = spawn CaseHolder
+    assert_eq(a <- :reply_situation(1), :one)
+    assert_eq(a <- :reply_situation(5), :other)
+  end
+
+  test "become field value" do
+    a = spawn CaseHolder
+    a <- :become_case(2)
+    assert_eq(a <- :get, :other)
+  end
+
+  test "call argument" do
+    assert_eq(id(case 2 do 1 -> :one _ -> :other end), :other)
+    assert_eq(case 1 do 1 -> :one _ -> :other end, :one)
+  end
+
+  test "call argument spanning lines" do
+    r = id(case 1 do
+      1 -> :one
+      _ -> :other
+    end)
+    assert_eq(r, :one)
+  end
+
+  test "message send argument" do
+    a = spawn CaseHolder
+    assert_eq(a <- :echo(situation 1 do 1 -> :one _ -> :other end), :one)
+  end
+
+  test "list, tuple and map elements" do
+    assert_eq([0, case 1 do 1 -> 10 _ -> 20 end, 2], [0, 10, 2])
+    assert_eq(elem({0, case 2 do 1 -> 10 _ -> 20 end}, 1), 20)
+    assert_eq(lookup(%{k: situation 1 do 1 -> 10 _ -> 20 end}, :k), 10)
+  end
+
+  test "binary operator, left and right" do
+    assert_eq(case 1 do 1 -> 10 _ -> 20 end + 1, 11)
+    assert_eq(1 + case 2 do 1 -> 10 _ -> 20 end, 21)
+    assert(case 1 do 1 -> 10 _ -> 20 end == 10)
+  end
+
+  test "the right operand is the whole case, not its first branch" do
+    # `1 + case ... end * 2` is 1 + (case * 2): the case binds as a primary.
+    assert_eq(1 + case 1 do 1 -> 10 _ -> 20 end * 2, 21)
+  end
+
+  test "pipe source and orelse operand" do
+    assert_eq(case 1 do 1 -> 10 _ -> 20 end |> id(_), 10)
+    assert_eq(nil orelse case 1 do 1 -> 10 _ -> 20 end, 10)
+  end
+
+  test "case scrutinee" do
+    r = case case 1 do 1 -> 10 _ -> 20 end do
+      10 -> :ten
+      _ -> :other
+    end
+    assert_eq(r, :ten)
+  end
+
+  test "nested case starting a branch body" do
+    r = case 1 do
+      1 ->
+        case 2 do
+          2 -> :inner
+          _ -> :no
+        end
+      _ -> :outer
+    end
+    assert_eq(r, :inner)
+  end
+
+  test "handler last expression with an operator after end" do
+    a = spawn CaseHolder
+    assert_eq(a <- :last_case(1), 11)
+  end
+
+  test "def last expression" do
+    assert_eq(pick(1), :one)
+    assert_eq(pick(3), :other)
+  end
+
+  test "multi-statement branch body inside a call argument" do
+    r = id(case 1 do
+      1 ->
+        t = 41
+        t + 1
+      _ -> 0
+    end)
+    assert_eq(r, 42)
+  end
+end
