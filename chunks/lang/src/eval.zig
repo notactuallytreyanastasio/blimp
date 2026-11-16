@@ -608,6 +608,18 @@ pub const Evaluator = struct {
         });
     }
 
+    /// An actor body node evalActorDef will not run, refused where it stands.
+    fn refuseInActorBody(self: *Evaluator, loc: ast.Loc, message: []const u8) EvalError {
+        self.last_error = .{
+            .title = "NOT SUPPORTED",
+            .source_line = errors.lineAt(self.source, loc.line),
+            .line = loc.line,
+            .col = loc.col,
+            .message = message,
+        };
+        return error.NotSupported;
+    }
+
     noinline fn evalActorDef(self: *Evaluator, def: *const ast.Node.ActorDef) EvalError!*const Value {
         // Collect state fields and handlers from the body
         var state_fields_list = std.ArrayList(Value.MapEntry).empty;
@@ -635,9 +647,21 @@ pub const Evaluator = struct {
                         .bubble_strategy = mh.bubble_strategy,
                     }) catch return error.OutOfMemory;
                 },
-                else => {
-                    // Ignore other body nodes (e.g. nested actors, not yet supported)
-                },
+                // Not run here: `blimp test` collects them from the
+                // actor body (runTests, runPropertyTests).
+                .test_def, .property_def => {},
+                .actor_def => |inner| return self.refuseInActorBody(body_node.loc, std.fmt.allocPrint(
+                    self.allocator,
+                    "nested actor `{s}` inside `{s}` at line {d} is not supported; define it at top level as `actor {s}.{s} do ... end`",
+                    .{ inner.name, def.name, body_node.loc.line, def.name, inner.name },
+                ) catch return error.OutOfMemory),
+                // The parser lets nothing else into an actor body; a node
+                // that gets here came from elsewhere and is not dropped.
+                else => return self.refuseInActorBody(body_node.loc, std.fmt.allocPrint(
+                    self.allocator,
+                    "`{s}` at line {d} is not allowed in the body of actor `{s}`; an actor body holds only `state`, `on`, `test` and `property`",
+                    .{ @tagName(body_node.kind), body_node.loc.line, def.name },
+                ) catch return error.OutOfMemory),
             }
         }
 
@@ -4688,4 +4712,33 @@ test "a call site cached as a builtin defers to a local of that name bound after
     const want = [_]i64{ 2, 99, 77, 55, 2, 3 };
     try std.testing.expectEqual(want.len, got.list.len);
     for (want, got.list) |w, v| try std.testing.expectEqual(w, v.integer);
+}
+
+// The parser refuses an actor inside an actor, so this AST is built by hand:
+// it is what any other front end (or a later, looser parser) could hand the
+// evaluator.  evalActorDef used to skip it with `else => {}`, so Shop was
+// registered and Checkout never existed, with nothing said.
+test "an actor_def inside an actor body is refused, not skipped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source = "actor Shop do\nend\nactor Checkout do\nend\n";
+    var parser = Parser.init(alloc, source);
+    const parsed = try parser.parseFile();
+    var inner = parsed[1];
+    inner.loc = .{ .line = 2, .col = 3 };
+    const body = try alloc.alloc(ast.Node, 1);
+    body[0] = inner;
+    var outer = parsed[0];
+    outer.kind.actor_def.body = body;
+
+    var evaluator = Evaluator.init(alloc);
+    evaluator.setSource(source);
+    try std.testing.expectError(error.NotSupported, evaluator.eval(&outer));
+    const err = evaluator.last_error orelse return error.TestExpectedError;
+    try std.testing.expectEqualStrings(
+        "nested actor `Checkout` inside `Shop` at line 2 is not supported; define it at top level as `actor Shop.Checkout do ... end`",
+        err.message,
+    );
+    try std.testing.expectEqual(@as(u32, 2), err.line.?);
 }

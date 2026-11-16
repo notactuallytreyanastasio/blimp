@@ -275,6 +275,13 @@ pub const Checker = struct {
         self.current_actor = actor.name;
         self.env.pushScope();
         for (actor.body) |stmt| {
+            // checkNode would check an inner actor as if it stood at top
+            // level, though registerActor never registered it.
+            if (stmt.kind == .actor_def) {
+                const inner = stmt.kind.actor_def.name;
+                self.addError(stmt.loc, "nested actor `{s}` inside `{s}` at line {d} is not supported; define it at top level as `actor {s}.{s} do ... end`", .{ inner, actor.name, stmt.loc.line, actor.name, inner });
+                continue;
+            }
             self.checkNode(stmt);
         }
         self.env.popScope();
@@ -1886,4 +1893,31 @@ test "cross-actor wrong type at send site" {
     , &arena);
     try std.testing.expectEqual(@as(usize, 1), result.errors.len);
     try std.testing.expect(std.mem.indexOf(u8, result.errors[0].message, "expected String, got Int") != null);
+}
+
+// The parser refuses an actor inside an actor, so the AST is built by hand.
+// checkActorDef used to hand the inner actor_def to checkNode, which checked
+// it as if it stood at top level, while registerActor skipped it: its
+// handlers were type-checked against a registry that never heard of it.
+test "an actor_def inside an actor body is a checker error, not a second top-level actor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var parser = @import("parser.zig").Parser.init(alloc, "actor Shop do\nend\nactor Checkout do\nend\n");
+    const parsed = try parser.parseFile();
+    var inner = parsed[1];
+    inner.loc = .{ .line = 2, .col = 3 };
+    const body = try alloc.alloc(Node, 1);
+    body[0] = inner;
+    var outer = parsed[0];
+    outer.kind.actor_def.body = body;
+
+    var checker = Checker.init(alloc);
+    const result = checker.checkFile(&.{outer});
+    try std.testing.expectEqual(@as(usize, 1), result.errors.len);
+    try std.testing.expectEqual(@as(u32, 2), result.errors[0].loc.line);
+    try std.testing.expectEqualStrings(
+        "nested actor `Checkout` inside `Shop` at line 2 is not supported; define it at top level as `actor Shop.Checkout do ... end`",
+        result.errors[0].message,
+    );
 }
