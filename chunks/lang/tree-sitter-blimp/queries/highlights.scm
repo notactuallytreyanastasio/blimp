@@ -40,7 +40,8 @@
 
 ; Parameters
 (parameter_list
-  (identifier) @variable.parameter)
+  (handler_param
+    (identifier) @variable.parameter))
 
 ; Key in key-value pairs
 (key_value_pair

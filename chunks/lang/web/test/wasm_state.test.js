@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 async function load() {
-  const bytes = fs.readFileSync(path.join(__dirname, '..', 'blimp.wasm'));
+  const bytes = fs.readFileSync(process.env.BLIMP_WASM || path.join(__dirname, '..', 'blimp.wasm'));
   let mem;
   const rs = (p, l) => new TextDecoder().decode(new Uint8Array(mem.buffer, p, l));
   const { instance } = await WebAssembly.instantiate(bytes, { env: { blimp_js_print: () => {}, blimp_js_error: () => {} } });

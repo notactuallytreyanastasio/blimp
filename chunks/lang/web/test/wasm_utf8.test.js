@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 const Blimp = require('../blimp.js');
-const WASM = fs.readFileSync(path.join(__dirname, '..', 'blimp.wasm'));
+const WASM = fs.readFileSync(process.env.BLIMP_WASM || path.join(__dirname, '..', 'blimp.wasm'));
 const load = () => new Blimp().init(WASM);
 
 test('length counts bytes, utf8_length code points, grapheme_length what a reader sees', async () => {

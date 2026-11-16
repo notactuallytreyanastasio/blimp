@@ -1,4 +1,5 @@
 # Bootstrap tests: Blimp compiling Blimp
+# prelude: lexer.blimp parser.blimp eval.blimp
 
 actor BootstrapTests do
   test "integer" do assert_eq(blimp_self_eval("42"), 42) end

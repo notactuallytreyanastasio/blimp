@@ -41,7 +41,8 @@ end
       (assignment
         (identifier)
         (spawn_expression
-          (upper_identifier)))
+          (spawn_target
+            (upper_identifier))))
       (reply_statement
         (identifier)))))
 
@@ -67,7 +68,8 @@ end
       (assignment
         (identifier)
         (spawn_expression
-          (upper_identifier)
+          (spawn_target
+            (upper_identifier))
           (key_value_list
             (key_value_pair
               (identifier)

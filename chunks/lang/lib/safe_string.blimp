@@ -365,8 +365,27 @@ end
 
 def safe_sql(parts: List) -> Map do
   builder = spawn SafeSqlBuilder
-  build_safe_html(builder, parts, 0)
+  build_safe_sql(builder, parts, 0)
   builder <- :to_safe_sql
+end
+
+# Not build_safe_html: its accumulator is typed SafeHtmlAccumulator, so a
+# SafeSqlBuilder handed to it is a type mismatch at the first call, and it
+# would to_string every unsafe value, turning a parameter's 42 into "42".
+def build_safe_sql(builder: SafeSqlBuilder, parts: List, idx: Int) -> Any do
+  case idx >= length(parts) do
+    true -> :ok
+    _ ->
+      part = elem(parts, idx)
+      part_type = lookup(part, "type")
+      value = lookup(part, "value")
+      case part_type do
+        :fixed -> builder <- :append_fixed(value)
+        :unsafe -> builder <- :append_unsafe(value)
+        _ -> :ok
+      end
+      build_safe_sql(builder, parts, idx + 1)
+  end
 end
 
 # ── Convenience: compose safe HTML from a template ───

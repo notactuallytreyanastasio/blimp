@@ -1,4 +1,5 @@
 # Tests for the Blimp stdlib -- verify Blimp implementations
+# prelude: stdlib.blimp
 # match the Zig builtin behavior
 
 actor StdlibLogicTests do

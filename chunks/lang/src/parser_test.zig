@@ -1,11 +1,5 @@
 /// Tests for parser.zig
-///
-/// NOTE: parser.zig currently uses the pre-Zig-0.14 ArrayListUnmanaged API
-/// (std.ArrayList with .empty init and allocator passed to append). These
-/// tests are correct and ready to run once parser.zig is updated to Zig 0.14
-/// ArrayListUnmanaged syntax.
-///
-/// Run with: zig test src/parser_test.zig -target x86_64-macos
+/// Run by `zig build test`, through the import in lib.zig's test block.
 const std = @import("std");
 const Parser = @import("parser.zig").Parser;
 const ast = @import("ast.zig");
@@ -42,7 +36,10 @@ test "parse string literal" {
     const nodes = try p.parseFile();
     try std.testing.expectEqual(@as(usize, 1), nodes.len);
     try std.testing.expectEqual(Node.Kind.string_lit, std.meta.activeTag(nodes[0].kind));
-    try std.testing.expectEqualStrings("hello", nodes[0].kind.string_lit.value);
+    // `value` is the lexeme, quotes and all (the lexer keeps them; see
+    // literal.stripQuotes). The string the program sees is the prebuilt one.
+    try std.testing.expectEqualStrings("\"hello\"", nodes[0].kind.string_lit.value);
+    try std.testing.expectEqualStrings("hello", nodes[0].kind.string_lit.prebuilt.?.string);
 }
 
 test "parse atom literal" {

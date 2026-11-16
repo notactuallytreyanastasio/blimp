@@ -7,7 +7,7 @@ const path = require('path');
 
 const Blimp = require('../blimp.js');
 const BlimpView = require('../blimp-view.js');
-const WASM = fs.readFileSync(path.join(__dirname, '..', 'blimp.wasm'));
+const WASM = fs.readFileSync(process.env.BLIMP_WASM || path.join(__dirname, '..', 'blimp.wasm'));
 const TETRIS = fs.readFileSync(path.join(__dirname, '..', '..', 'examples', 'tetris.blimp'), 'utf8');
 
 // Just enough DOM for BlimpView to render into, patch, and count.

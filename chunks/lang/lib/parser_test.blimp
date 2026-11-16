@@ -1,4 +1,5 @@
 # Comprehensive parser tests
+# prelude: lexer.blimp parser.blimp
 
 def parse(src: String) -> Map do
   l = spawn Lexer
