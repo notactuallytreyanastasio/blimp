@@ -67,7 +67,10 @@ regression_spawn_in_send_arg() {
 zig_test_files_imported() {
     local f rc=0
     for f in src/*_test.zig; do
-        grep -q "@import(\"$(basename "$f")\")" src/lib.zig || {
+        # Nothing but indentation and `_ = ` may come before the import: a
+        # plain grep for the import's text is satisfied by the line
+        # commented out, which is the usual way a test file stops running.
+        grep -Eq "^[[:space:]]*(_[[:space:]]*=[[:space:]]*)?@import\\(\"$(basename "$f")\"\\)" src/lib.zig || {
             echo "$f is not imported by src/lib.zig, so zig build test never runs it"
             rc=1
         }
