@@ -1734,11 +1734,14 @@ actor SystemTests do
   end
 
   # -- argv --
+  # This file runs as `blimp lib/builtin_test.blimp --test` and as part of
+  # `blimp test lib`; argv is the real argv either way, so the test takes both.
   test "argv is the process's arguments as strings" do
     args = argv()
     assert(length(args) >= 3)
-    assert(contains(elem(args, 1), "builtin_test.blimp"))
-    assert_eq(elem(args, 2), "--test")
+    assert_eq(length(filter(args, fn(a: Any) do type_of(a) == :string end)), length(args))
+    assert(contains(elem(args, 0), "blimp"))
+    assert((contains(elem(args, 1), "builtin_test.blimp") and elem(args, 2) == "--test") or (elem(args, 1) == "test" and contains(elem(args, 2), "lib")))
   end
 
   test "argv takes no arguments" do

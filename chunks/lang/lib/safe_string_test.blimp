@@ -264,8 +264,11 @@ actor SecureCompositionProperties do
     ]
     result = safe_sql(parts)
     query = lookup(result, "query")
-    # The query should contain $1, not the raw string
-    assert(contains(query, "$1"))
-    refute(contains(query, s) and length(s) > 0)
+    # The query is the fixed text and a placeholder, whatever s is, and s is
+    # the parameter. Not refute(contains(query, s)): gen_string(15) is a
+    # single character like "E" or "=" about once in 80 draws, and those are
+    # in the fixed text, so that version falsified itself on correct code.
+    assert_eq(query, "SELECT * FROM t WHERE x = $1")
+    assert_eq(lookup(result, "params"), [s])
   end
 end
