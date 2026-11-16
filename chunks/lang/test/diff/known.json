@@ -251,14 +251,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4347601184\n",
+      "stdout": "4348535072\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4350861600\n",
+      "stdout": "4318372128\n",
       "stderr": ""
     },
     "note": "interpreter: NO MATCHING HANDLER, exit 1; compiled prints a heap address, exit 0."
@@ -445,14 +445,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4330697628\n",
+      "stdout": "4299355036\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4364088220\n",
+      "stdout": "4344247196\n",
       "stderr": ""
     },
     "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
@@ -783,6 +783,20 @@
     },
     "category": "compile-error"
   },
+  "test/diff/corpus/builtin_to_int_float.blimp": {
+    "interp": {
+      "end": "exit",
+      "exit": 0,
+      "stdout": "1\n",
+      "stderr": ""
+    },
+    "compiler": {
+      "end": "exit",
+      "exit": 1,
+      "error": "LLVM verification error: Call parameter type does not match function signature!"
+    },
+    "category": "compile-error"
+  },
   "test/diff/corpus/case_int.blimp": {
     "interp": {
       "end": "exit",
@@ -947,6 +961,20 @@
       "end": "exit",
       "exit": 0,
       "stdout": "[:a, :b]\n",
+      "stderr": ""
+    },
+    "compiler": {
+      "end": "exit",
+      "exit": 1,
+      "error": "LLVM verification error: Call parameter type does not match function signature!"
+    },
+    "category": "compile-error"
+  },
+  "test/diff/corpus/list_of_floats.blimp": {
+    "interp": {
+      "end": "exit",
+      "exit": 0,
+      "stdout": "[1.5, 2.5]\n",
       "stderr": ""
     },
     "compiler": {
