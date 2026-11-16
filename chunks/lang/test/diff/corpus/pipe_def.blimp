@@ -1,0 +1,5 @@
+def double(x: Int) -> Int do
+  x * 2
+end
+
+5 |> double(_)

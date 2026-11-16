@@ -1,0 +1,5 @@
+def greet() -> String do
+  "hi"
+end
+
+greet()

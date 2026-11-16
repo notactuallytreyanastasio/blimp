@@ -1,0 +1,12 @@
+actor Counter do
+  state count: Int :: 0
+
+  on :inc do
+    become count: count + 1
+    reply count + 1
+  end
+end
+
+c = spawn Counter
+c <- :inc
+c <- :inc

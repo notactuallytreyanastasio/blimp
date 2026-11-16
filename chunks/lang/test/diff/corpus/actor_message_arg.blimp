@@ -1,0 +1,12 @@
+actor Adder do
+  state total: Int :: 0
+
+  on :add(x: Int) do
+    become total: total + x
+    reply total + x
+  end
+end
+
+a = spawn Adder
+a <- :add(5)
+a <- :add(7)

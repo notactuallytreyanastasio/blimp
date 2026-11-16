@@ -1,0 +1,10 @@
+actor C do
+  state n: Int :: 0
+
+  on :inc do
+    reply 1
+  end
+end
+
+c = spawn C
+c <- :dec

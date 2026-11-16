@@ -1,0 +1,5 @@
+def half(x: Int) -> Float do
+  x / 2.0
+end
+
+half(3)

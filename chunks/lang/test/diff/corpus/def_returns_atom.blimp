@@ -1,0 +1,5 @@
+def status() -> Atom do
+  :ready
+end
+
+status()

@@ -1,0 +1,10 @@
+actor A do
+  state s: Int :: 0
+
+  on :ping do
+    reply :pong
+  end
+end
+
+a = spawn A
+a <- :ping
