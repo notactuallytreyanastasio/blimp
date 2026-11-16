@@ -3,3 +3,4 @@
 chunks/lang/.zig-cache/
 chunks/lang/zig-out/
 chunks/repl_tui/target/
+chunks/lang/zig-pkg/
