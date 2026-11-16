@@ -251,14 +251,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4348535072\n",
+      "stdout": "4380385568\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4318372128\n",
+      "stdout": "4316864800\n",
       "stderr": ""
     },
     "note": "interpreter: NO MATCHING HANDLER, exit 1; compiled prints a heap address, exit 0."
@@ -419,6 +419,20 @@
     },
     "category": "unsupported"
   },
+  "test/case_anywhere_test.blimp": {
+    "interp": {
+      "end": "exit",
+      "exit": 0,
+      "stdout": ":CaseAnywhereTests\n",
+      "stderr": ""
+    },
+    "compiler": {
+      "end": "exit",
+      "exit": 1,
+      "error": "LLVM verification error: PHI node operands are not the same type as the result!"
+    },
+    "category": "compile-error"
+  },
   "test/diff/corpus/actor_reply_atom.blimp": {
     "interp": {
       "end": "exit",
@@ -445,14 +459,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4299355036\n",
+      "stdout": "4304286620\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4344247196\n",
+      "stdout": "4332237724\n",
       "stderr": ""
     },
     "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
