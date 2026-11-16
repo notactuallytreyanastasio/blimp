@@ -41,6 +41,7 @@ typedef struct BlimpVal {
 void blimp_rc_inc(BlimpVal *v);
 void blimp_rc_dec(BlimpVal *v);
 BlimpVal *blimp_rc_reuse(BlimpVal *v);
+static const char *atom_text(int id);
 
 // ── Value constructors ──────────────────────────────────
 
@@ -299,7 +300,10 @@ void blimp_print_val(BlimpVal *v) {
         case VAL_INT: printf("%lld\n", v->integer); break;
         case VAL_FLOAT: printf("%g\n", v->float_val); break;
         case VAL_STRING: printf("\"%s\"\n", v->string); break;
-        case VAL_ATOM: printf(":%d\n", v->atom_id); break;
+        case VAL_ATOM:
+            if (atom_text(v->atom_id)) printf(":%s\n", atom_text(v->atom_id));
+            else printf(":%d\n", v->atom_id);
+            break;
         case VAL_BOOL: printf("%s\n", v->bool_val ? "true" : "false"); break;
         case VAL_NIL: printf("nil\n"); break;
         case VAL_ACTOR_REF: printf("ref<%d>\n", v->actor_id); break;
@@ -330,7 +334,10 @@ void blimp_print_val(BlimpVal *v) {
                     case VAL_INT: printf("%lld", mv->integer); break;
                     case VAL_FLOAT: printf("%g", mv->float_val); break;
                     case VAL_STRING: printf("\"%s\"", mv->string); break;
-                    case VAL_ATOM: printf(":%d", mv->atom_id); break;
+                    case VAL_ATOM:
+                        if (atom_text(mv->atom_id)) printf(":%s", atom_text(mv->atom_id));
+                        else printf(":%d", mv->atom_id);
+                        break;
                     case VAL_BOOL: printf("%s", mv->bool_val ? "true" : "false"); break;
                     case VAL_NIL: printf("nil"); break;
                     case VAL_ACTOR_REF: printf("ref<%d>", mv->actor_id); break;
@@ -457,11 +464,45 @@ static const char *atom_name(int id) {
 #define MAILBOX_CAPACITY 256
 #define MAX_ARGS 8
 
-// Handler result: {matched, value}
+// Handler result, and what `blimp_send` hands back: {status, value}.
+//
+// The status is how a bubble travels.  It is part of the return value of one
+// handler call and of the one send that waited for it, so it cannot be read
+// by anything but that send -- unlike a global "last error", which outlives
+// the message that set it and is wrong the moment a catch forgets to clear it
+// or the scheduler runs another actor's handler in between.
+//
+// For BLIMP_BUBBLE and BLIMP_FAULT, `value` is a BlimpRaise*.  Codegen
+// (codegen.zig, `Status`) uses the same numbers.
+enum {
+    BLIMP_NOMATCH = 0, // guard failed: try the next clause (handlers only)
+    BLIMP_OK = 1,      // replied with `value`
+    BLIMP_NIL = 2,     // ended without a reply, or replied nil
+    BLIMP_BUBBLE = 3,  // `bubble`: caught by try and orelse
+    BLIMP_FAULT = 4,   // runtime error: caught by try, not by orelse
+};
+
 typedef struct {
-    char matched;
+    char status;
     long long value;
 } HandlerResult;
+
+// Where something happened, emitted by codegen as a constant per site.
+typedef struct {
+    int line;
+    int col;
+    const char *src; // the text of that source line
+} BlimpSite;
+
+// A bubble or a runtime error on its way to whoever catches it.
+typedef struct {
+    const char *title;
+    char *message;
+    BlimpVal *reason;        // what `bubble` carried, or NULL
+    const char *catch_atom;  // what `catch e` binds when there is no reason
+    const BlimpSite *site;
+    char *hint;
+} BlimpRaise;
 
 // Message in mailbox
 typedef struct {
@@ -469,8 +510,129 @@ typedef struct {
     int arg_count;
     long long args[MAX_ARGS];
     volatile int reply_ready;  // 0 = pending, 1 = done
+    char reply_status;
     long long reply_value;
 } Message;
+
+// ── Raising and reporting ────────────────────────────────
+
+// Every atom the program names, in codegen's intern order, so an atom id can
+// be printed as `:name`.  Codegen always defines both.
+extern const char *blimp_atom_names[];
+extern int blimp_atom_count;
+
+static const char *atom_text(int id) {
+    if (id >= 0 && id < blimp_atom_count) return blimp_atom_names[id];
+    return NULL;
+}
+
+static int atom_id_of(const char *name) {
+    for (int i = 0; i < blimp_atom_count; i++) {
+        if (strcmp(blimp_atom_names[i], name) == 0) return i;
+    }
+    fprintf(stderr, "blimp runtime: atom :%s was never interned by codegen\n", name);
+    abort();
+}
+
+// Like the interpreter's Value.format: atoms with their colon, strings quoted.
+static void format_val(FILE *out, BlimpVal *v) {
+    if (!v) { fputs("nil", out); return; }
+    switch (v->tag) {
+        case VAL_INT: fprintf(out, "%lld", v->integer); break;
+        case VAL_FLOAT: fprintf(out, "%g", v->float_val); break;
+        case VAL_STRING: fprintf(out, "\"%s\"", v->string); break;
+        case VAL_ATOM: {
+            const char *name = atom_text(v->atom_id);
+            if (name) fprintf(out, ":%s", name); else fprintf(out, ":%d", v->atom_id);
+            break;
+        }
+        case VAL_BOOL: fputs(v->bool_val ? "true" : "false", out); break;
+        case VAL_NIL: fputs("nil", out); break;
+        case VAL_ACTOR_REF: fprintf(out, "ref<%d>", v->actor_id); break;
+        default: fputs("<value>", out); break;
+    }
+}
+
+static char *dup_printf(const char *fmt, const char *a, const char *b, const char *c) {
+    int n = snprintf(NULL, 0, fmt, a, b, c);
+    char *s = (char *)malloc((size_t)n + 1);
+    snprintf(s, (size_t)n + 1, fmt, a, b, c);
+    return s;
+}
+
+BlimpRaise *blimp_raise_bubble(BlimpVal *reason, const BlimpSite *site) {
+    BlimpRaise *r = (BlimpRaise *)calloc(1, sizeof(BlimpRaise));
+    r->title = "UNCAUGHT BUBBLE";
+    r->reason = reason;
+    r->catch_atom = "bubble";
+    r->site = site;
+    r->hint = (char *)"Handle it with `try ... catch` or `orelse`.";
+    if (reason) {
+        char *buf = NULL;
+        size_t len = 0;
+        FILE *m = open_memstream(&buf, &len);
+        fputs("A bubble reached the top of the program: ", m);
+        format_val(m, reason);
+        fclose(m);
+        r->message = buf;
+    } else {
+        r->message = (char *)"A bubble reached the top of the program.";
+    }
+    return r;
+}
+
+BlimpRaise *blimp_raise_div_zero(const BlimpSite *site) {
+    BlimpRaise *r = (BlimpRaise *)calloc(1, sizeof(BlimpRaise));
+    r->title = "DIVISION BY ZERO";
+    r->message = (char *)"You're dividing by zero, which isn't defined.";
+    r->catch_atom = "division_by_zero";
+    r->site = site;
+    r->hint = (char *)"Check the denominator before dividing.";
+    return r;
+}
+
+static BlimpRaise *blimp_raise_no_handler(int actor_id, int msg_atom, const BlimpSite *site) {
+    const char *msg = atom_text(msg_atom);
+    if (!msg) msg = "?";
+    const char *actor = (actor_id >= 0 && actor_id < 256 && actor_type_names[actor_id])
+        ? actor_type_names[actor_id] : "?";
+    BlimpRaise *r = (BlimpRaise *)calloc(1, sizeof(BlimpRaise));
+    r->title = "NO MATCHING HANDLER";
+    r->message = dup_printf("I tried to send :%s%s%s to this actor, but it doesn't know how to handle it.", msg, "", "");
+    // The interpreter binds this name: the error under it is UndefinedVariable.
+    r->catch_atom = "undefined";
+    r->site = site;
+    r->hint = dup_printf("Actor `%s` has no handler for `:%s`.\n\nDefine a handler with:\n      on :%s do ... end",
+                         actor, msg, msg);
+    return r;
+}
+
+// What `catch e` binds: the bubble's reason, or an atom naming the error.
+BlimpVal *blimp_raise_reason(BlimpRaise *r) {
+    if (r->reason) return r->reason;
+    return blimp_val_atom(atom_id_of(r->catch_atom));
+}
+
+// Nothing caught it.  The same text, colours and exit status as the
+// interpreter's BlimpError.format followed by main.zig's newline.
+void blimp_uncaught(BlimpRaise *r) {
+    fflush(stdout);
+    FILE *e = stderr;
+    fprintf(e, "\n\x1b[36m-- %s ", r->title);
+    size_t title_len = strlen(r->title) + 4;
+    size_t dashes = title_len < 50 ? 50 - title_len : 5;
+    for (size_t i = 0; i < dashes; i++) fputs("\xe2\x94\x80", e);
+    fputs("\x1b[0m\n\n", e);
+    fprintf(e, "  %s\n\n", r->message);
+    if (r->site && r->site->line > 0) {
+        fprintf(e, "\x1b[90m%d|\x1b[0m \x1b[91m%s\x1b[0m\n", r->site->line, r->site->src);
+        for (int i = 0; i < r->site->col + 4; i++) fputc(' ', e);
+        fputs("\x1b[31m^\x1b[0m\n", e);
+    }
+    if (r->hint) fprintf(e, "\n  \x1b[33mHint: %s\x1b[0m\n", r->hint);
+    fputs("\n\n", e);
+    exit(1);
+}
 
 // Mailbox: ring buffer
 typedef struct {
@@ -539,7 +701,7 @@ static int run_queue_dequeue(void) {
 
 // ── Internal: process one message ────────────────────────
 
-static long long dispatch_message(Actor *actor, Message *msg) {
+static HandlerResult dispatch_message(Actor *actor, Message *msg) {
     for (int h = 0; h < actor->handler_count; h++) {
         if (actor->handlers[h].atom_id != msg->handler_atom_id)
             continue;
@@ -578,12 +740,12 @@ static long long dispatch_message(Actor *actor, Message *msg) {
             }
         }
 
-        if (result.matched) {
-            return result.value;
+        if (result.status != BLIMP_NOMATCH) {
+            return result;
         }
         // Guard failed, try next clause
     }
-    return 0; // No handler matched
+    return (HandlerResult){ .status = BLIMP_NOMATCH, .value = 0 };
 }
 
 // ── Mailbox operations ───────────────────────────────────
@@ -597,6 +759,7 @@ static Message *mailbox_enqueue(Mailbox *mb) {
     mb->head = (mb->head + 1) % MAILBOX_CAPACITY;
     mb->count++;
     msg->reply_ready = 0;
+    msg->reply_status = BLIMP_NOMATCH;
     msg->reply_value = 0;
     return msg;
 }
@@ -680,8 +843,9 @@ static int scheduler_step(void) {
             int prev_actor = current_actor_id;
             current_actor_id = aid;
 
-            long long result = dispatch_message(a, msg);
-            msg->reply_value = result;
+            HandlerResult result = dispatch_message(a, msg);
+            msg->reply_status = result.status;
+            msg->reply_value = result.value;
             msg->reply_ready = 1;
             mailbox_dequeue(&a->mailbox);
 
@@ -720,7 +884,20 @@ static int scheduler_step(void) {
 //   2. If self-send, process inline (avoid deadlock)
 //   3. Otherwise, pump the scheduler round-robin until reply is ready
 //   4. Return the reply value
-long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long *args) {
+// A send that found no handler (or whose every clause's guard failed) is a
+// runtime error at the send, as it is in the interpreter.
+static HandlerResult finish_send(Actor *actor, Message *msg, const BlimpSite *site) {
+    if (msg->reply_status == BLIMP_NOMATCH) {
+        return (HandlerResult){
+            .status = BLIMP_FAULT,
+            .value = (long long)blimp_raise_no_handler(actor->id, msg->handler_atom_id, site),
+        };
+    }
+    return (HandlerResult){ .status = msg->reply_status, .value = msg->reply_value };
+}
+
+HandlerResult blimp_send(int actor_id, int handler_atom_id, int arg_count, long long *args,
+                         const BlimpSite *site) {
     Actor *actor = &actors[actor_id];
 
     // Log the send event
@@ -733,7 +910,10 @@ long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long
 
     // Enqueue
     Message *msg = mailbox_enqueue(&actor->mailbox);
-    if (!msg) return 0;
+    if (!msg) {
+        // TODO: a full mailbox is still a silent nil reply.
+        return (HandlerResult){ .status = BLIMP_NIL, .value = 0 };
+    }
 
     msg->handler_atom_id = handler_atom_id;
     msg->arg_count = arg_count;
@@ -744,8 +924,9 @@ long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long
     // Self-send: process inline to avoid deadlock
     // (the scheduler would skip us because is_processing == 1)
     if (actor_id == current_actor_id) {
-        long long result = dispatch_message(actor, msg);
-        msg->reply_value = result;
+        HandlerResult result = dispatch_message(actor, msg);
+        msg->reply_status = result.status;
+        msg->reply_value = result.value;
         msg->reply_ready = 1;
         mailbox_dequeue(&actor->mailbox);
 
@@ -757,7 +938,7 @@ long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long
             log_event(evt);
         }
 
-        return result;
+        return finish_send(actor, msg, site);
     }
 
     // Mark target as runnable
@@ -775,11 +956,12 @@ long long blimp_send(int actor_id, int handler_atom_id, int arg_count, long long
         if (progress == 0 && !msg->reply_ready) {
             fprintf(stderr, "blimp: deadlock - actor %d waiting for reply from actor %d\n",
                     current_actor_id, actor_id);
-            return 0;
+            // TODO: a deadlock is still a nil reply after this line.
+            return (HandlerResult){ .status = BLIMP_NIL, .value = 0 };
         }
     }
 
-    return msg->reply_value;
+    return finish_send(actor, msg, site);
 }
 
 void *blimp_get_state(int actor_id) {

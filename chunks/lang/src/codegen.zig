@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const errors = @import("errors.zig");
 
 const c = @cImport({
     @cInclude("llvm-c/Core.h");
@@ -18,6 +19,34 @@ pub const CodegenError = error{
     VerificationFailed,
     TargetError,
     EmitError,
+};
+
+/// The status byte of a handler result and of a send: `{i8 status, i64 value}`.
+/// runtime.c's `BLIMP_*` enum carries the same numbers.  For `bubble` and
+/// `fault` the value is a `BlimpRaise*` holding the reason and the site.
+const Status = struct {
+    const nomatch: u64 = 0; // guard failed: the runtime tries the next clause
+    const ok: u64 = 1;
+    const nil: u64 = 2; // ended without a reply, or replied nil
+    const bubble: u64 = 3; // caught by try and by orelse
+    const fault: u64 = 4; // runtime error: caught by try only
+};
+
+/// A construct codegen refused, and where.  compile_main prints it.
+pub const Failure = struct {
+    loc: ast.Loc,
+    message: []const u8,
+    hint: []const u8,
+};
+
+/// A `try` or `orelse` enclosing the code being compiled, innermost last.
+/// A raise in the same function branches to the innermost one that takes it.
+const Catch = struct {
+    kind: enum { try_, orelse_ },
+    landing: c.LLVMBasicBlockRef,
+    /// try only: where the BlimpRaise* is left for the catch block
+    slot: c.LLVMValueRef,
+    loc: ast.Loc,
 };
 
 /// Variable scope: maps names to LLVM alloca pointers + type tags.
@@ -105,9 +134,28 @@ pub const Codegen = struct {
     i1_type: c.LLVMTypeRef,
     void_type: c.LLVMTypeRef,
     ptr_type: c.LLVMTypeRef,
-    handler_ret_type: c.LLVMTypeRef, // {i1, i64} -- matched flag + return value
+    i8_type: c.LLVMTypeRef,
+    handler_ret_type: c.LLVMTypeRef, // {i8, i64} -- Status + value
+    site_type: c.LLVMTypeRef, // {i32 line, i32 col, ptr source_line} -- BlimpSite
     // Current function being built (needed for creating basic blocks)
     current_fn: ?c.LLVMValueRef = null,
+    /// What the function being built can do with a bubble nothing in it
+    /// catches: a handler returns it to the sender; main and a def have no
+    /// one to hand it to.
+    fn_kind: enum { main, handler, def } = .main,
+    /// The def (or "fn") being compiled, for messages.
+    current_def_name: []const u8 = "",
+    /// Enclosing try/orelse in the current function.
+    catches: std.ArrayList(Catch) = .empty,
+    /// Top-level def names: a call to one inside a try/orelse is refused.
+    def_names: std.ArrayList([]const u8) = .empty,
+    /// Status of the send compiled last, so `orelse` can tell a reply of 0
+    /// from no reply at all.
+    last_send_status: ?c.LLVMValueRef = null,
+    /// Program text, for the source line a runtime report shows.
+    source: []const u8 = "",
+    /// Set when codegen refuses a construct; the first one set is reported.
+    failure: ?Failure = null,
     // When set, compileFuncCall marks calls to this name with musttail
     tail_call_target: ?[]const u8 = null,
     // Current actor context (set during handler compilation)
@@ -137,17 +185,28 @@ pub const Codegen = struct {
             .i1_type = c.LLVMInt1TypeInContext(ctx),
             .void_type = c.LLVMVoidTypeInContext(ctx),
             .ptr_type = c.LLVMPointerTypeInContext(ctx, 0),
+            .i8_type = c.LLVMInt8TypeInContext(ctx),
             .handler_ret_type = blk: {
                 var members = [_]c.LLVMTypeRef{
-                    c.LLVMInt1TypeInContext(ctx),
+                    c.LLVMInt8TypeInContext(ctx),
                     c.LLVMInt64TypeInContext(ctx),
                 };
                 break :blk c.LLVMStructTypeInContext(ctx, &members, 2, 0);
+            },
+            .site_type = blk: {
+                var members = [_]c.LLVMTypeRef{
+                    c.LLVMInt32TypeInContext(ctx),
+                    c.LLVMInt32TypeInContext(ctx),
+                    c.LLVMPointerTypeInContext(ctx, 0),
+                };
+                break :blk c.LLVMStructTypeInContext(ctx, &members, 3, 0);
             },
         };
     }
 
     pub fn deinit(self: *Codegen) void {
+        self.catches.deinit(self.allocator);
+        self.def_names.deinit(self.allocator);
         self.scope.deinit(self.allocator);
         self.atoms.deinit(self.allocator);
         for (self.actors.items) |*a| a.handler_fns.deinit(self.allocator);
@@ -218,6 +277,33 @@ pub const Codegen = struct {
 
     /// Compile an expression, returning the value and its type tag.
     pub fn compileExpr(self: *Codegen, node: ast.Node) CodegenError!TaggedVal {
+        return self.compileNode(node) catch |err| {
+            // The innermost node that failed is the first to get here.
+            if (self.failure == null) {
+                self.failure = .{
+                    .loc = node.loc,
+                    .message = if (err == CodegenError.UndefinedVariable and node.kind == .identifier)
+                        std.fmt.allocPrint(self.allocator, "Nothing called `{s}` is in scope here.", .{node.kind.identifier.name}) catch "undefined variable"
+                    else
+                        std.fmt.allocPrint(self.allocator, "The compiler does not handle this `{s}` yet.", .{@tagName(node.kind)}) catch "unsupported construct",
+                    .hint = "Run this file with the interpreter.",
+                };
+            }
+            return err;
+        };
+    }
+
+    /// Refuse a construct: compile_main reports `message` at `loc`.
+    fn reject(self: *Codegen, loc: ast.Loc, comptime fmt: []const u8, args: anytype, hint: []const u8) CodegenError {
+        self.failure = .{
+            .loc = loc,
+            .message = std.fmt.allocPrint(self.allocator, fmt, args) catch fmt,
+            .hint = hint,
+        };
+        return CodegenError.UnsupportedNode;
+    }
+
+    fn compileNode(self: *Codegen, node: ast.Node) CodegenError!TaggedVal {
         return switch (node.kind) {
             .integer_lit => |lit| .{ .val = c.LLVMConstInt(self.i64_type, @bitCast(lit.value), 1), .tag = .int },
             .float_lit => |lit| .{ .val = c.LLVMConstReal(self.f64_type, lit.value), .tag = .float },
@@ -229,21 +315,22 @@ pub const Codegen = struct {
             .string_lit => |lit| self.compileStringLit(lit),
             .atom_lit => |lit| self.compileAtomLit(lit),
             .identifier => |id| self.compileIdentifier(id),
-            .binary_op => |op| self.compileBinaryOp(op),
+            .binary_op => |op| self.compileBinaryOp(op, node.loc),
             .unary_op => |op| self.compileUnaryOp(op),
             .assign_stmt => |stmt| self.compileAssign(stmt),
             .func_call => |call| self.compileFuncCall(call),
             .pipe_expr => |pipe| self.compilePipe(pipe),
             .situation => |sit| self.compileSituation(sit),
             .case_expr => |cas| self.compileCase(cas),
-            .orelse_expr => |ore| self.compileOrelse(ore),
+            .orelse_expr => |ore| self.compileOrelse(ore, node.loc),
+            .try_catch => |tc| self.compileTryCatch(tc, node.loc),
             .dot_access => |dot| self.compileDotAccess(dot),
             .actor_def => |def| self.compileActorDef(def),
             .spawn_expr => |spn| self.compileSpawn(spn),
             .struct_lit => |sl| self.compileStructLit(sl),
-            .bubble_stmt => |bs| self.compileBubble(bs),
+            .bubble_stmt => |bs| self.compileBubble(bs, node.loc),
             .map_lit => |ml| self.compileMapLit(ml),
-            .message_send => |msg| self.compileMessageSend(msg),
+            .message_send => |msg| self.compileMessageSend(msg, node.loc),
             .become_stmt => |bec| self.compileBecome(bec),
             .reply_stmt => |rep| self.compileReply(rep),
             .self_ref => self.compileSelfRef(),
@@ -366,8 +453,26 @@ pub const Codegen = struct {
         return rhs;
     }
 
+    /// A def returns a bare i64, so a bubble or fault inside one has no way
+    /// back to a try/orelse around the call (it aborts the program instead).
+    /// Refused here rather than compiled into a catch that cannot fire.
+    fn checkDefCallCatchable(self: *Codegen, name: []const u8) CodegenError!void {
+        if (self.catches.items.len == 0) return;
+        for (self.def_names.items) |d| {
+            if (!std.mem.eql(u8, d, name)) continue;
+            const k = self.catches.items[self.catches.items.len - 1];
+            return self.reject(
+                k.loc,
+                "`{s}` around a call to `{s}`: a bubble or a division by zero inside a def cannot reach this catch in compiled code.",
+                .{ if (k.kind == .try_) "try" else "orelse", name },
+                "Call the def outside the `try`, or run this file with the interpreter.",
+            );
+        }
+    }
+
     fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall) CodegenError!TaggedVal {
         const name = call.name;
+        try self.checkDefCallCatchable(name);
 
         // max(a, b) and min(a, b) - inline as icmp+select
         if ((std.mem.eql(u8, name, "max") or std.mem.eql(u8, name, "min")) and call.args.len == 2) {
@@ -411,6 +516,11 @@ pub const Codegen = struct {
 
         // Right side must be a func_call (with _ placeholder) or bare identifier
         const right = pipe.right.*;
+        switch (right.kind) {
+            .func_call => |call| try self.checkDefCallCatchable(call.name),
+            .identifier => |id| try self.checkDefCallCatchable(id.name),
+            else => {},
+        }
         switch (right.kind) {
             .func_call => |call| {
                 // Replace the hole/placeholder arg with left_val
@@ -469,7 +579,7 @@ pub const Codegen = struct {
         }
     }
 
-    fn compileBinaryOp(self: *Codegen, op: ast.Node.BinaryOp) CodegenError!TaggedVal {
+    fn compileBinaryOp(self: *Codegen, op: ast.Node.BinaryOp, loc: ast.Loc) CodegenError!TaggedVal {
         const lhs = try self.compileExpr(op.left.*);
         const rhs = try self.compileExpr(op.right.*);
 
@@ -483,6 +593,10 @@ pub const Codegen = struct {
                 c.LLVMBuildSIToFP(self.builder, rhs.val, self.f64_type, "promo_r")
             else
                 rhs.val;
+            if (op.op == .div) {
+                const zero = c.LLVMConstReal(self.f64_type, 0.0);
+                self.emitDivZeroCheck(c.LLVMBuildFCmp(self.builder, c.LLVMRealOEQ, fr, zero, "fdiv0"), loc);
+            }
 
             const val = switch (op.op) {
                 .add => c.LLVMBuildFAdd(self.builder, fl, fr, "faddtmp"),
@@ -511,7 +625,12 @@ pub const Codegen = struct {
             return .{ .val = val, .tag = tag };
         }
 
-        // Integer path
+        // Integer path.  `sdiv` by zero is undefined behaviour in LLVM, and
+        // at O3 it came out as 1 for 10 / 0: check first, as the interpreter does.
+        if (op.op == .div) {
+            const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+            self.emitDivZeroCheck(c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, rhs.val, zero, "div0"), loc);
+        }
         const val = switch (op.op) {
             .add => c.LLVMBuildAdd(self.builder, lhs.val, rhs.val, "addtmp"),
             .sub => c.LLVMBuildSub(self.builder, lhs.val, rhs.val, "subtmp"),
@@ -615,6 +734,7 @@ pub const Codegen = struct {
         const saved_fn = self.current_fn;
         const saved_scope = self.scope;
         const saved_actor = self.current_actor;
+        const saved_bb = c.LLVMGetInsertBlock(self.builder);
         defer {
             self.current_fn = saved_fn;
             self.scope = saved_scope;
@@ -636,7 +756,9 @@ pub const Codegen = struct {
                     field_types.append(self.allocator, self.i64_type) catch {}; // All fields stored as i64 for now
                     if (field.default_value) |dv| {
                         // We need to compile the default in main's context
+                        // TODO: a default the compiler cannot build silently becomes 0.
                         const dv_result = self.compileExpr(dv.*) catch {
+                            self.failure = null;
                             field_defaults.append(self.allocator, c.LLVMConstInt(self.i64_type, 0, 0)) catch {};
                             field_default_tags.append(self.allocator, .int) catch {};
                             continue;
@@ -692,10 +814,11 @@ pub const Codegen = struct {
             .tag = .atom,
         };
 
-        // Restore builder to main function, store the actor name
-        if (saved_fn) |sfn| {
-            const last_bb = c.LLVMGetLastBasicBlock(sfn);
-            c.LLVMPositionBuilderAtEnd(self.builder, last_bb);
+        // Restore builder to where main was.  Not its last block: a send's
+        // raise path or an orelse appends blocks that are not where main
+        // carries on.
+        if (saved_fn != null and saved_bb != null) {
+            c.LLVMPositionBuilderAtEnd(self.builder, saved_bb);
         }
 
         return atom_val;
@@ -726,6 +849,16 @@ pub const Codegen = struct {
 
         const func = c.LLVMAddFunction(self.module, fn_name, fn_type);
         self.current_fn = func;
+
+        const saved_kind = self.fn_kind;
+        const saved_catches = self.catches;
+        self.fn_kind = .handler;
+        self.catches = .empty;
+        defer {
+            self.catches.deinit(self.allocator);
+            self.catches = saved_catches;
+            self.fn_kind = saved_kind;
+        }
 
         // Create entry block
         const entry = c.LLVMAppendBasicBlockInContext(self.context, func, "entry");
@@ -776,9 +909,9 @@ pub const Codegen = struct {
             const fail_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "guard_fail");
             _ = c.LLVMBuildCondBr(self.builder, guard_bool, body_bb, fail_bb);
 
-            // Guard fail: return {false, 0}
+            // Guard fail: the runtime tries the next clause
             c.LLVMPositionBuilderAtEnd(self.builder, fail_bb);
-            _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(false, c.LLVMConstInt(self.i64_type, 0, 0)));
+            _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(Status.nomatch, c.LLVMConstInt(self.i64_type, 0, 0)));
 
             c.LLVMPositionBuilderAtEnd(self.builder, body_bb);
         }
@@ -789,10 +922,10 @@ pub const Codegen = struct {
             last_val = try self.compileExpr(stmt);
         }
 
-        // If body didn't end with reply (no terminator), add default return {true, 0}
+        // Fell off the end without a reply: nil, which `orelse` falls back on
         const current_bb = c.LLVMGetInsertBlock(self.builder);
         if (c.LLVMGetBasicBlockTerminator(current_bb) == null) {
-            _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(true, c.LLVMConstInt(self.i64_type, 0, 0)));
+            _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(Status.nil, c.LLVMConstInt(self.i64_type, 0, 0)));
         }
 
         // Register handler
@@ -838,16 +971,120 @@ pub const Codegen = struct {
         const val = try self.compileExpr(reply.value.*);
         // Coerce to i64 for the {i1, i64} handler return type
         const ret_val = self.coerceToI64(val);
-        _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(true, ret_val));
+        const status = if (val.tag == .nil) Status.nil else Status.ok;
+        _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(status, ret_val));
         return val;
     }
 
-    /// Build a {i1, i64} struct value for handler returns.
-    fn makeHandlerRet(self: *Codegen, matched: bool, value: c.LLVMValueRef) c.LLVMValueRef {
-        const flag = c.LLVMConstInt(self.i1_type, if (matched) 1 else 0, 0);
+    /// Build a {i8 status, i64 value} struct value for handler returns.
+    fn makeHandlerRet(self: *Codegen, status: u64, value: c.LLVMValueRef) c.LLVMValueRef {
+        return self.makeHandlerRetDyn(c.LLVMConstInt(self.i8_type, status, 0), value);
+    }
+
+    fn makeHandlerRetDyn(self: *Codegen, status: c.LLVMValueRef, value: c.LLVMValueRef) c.LLVMValueRef {
         const undef = c.LLVMGetUndef(self.handler_ret_type);
-        const with_flag = c.LLVMBuildInsertValue(self.builder, undef, flag, 0, "ret_flag");
+        const with_flag = c.LLVMBuildInsertValue(self.builder, undef, status, 0, "ret_status");
         return c.LLVMBuildInsertValue(self.builder, with_flag, value, 1, "ret_val");
+    }
+
+    // ── Raising: bubbles and runtime errors ─────────────────
+
+    /// A constant BlimpSite {line, col, source line} for a report at `loc`.
+    fn siteGlobal(self: *Codegen, loc: ast.Loc) c.LLVMValueRef {
+        const text: []const u8 = if (loc.line == 0 or self.source.len == 0) "" else errors.lineAt(self.source, loc.line);
+        const str = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(text), "site_src");
+        var fields = [_]c.LLVMValueRef{
+            c.LLVMConstInt(self.i32_type, loc.line, 0),
+            c.LLVMConstInt(self.i32_type, loc.col, 0),
+            str,
+        };
+        const g = c.LLVMAddGlobal(self.module, self.site_type, "site");
+        c.LLVMSetInitializer(g, c.LLVMConstStructInContext(self.context, &fields, 3, 0));
+        c.LLVMSetGlobalConstant(g, 1);
+        c.LLVMSetLinkage(g, c.LLVMPrivateLinkage);
+        return g;
+    }
+
+    /// Send a raise (status `bubble` or `fault`, a BlimpRaise*) to whoever
+    /// takes it, from a block that has not been terminated:
+    ///   the innermost enclosing try takes anything; an orelse only bubbles;
+    ///   with neither, a handler returns it to its sender, and main or a def
+    ///   reports it and exits 1, which is what the interpreter does when a
+    ///   bubble reaches the top.
+    /// Leaves the builder in a fresh block with no predecessors.
+    fn emitRaise(self: *Codegen, status: c.LLVMValueRef, raise_ptr: c.LLVMValueRef) void {
+        const func = self.current_fn.?;
+        var i = self.catches.items.len;
+        const delivered = blk: while (i > 0) {
+            i -= 1;
+            const k = self.catches.items[i];
+            switch (k.kind) {
+                .try_ => {
+                    _ = c.LLVMBuildStore(self.builder, raise_ptr, k.slot);
+                    _ = c.LLVMBuildBr(self.builder, k.landing);
+                    break :blk true;
+                },
+                .orelse_ => {
+                    const is_bubble = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, status, c.LLVMConstInt(self.i8_type, Status.bubble, 0), "is_bubble");
+                    const past = c.LLVMAppendBasicBlockInContext(self.context, func, "fault_past_orelse");
+                    _ = c.LLVMBuildCondBr(self.builder, is_bubble, k.landing, past);
+                    c.LLVMPositionBuilderAtEnd(self.builder, past);
+                },
+            }
+        } else false;
+
+        if (!delivered) switch (self.fn_kind) {
+            .handler => {
+                const as_int = c.LLVMBuildPtrToInt(self.builder, raise_ptr, self.i64_type, "raise_int");
+                _ = c.LLVMBuildRet(self.builder, self.makeHandlerRetDyn(status, as_int));
+            },
+            .main, .def => {
+                const f = self.getRuntimeFn("blimp_uncaught", &.{self.ptr_type}, self.void_type);
+                var args = [_]c.LLVMValueRef{raise_ptr};
+                var pt = [_]c.LLVMTypeRef{self.ptr_type};
+                _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &pt, 1, 0), f, &args, 1, "");
+                _ = c.LLVMBuildUnreachable(self.builder);
+            },
+        };
+
+        const after = c.LLVMAppendBasicBlockInContext(self.context, func, "after_raise");
+        c.LLVMPositionBuilderAtEnd(self.builder, after);
+    }
+
+    /// Branch on a {status, value} result from a send: a bubble or fault goes
+    /// to `emitRaise`, anything else continues with the value.
+    fn emitCheckResult(self: *Codegen, result: c.LLVMValueRef) struct { val: c.LLVMValueRef, status: c.LLVMValueRef } {
+        const func = self.current_fn.?;
+        const status = c.LLVMBuildExtractValue(self.builder, result, 0, "status");
+        const val = c.LLVMBuildExtractValue(self.builder, result, 1, "value");
+        const raised = c.LLVMBuildICmp(self.builder, c.LLVMIntUGE, status, c.LLVMConstInt(self.i8_type, Status.bubble, 0), "raised");
+        const raise_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "raised");
+        const ok_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "replied");
+        _ = c.LLVMBuildCondBr(self.builder, raised, raise_bb, ok_bb);
+        c.LLVMPositionBuilderAtEnd(self.builder, raise_bb);
+        self.emitRaise(status, c.LLVMBuildIntToPtr(self.builder, val, self.ptr_type, "raise_ptr"));
+        // emitRaise left us in an unreachable block; nothing goes there.
+        _ = c.LLVMBuildUnreachable(self.builder);
+        c.LLVMPositionBuilderAtEnd(self.builder, ok_bb);
+        return .{ .val = val, .status = status };
+    }
+
+    /// `a / b` with b == 0: a fault at the operator, as the interpreter's
+    /// DIVISION BY ZERO.  Leaves the builder where b != 0.
+    fn emitDivZeroCheck(self: *Codegen, is_zero: c.LLVMValueRef, loc: ast.Loc) void {
+        const func = self.current_fn orelse return;
+        _ = self.atoms.intern(self.allocator, "division_by_zero"); // what `catch e` binds
+        const zero_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "div_by_zero");
+        const ok_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "div_ok");
+        _ = c.LLVMBuildCondBr(self.builder, is_zero, zero_bb, ok_bb);
+        c.LLVMPositionBuilderAtEnd(self.builder, zero_bb);
+        const f = self.getRuntimeFn("blimp_raise_div_zero", &.{self.ptr_type}, self.ptr_type);
+        var args = [_]c.LLVMValueRef{self.siteGlobal(loc)};
+        var pt = [_]c.LLVMTypeRef{self.ptr_type};
+        const raise_ptr = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "div_zero");
+        self.emitRaise(c.LLVMConstInt(self.i8_type, Status.fault, 0), raise_ptr);
+        _ = c.LLVMBuildUnreachable(self.builder);
+        c.LLVMPositionBuilderAtEnd(self.builder, ok_bb);
     }
 
     fn compileSpawn(self: *Codegen, spn: ast.Node.SpawnExpr) CodegenError!TaggedVal {
@@ -873,7 +1110,11 @@ pub const Codegen = struct {
             var value: TaggedVal = .{ .val = actor.state_defaults[i], .tag = actor.state_default_tags[i] };
             for (overrides) |ov| {
                 if (std.mem.eql(u8, ov.key, field_name)) {
-                    value = self.compileExpr(ov.value) catch break;
+                    // TODO: an override the compiler cannot build silently keeps the default.
+                    value = self.compileExpr(ov.value) catch {
+                        self.failure = null;
+                        break;
+                    };
                     break;
                 }
             }
@@ -901,6 +1142,13 @@ pub const Codegen = struct {
         // Canvas: register actor type name and field info
         if (self.canvas_mode) {
             self.emitCanvasActorInfo(actor, actor_id);
+        } else {
+            // The runtime names the actor in NO MATCHING HANDLER.
+            const type_str = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(actor.name), "type_name");
+            const set_type_fn = self.getRuntimeFn("blimp_set_actor_type", &.{ self.i32_type, self.ptr_type }, self.void_type);
+            var type_args = [_]c.LLVMValueRef{ actor_id, type_str };
+            var type_pt = [_]c.LLVMTypeRef{ self.i32_type, self.ptr_type };
+            _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &type_pt, 2, 0), set_type_fn, &type_args, 2, "");
         }
 
         // Return actor_id as i64
@@ -973,16 +1221,44 @@ pub const Codegen = struct {
         return self.compileSpawnInner(sl.type_name, sl.fields);
     }
 
-    /// Bubble: in compiled code, returns {matched=true, 0} and the runtime
-    /// treats the handler as "no useful reply". For now, bubble is a no-op return.
-    /// TODO: propagate bubble reason through an error channel.
-    fn compileBubble(self: *Codegen, bs: ast.Node.BubbleStmt) CodegenError!TaggedVal {
-        // Compile the reason expression (if any) for side effects, but discard
-        if (bs.reason) |reason| {
-            _ = try self.compileExpr(reason.*);
+    /// Bubble: box the reason, record where, and raise.  It used to return
+    /// {matched, 0}, the same as `reply 0`: the sender got 0, `orelse` could
+    /// not tell it from a real reply of 0, and one nothing caught printed a
+    /// plausible number and exited 0.
+    fn compileBubble(self: *Codegen, bs: ast.Node.BubbleStmt, loc: ast.Loc) CodegenError!TaggedVal {
+        if (self.fn_kind == .def) {
+            return self.reject(
+                loc,
+                "`bubble` inside `{s}` cannot be compiled: a def returns a bare value, so the reason would have nowhere to go.",
+                .{self.current_def_name},
+                "Move the bubble into an actor handler, or run this file with the interpreter.",
+            );
         }
-        // Return {matched=true, 0} -- signals "handled but no value"
-        _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(true, c.LLVMConstInt(self.i64_type, 0, 0)));
+        if (self.fn_kind == .handler) {
+            const actor = self.current_actor.?.name;
+            // The interpreter restarts a dotted actor (or its siblings) under
+            // its supervisor when it bubbles.  Compiled actors have none.
+            if (std.mem.lastIndexOfScalar(u8, actor, '.')) |dot| {
+                return self.reject(
+                    loc,
+                    "`bubble` in a handler of `{s}` restarts it under its supervisor `{s}`; compiled actors have no supervisor, so the restart would not happen.",
+                    .{ actor, actor[0..dot] },
+                    "Run this file with the interpreter, which supervises.",
+                );
+            }
+        }
+
+        const reason_ptr = if (bs.reason) |reason|
+            self.wrapAsBlimpVal(try self.compileExpr(reason.*))
+        else blk: {
+            _ = self.atoms.intern(self.allocator, "bubble"); // what `catch e` binds
+            break :blk c.LLVMConstNull(self.ptr_type);
+        };
+        const f = self.getRuntimeFn("blimp_raise_bubble", &.{ self.ptr_type, self.ptr_type }, self.ptr_type);
+        var args = [_]c.LLVMValueRef{ reason_ptr, self.siteGlobal(loc) };
+        var pt = [_]c.LLVMTypeRef{ self.ptr_type, self.ptr_type };
+        const raise_ptr = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 2, 0), f, &args, 2, "bubble");
+        self.emitRaise(c.LLVMConstInt(self.i8_type, Status.bubble, 0), raise_ptr);
         return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
     }
 
@@ -1214,6 +1490,19 @@ pub const Codegen = struct {
         const saved_fn = self.current_fn;
         const saved_scope = self.scope;
         const saved_tail_target = self.tail_call_target;
+        const saved_bb = c.LLVMGetInsertBlock(self.builder);
+        const saved_kind = self.fn_kind;
+        const saved_def_name = self.current_def_name;
+        const saved_catches = self.catches;
+        self.fn_kind = .def;
+        self.current_def_name = std.fmt.allocPrint(self.allocator, "def {s}", .{ds.name}) catch ds.name;
+        self.catches = .empty;
+        defer {
+            self.catches.deinit(self.allocator);
+            self.catches = saved_catches;
+            self.fn_kind = saved_kind;
+            self.current_def_name = saved_def_name;
+        }
         self.scope = .{};
 
         // Create function: i64 name(i64, i64, ...)
@@ -1259,10 +1548,9 @@ pub const Codegen = struct {
         self.scope = saved_scope;
         self.tail_call_target = saved_tail_target;
 
-        // Position builder back in the calling function
-        if (saved_fn) |f| {
-            const last_bb = c.LLVMGetLastBasicBlock(f);
-            c.LLVMPositionBuilderAtEnd(self.builder, last_bb);
+        // Position builder back where the calling function was
+        if (saved_fn != null and saved_bb != null) {
+            c.LLVMPositionBuilderAtEnd(self.builder, saved_bb);
         }
 
         // Return the function name as an atom (like the interpreter)
@@ -1310,6 +1598,21 @@ pub const Codegen = struct {
         // Create an LLVM function for the closure body
         const cur_fn = self.current_fn;
         const saved_scope = self.scope;
+        const saved_bb = c.LLVMGetInsertBlock(self.builder);
+        const saved_kind = self.fn_kind;
+        const saved_def_name = self.current_def_name;
+        const saved_catches = self.catches;
+        // A closure is called by the runtime and returns a bare BlimpVal*:
+        // it has no channel for a bubble either.
+        self.fn_kind = .def;
+        self.current_def_name = "fn";
+        self.catches = .empty;
+        defer {
+            self.catches.deinit(self.allocator);
+            self.catches = saved_catches;
+            self.fn_kind = saved_kind;
+            self.current_def_name = saved_def_name;
+        }
         self.scope = .{};
 
         // Function type: BlimpVal*(BlimpVal*, ...) for each param
@@ -1357,10 +1660,9 @@ pub const Codegen = struct {
         self.current_fn = cur_fn;
         self.scope = saved_scope;
 
-        // Position builder back in the calling function
-        if (cur_fn) |f| {
-            const last_bb = c.LLVMGetLastBasicBlock(f);
-            c.LLVMPositionBuilderAtEnd(self.builder, last_bb);
+        // Position builder back where the calling function was
+        if (cur_fn != null and saved_bb != null) {
+            c.LLVMPositionBuilderAtEnd(self.builder, saved_bb);
         }
 
         // Create closure value: blimp_val_closure(func_ptr, param_count, null, 0)
@@ -1449,7 +1751,7 @@ pub const Codegen = struct {
         );
     }
 
-    fn compileMessageSend(self: *Codegen, msg: ast.Node.MessageSend) CodegenError!TaggedVal {
+    fn compileMessageSend(self: *Codegen, msg: ast.Node.MessageSend, loc: ast.Loc) CodegenError!TaggedVal {
         const target = try self.compileExpr(msg.target.*);
 
         // Target is now an actor_id (i64) -- truncate to i32 for the runtime
@@ -1486,22 +1788,28 @@ pub const Codegen = struct {
             }
         }
 
-        // Call blimp_send(actor_id, handler_atom_id, arg_count, args_ptr) -> i64
+        // blimp_send(actor_id, handler_atom_id, arg_count, args_ptr, site)
+        //   -> {i8 status, i64 value}
+        // The site is where a NO MATCHING HANDLER is reported.
+        _ = self.atoms.intern(self.allocator, "undefined"); // what `catch e` binds for one
         const send_fn = self.getRuntimeFn(
             "blimp_send",
-            &.{ self.i32_type, self.i32_type, self.i32_type, self.ptr_type },
-            self.i64_type,
+            &.{ self.i32_type, self.i32_type, self.i32_type, self.ptr_type, self.ptr_type },
+            self.handler_ret_type,
         );
         var send_args = [_]c.LLVMValueRef{
             actor_id,
             c.LLVMConstInt(self.i32_type, msg_atom_id, 0),
             c.LLVMConstInt(self.i32_type, arg_count, 0),
             args_alloca,
+            self.siteGlobal(loc),
         };
-        var send_pt = [_]c.LLVMTypeRef{ self.i32_type, self.i32_type, self.i32_type, self.ptr_type };
-        const send_ft = c.LLVMFunctionType(self.i64_type, &send_pt, 4, 0);
-        const result = c.LLVMBuildCall2(self.builder, send_ft, send_fn, &send_args, 4, "send");
-        return .{ .val = result, .tag = .int };
+        var send_pt = [_]c.LLVMTypeRef{ self.i32_type, self.i32_type, self.i32_type, self.ptr_type, self.ptr_type };
+        const send_ft = c.LLVMFunctionType(self.handler_ret_type, &send_pt, 5, 0);
+        const result = c.LLVMBuildCall2(self.builder, send_ft, send_fn, &send_args, 5, "send");
+        const checked = self.emitCheckResult(result);
+        self.last_send_status = checked.status;
+        return .{ .val = checked.val, .tag = .int };
     }
 
     fn getMalloc(self: *Codegen) c.LLVMValueRef {
@@ -1696,9 +2004,10 @@ pub const Codegen = struct {
             // All branches terminated (reply/ret) -- merge is dead code.
             // Delete the empty merge block and position at the last block.
             c.LLVMDeleteBasicBlock(merge_bb);
-            // Position at last basic block of function so subsequent codegen works
-            const last_bb = c.LLVMGetLastBasicBlock(func);
-            c.LLVMPositionBuilderAtEnd(self.builder, last_bb);
+            // Carry on in a fresh block with no predecessors.  The function's
+            // last block is not that: it may be a raise path already ended.
+            const dead_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "after_branches");
+            c.LLVMPositionBuilderAtEnd(self.builder, dead_bb);
             return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
         }
 
@@ -1715,16 +2024,30 @@ pub const Codegen = struct {
         return self.compileBranching(cas.subject, cas.branches);
     }
 
-    fn compileOrelse(self: *Codegen, ore: ast.Node.OrElseExpr) CodegenError!TaggedVal {
+    /// `x orelse y`: y when x bubbles (from anywhere inside x, as in the
+    /// interpreter) or is nil.  A fault inside x is not caught here: it goes
+    /// on to an enclosing try or the top.
+    fn compileOrelse(self: *Codegen, ore: ast.Node.OrElseExpr, loc: ast.Loc) CodegenError!TaggedVal {
         const func = self.current_fn orelse return CodegenError.LLVMError;
-        const try_val = try self.compileExpr(ore.try_expr.*);
-
-        // Compare against nil (0 for i64 values)
-        const zero = c.LLVMConstInt(self.i64_type, 0, 0);
-        const is_nil = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, try_val.val, zero, "isniltmp");
-
         const fallback_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "fallback");
         const merge_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "orelse_merge");
+
+        self.catches.append(self.allocator, .{ .kind = .orelse_, .landing = fallback_bb, .slot = null, .loc = loc }) catch return CodegenError.LLVMError;
+        self.last_send_status = null;
+        const try_val = self.compileExpr(ore.try_expr.*) catch |err| {
+            _ = self.catches.pop();
+            return err;
+        };
+        _ = self.catches.pop();
+
+        // Nil.  For a send, the status says whether there was a reply: a
+        // reply of 0 is a value, not nil, and used to take the fallback.
+        // TODO: anything else is still compared against 0, so an Int 0 from
+        // a def or a variable takes the fallback where the interpreter keeps it.
+        const is_nil = if (ore.try_expr.kind == .message_send and self.last_send_status != null)
+            c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.last_send_status.?, c.LLVMConstInt(self.i8_type, Status.nil, 0), "noreply")
+        else
+            c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.coerceToI64(try_val), c.LLVMConstInt(self.i64_type, 0, 0), "isniltmp");
         const try_bb = c.LLVMGetInsertBlock(self.builder);
 
         _ = c.LLVMBuildCondBr(self.builder, is_nil, fallback_bb, merge_bb);
@@ -1743,6 +2066,69 @@ pub const Codegen = struct {
         c.LLVMAddIncoming(phi, &vals, &blocks, 2);
 
         return .{ .val = phi, .tag = .int };
+    }
+
+    /// `try do ... catch e do ... end`.  Any bubble or fault raised in the
+    /// body (in this function, or returned by a send) lands in the catch
+    /// block with its BlimpRaise*; `e` is the bubble's reason, or the atom
+    /// the interpreter binds (:division_by_zero, :undefined, :bubble).
+    fn compileTryCatch(self: *Codegen, tc: ast.Node.TryCatch, loc: ast.Loc) CodegenError!TaggedVal {
+        const func = self.current_fn orelse return CodegenError.LLVMError;
+        const slot = c.LLVMBuildAlloca(self.builder, self.ptr_type, "raised");
+        const catch_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "catch");
+        const merge_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "try_merge");
+
+        self.catches.append(self.allocator, .{ .kind = .try_, .landing = catch_bb, .slot = slot, .loc = loc }) catch return CodegenError.LLVMError;
+        var body_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        for (tc.try_body) |stmt| {
+            body_val = self.compileExpr(stmt) catch |err| {
+                _ = self.catches.pop();
+                return err;
+            };
+        }
+        _ = self.catches.pop();
+        const body_end = c.LLVMGetInsertBlock(self.builder);
+
+        // The catch body runs outside this try: a raise in it goes further out.
+        c.LLVMPositionBuilderAtEnd(self.builder, catch_bb);
+        if (tc.catch_var) |name| {
+            const f = self.getRuntimeFn("blimp_raise_reason", &.{self.ptr_type}, self.ptr_type);
+            var args = [_]c.LLVMValueRef{c.LLVMBuildLoad2(self.builder, self.ptr_type, slot, "raise")};
+            var pt = [_]c.LLVMTypeRef{self.ptr_type};
+            const reason = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "reason");
+            const alloca = c.LLVMBuildAlloca(self.builder, self.ptr_type, self.zname(name));
+            _ = c.LLVMBuildStore(self.builder, reason, alloca);
+            self.scope.put(self.allocator, .{ .name = name, .alloca = alloca, .tag = .tagged_val, .llvm_type = self.ptr_type });
+        }
+        var catch_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        for (tc.catch_body) |stmt| {
+            catch_val = try self.compileExpr(stmt);
+        }
+        const catch_end = c.LLVMGetInsertBlock(self.builder);
+
+        // Both arms meet as one value.  Same tag: as i64.  Different tags
+        // (an Int reply against a caught reason): both boxed as BlimpVal*.
+        const same = body_val.tag == catch_val.tag;
+        const result_tag: ValTag = if (same) body_val.tag else .tagged_val;
+        var vals: [2]c.LLVMValueRef = undefined;
+        var blocks: [2]c.LLVMBasicBlockRef = undefined;
+        var n: u32 = 0;
+        for ([_]struct { bb: c.LLVMBasicBlockRef, tv: TaggedVal }{
+            .{ .bb = body_end, .tv = body_val },
+            .{ .bb = catch_end, .tv = catch_val },
+        }) |arm| {
+            if (c.LLVMGetBasicBlockTerminator(arm.bb) != null) continue;
+            c.LLVMPositionBuilderAtEnd(self.builder, arm.bb);
+            vals[n] = if (same) self.coerceToI64(arm.tv) else self.coerceToI64(.{ .val = self.wrapAsBlimpVal(arm.tv), .tag = .tagged_val });
+            blocks[n] = c.LLVMGetInsertBlock(self.builder);
+            n += 1;
+            _ = c.LLVMBuildBr(self.builder, merge_bb);
+        }
+        c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
+        if (n == 0) return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "try_result");
+        c.LLVMAddIncoming(phi, &vals, &blocks, n);
+        return .{ .val = self.coerceFromI64(phi, result_tag), .tag = result_tag };
     }
 
     // ── Program building ─────────────────────────────────────
@@ -1796,6 +2182,31 @@ pub const Codegen = struct {
 
         // Return 0
         _ = c.LLVMBuildRet(self.builder, c.LLVMConstInt(self.i32_type, 0, 0));
+
+        self.emitAtomTable();
+    }
+
+    /// `blimp_atom_names` / `blimp_atom_count`: every atom in intern order,
+    /// so the runtime can print a bubble's reason as `:too_small` rather than
+    /// `:3`.  Emitted last, when every atom has been interned.
+    fn emitAtomTable(self: *Codegen) void {
+        const n: u32 = @intCast(self.atoms.names.items.len);
+        const ptrs = self.allocator.alloc(c.LLVMValueRef, n) catch return;
+        for (self.atoms.names.items, 0..) |name, i| {
+            const s = c.LLVMConstStringInContext(self.context, self.zname(name), @intCast(name.len), 0);
+            const g = c.LLVMAddGlobal(self.module, c.LLVMTypeOf(s), "atom_name");
+            c.LLVMSetInitializer(g, s);
+            c.LLVMSetGlobalConstant(g, 1);
+            c.LLVMSetLinkage(g, c.LLVMPrivateLinkage);
+            ptrs[i] = g;
+        }
+        const arr_ty = c.LLVMArrayType2(self.ptr_type, n);
+        const table = c.LLVMAddGlobal(self.module, arr_ty, "blimp_atom_names");
+        c.LLVMSetInitializer(table, c.LLVMConstArray2(self.ptr_type, ptrs.ptr, n));
+        c.LLVMSetGlobalConstant(table, 1);
+        const count = c.LLVMAddGlobal(self.module, self.i32_type, "blimp_atom_count");
+        c.LLVMSetInitializer(count, c.LLVMConstInt(self.i32_type, n, 0));
+        c.LLVMSetGlobalConstant(count, 1);
     }
 
     /// Forward-declare all `def` functions so call order doesn't matter.
@@ -1803,6 +2214,7 @@ pub const Codegen = struct {
         for (nodes) |node| {
             if (node.kind == .def_stmt) {
                 const ds = node.kind.def_stmt;
+                self.def_names.append(self.allocator, ds.name) catch {};
                 // Only declare if not already present
                 if (c.LLVMGetNamedFunction(self.module, self.zname(ds.name)) == null) {
                     const param_count: u32 = @intCast(ds.params.len);

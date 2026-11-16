@@ -89,8 +89,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
         codegen.canvas_mode = true;
     }
 
+    codegen.source = source;
     codegen.buildProgram(program_nodes) catch |err| {
-        std.debug.print("Codegen error: {}\n", .{err});
+        // Codegen says which construct and where; a bare error name is all
+        // there is otherwise.
+        if (codegen.failure) |f| {
+            const err_report = BlimpError{
+                .title = "CANNOT COMPILE",
+                .source_line = getSourceLine(source, f.loc.line),
+                .line = f.loc.line,
+                .col = if (f.loc.col > 0) f.loc.col - 1 else 0,
+                .message = f.message,
+                .hint = f.hint,
+            };
+            err_report.formatStderr();
+            std.debug.print("1 construct cannot be compiled.\n", .{});
+        } else {
+            std.debug.print("Codegen error: {}\n", .{err});
+        }
         std.process.exit(1);
     };
 
@@ -227,6 +243,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             };
             std.debug.print("Canvas: {s}\n", .{html_name});
+        }
+
+        // The program's exit status is the answer to "did it work": one that
+        // died of an uncaught bubble used to come back from `--run` as 0.
+        switch (run_result.term) {
+            .exited => |code| if (code != 0) std.process.exit(code),
+            .signal => |sig| {
+                std.debug.print("compiled program killed by signal {d}\n", .{@intFromEnum(sig)});
+                std.process.exit(1);
+            },
+            else => {
+                std.debug.print("compiled program ended abnormally\n", .{});
+                std.process.exit(1);
+            },
         }
     } else {
         std.debug.print("Compiled: {s} -> {s}\n", .{ input_file, output_name });
