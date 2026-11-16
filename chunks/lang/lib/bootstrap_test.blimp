@@ -11,6 +11,12 @@ actor BootstrapTests do
   test "builtin concat" do assert_eq(blimp_self_eval("concat(\"a\", \"b\")"), "ab") end
   test "comparison" do assert_eq(blimp_self_eval("10 > 3"), true) end
   test "case expression" do assert_eq(blimp_self_eval("case 2 do\n1 -> :one\n2 -> :two\n_ -> :other\nend"), ":two") end
+  # The self-hosted parser has always had case in parse_primary, unlike parser.zig before 4f42568.
+  test "case as list element" do assert_eq(blimp_self_eval("[0, case 1 do\n1 -> 10\n_ -> 20\nend]"), [0, 10]) end
+  test "case as operand, both sides" do assert_eq(blimp_self_eval("case 1 do\n1 -> 10\n_ -> 20\nend + 1 + case 2 do\n1 -> 10\n_ -> 20\nend"), 31) end
+  test "case as case scrutinee" do assert_eq(blimp_self_eval("case case 1 do\n1 -> 10\n_ -> 20\nend do\n10 -> :ten\n_ -> :other\nend"), ":ten") end
+  # situation is not in the self-hosted parser at all; it is refused, not misparsed.
+  test "situation is refused by the self-hosted parser" do assert_eq(lookup(blimp_self_eval("situation 1 do\n1 -> 10\n_ -> 20\nend"), "error"), "unexpected token: kw_situation") end
   test "nested calls" do assert_eq(blimp_self_eval("def add(a: Int, b: Int) do a + b end\nadd(add(1, 2), add(3, 4))"), 10) end
   test "head of list" do assert_eq(blimp_self_eval("head([10, 20, 30])"), 10) end
   test "multi-line program" do assert_eq(blimp_self_eval("x = 10\ny = 20\nz = x + y\nz * 2"), 60) end
