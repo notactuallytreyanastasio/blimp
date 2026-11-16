@@ -1,0 +1,3 @@
+# diff: plain
+# A compiled program prints its final top-level value; `blimp FILE` does not.
+1 + 2

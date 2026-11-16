@@ -1,0 +1,8 @@
+def f(x: Int) -> Int do
+  situation x do
+    1 -> 10
+    _ -> bubble :bad
+  end
+end
+
+f(2)

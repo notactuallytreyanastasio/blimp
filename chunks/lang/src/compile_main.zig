@@ -13,6 +13,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var args_arena = std.heap.ArenaAllocator.init(allocator);
     defer args_arena.deinit();
     const args = try init.args.toSlice(args_arena.allocator());
+    var threaded: std.Io.Threaded = .init(allocator, .{ .argv0 = .init(init.args), .environ = init.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
 
     if (args.len < 2) {
         std.debug.print("Usage: blimp-compile <file.blimp> [-o <output>] [--dump-ir] [--run]\n", .{});
@@ -44,7 +47,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Read source file
-    const source = std.Io.Dir.cwd().readFileAlloc(allocator, input_file, 1024 * 1024) catch |err| {
+    const source = std.Io.Dir.cwd().readFileAlloc(io, input_file, allocator, .limited(1024 * 1024)) catch |err| {
         std.debug.print("Error reading '{s}': {}\n", .{ input_file, err });
         std.process.exit(1);
     };
@@ -130,7 +133,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Find the runtime object
-    const self_exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
+    const self_exe_dir = try std.process.executableDirPathAlloc(io, allocator);
     defer allocator.free(self_exe_dir);
 
     const runtime_obj_path = try std.fmt.allocPrint(allocator, "{s}/../lib/blimp_runtime.o", .{self_exe_dir});
@@ -138,16 +141,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Link (with -flto when LTO is enabled)
     const link_result = if (lto_enabled)
-        std.process.Child.run(.{
-            .allocator = allocator,
+        std.process.run(allocator, io, .{
             .argv = &.{ "cc", "-flto", obj_path, runtime_obj_path, "-o", output_name },
         }) catch |err| {
             std.debug.print("Linker error: {}\n", .{err});
             std.process.exit(1);
         }
     else
-        std.process.Child.run(.{
-            .allocator = allocator,
+        std.process.run(allocator, io, .{
             .argv = &.{ "cc", obj_path, runtime_obj_path, "-o", output_name },
         }) catch |err| {
             std.debug.print("Linker error: {}\n", .{err});
@@ -157,7 +158,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer allocator.free(link_result.stderr);
 
     switch (link_result.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 std.debug.print("Linker failed (exit {d}):\n{s}\n", .{ code, link_result.stderr });
                 std.process.exit(1);
@@ -170,17 +171,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Clean up object/bitcode file
-    std.Io.Dir.cwd().deleteFile(obj_path) catch {};
+    std.Io.Dir.cwd().deleteFile(io, obj_path) catch {};
 
     if (run_after) {
         // Execute the compiled binary (use absolute path)
-        const abs_output = try std.Io.Dir.cwd().realpathAlloc(allocator, output_name);
+        const abs_output = try std.Io.Dir.cwd().realPathFileAlloc(io, output_name, allocator);
         defer allocator.free(abs_output);
         const abs_z = try allocator.dupeZ(u8, abs_output);
         defer allocator.free(abs_z);
 
-        const run_result = std.process.Child.run(.{
-            .allocator = allocator,
+        const run_result = std.process.run(allocator, io, .{
             .argv = &.{abs_z},
         }) catch |err| {
             std.debug.print("Run error: {}\n", .{err});
@@ -192,24 +192,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Print stdout/stderr
         if (run_result.stdout.len > 0) {
             const stdout = std.Io.File.stdout();
-            stdout.writeAll(run_result.stdout) catch {};
+            stdout.writeStreamingAll(io, run_result.stdout) catch {};
         }
         if (run_result.stderr.len > 0) {
             const stderr = std.Io.File.stderr();
-            stderr.writeAll(run_result.stderr) catch {};
+            stderr.writeStreamingAll(io, run_result.stderr) catch {};
         }
 
         // Clean up binary
-        std.Io.Dir.cwd().deleteFile(output_name) catch {};
+        std.Io.Dir.cwd().deleteFile(io, output_name) catch {};
 
         // Canvas mode: read JSON events and generate HTML
         if (canvas_mode) {
-            const json_data = std.Io.Dir.cwd().readFileAlloc(allocator, "blimp_canvas.json", 1024 * 1024) catch |err| {
+            const json_data = std.Io.Dir.cwd().readFileAlloc(io, "blimp_canvas.json", allocator, .limited(1024 * 1024)) catch |err| {
                 std.debug.print("Canvas: no events generated ({s})\n", .{@errorName(err)});
                 return;
             };
             defer allocator.free(json_data);
-            std.Io.Dir.cwd().deleteFile("blimp_canvas.json") catch {};
+            std.Io.Dir.cwd().deleteFile(io, "blimp_canvas.json") catch {};
 
             // Derive html name from input file
             const html_name = try std.fmt.allocPrint(allocator, "{s}.html", .{
@@ -222,7 +222,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             };
             defer allocator.free(html_content);
-            std.Io.Dir.cwd().writeFile(.{ .sub_path = html_name, .data = html_content }) catch |err| {
+            std.Io.Dir.cwd().writeFile(io, .{ .sub_path = html_name, .data = html_content }) catch |err| {
                 std.debug.print("Canvas: cannot write {s}: {s}\n", .{ html_name, @errorName(err) });
                 return;
             };
@@ -234,9 +234,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 fn buildCanvasHtml(allocator: std.mem.Allocator, json_data: []const u8, source: []const u8) ![]u8 {
-    var buf: std.ArrayListAligned(u8, null) = .empty;
-    buf.ensureTotalCapacity(allocator, json_data.len + source.len + 16384) catch {};
-    const w = buf.writer(allocator);
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    const w = &aw.writer;
     try w.writeAll(
         \\<!DOCTYPE html>
         \\<html><head><meta charset="utf-8">
@@ -486,7 +485,7 @@ fn buildCanvasHtml(allocator: std.mem.Allocator, json_data: []const u8, source: 
         \\requestAnimationFrame(draw);
         \\</script></body></html>
     );
-    return buf.toOwnedSlice(allocator);
+    return aw.toOwnedSlice();
 }
 
 /// Extract a source line by line number (1-indexed).

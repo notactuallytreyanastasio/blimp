@@ -136,8 +136,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    compile_exe.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm@20/include" });
-    compile_exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm@20/lib" });
+    // codegen.zig uses only the LLVM C API, which also builds and runs against
+    // LLVM 22. The default stays llvm@20; `-Dllvm=/opt/homebrew/opt/llvm@22`
+    // points it at whichever one the machine has.
+    const llvm_prefix = b.option([]const u8, "llvm", "LLVM install prefix for blimp-compile") orelse "/opt/homebrew/opt/llvm@20";
+    compile_exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{llvm_prefix}) });
+    compile_exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{llvm_prefix}) });
     compile_exe.root_module.linkSystemLibrary("LLVM", .{});
     compile_exe.root_module.link_libc = true;
 

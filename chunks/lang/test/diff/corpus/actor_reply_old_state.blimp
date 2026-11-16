@@ -1,0 +1,12 @@
+# Does `reply` after `become` see the old state or the new one?
+actor A do
+  state n: Int :: 1
+
+  on :bump do
+    become n: n + 10
+    reply n
+  end
+end
+
+a = spawn A
+a <- :bump

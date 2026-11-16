@@ -1,0 +1,13 @@
+actor V do
+  state s: Int :: 0
+
+  on :check(x: Int) do
+    situation x do
+      1 -> reply :ok
+      _ -> bubble :bad
+    end
+  end
+end
+
+v = spawn V
+v <- :check(2)

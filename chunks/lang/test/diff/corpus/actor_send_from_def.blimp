@@ -1,0 +1,13 @@
+actor C do
+  state n: Int :: 0
+
+  on :get do
+    reply 42
+  end
+end
+
+def ask(c: Any) -> Int do
+  c <- :get
+end
+
+ask(spawn C)

@@ -1,0 +1,8 @@
+def count(n: Int, acc: Int) -> Int do
+  situation n do
+    0 -> acc
+    _ -> count(n - 1, acc + 1)
+  end
+end
+
+count(100000, 0)

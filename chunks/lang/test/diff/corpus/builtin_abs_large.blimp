@@ -1,0 +1,2 @@
+# abs of a value that does not fit in 32 bits
+abs(0 - 5000000000)

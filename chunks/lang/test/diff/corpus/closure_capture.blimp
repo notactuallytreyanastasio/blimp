@@ -1,0 +1,3 @@
+y = 10
+f = fn(x: Int) do x + y end
+f(1)

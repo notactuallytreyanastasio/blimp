@@ -1,0 +1,8 @@
+def fact(n: Int) -> Int do
+  situation n do
+    0 -> 1
+    _ -> n * fact(n - 1)
+  end
+end
+
+fact(25)

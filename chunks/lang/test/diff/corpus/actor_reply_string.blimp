@@ -1,0 +1,10 @@
+actor A do
+  state s: Int :: 0
+
+  on :name do
+    reply "alice"
+  end
+end
+
+a = spawn A
+a <- :name
