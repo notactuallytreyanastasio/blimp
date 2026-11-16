@@ -581,18 +581,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "situation_expression"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "case_expression"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "for_expression"
-        },
-        {
-          "type": "SYMBOL",
           "name": "assignment"
         },
         {
@@ -1278,6 +1266,18 @@
         {
           "type": "SYMBOL",
           "name": "fn_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "situation_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "case_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "for_expression"
         },
         {
           "type": "SYMBOL",

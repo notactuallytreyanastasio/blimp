@@ -123,9 +123,8 @@ module.exports = grammar({
         $.become_statement,
         $.reply_statement,
         $.bubble_statement,
-        $.situation_expression,
-        $.case_expression,
-        $.for_expression,
+        // situation, case and for are primaries (see _primary): an
+        // expression wherever an expression is allowed, as in parser.zig.
         $.assignment,
         $._expression,
       ),
@@ -234,6 +233,9 @@ module.exports = grammar({
       choice(
         $.spawn_expression,
         $.fn_expression,
+        $.situation_expression,
+        $.case_expression,
+        $.for_expression,
         $.self_ref,
         $.integer,
         $.float,
