@@ -47,46 +47,50 @@ actor UrlEscapeTests do
 end
 
 # ── HTML Context Automaton Tests ─────────────────────
+#
+# The context's state is under "st", not "state": `state` is a keyword, so
+# `%{state: :pcdata}` does not parse, and html_initial_context has always
+# written %{st: ..., tg: ..., at: ..., qt: ...}.
 
 actor HtmlContextTests do
   test "initial context is pcdata" do
     ctx = html_initial_context()
-    assert_eq(lookup(ctx, "state"), :pcdata)
+    assert_eq(lookup(ctx, "st"), :pcdata)
   end
 
   test "transitions to tag on <" do
     ctx = html_transition(html_initial_context(), "<")
-    assert_eq(lookup(ctx, "state"), :tag_open)
+    assert_eq(lookup(ctx, "st"), :tag_open)
   end
 
   test "transitions through tag name" do
     ctx = html_transition(html_initial_context(), "<div")
-    assert_eq(lookup(ctx, "state"), :tag_name)
+    assert_eq(lookup(ctx, "st"), :tag_name)
   end
 
   test "transitions to before_attr after space" do
     ctx = html_transition(html_initial_context(), "<div ")
-    assert_eq(lookup(ctx, "state"), :before_attr)
+    assert_eq(lookup(ctx, "st"), :before_attr)
   end
 
   test "transitions through attribute" do
     ctx = html_transition(html_initial_context(), "<a href=")
-    assert_eq(lookup(ctx, "state"), :before_attr_value)
+    assert_eq(lookup(ctx, "st"), :before_attr_value)
   end
 
   test "enters quoted attr value" do
     ctx = html_transition(html_initial_context(), "<a href=\"")
-    assert_eq(lookup(ctx, "state"), :attr_value)
+    assert_eq(lookup(ctx, "st"), :attr_value)
   end
 
   test "returns to pcdata after closing tag" do
     ctx = html_transition(html_initial_context(), "<div>")
-    assert_eq(lookup(ctx, "state"), :pcdata)
+    assert_eq(lookup(ctx, "st"), :pcdata)
   end
 
   test "full round trip" do
     ctx = html_transition(html_initial_context(), "<p>hello</p>")
-    assert_eq(lookup(ctx, "state"), :pcdata)
+    assert_eq(lookup(ctx, "st"), :pcdata)
   end
 end
 
@@ -211,6 +215,11 @@ actor SafeSqlTests do
     result = safe_sql(parts)
     assert_eq(lookup(result, "query"), "INSERT INTO users (name, email) VALUES ($1, $2)")
     assert_eq(length(lookup(result, "params")), 2)
+  end
+
+  test "a parameter keeps its type" do
+    parts = [%{type: :fixed, value: "SELECT * FROM t WHERE id = "}, %{type: :unsafe, value: 42}]
+    assert_eq(head(lookup(safe_sql(parts), "params")), 42)
   end
 
   test "fixed-only query has no params" do
