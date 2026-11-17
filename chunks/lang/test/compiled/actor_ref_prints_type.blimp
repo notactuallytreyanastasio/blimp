@@ -1,0 +1,17 @@
+# An actor prints as the interpreter prints it, ref<Type:n> with n counting
+# spawns from 1. Compiled code printed its runtime slot, from 0, and a try
+# whose two arms differ boxed the actor as nil.
+actor C do
+  state n: Int :: 0
+end
+actor D do
+  state n: Int :: 0
+end
+c = spawn C
+puts(spawn D)
+r = try do
+  c
+catch e do
+  :failed
+end
+r

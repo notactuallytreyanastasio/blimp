@@ -1,0 +1,5 @@
+--- stdout
+ref<D:2>
+ref<C:1>
+--- stderr
+--- exit 0

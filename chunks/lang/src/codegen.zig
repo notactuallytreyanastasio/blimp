@@ -604,7 +604,7 @@ pub const Codegen = struct {
             .builtin => |b| switch (b) {
                 .max, .min, .rem => .{ &.{.int}, "an Int" },
                 .abs => .{ &.{ .int, .float }, "an Int or a Float" },
-                .puts => .{ &.{ .int, .float, .string, .boolean }, "an Int, a Float, a String or a Bool" },
+                .puts => .{ &.{ .int, .float, .string, .boolean, .actor_ref }, "an Int, a Float, a String, a Bool or an actor" },
             },
         };
         for (args, 0..) |a, i| {
@@ -695,7 +695,7 @@ pub const Codegen = struct {
 
     /// puts(x): the interpreter writes a String's bytes as they are and any
     /// other value formatted, then a newline, and returns x.  An Int, a
-    /// Float and a Bool format the same either side; other tags are
+    /// Float, a Bool and an actor format the same either side; other tags are
     /// refused in requireArgTags.
     fn emitPuts(self: *Codegen, x: TaggedVal) TaggedVal {
         if (x.tag == .string) {
@@ -1719,7 +1719,7 @@ pub const Codegen = struct {
             },
             .atom => blk: {
                 const f = self.getRuntimeFn("blimp_val_atom", &.{self.i32_type}, self.ptr_type);
-                var args = [_]c.LLVMValueRef{tv.val};
+                var args = [_]c.LLVMValueRef{self.atomId32(tv.val)};
                 var pt = [_]c.LLVMTypeRef{self.i32_type};
                 break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
             },
@@ -1731,7 +1731,15 @@ pub const Codegen = struct {
                 break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
             },
             .tagged_val => tv.val, // Already a BlimpVal*
-            .nil, .actor_ref => blk: {
+            // An actor boxed as nil was what a try or case with an actor on
+            // one side handed back.
+            .actor_ref => blk: {
+                const f = self.getRuntimeFn("blimp_val_actor_ref", &.{self.i32_type}, self.ptr_type);
+                var args = [_]c.LLVMValueRef{c.LLVMBuildTrunc(self.builder, tv.val, self.i32_type, "ref_id")};
+                var pt = [_]c.LLVMTypeRef{self.i32_type};
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
+            },
+            .nil => blk: {
                 const f = self.getRuntimeFn("blimp_val_nil", &.{}, self.ptr_type);
                 break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &[_]c.LLVMTypeRef{}, 0, 0), f, &[_]c.LLVMValueRef{}, 0, "boxed");
             },
@@ -2865,11 +2873,12 @@ pub const Codegen = struct {
                 _ = c.LLVMBuildCall2(self.builder, ft, f, &[_]c.LLVMValueRef{}, 0, "");
             },
             .actor_ref => {
-                // Print actor ref as its ID
-                const f = self.getPrintInt();
-                var params = [_]c.LLVMTypeRef{self.i64_type};
+                // ref<Type:n>, as the interpreter prints one; it printed
+                // the runtime's slot number.
+                const f = self.getRuntimeFn("blimp_print_actor_ref", &.{self.i32_type}, self.void_type);
+                var params = [_]c.LLVMTypeRef{self.i32_type};
                 const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
-                var args = [_]c.LLVMValueRef{tv.val};
+                var args = [_]c.LLVMValueRef{c.LLVMBuildTrunc(self.builder, tv.val, self.i32_type, "ref_id")};
                 _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
             },
             .tagged_val => {

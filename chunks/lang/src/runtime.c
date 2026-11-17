@@ -43,6 +43,7 @@ void blimp_rc_inc(BlimpVal *v);
 void blimp_rc_dec(BlimpVal *v);
 BlimpVal *blimp_rc_reuse(BlimpVal *v);
 static const char *atom_text(int id);
+static void put_actor_ref(FILE *f, int id);
 
 // ── Value constructors ──────────────────────────────────
 
@@ -364,7 +365,7 @@ void blimp_print_val(BlimpVal *v) {
             break;
         case VAL_BOOL: printf("%s\n", v->bool_val ? "true" : "false"); break;
         case VAL_NIL: printf("nil\n"); break;
-        case VAL_ACTOR_REF: printf("ref<%d>\n", v->actor_id); break;
+        case VAL_ACTOR_REF: put_actor_ref(stdout, v->actor_id); putchar('\n'); break;
         case VAL_CLOSURE: printf("fn/%d\n", v->closure.param_count); break;
         case VAL_LIST:
             printf("[");
@@ -398,7 +399,7 @@ void blimp_print_val(BlimpVal *v) {
                         break;
                     case VAL_BOOL: printf("%s", mv->bool_val ? "true" : "false"); break;
                     case VAL_NIL: printf("nil"); break;
-                    case VAL_ACTOR_REF: printf("ref<%d>", mv->actor_id); break;
+                    case VAL_ACTOR_REF: put_actor_ref(stdout, mv->actor_id); break;
                     default: printf("?"); break;
                 }
             }
@@ -504,6 +505,24 @@ static int atom_name_count = 0;
 
 // Actor type names (set at spawn time)
 static const char *actor_type_names[256];
+
+// An actor as the interpreter prints one: ref<Type:n>, n counting spawns
+// from 1 (its registry's next_id).  Runtime slots count from 0.  Every
+// spawn names its type; a slot without one is a codegen bug, and a
+// made-up name would look like output, so it aborts.
+static void put_actor_ref(FILE *f, int id) {
+    const char *name = (id >= 0 && id < 256) ? actor_type_names[id] : NULL;
+    if (!name) {
+        fprintf(stderr, "blimp runtime: actor %d has no type name\n", id);
+        abort();
+    }
+    fprintf(f, "ref<%s:%d>", name, id + 1);
+}
+
+void blimp_print_actor_ref(int id) {
+    put_actor_ref(stdout, id);
+    putchar('\n');
+}
 
 // Actor field names and counts (set by codegen)
 typedef struct {
@@ -630,7 +649,7 @@ static void format_val(FILE *out, BlimpVal *v) {
         }
         case VAL_BOOL: fputs(v->bool_val ? "true" : "false", out); break;
         case VAL_NIL: fputs("nil", out); break;
-        case VAL_ACTOR_REF: fprintf(out, "ref<%d>", v->actor_id); break;
+        case VAL_ACTOR_REF: put_actor_ref(out, v->actor_id); break;
         default: fputs("<value>", out); break;
     }
 }
