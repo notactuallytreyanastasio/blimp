@@ -5,7 +5,8 @@
 #
 #   tree-sitter-blimp/scripts/disagreements.sh
 #
-# Prints one line per disagreement and exits 1 if there are any:
+# Prints one line per disagreement and exits 1 if there are any; exits 2,
+# saying so, if tree-sitter did not parse every file:
 #
 #   ts-error   FILE:LINE:COL  SOURCE LINE      tree-sitter has an ERROR or
 #                                              MISSING node there; parser.zig
@@ -43,8 +44,18 @@ mkdir -p "$TREE_SITTER_LIBDIR"
 git -C "$root" ls-files '*.blimp' | sed "s|^|$root/|" > "$tmp/files"
 
 # tree-sitter: FILE <tab> first error, for each file with an ERROR or MISSING.
-(cd tree-sitter-blimp && $TREE_SITTER parse --quiet --paths "$tmp/files" 2>/dev/null) |
-  sed -nE 's/^([^	]*[^ 	]) *	.*\((ERROR|MISSING)[^[]*\[([0-9]+), ([0-9]+)\].*/\1	\3	\4/p' > "$tmp/ts"
+# --stat ends the output with "Total parses: N". A tree-sitter that did not
+# run, or stopped early, prints no such line or a smaller N; without this
+# check its silence would read as "no ERROR in any file".
+(cd tree-sitter-blimp && $TREE_SITTER parse --quiet --stat --paths "$tmp/files") > "$tmp/out" 2> "$tmp/err"
+want=$(wc -l < "$tmp/files" | tr -d ' ')
+got=$(sed -nE 's/^Total parses: ([0-9]+);.*/\1/p' "$tmp/out")
+if [ "$got" != "$want" ]; then
+  echo "tree-sitter parsed ${got:-0} of $want files; nothing was compared. Its stderr:" >&2
+  sed 's/^/  /' "$tmp/err" >&2
+  exit 2
+fi
+sed -nE 's/^([^	]*[^ 	]) *	.*\((ERROR|MISSING)[^[]*\[([0-9]+), ([0-9]+)\].*/\1	\3	\4/p' "$tmp/out" > "$tmp/ts"
 
 found=0
 while read -r f; do
