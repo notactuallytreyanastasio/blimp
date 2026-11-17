@@ -1,10 +1,25 @@
+warning: first-pass eval failed: 
+-- TEMPLATE NOT FOUND ----------------------------
+
+  No actor template called `Tokenizer` is defined.
+
+57|   state lexer: Any :: spawn Tokenizer
+                           ^
+
+  Hint: Define an actor first:
+      actor Counter do
+        state count: Int :: 0
+        on :increment do ... end
+      end
+
+
 FFFAssertion failed: values not equal
   left:  4
   right: 5
 FFFAssertion failed: values not equal
   left:  7
   right: 10
-F
+FF
 
 
   FAIL SpawnTests > spawns an actor nobody defined
@@ -77,5 +92,19 @@ F
   FAIL SpawnTests > a property that is false
     property falsified: expected 10, got 7
 
-7 failed, 0 passed, 7 total
+  FAIL StateSpawnTests > a state default that spawns an actor nobody defined
+    -- TEMPLATE NOT FOUND ----------------------------
+    
+      No actor template called `Tokenizer` is defined.
+    
+    57|   state lexer: Any :: spawn Tokenizer
+                               ^
+    
+      Hint: Define an actor first:
+          actor Counter do
+            state count: Int :: 0
+            on :increment do ... end
+          end
+
+8 failed, 0 passed, 8 total
 

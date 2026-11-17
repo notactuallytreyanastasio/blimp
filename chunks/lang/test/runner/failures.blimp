@@ -52,3 +52,11 @@ actor SpawnTests do
     assert_eq(n, 10)
   end
 end
+
+actor StateSpawnTests do
+  state lexer: Any :: spawn Tokenizer
+
+  test "a state default that spawns an actor nobody defined" do
+    assert_eq(lexer, 1)
+  end
+end

@@ -219,26 +219,21 @@ pub const Evaluator = struct {
                 // Fresh scope per test: re-evaluate state defaults from AST
                 // This gives each test fresh actor spawns (not shared singletons)
                 self.env.pushScope();
-                for (def.body) |state_node| {
-                    if (state_node.kind != .state_def) continue;
-                    for (state_node.kind.state_def.fields) |field| {
-                        if (field.default_value) |default_ptr| {
-                            const val = self.eval(default_ptr) catch continue;
-                            self.env.define(field.key, val);
-                        }
-                    }
-                }
-
-                // Run test body. Cleared after the state defaults: one that
-                // fails is still skipped, and its error must not stand in
-                // for the body's.
                 self.clearTestFailure();
                 var why: ?[]const u8 = null;
-                for (test_def.body) |*stmt| {
-                    _ = self.eval(stmt) catch |err| {
-                        why = self.describeTestFailure(err, "assertion failed");
-                        break;
-                    };
+                // A state default that fails fails the test. Skipping it left
+                // the field undefined, and the test then failed on that
+                // instead of on the spawn that never happened.
+                if (self.evalTestState(def)) |err| why = self.describeTestFailure(err, "assertion failed");
+
+                // Run test body
+                if (why == null) {
+                    for (test_def.body) |*stmt| {
+                        _ = self.eval(stmt) catch |err| {
+                            why = self.describeTestFailure(err, "assertion failed");
+                            break;
+                        };
+                    }
                 }
                 const test_passed = why == null;
 
@@ -280,24 +275,17 @@ pub const Evaluator = struct {
                 var prop_why: ?[]const u8 = null;
                 while (run < num_runs) : (run += 1) {
                     self.env.pushScope();
-                    // Evaluate state defaults
-                    for (def.body) |state_node| {
-                        if (state_node.kind != .state_def) continue;
-                        for (state_node.kind.state_def.fields) |field| {
-                            if (field.default_value) |default_ptr| {
-                                const val = self.eval(default_ptr) catch continue;
-                                self.env.define(field.key, val);
-                            }
-                        }
-                    }
+                    self.clearTestFailure();
+                    if (self.evalTestState(def)) |err| prop_why = self.describeTestFailure(err, "property falsified");
 
                     // Run property body (given + assertions)
-                    self.clearTestFailure();
-                    for (prop.body) |*stmt| {
-                        _ = self.eval(stmt) catch |err| {
-                            prop_why = self.describeTestFailure(err, "property falsified");
-                            break;
-                        };
+                    if (prop_why == null) {
+                        for (prop.body) |*stmt| {
+                            _ = self.eval(stmt) catch |err| {
+                                prop_why = self.describeTestFailure(err, "property falsified");
+                                break;
+                            };
+                        }
                     }
                     self.env.popScope();
                     self.actor_ctx = null;
@@ -359,6 +347,21 @@ pub const Evaluator = struct {
         self.bubble_line = 0;
         self.bubble_col = 0;
         builtins_mod.last_assertion_detail_len = 0;
+    }
+
+    /// Evaluate an actor's state defaults into the current scope for a test.
+    /// Returns the error of the first one that fails.
+    fn evalTestState(self: *Evaluator, def: ast.Node.ActorDef) ?EvalError {
+        for (def.body) |state_node| {
+            if (state_node.kind != .state_def) continue;
+            for (state_node.kind.state_def.fields) |field| {
+                if (field.default_value) |default_ptr| {
+                    const val = self.eval(default_ptr) catch |err| return err;
+                    self.env.define(field.key, val);
+                }
+            }
+        }
+        return null;
     }
 
     /// Why a test stopped, as the line under its FAIL. An assertion builtin
