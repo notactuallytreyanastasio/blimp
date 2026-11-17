@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  `try` around a call of `xs`, a local holding a list, map or fn value: if it is not a fn, or a fault happens inside it, the error cannot reach this catch in compiled code.
+
+4| r = try do
+        ^
+
+  Hint: Call it outside the `try`, or run this file with the interpreter.
+
+1 construct cannot be compiled.

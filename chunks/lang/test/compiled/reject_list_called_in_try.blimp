@@ -1,0 +1,9 @@
+# A list called inside try: the interpreter catches its UNKNOWN FUNCTION;
+# compiled code cannot, and the refusal called the list a fn value.
+xs = [1, 2]
+r = try do
+  xs(1)
+catch e do
+  0
+end
+r

@@ -551,9 +551,12 @@ pub const Codegen = struct {
             // like a def, has no channel back to the caller's catch).
             if (self.catches.items.len > 0) {
                 const k = self.catches.items[self.catches.items.len - 1];
+                // The tag says list, map or fn, not which: the runtime finds
+                // out at the call, and its UNKNOWN FUNCTION for a list ends
+                // the program here too, where the interpreter's try catches it.
                 return self.reject(
                     k.loc,
-                    "`{s}` around a call of the fn value `{s}`: a fault inside it cannot reach this catch in compiled code.",
+                    "`{s}` around a call of `{s}`, a local holding a list, map or fn value: if it is not a fn, or a fault happens inside it, the error cannot reach this catch in compiled code.",
                     .{ if (k.kind == .try_) "try" else "orelse", name },
                     "Call it outside the `try`, or run this file with the interpreter.",
                 );
@@ -569,7 +572,23 @@ pub const Codegen = struct {
             );
             return .{ .def = d };
         };
-        if (std.meta.stringToEnum(Builtin, name)) |b| {
+        // A local that is not a fn value hides a def of its name (the
+        // interpreter finds the local first and reports UNKNOWN FUNCTION);
+        // a builtin of that name is still called, as it is there.
+        const builtin = std.meta.stringToEnum(Builtin, name);
+        if (local) |entry| if (builtin == null) {
+            const hides = if (self.findDef(name) != null)
+                std.fmt.allocPrint(self.allocator, ", and it hides the def `{s}`", .{name}) catch ""
+            else
+                "";
+            return self.reject(
+                loc,
+                "`{s}` is a local holding {s}, which is not a function{s}. The interpreter reports UNKNOWN FUNCTION here.",
+                .{ name, tagNoun(entry.tag), hides },
+                "Rename the local or the def, or run this file with the interpreter.",
+            );
+        };
+        if (builtin) |b| {
             const want: usize = switch (b) {
                 .max, .min, .rem => 2,
                 .abs, .puts => 1,

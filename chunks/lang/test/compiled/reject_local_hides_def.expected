@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  `double` is a local holding an Int, which is not a function, and it hides the def `double`. The interpreter reports UNKNOWN FUNCTION here.
+
+7| double(3)
+    ^
+
+  Hint: Rename the local or the def, or run this file with the interpreter.
+
+1 construct cannot be compiled.
