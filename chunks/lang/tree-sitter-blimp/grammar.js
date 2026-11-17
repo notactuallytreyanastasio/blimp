@@ -54,8 +54,22 @@ module.exports = grammar({
       choice(
         $.state_definition,
         $.message_handler,
+        $.test_definition,
+        $.property_definition,
         $._statement,
       ),
+
+    // test "name" do ... end, in an actor body only (parseActorBodyTopLevel).
+    // Without this rule `test "x" do` read as an identifier, a string and an
+    // identifier `do`, and the test's `end` closed the actor, with no ERROR.
+    test_definition: ($) =>
+      seq("test", $.string, "do", repeat($._statement), "end"),
+
+    // property "name" do given n: gen_integer(0, 9) ... end (parsePropertyDef)
+    property_definition: ($) =>
+      seq("property", $.string, "do", repeat(choice($.given_statement, $._statement)), "end"),
+
+    given_statement: ($) => seq("given", $.identifier, ":", $._expression),
 
     // ============================================================
     // State definition
@@ -260,6 +274,7 @@ module.exports = grammar({
         $.situation_expression,
         $.case_expression,
         $.for_expression,
+        $.try_expression,
         $.self_ref,
         $.integer,
         $.float,
@@ -293,6 +308,15 @@ module.exports = grammar({
     // fn(x, y) do ... end
     fn_expression: ($) =>
       seq("fn", $.parameter_list, optional($.return_type), "do", repeat($._statement), "end"),
+
+    // try do ... catch e do ... end (parseTryCatch): one `end` closes both
+    // bodies, and the catch clause and its variable are optional.
+    try_expression: ($) =>
+      seq(
+        "try", "do", repeat($._statement),
+        optional(seq("catch", optional($.identifier), "do", repeat($._statement))),
+        "end",
+      ),
 
     // self reference inside handler
     self_ref: (_) => "self",

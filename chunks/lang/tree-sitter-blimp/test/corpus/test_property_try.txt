@@ -1,0 +1,91 @@
+================================================================================
+Test and property blocks in an actor, and try with catch
+================================================================================
+
+actor Shapes do
+  state n: Int :: 7
+  on :kinds do
+    reply n
+  end
+  test "seven kinds" do
+    s = spawn Shapes
+    assert_eq(s <- :kinds, 7)
+  end
+  property "n is never negative" do
+    given k: gen_integer(0, 9)
+    assert(k >= 0)
+  end
+end
+r = try do
+  1
+catch e do
+  e
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (state_definition
+      (typed_field_list
+        (typed_field
+          (identifier)
+          (type_name
+            (upper_identifier))
+          (integer))))
+    (message_handler
+      (atom)
+      (reply_statement
+        (identifier)))
+    (test_definition
+      (string)
+      (assignment
+        (identifier)
+        (spawn_expression
+          (spawn_target
+            (upper_identifier))))
+      (function_call
+        (identifier)
+        (message_send
+          (identifier)
+          (atom))
+        (integer)))
+    (property_definition
+      (string)
+      (given_statement
+        (identifier)
+        (function_call
+          (identifier)
+          (integer)
+          (integer)))
+      (function_call
+        (identifier)
+        (binary_expression
+          (identifier)
+          (integer)))))
+  (assignment
+    (identifier)
+    (try_expression
+      (integer)
+      (identifier)
+      (identifier))))
+
+================================================================================
+Try without a catch clause
+================================================================================
+
+r = try do
+  f(1)
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (try_expression
+      (function_call
+        (identifier)
+        (integer)))))
