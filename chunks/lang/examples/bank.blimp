@@ -1,16 +1,16 @@
 actor Account do
   state balance: Int :: 0
 
-  on :deposit(amount) when amount > 0 do
+  on :deposit(amount: Int) when amount > 0 do
     become balance: balance + amount
     reply balance + amount
   end
 
-  on :deposit(amount) do
+  on :deposit(amount: Int) do
     reply balance
   end
 
-  on :withdraw(amount) when amount > 0 do
+  on :withdraw(amount: Int) when amount > 0 do
     become balance: balance - amount
     reply balance - amount
   end
@@ -21,7 +21,7 @@ actor Account do
 end
 
 actor Bank do
-  on :transfer(from, to, amount) do
+  on :transfer(from: Account, to: Account, amount: Int) do
     from <- :withdraw(amount)
     to <- :deposit(amount)
     reply to <- :get
