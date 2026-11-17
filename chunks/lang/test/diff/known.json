@@ -27,20 +27,6 @@
     },
     "category": "unsupported"
   },
-  "examples/content_pipeline.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- NOT AN ACTOR \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "CANNOT COMPILE: There is no `split` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
-    },
-    "category": "unsupported"
-  },
   "examples/dot_notation.blimp": {
     "interp": {
       "end": "exit",
@@ -139,20 +125,6 @@
     },
     "category": "unsupported"
   },
-  "examples/game_rules.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- NOT AN ACTOR \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "CANNOT COMPILE: There is no `elem` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
-    },
-    "category": "unsupported"
-  },
   "examples/hole_test.blimp": {
     "interp": {
       "end": "exit",
@@ -184,9 +156,9 @@
   "examples/marketplace.blimp": {
     "interp": {
       "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- NO MATCHING HANDLER \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+      "exit": 0,
+      "stdout": "5\n%{name: \"alice\", account: 400, wallet: 45, spent: 130}\n%{name: \"bob\", account: 0, wallet: 0, spent: 50}\n%{name: \"shop\", balance: 2945, revenue: 145}\n%{name: \"cafe\", balance: 2235, revenue: 35}\n%{stolen: 2625, attempts: 7, blocked: 3}\n%{stolen: 2625, attempts: 7, blocked: 3}\n",
+      "stderr": ""
     },
     "compiler": {
       "end": "exit",
@@ -224,20 +196,6 @@
     },
     "category": "unsupported"
   },
-  "examples/rate_limiter.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- NOT AN ACTOR \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "CANNOT COMPILE: There is no `append` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
-    },
-    "category": "unsupported"
-  },
   "examples/shop_system.blimp": {
     "interp": {
       "end": "exit",
@@ -249,6 +207,20 @@
       "end": "exit",
       "exit": 1,
       "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
+    },
+    "category": "unsupported"
+  },
+  "examples/supervision.blimp": {
+    "interp": {
+      "end": "exit",
+      "exit": 0,
+      "stdout": "800\n3\n:caught\n0\n0\n0\n",
+      "stderr": ""
+    },
+    "compiler": {
+      "end": "exit",
+      "exit": 1,
+      "error": "CANNOT COMPILE: `bubble` in a handler of `Bank.Account` restarts it under its supervisor `Bank`; compiled actors have no supervisor, so the restart would not happen."
     },
     "category": "unsupported"
   },
@@ -392,14 +364,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4308237800\n",
+      "stdout": "4368956904\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4329504232\n",
+      "stdout": "4365581800\n",
       "stderr": ""
     },
     "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
