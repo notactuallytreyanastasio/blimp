@@ -1,0 +1,7 @@
+# A def is not a C function. Under its own name `def printf` was the printf
+# the runtime prints with (the program printed nothing and exited 0), and
+# `def main` was main itself (LLVM verification failed on its return type).
+def printf(n: Int) -> Int do n + 100 end
+def malloc(n: Int) -> Int do n + 1 end
+def main() -> Int do 7 end
+printf(malloc(main()))

@@ -147,7 +147,7 @@ pub const Codegen = struct {
     current_def_name: []const u8 = "",
     /// Enclosing try/orelse in the current function.
     catches: std.ArrayList(Catch) = .empty,
-    /// Top-level def names: a call to one inside a try/orelse is refused.
+    /// Every def's name: a call to one inside a try/orelse is refused.
     def_names: std.ArrayList([]const u8) = .empty,
     /// Status of the send compiled last, so `orelse` can tell a reply of 0
     /// from no reply at all.
@@ -470,6 +470,17 @@ pub const Codegen = struct {
         }
     }
 
+    fn isDef(self: *const Codegen, name: []const u8) bool {
+        for (self.def_names.items) |d| if (std.mem.eql(u8, d, name)) return true;
+        return false;
+    }
+
+    /// The symbol a call by name goes to: a def's own, or else (for now) a C
+    /// function of that name.
+    fn calleeSymbol(self: *Codegen, name: []const u8) [*:0]const u8 {
+        return if (self.isDef(name)) self.defSymbol(name) else self.zname(name);
+    }
+
     fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall) CodegenError!TaggedVal {
         const name = call.name;
         try self.checkDefCallCatchable(name);
@@ -495,7 +506,7 @@ pub const Codegen = struct {
             arg_types[i] = self.i64_type;
         }
         const ft = c.LLVMFunctionType(self.i64_type, &arg_types, n, 0);
-        const extern_name = self.zname(name);
+        const extern_name = self.calleeSymbol(name);
         var func = c.LLVMGetNamedFunction(self.module, extern_name);
         if (func == null) {
             func = c.LLVMAddFunction(self.module, extern_name, ft);
@@ -550,7 +561,7 @@ pub const Codegen = struct {
                     }
                     const total: u32 = n + 1;
                     const ft = c.LLVMFunctionType(self.i64_type, &shifted_types, total, 0);
-                    const func_name = self.zname(call.name);
+                    const func_name = self.calleeSymbol(call.name);
                     var func = c.LLVMGetNamedFunction(self.module, func_name);
                     if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
                     const val = c.LLVMBuildCall2(self.builder, ft, func, &shifted_vals, total, "pipetmp");
@@ -558,7 +569,7 @@ pub const Codegen = struct {
                 }
 
                 const ft = c.LLVMFunctionType(self.i64_type, &arg_types, n, 0);
-                const func_name = self.zname(call.name);
+                const func_name = self.calleeSymbol(call.name);
                 var func = c.LLVMGetNamedFunction(self.module, func_name);
                 if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
                 const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, n, "pipetmp");
@@ -569,7 +580,7 @@ pub const Codegen = struct {
                 var arg_vals = [_]c.LLVMValueRef{left_val.val};
                 var arg_types = [_]c.LLVMTypeRef{self.i64_type};
                 const ft = c.LLVMFunctionType(self.i64_type, &arg_types, 1, 0);
-                const func_name = self.zname(id.name);
+                const func_name = self.calleeSymbol(id.name);
                 var func = c.LLVMGetNamedFunction(self.module, func_name);
                 if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
                 const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, 1, "pipetmp");
@@ -1504,6 +1515,7 @@ pub const Codegen = struct {
             self.current_def_name = saved_def_name;
         }
         self.scope = .{};
+        if (!self.isDef(ds.name)) self.def_names.append(self.allocator, ds.name) catch return CodegenError.LLVMError;
 
         // Create function: i64 name(i64, i64, ...)
         const param_count: u32 = @intCast(ds.params.len);
@@ -1514,9 +1526,8 @@ pub const Codegen = struct {
         const fn_type = c.LLVMFunctionType(self.i64_type, param_types.ptr, param_count, 0);
 
         // Use existing forward declaration if present, otherwise create
-        const fn_name = self.zname(ds.name);
-        const func = c.LLVMGetNamedFunction(self.module, fn_name) orelse
-            c.LLVMAddFunction(self.module, fn_name, fn_type);
+        const func = c.LLVMGetNamedFunction(self.module, self.defSymbol(ds.name)) orelse
+            self.addDefFunction(ds.name, fn_type);
 
         const entry_bb = c.LLVMAppendBasicBlock(func, "entry");
         c.LLVMPositionBuilderAtEnd(self.builder, entry_bb);
@@ -2209,6 +2220,24 @@ pub const Codegen = struct {
         c.LLVMSetGlobalConstant(count, 1);
     }
 
+    /// The LLVM name of `def name`.  A def is not a C function: named
+    /// `printf` or `malloc` under its own name, it was the symbol the runtime
+    /// linked for printf or malloc, and `def printf(n: Int)` turned every
+    /// print in the program into a call to it.  `def.` cannot begin a C
+    /// identifier, so no def can take a libc or runtime symbol.
+    fn defSymbol(self: *Codegen, name: []const u8) [*:0]const u8 {
+        const s = std.fmt.allocPrintSentinel(self.allocator, "def.{s}", .{name}, 0) catch return "def.?";
+        return s.ptr;
+    }
+
+    /// Declare `def name` with internal linkage: nothing outside the module
+    /// calls a def, so its symbol is never exported to the linker either.
+    fn addDefFunction(self: *Codegen, name: []const u8, fn_type: c.LLVMTypeRef) c.LLVMValueRef {
+        const func = c.LLVMAddFunction(self.module, self.defSymbol(name), fn_type);
+        c.LLVMSetLinkage(func, c.LLVMInternalLinkage);
+        return func;
+    }
+
     /// Forward-declare all `def` functions so call order doesn't matter.
     fn forwardDeclareDefs(self: *Codegen, nodes: []const ast.Node) void {
         for (nodes) |node| {
@@ -2216,14 +2245,14 @@ pub const Codegen = struct {
                 const ds = node.kind.def_stmt;
                 self.def_names.append(self.allocator, ds.name) catch {};
                 // Only declare if not already present
-                if (c.LLVMGetNamedFunction(self.module, self.zname(ds.name)) == null) {
+                if (c.LLVMGetNamedFunction(self.module, self.defSymbol(ds.name)) == null) {
                     const param_count: u32 = @intCast(ds.params.len);
                     const param_types = self.allocator.alloc(c.LLVMTypeRef, param_count) catch continue;
                     for (0..param_count) |i| {
                         param_types[i] = self.i64_type;
                     }
                     const fn_type = c.LLVMFunctionType(self.i64_type, param_types.ptr, param_count, 0);
-                    _ = c.LLVMAddFunction(self.module, self.zname(ds.name), fn_type);
+                    _ = self.addDefFunction(ds.name, fn_type);
                 }
             }
         }
