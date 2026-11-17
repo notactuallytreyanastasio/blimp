@@ -288,6 +288,7 @@ module.exports = grammar({
         $.list,
         $.tuple,
         $.map,
+        $.struct_literal,
         $.parenthesized_expression,
       ),
 
@@ -343,7 +344,18 @@ module.exports = grammar({
 
     tuple: ($) => seq("{", commaSep($._expression), "}"),
 
-    map: ($) => seq("%", "{", commaSep($.key_value_pair), "}"),
+    // parseMapLitBody takes a string key as well as a name: %{"data-n": 1}.
+    map: ($) => seq("%", "{", commaSep(alias($._map_pair, $.key_value_pair)), "}"),
+
+    _map_pair: ($) => prec.right(seq(choice($.identifier, $.string), ":", $._expression)),
+
+    // %Shop.Checkout{total: 0} (parseStructLit): name pairs only.
+    struct_literal: ($) =>
+      seq(
+        "%",
+        prec.right(seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
+        "{", commaSep($.key_value_pair), "}",
+      ),
 
     // ============================================================
     // Situation expression (pattern matching)
@@ -389,7 +401,10 @@ module.exports = grammar({
 
     integer: (_) => /\d+/,
 
-    float: (_) => /\d+\.\d+/,
+    // lexNumber: a decimal point needs a digit after it, and an exponent
+    // makes a float with or without one (`1e25`, `9.5E-3`). Without the
+    // exponent here, `1e25` was the integer 1 and then an identifier e25.
+    float: (_) => /\d+\.\d+([eE][+-]?\d+)?|\d+[eE][+-]?\d+/,
 
     // One token, so that the extras cannot apply inside it. As a seq of
     // quote, body and quote, a `#` in the body was lexed as a comment that
