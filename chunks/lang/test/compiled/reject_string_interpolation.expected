@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  This string has `#{...}` in it; compiled code does not interpolate strings yet.
+
+4| "n is #{n}"
+    ^
+
+  Hint: Run this file with the interpreter.
+
+1 construct cannot be compiled.

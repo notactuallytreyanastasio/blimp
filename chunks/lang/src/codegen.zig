@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const errors = @import("errors.zig");
+const literal = @import("literal.zig");
 
 const c = @cImport({
     @cInclude("llvm-c/Core.h");
@@ -350,7 +351,7 @@ pub const Codegen = struct {
                 .tag = .boolean,
             },
             .nil_lit => .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil },
-            .string_lit => |lit| self.compileStringLit(lit),
+            .string_lit => |lit| self.compileStringLit(lit, node.loc),
             .atom_lit => |lit| self.compileAtomLit(lit),
             .identifier => |id| self.compileIdentifier(id, node.loc),
             .binary_op => |op| self.compileBinaryOp(op, node.loc),
@@ -433,13 +434,23 @@ pub const Codegen = struct {
         };
     }
 
-    fn compileStringLit(self: *Codegen, lit: ast.Node.StringLit) TaggedVal {
-        const raw = lit.value;
-        const s = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
-            raw[1 .. raw.len - 1]
-        else
-            raw;
-        const global = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(s), "str");
+    /// The text a string literal stands for: its escapes turned into the
+    /// bytes they name, with the same rules the parser applies for the
+    /// interpreter (literal.appendUnescaped).  The lexeme used to be
+    /// emitted as written, so puts("a\nb") printed a backslash and an n.
+    /// An interpolated literal is refused: it needs every part formatted
+    /// at run time, as the interpreter does, and printing the `#{n}`
+    /// itself was the old answer.
+    fn compileStringLit(self: *Codegen, lit: ast.Node.StringLit, loc: ast.Loc) CodegenError!TaggedVal {
+        if (lit.interp != null) return self.reject(
+            loc,
+            "This string has `#{{...}}` in it; compiled code does not interpolate strings yet.",
+            .{},
+            "Run this file with the interpreter.",
+        );
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        literal.appendUnescaped(self.allocator, &buf, literal.stripQuotes(lit.value)) catch return CodegenError.LLVMError;
+        const global = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(buf.items), "str");
         return .{ .val = global, .tag = .string };
     }
 

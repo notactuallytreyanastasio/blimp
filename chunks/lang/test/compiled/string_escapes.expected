@@ -1,0 +1,9 @@
+--- stdout
+a
+b
+tab	here, quote " and backslash \
+#{not interpolated}
+"x
+y"
+--- stderr
+--- exit 0
