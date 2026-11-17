@@ -7,6 +7,9 @@
 # `make test` built libblimp.a, ran no test, and exited 0.
 
 ZIG ?= zig
+# LLVM prefix for blimp-compile, e.g. make check LLVM=/opt/homebrew/opt/llvm@22.
+# Empty means build.zig finds one (findLlvm) and prints which.
+LLVM ?=
 
 .PHONY: all blimp run server test check wasm clean
 
@@ -28,10 +31,11 @@ server: blimp
 test:
 	$(ZIG) build test --summary all
 
-# Every suite: zig, blimp test test/lib, examples, node, python, tree-sitter.
+# Every suite: zig, blimp test test/lib, examples, node, python, tree-sitter,
+# and the compiler's: its build, the compiled fixtures and the diff harness.
 # Exits 1 and names the suites that failed if any did.
 check:
-	ZIG=$(ZIG) scripts/check.sh
+	ZIG=$(ZIG) LLVM=$(LLVM) scripts/check.sh
 
 wasm:
 	$(ZIG) build wasm

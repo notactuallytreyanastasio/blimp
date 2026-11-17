@@ -2,7 +2,7 @@
 
 *November 16, 2026*
 
-Blimp has two ways to run a program. `blimp` interprets it, and `blimp-compile` turns it into LLVM IR and links a native binary against a small C runtime. The last chapter of this series is about the place where the two disagreed most: what happens when a handler gives up.
+Blimp has two ways to run a program. `blimp` interprets it, and `blimp-compile` turns it into LLVM IR and links a native binary against a small C runtime. This chapter is about the place where the two disagreed most: what happens when a handler gives up.
 
 A handler gives up with `bubble`. The bubble carries a reason back to whoever sent the message, and a `try ... catch` or an `orelse` around the send can handle it. If nothing handles it, the interpreter stops and tells you where it came from. Take this program:
 
@@ -56,7 +56,7 @@ entry:
 
 The two bodies match instruction for instruction. The compiler evaluated the bubble's reason, dropped it and returned "matched, value 0". So `r` got 0, `r + 1` gave 1, and the program looked fine. An `orelse` had the same blind spot from the other side: `v <- :zero orelse 99` printed 99 when the handler had replied 0 on purpose, because the compiled `orelse` compared the reply against 0. Two neighbouring cases went wrong the same way. Integer division compiled to a bare LLVM `sdiv`, which is undefined behaviour on a zero divisor, and `10 / x` with `x = 0` came out as 1. A message with no handler replied 0.
 
-The compiler had no tests of its own to catch any of this, since `zig build test` never compiles `codegen.zig`. So the first commit adds 22 fixtures in `test/compiled/`. Each pairs a `.blimp` file with an `.expected` file of output and exit status, and the interpreter wrote every runtime expectation. Against the old compiler, 3 passed and 20 failed. The 3 that passed are `orelse` cases where falling back on a 0 happens to give the right answer.
+The compiler had no tests of its own to catch any of this, since `zig build test` never compiles `codegen.zig`. So the first commit adds 22 fixtures in `test/compiled/`. Each pairs a `.blimp` file with an `.expected` file of output and exit status, and the interpreter wrote every runtime expectation. The runner makes one more check, that `blimp-compile --run` hands back the program's exit status, so it counts 23. Against the old compiler, 3 passed and 20 failed. The 3 that passed are `orelse` cases where falling back on a 0 happens to give the right answer.
 
 ## Where the reason goes now
 
@@ -116,4 +116,4 @@ zig build -Dllvm=/opt/homebrew/opt/llvm@22
 sh test/compiled/run.sh
 ```
 
-On this branch that prints `compiled fixtures: 23 passed, 0 failed`. The count is the 22 fixtures plus a check that `blimp-compile --run` hands back the program's exit status, which it used to replace with 0.
+On this branch that prints `compiled fixtures: 23 passed, 0 failed`: the 22 fixtures and the `--run` check, which used to get 0 back whatever the program did.

@@ -245,17 +245,36 @@ def classify(prog, interp, compiler, timeout):
 AGREEMENT = {"agree", "both-reject"}
 
 
+# A flaky program is flaky because two runs of one side disagree, and the
+# disagreement can itself fail to show: the compiled actor_reply_string prints
+# a String as its address, and two runs printed the same one on try 584 of a
+# loop here (about 3000 distinct addresses under ASLR), which made it
+# `diverge` and the whole run red on an unchanged tree. A program listed as
+# flaky that comes back as something else is therefore run again, up to this
+# many times, before that is believed. Programs not listed as flaky are never
+# rerun.
+FLAKY_RETRIES = 5
+
+
 def fingerprint(rec):
     """What must stay the same for a listed program to count as unchanged.
 
-    A flaky program's output is by definition not reproducible, so for it only
-    the category and which side varied are held fixed.
+    A flaky program's varying output is by definition not reproducible, so for
+    it the category, which side varied, the other side in full, and the varying
+    side's end, exit status and stderr are held fixed: only the varying stdout
+    is let go.
     """
     if rec["category"] == "flaky":
-        return {
-            "category": "flaky",
-            "side": "interp" if "interp_second_run" in rec else "compiled",
-        }
+        varied = "interp" if "interp_second_run" in rec else "compiled"
+        fp = {"category": "flaky", "side": varied}
+        for name in ("interp", "compiled", "compiler"):
+            if name not in rec:
+                continue
+            if name == varied:
+                fp[name] = {k: rec[name][k] for k in ("end", "exit", "stderr")}
+            else:
+                fp[name] = rec[name]
+        return fp
     return {k: v for k, v in rec.items() if k != "note"}
 
 
@@ -293,6 +312,19 @@ def main():
     if os.path.exists(KNOWN_PATH):
         with open(KNOWN_PATH) as fh:
             known = json.load(fh)
+
+    for prog, rec in list(results.items()):
+        listed = known.get(prog)
+        if listed is None or listed["category"] != "flaky":
+            continue
+        tries = 0
+        while rec["category"] != "flaky" and tries < FLAKY_RETRIES:
+            tries += 1
+            rec = classify(prog, args.interp, args.compiler, args.timeout)[1]
+        if tries and rec["category"] == "flaky":
+            print("note: %s is listed as flaky and its first two runs agreed; run %d more time(s) before it varied"
+                  % (prog, tries))
+        results[prog] = rec
 
     if args.record:
         notes = {k: v.get("note") for k, v in known.items() if v.get("note")}

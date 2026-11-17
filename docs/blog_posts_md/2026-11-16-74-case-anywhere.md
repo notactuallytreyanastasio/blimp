@@ -10,7 +10,7 @@ Parse error: error.UnexpectedToken at line 6, col 11
 
 The workaround was to bind the case to a temporary first. `try`, `for` and `fn` never had the restriction, because they were in `parsePrimary` all along.
 
-On the `05-case-anywhere` branch, this program runs:
+On this branch, this program runs:
 
 ```blimp
 actor Counter do
