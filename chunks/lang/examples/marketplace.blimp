@@ -79,14 +79,21 @@ actor Marketplace.AccountHolder do
   state wallet: Marketplace.AccountHolder.Wallet :: nil
   state total_spent: Int :: 0
 
-  # Pay from wallet first, fall back to account
+  # Pay from wallet first, fall back to account, and decline if neither
+  # covers it. A refused :take or :withdraw bubbles, and a bubble restarts
+  # the actor that raised it with its declared defaults: a wallet or account
+  # the thief failed to empty is left at 0 all the same.
   on :buy(amount: Int) when amount > 0 do
     wallet_result = wallet <- :take(amount) orelse :short
     situation wallet_result do
       :short ->
-        account <- :withdraw(amount)
-        become total_spent: total_spent + amount
-        reply :from_account
+        account_result = account <- :withdraw(amount) orelse :declined
+        situation account_result do
+          :declined -> reply :declined
+          _ ->
+            become total_spent: total_spent + amount
+            reply :from_account
+        end
       _ ->
         become total_spent: total_spent + amount
         reply :from_wallet
@@ -148,10 +155,14 @@ actor Marketplace.Institution do
   state revenue: Int :: 0
 
   on :charge(customer: Marketplace.AccountHolder, amount: Int) when amount > 0 do
-    customer <- :buy(amount)
-    account <- :deposit(amount)
-    become revenue: revenue + amount
-    reply :charged
+    paid = customer <- :buy(amount)
+    situation paid do
+      :declined -> reply :declined
+      _ ->
+        account <- :deposit(amount)
+        become revenue: revenue + amount
+        reply :charged
+    end
   end
 
   on :pay_supplier(supplier: Marketplace.Institution, amount: Int) when amount > 0 do
@@ -162,6 +173,12 @@ actor Marketplace.Institution do
         supplier <- :deposit(amount)
         reply :paid
     end
+  end
+
+  # A supplier is paid like a person is: the money goes to its account
+  on :deposit(amount: Int) when amount > 0 do
+    account <- :deposit(amount)
+    reply :ok
   end
 
   on :revenue -> Int do
@@ -279,9 +296,9 @@ thief <- :hack(shop_acct, 2000)
 
 # ── Final report ──
 
-market <- :epoch
-alice <- :status
-bob <- :status
-shop <- :status
-cafe <- :status
-thief <- :report
+print(market <- :epoch)
+print(alice <- :status)
+print(bob <- :status)
+print(shop <- :status)
+print(cafe <- :status)
+print(thief <- :report)

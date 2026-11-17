@@ -130,6 +130,7 @@ suite "zig build test" "$ZIG" build test --summary all
 suite "blimp test test" "$BLIMP" test test
 suite "blimp test lib" "$BLIMP" test lib
 suite "examples --test" examples_with_tests
+suite "examples run as programs" env BLIMP="$BLIMP" scripts/run_examples.sh
 suite "runner reports failure" runner_reports_failure
 suite "runner names the failure" runner_names_the_failure
 suite "regression_spawn_in_send_arg" regression_spawn_in_send_arg

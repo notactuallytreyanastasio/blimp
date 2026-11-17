@@ -1,3 +1,16 @@
+# SKETCH, NOT A PROGRAM. `blimp examples/checkout.blimp` stops with
+#   Parse error: error.UnexpectedToken
+# at the first leading `|>` in :charge.
+# It was written on 2026-03-20, the day the grammar was, and uses syntax
+# the parser does not accept: a pipe chain continued on the next line
+# with a leading `|>`, and `expr orelse bubble` (D7 in
+# docs/lang_design/parser.md). The types Item and Payment and the
+# functions valid?, calculate_tax, finalize, validate and retry_payment
+# are defined nowhere, and nothing runs at the top level. For a shop that
+# runs, see shop_system.blimp and dot_notation.blimp.
+# scripts/run_examples.sh lists it as expected to fail; if it starts to
+# parse, that suite says so.
+#
 # A full checkout actor showing typed state, guards, pipes, bubbles, and holes
 actor Shop do
   state region: Atom :: :us
