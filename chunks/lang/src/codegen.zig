@@ -166,7 +166,6 @@ pub const Codegen = struct {
     print_float_fn: ?c.LLVMValueRef = null,
     print_bool_fn: ?c.LLVMValueRef = null,
     print_string_fn: ?c.LLVMValueRef = null,
-    print_atom_fn: ?c.LLVMValueRef = null,
     print_nil_fn: ?c.LLVMValueRef = null,
 
     pub fn init(allocator: std.mem.Allocator, module_name: [*:0]const u8) Codegen {
@@ -249,14 +248,6 @@ pub const Codegen = struct {
         const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
         self.print_string_fn = c.LLVMAddFunction(self.module, "blimp_print_string", ft);
         return self.print_string_fn.?;
-    }
-
-    fn getPrintAtom(self: *Codegen) c.LLVMValueRef {
-        if (self.print_atom_fn) |f| return f;
-        var params = [_]c.LLVMTypeRef{self.ptr_type};
-        const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
-        self.print_atom_fn = c.LLVMAddFunction(self.module, "blimp_print_atom", ft);
-        return self.print_atom_fn.?;
     }
 
     fn getPrintNil(self: *Codegen) c.LLVMValueRef {
@@ -2485,6 +2476,13 @@ pub const Codegen = struct {
         return self.buildProgram(&.{expr});
     }
 
+    /// An atom is an i32 id, except where it was widened to i64 to be
+    /// stored (a state field, a handler's return value, a def's own name).
+    fn atomId32(self: *Codegen, v: c.LLVMValueRef) c.LLVMValueRef {
+        if (c.LLVMTypeOf(v) == self.i32_type) return v;
+        return c.LLVMBuildTrunc(self.builder, v, self.i32_type, "atom_id");
+    }
+
     fn emitPrint(self: *Codegen, tv: TaggedVal) void {
         switch (tv.tag) {
             .int => {
@@ -2516,23 +2514,14 @@ pub const Codegen = struct {
                 _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
             },
             .atom => {
-                // Resolve atom ID back to name string for printing
-                // tv.val is a constant i32 -- extract the ID
-                const f = self.getPrintAtom();
-                var params = [_]c.LLVMTypeRef{self.ptr_type};
+                // By id, through the runtime's copy of the intern table: an
+                // atom read from a variable or a state field is not a
+                // constant, and printing only constants gave `:?` for those.
+                const f = self.getRuntimeFn("blimp_print_atom_id", &.{self.i32_type}, self.void_type);
+                var params = [_]c.LLVMTypeRef{self.i32_type};
                 const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
-                // Try to get the atom name from the intern table
-                const atom_id = c.LLVMConstIntGetZExtValue(tv.val);
-                if (atom_id < self.atoms.names.items.len) {
-                    const name = self.atoms.names.items[@intCast(atom_id)];
-                    const str_ptr = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(name), "atom_name");
-                    var args = [_]c.LLVMValueRef{str_ptr};
-                    _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
-                } else {
-                    const str_ptr = c.LLVMBuildGlobalStringPtr(self.builder, "?", "atom_unknown");
-                    var args = [_]c.LLVMValueRef{str_ptr};
-                    _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
-                }
+                var args = [_]c.LLVMValueRef{self.atomId32(tv.val)};
+                _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
             },
             .nil => {
                 const f = self.getPrintNil();

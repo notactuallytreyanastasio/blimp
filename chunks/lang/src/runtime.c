@@ -371,6 +371,17 @@ void blimp_print_atom(const char *val) {
     printf(":%s\n", val);
 }
 
+// An atom by its intern id.  An id outside the table is a codegen bug, and
+// printing a placeholder for it would look like output: abort instead.
+void blimp_print_atom_id(int id) {
+    const char *name = atom_text(id);
+    if (!name) {
+        fprintf(stderr, "blimp runtime: atom id %d is not in the intern table\n", id);
+        abort();
+    }
+    printf(":%s\n", name);
+}
+
 void blimp_print_nil(void) {
     printf("nil\n");
 }
