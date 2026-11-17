@@ -891,6 +891,12 @@ actor MathTests do
     assert(result < 4.0)
   end
 
+  test "abs of negative zero is positive zero" do
+    # -0.0 == 0.0, so compare the spelling, which keeps the sign.
+    assert_eq(to_string(-0.0), "-0")
+    assert_eq(to_string(abs(-0.0)), "0")
+  end
+
   # -- floor --
   test "floor positive" do
     assert_eq(floor(3.7), 3)

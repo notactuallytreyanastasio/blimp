@@ -1748,7 +1748,9 @@ fn builtinAbs(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     switch (args[0].*) {
         // abs(minInt) has no i64 answer; wrap to minInt, as the operators do.
         .integer => |n| result.* = Value{ .integer = if (n < 0) 0 -% n else n },
-        .float => |f| result.* = Value{ .float = if (f < 0) -f else f },
+        // @abs clears the sign bit: `f < 0` is false for -0.0, which then
+        // came back as -0.0.
+        .float => |f| result.* = Value{ .float = @abs(f) },
         else => return error.TypeError,
     }
     return result;
