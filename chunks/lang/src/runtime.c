@@ -349,6 +349,11 @@ void blimp_print_val(BlimpVal *v) {
     }
 }
 
+// `orelse` on a boxed value: NULL and a boxed nil are both nil.
+int blimp_val_is_nil(BlimpVal *v) {
+    return v == NULL || v->tag == VAL_NIL;
+}
+
 // ── Print functions (legacy i64 path) ───────────────────
 
 void blimp_print_int(long long val) {

@@ -1,0 +1,22 @@
+# orelse takes its fallback on nil, and 0 and false are not nil. The old
+# test compared the value's i64 with 0. The result keeps its type: an Atom,
+# a Bool, a String, or both sides boxed when they differ.
+actor A do
+  state s: Int :: 0
+
+  on :q(n: Int) do
+    case n do
+      1 -> reply :one
+      _ -> become s: 1
+    end
+  end
+end
+
+x = 0
+puts(x orelse 5)
+n = nil
+puts(n orelse 5)
+puts(false orelse true)
+a = spawn A
+y = a <- :q(1) orelse :none
+y

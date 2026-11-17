@@ -1,0 +1,15 @@
+# :q replies an Atom on one path and nothing on the other; under orelse the
+# send's status picks the fallback. On the parent this printed 4.
+actor A do
+  state s: Int :: 0
+
+  on :q(n: Int) do
+    case n do
+      1 -> reply :one
+      _ -> become s: 1
+    end
+  end
+end
+
+a = spawn A
+a <- :q(2) orelse :none

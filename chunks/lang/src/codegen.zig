@@ -167,6 +167,9 @@ pub const Codegen = struct {
     /// Set by `orelse` for the send that is its left side: that send may
     /// end without a reply, since the status takes the fallback.
     send_under_orelse: bool = false,
+    /// The send compiled last cannot hand back a value (no handler of that
+    /// name, or every one only raises), so `orelse` takes only its fallback.
+    last_send_never: bool = false,
     /// Replies of the handler being compiled (see HandlerFn).
     reply_mask: u16 = 0,
     reply_may_nil: bool = false,
@@ -304,6 +307,7 @@ pub const Codegen = struct {
         loc: ast.Loc,
         under_orelse: bool,
         reply: ValTag,
+        never: bool,
         /// null: an unbound parameter passed on as it is.
         arg_tags: []const ?ValTag,
         arg_locs: []const ast.Loc,
@@ -2185,11 +2189,14 @@ pub const Codegen = struct {
         const checked = self.emitCheckResult(result);
         self.last_send_status = checked.status;
         const reply = try self.replyTag(msg.message, loc, under_orelse);
+        const never = self.sendNeverReturns(msg.message);
+        self.last_send_never = never;
         self.sends.append(self.allocator, .{
             .message = msg.message,
             .loc = loc,
             .under_orelse = under_orelse,
             .reply = reply,
+            .never = never,
             .arg_tags = arg_tags,
             .arg_locs = arg_locs,
         }) catch return CodegenError.LLVMError;
@@ -2246,6 +2253,17 @@ pub const Codegen = struct {
         return tag;
     }
 
+    /// No handler of `message` compiled so far can end without raising:
+    /// there is none (the send is NO MATCHING HANDLER, a fault), or each
+    /// one only bubbles.
+    fn sendNeverReturns(self: *Codegen, message: []const u8) bool {
+        for (self.actors.items) |a| for (a.handler_fns.items) |h| {
+            if (!std.mem.eql(u8, h.name, message)) continue;
+            if (h.reply_mask != 0 or h.may_nil) return false;
+        };
+        return true;
+    }
+
     fn maskNouns(self: *Codegen, mask: u16) []const u8 {
         var out: std.ArrayList(u8) = .empty;
         var first = true;
@@ -2294,6 +2312,13 @@ pub const Codegen = struct {
                     );
                 }
             };
+            // Only `orelse` acts on `never`: it drops the left side.
+            if (snd.under_orelse and snd.never and !self.sendNeverReturns(snd.message)) return self.reject(
+                snd.loc,
+                "This send of :{s} was compiled before its handler, as never handing back a value; the handler can.",
+                .{snd.message},
+                "Declare the handler before the code that sends to it, or run this file with the interpreter.",
+            );
             if (any and now != snd.reply) return self.reject(
                 snd.loc,
                 "This send of :{s} was compiled before its handler, as replying {s}; the handler replies {s}.",
@@ -2525,6 +2550,7 @@ pub const Codegen = struct {
 
         self.catches.append(self.allocator, .{ .kind = .orelse_, .landing = fallback_bb, .slot = null, .loc = loc }) catch return CodegenError.LLVMError;
         self.last_send_status = null;
+        self.last_send_never = false;
         self.send_under_orelse = ore.try_expr.kind == .message_send;
         const try_val = self.compileExpr(ore.try_expr.*) catch |err| {
             _ = self.catches.pop();
@@ -2533,31 +2559,84 @@ pub const Codegen = struct {
         _ = self.catches.pop();
 
         // Nil.  For a send, the status says whether there was a reply: a
-        // reply of 0 is a value, not nil, and used to take the fallback.
-        // TODO: anything else is still compared against 0, so an Int 0 from
-        // a def or a variable takes the fallback where the interpreter keeps it.
-        const is_nil = if (ore.try_expr.kind == .message_send and self.last_send_status != null)
-            c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.last_send_status.?, c.LLVMConstInt(self.i8_type, Status.nil, 0), "noreply")
-        else
-            c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.coerceToI64(try_val), c.LLVMConstInt(self.i64_type, 0, 0), "isniltmp");
-        const try_bb = c.LLVMGetInsertBlock(self.builder);
-
-        _ = c.LLVMBuildCondBr(self.builder, is_nil, fallback_bb, merge_bb);
+        // reply of 0 is a value, not nil.  For anything else the tag does:
+        // a nil is nil, a boxed value is asked at run time, and an Int, a
+        // Bool, a String or an Atom is never nil.  Comparing the i64 with 0
+        // was the old test, and `x = 0; x orelse 5` gave 5.
+        const try_end = c.LLVMGetInsertBlock(self.builder);
+        const try_live = c.LLVMGetBasicBlockTerminator(try_end) == null;
+        var try_i64: c.LLVMValueRef = null;
+        if (try_live) {
+            const is_nil: ?c.LLVMValueRef = if (ore.try_expr.kind == .message_send and self.last_send_status != null)
+                c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.last_send_status.?, c.LLVMConstInt(self.i8_type, Status.nil, 0), "noreply")
+            else switch (try_val.tag) {
+                .nil => c.LLVMConstInt(self.i1_type, 1, 0),
+                .tagged_val => blk: {
+                    const f = self.getRuntimeFn("blimp_val_is_nil", &.{self.ptr_type}, self.i32_type);
+                    var pt = [_]c.LLVMTypeRef{self.ptr_type};
+                    var args = [_]c.LLVMValueRef{try_val.val};
+                    const r = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.i32_type, &pt, 1, 0), f, &args, 1, "is_nil");
+                    break :blk c.LLVMBuildICmp(self.builder, c.LLVMIntNE, r, c.LLVMConstInt(self.i32_type, 0, 0), "isniltmp");
+                },
+                else => null,
+            };
+            if (is_nil) |cond| {
+                _ = c.LLVMBuildCondBr(self.builder, cond, fallback_bb, merge_bb);
+            } else {
+                _ = c.LLVMBuildBr(self.builder, merge_bb);
+            }
+        }
 
         // Fallback block
         c.LLVMPositionBuilderAtEnd(self.builder, fallback_bb);
         const fallback_val = try self.compileExpr(ore.fallback.*);
-        const fallback_end_bb = c.LLVMGetInsertBlock(self.builder);
-        _ = c.LLVMBuildBr(self.builder, merge_bb);
+        const fallback_end = c.LLVMGetInsertBlock(self.builder);
+        const fallback_live = c.LLVMGetBasicBlockTerminator(fallback_end) == null;
 
-        // Merge with phi -- coerce both to i64 for uniform type
+        // One tag on both sides: that tag.  A nil left side only ever takes
+        // the fallback, so the fallback's.  Otherwise both are boxed, as
+        // try's two arms are.  Each side is widened in its own block: the
+        // widening used to be emitted in the merge block, which LLVM
+        // refused for anything not already an i64.
+        const left_never = ore.try_expr.kind == .message_send and self.last_send_never;
+        const left_counts = try_live and try_val.tag != .nil and !left_never;
+        const same = !left_counts or !fallback_live or try_val.tag == fallback_val.tag;
+        const result_tag: ValTag = if (!left_counts) fallback_val.tag else if (same) try_val.tag else .tagged_val;
+        var fallback_i64: c.LLVMValueRef = null;
+        if (fallback_live) {
+            fallback_i64 = if (same) self.coerceToI64(fallback_val) else self.coerceToI64(.{ .val = self.wrapAsBlimpVal(fallback_val), .tag = .tagged_val });
+            _ = c.LLVMBuildBr(self.builder, merge_bb);
+        }
+        const fallback_from = c.LLVMGetInsertBlock(self.builder);
+        if (try_live) {
+            // Before the branch try_end ended with.
+            c.LLVMPositionBuilderBefore(self.builder, c.LLVMGetBasicBlockTerminator(try_end));
+            try_i64 = if (!left_counts)
+                c.LLVMConstInt(self.i64_type, 0, 0)
+            else if (same)
+                self.coerceToI64(try_val)
+            else
+                self.coerceToI64(.{ .val = self.wrapAsBlimpVal(try_val), .tag = .tagged_val });
+        }
+
         c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
+        var vals: [2]c.LLVMValueRef = undefined;
+        var blocks: [2]c.LLVMBasicBlockRef = undefined;
+        var n: u32 = 0;
+        if (try_live) {
+            vals[n] = try_i64;
+            blocks[n] = try_end;
+            n += 1;
+        }
+        if (fallback_live) {
+            vals[n] = fallback_i64;
+            blocks[n] = fallback_from;
+            n += 1;
+        }
+        if (n == 0) return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
         const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "orelse");
-        var vals = [_]c.LLVMValueRef{ self.coerceToI64(try_val), self.coerceToI64(fallback_val) };
-        var blocks = [_]c.LLVMBasicBlockRef{ try_bb, fallback_end_bb };
-        c.LLVMAddIncoming(phi, &vals, &blocks, 2);
-
-        return .{ .val = phi, .tag = .int };
+        c.LLVMAddIncoming(phi, &vals, &blocks, n);
+        return .{ .val = self.coerceFromI64(phi, result_tag), .tag = result_tag };
     }
 
     /// `try do ... catch e do ... end`.  Any bubble or fault raised in the
