@@ -8,7 +8,10 @@
 # - What to do when the bucket is completely dry and a priority request arrives
 #
 # Run this to let Claude fill in the missing pieces:
-#   blimp examples/rate_limiter.blimp --no-type-check
+#   blimp examples/rate_limiter.blimp
+# Each Hole the run reaches shells out to the `claude` CLI, and the answer is
+# written back into this file in place of the Hole. Without `claude` on PATH
+# a Hole evaluates to nil and the run goes on.
 
 actor RateLimiter do
   state capacity: Int :: 100
@@ -65,10 +68,11 @@ actor RateLimiter do
   end
 end
 
-# Demo
-RateLimiter <- :request("alice", 15)
-RateLimiter <- :request("alice", 15)
-RateLimiter <- :request("alice", 15)
-RateLimiter <- :request("bob", 80)
-result = RateLimiter <- :request("alice", 20)
+# Demo: 45 of the 100 tokens go to alice, then bob's 80 does not fit
+limiter = spawn RateLimiter
+limiter <- :request("alice", 15)
+limiter <- :request("alice", 15)
+limiter <- :request("alice", 15)
+limiter <- :request("bob", 80)
+result = limiter <- :request("alice", 20)
 print(result)
