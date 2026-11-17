@@ -209,3 +209,20 @@ test "checkFile handler with typed params registers param types" {
     try std.testing.expectEqualStrings("x", sig.param_names[0]);
     try std.testing.expectEqualStrings("y", sig.param_names[1]);
 }
+
+test "a Tuple annotation accepts a tuple" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var p = Parser.init(alloc,
+        \\actor A do
+        \\  on :m(o: Tuple) -> Tuple do reply o end
+        \\end
+        \\a = spawn A
+        \\r = a <- :m({1, 2})
+    );
+    const nodes = try p.parseFile();
+    var c = Checker.init(alloc);
+    const errs = c.checkFile(nodes).errors;
+    try std.testing.expectEqual(@as(usize, 0), errs.len);
+}
