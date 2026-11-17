@@ -108,6 +108,10 @@
           "named": true
         },
         {
+          "type": "property_definition",
+          "named": true
+        },
+        {
           "type": "reply_statement",
           "named": true
         },
@@ -137,6 +141,18 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "test_definition",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -282,6 +298,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -424,6 +448,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -456,7 +488,123 @@
           "named": true
         },
         {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "case_expression",
+          "named": true
+        },
+        {
+          "type": "concat_expression",
+          "named": true
+        },
+        {
+          "type": "dot_access",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "function_call",
+          "named": true
+        },
+        {
+          "type": "hole",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "map",
+          "named": true
+        },
+        {
+          "type": "message_send",
+          "named": true
+        },
+        {
+          "type": "nil",
+          "named": true
+        },
+        {
+          "type": "orelse_expression",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
+          "type": "spread_each",
+          "named": true
+        },
+        {
+          "type": "spread_map",
+          "named": true
+        },
+        {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "upper_identifier",
           "named": true
         }
       ]
@@ -606,6 +754,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -615,6 +771,10 @@
         },
         {
           "type": "upper_identifier",
+          "named": true
+        },
+        {
+          "type": "when_guard",
           "named": true
         }
       ]
@@ -734,6 +894,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -864,6 +1032,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -971,6 +1147,10 @@
           "named": true
         },
         {
+          "type": "parameter_list",
+          "named": true
+        },
+        {
           "type": "parenthesized_expression",
           "named": true
         },
@@ -980,6 +1160,10 @@
         },
         {
           "type": "reply_statement",
+          "named": true
+        },
+        {
+          "type": "return_type",
           "named": true
         },
         {
@@ -1004,6 +1188,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -1106,6 +1298,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -1122,7 +1322,7 @@
     "fields": {},
     "children": {
       "multiple": true,
-      "required": false,
+      "required": true,
       "types": [
         {
           "type": "assignment",
@@ -1209,6 +1409,10 @@
           "named": true
         },
         {
+          "type": "parameter_list",
+          "named": true
+        },
+        {
           "type": "parenthesized_expression",
           "named": true
         },
@@ -1218,6 +1422,10 @@
         },
         {
           "type": "reply_statement",
+          "named": true
+        },
+        {
+          "type": "return_type",
           "named": true
         },
         {
@@ -1242,6 +1450,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -1388,6 +1604,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -1512,6 +1736,149 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "upper_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "given_statement",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "atom",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "case_expression",
+          "named": true
+        },
+        {
+          "type": "concat_expression",
+          "named": true
+        },
+        {
+          "type": "dot_access",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "function_call",
+          "named": true
+        },
+        {
+          "type": "hole",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "map",
+          "named": true
+        },
+        {
+          "type": "message_send",
+          "named": true
+        },
+        {
+          "type": "nil",
+          "named": true
+        },
+        {
+          "type": "orelse_expression",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
+          "type": "spread_each",
+          "named": true
+        },
+        {
+          "type": "spread_map",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -1676,6 +2043,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -1800,6 +2175,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -1973,6 +2356,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -2104,6 +2495,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -2231,6 +2630,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -2251,7 +2658,7 @@
     "fields": {},
     "children": {
       "multiple": true,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "handler_param",
@@ -2370,6 +2777,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -2500,6 +2915,169 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "upper_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "property_definition",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "assignment",
+          "named": true
+        },
+        {
+          "type": "atom",
+          "named": true
+        },
+        {
+          "type": "become_statement",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "bubble_statement",
+          "named": true
+        },
+        {
+          "type": "case_expression",
+          "named": true
+        },
+        {
+          "type": "concat_expression",
+          "named": true
+        },
+        {
+          "type": "dot_access",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "function_call",
+          "named": true
+        },
+        {
+          "type": "given_statement",
+          "named": true
+        },
+        {
+          "type": "hole",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "map",
+          "named": true
+        },
+        {
+          "type": "message_send",
+          "named": true
+        },
+        {
+          "type": "nil",
+          "named": true
+        },
+        {
+          "type": "orelse_expression",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "reply_statement",
+          "named": true
+        },
+        {
+          "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
+          "type": "spread_each",
+          "named": true
+        },
+        {
+          "type": "spread_map",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -2624,6 +3202,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -2785,6 +3371,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -2794,6 +3388,10 @@
         },
         {
           "type": "upper_identifier",
+          "named": true
+        },
+        {
+          "type": "when_guard",
           "named": true
         }
       ]
@@ -2913,6 +3511,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -3065,6 +3671,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -3229,6 +3843,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -3356,6 +3978,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -3386,9 +4016,325 @@
     }
   },
   {
-    "type": "string",
+    "type": "struct_literal",
     "named": true,
-    "fields": {}
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "key_value_pair",
+          "named": true
+        },
+        {
+          "type": "upper_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "test_definition",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "assignment",
+          "named": true
+        },
+        {
+          "type": "atom",
+          "named": true
+        },
+        {
+          "type": "become_statement",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "bubble_statement",
+          "named": true
+        },
+        {
+          "type": "case_expression",
+          "named": true
+        },
+        {
+          "type": "concat_expression",
+          "named": true
+        },
+        {
+          "type": "dot_access",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "function_call",
+          "named": true
+        },
+        {
+          "type": "hole",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "map",
+          "named": true
+        },
+        {
+          "type": "message_send",
+          "named": true
+        },
+        {
+          "type": "nil",
+          "named": true
+        },
+        {
+          "type": "orelse_expression",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "reply_statement",
+          "named": true
+        },
+        {
+          "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
+          "type": "spread_each",
+          "named": true
+        },
+        {
+          "type": "spread_map",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "upper_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "try_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "assignment",
+          "named": true
+        },
+        {
+          "type": "atom",
+          "named": true
+        },
+        {
+          "type": "become_statement",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "bubble_statement",
+          "named": true
+        },
+        {
+          "type": "case_expression",
+          "named": true
+        },
+        {
+          "type": "concat_expression",
+          "named": true
+        },
+        {
+          "type": "dot_access",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "fn_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "function_call",
+          "named": true
+        },
+        {
+          "type": "hole",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "map",
+          "named": true
+        },
+        {
+          "type": "message_send",
+          "named": true
+        },
+        {
+          "type": "nil",
+          "named": true
+        },
+        {
+          "type": "orelse_expression",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "reply_statement",
+          "named": true
+        },
+        {
+          "type": "self_ref",
+          "named": true
+        },
+        {
+          "type": "situation_expression",
+          "named": true
+        },
+        {
+          "type": "spawn_expression",
+          "named": true
+        },
+        {
+          "type": "spread_each",
+          "named": true
+        },
+        {
+          "type": "spread_map",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "upper_identifier",
+          "named": true
+        }
+      ]
+    }
   },
   {
     "type": "tuple",
@@ -3500,6 +4446,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -3649,6 +4603,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -3764,6 +4726,14 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
           "named": true
         },
         {
@@ -3890,6 +4860,14 @@
           "named": true
         },
         {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
           "type": "tuple",
           "named": true
         },
@@ -3910,10 +4888,6 @@
   },
   {
     "type": "!=",
-    "named": false
-  },
-  {
-    "type": "\"",
     "named": false
   },
   {
@@ -3989,6 +4963,10 @@
     "named": false
   },
   {
+    "type": "<--",
+    "named": false
+  },
+  {
     "type": "<=",
     "named": false
   },
@@ -4025,6 +5003,10 @@
     "named": false
   },
   {
+    "type": "and",
+    "named": false
+  },
+  {
     "type": "atom",
     "named": true
   },
@@ -4042,6 +5024,10 @@
   },
   {
     "type": "case",
+    "named": false
+  },
+  {
+    "type": "catch",
     "named": false
   },
   {
@@ -4078,6 +5064,10 @@
     "named": false
   },
   {
+    "type": "given",
+    "named": false
+  },
+  {
     "type": "hole",
     "named": true
   },
@@ -4102,7 +5092,15 @@
     "named": false
   },
   {
+    "type": "or",
+    "named": false
+  },
+  {
     "type": "orelse",
+    "named": false
+  },
+  {
+    "type": "property",
     "named": false
   },
   {
@@ -4126,7 +5124,19 @@
     "named": false
   },
   {
+    "type": "string",
+    "named": true
+  },
+  {
+    "type": "test",
+    "named": false
+  },
+  {
     "type": "true",
+    "named": false
+  },
+  {
+    "type": "try",
     "named": false
   },
   {

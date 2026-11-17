@@ -8,8 +8,37 @@ module.exports = grammar({
 
   word: ($) => $.identifier,
 
+  // Token.keyword in src/token.zig: words the lexer never hands the parser
+  // as a name. Without this, tree-sitter lexes a keyword as an identifier
+  // wherever the keyword itself cannot go, so `t <- :m orelse bubble` was an
+  // orelse of an identifier `bubble`, where parser.zig refuses the line.
+  reserved: {
+    global: (_) => [
+      "actor", "do", "end", "state", "on", "become", "reply", "when",
+      "bubbles", "bubble", "def", "fn", "situation", "case", "orelse",
+      "spawn", "self", "try", "catch", "for", "in", "test", "and", "or",
+      "property", "given", "true", "false", "nil",
+    ],
+  },
+
+  // Newline-sensitive tokens, from src/scanner.c. Each is given only when
+  // no newline comes before it, as in parser.zig; see the scanner's header.
+  externals: ($) => [
+    $._binary_minus,
+    $._call_paren,
+    $._pipe_arrow,
+    $._same_line,
+    $._error_sentinel,
+  ],
+
   conflicts: ($) => [
-    [$.spawn_expression],
+    // A statement after a branch body may be the body's next statement or
+    // the next branch's pattern; only a later `->` tells. parser.zig decides
+    // the same way (looksLikeBranch parses ahead to the `->`), so let GLR
+    // carry both until one dies, instead of a precedence that picks one
+    // before the `->` is seen.
+    [$.case_branch],
+    [$.situation_branch],
   ],
 
   rules: {
@@ -38,8 +67,22 @@ module.exports = grammar({
       choice(
         $.state_definition,
         $.message_handler,
+        $.test_definition,
+        $.property_definition,
         $._statement,
       ),
+
+    // test "name" do ... end, in an actor body only (parseActorBodyTopLevel).
+    // Without this rule `test "x" do` read as an identifier, a string and an
+    // identifier `do`, and the test's `end` closed the actor, with no ERROR.
+    test_definition: ($) =>
+      seq("test", $.string, "do", repeat($._statement), "end"),
+
+    // property "name" do given n: gen_integer(0, 9) ... end (parsePropertyDef)
+    property_definition: ($) =>
+      seq("property", $.string, "do", repeat(choice($.given_statement, $._statement)), "end"),
+
+    given_statement: ($) => seq("given", $.identifier, ":", $._expression),
 
     // ============================================================
     // State definition
@@ -63,6 +106,9 @@ module.exports = grammar({
     type_name: ($) =>
       prec(10, choice(
         $.upper_identifier,
+        // Shop.Checkout: parseTypeName reads dotted names for parameters,
+        // return types and state fields alike.
+        seq($.upper_identifier, repeat1(seq(".", $.upper_identifier))),
         seq("[", $.type_name, "]"),                           // [Item], [Int]
         seq("{", commaSep1($.type_name), "}"),                // {Atom, Int}
         seq("%", "{", $.type_name, "=>", $.type_name, "}"),   // %{String => Int}
@@ -91,8 +137,10 @@ module.exports = grammar({
 
     return_type: ($) => seq("->", $.type_name),
 
+    // `(a: Int, b: [Item])`, also on def and fn. Empty `()` is allowed, as in
+    // parser.zig's parseTypedParamList.
     parameter_list: ($) =>
-      seq("(", commaSep1($.handler_param), ")"),
+      seq("(", commaSep($.handler_param), ")"),
 
     handler_param: ($) =>
       choice(
@@ -108,7 +156,8 @@ module.exports = grammar({
       seq(
         "def",
         $.identifier,
-        "(", commaSep($.identifier), ")",
+        $.parameter_list,
+        optional($.return_type),
         "do",
         repeat($._statement),
         "end",
@@ -131,16 +180,18 @@ module.exports = grammar({
 
     become_statement: ($) => seq("become", $.key_value_list),
 
-    reply_statement: ($) => seq("reply", $._expression),
+    // parseReplyStmt reads the value from the same line or fails.
+    reply_statement: ($) => seq("reply", $._same_line, $._expression),
 
+    // bubble, or bubble with a reason on the same line. parseBubbleStmt takes
+    // any expression as the reason, unless a newline, `end` or the end of
+    // the file comes first.
     bubble_statement: ($) =>
-      prec.right(0, choice(
-        seq("bubble", $.atom),          // bubble :reason (atom only)
-        seq("bubble", $.string),        // bubble "reason message"
-        "bubble",                       // bubble (no reason)
-      )),
+      prec.right(0, seq("bubble", optional(seq($._same_line, $._expression)))),
 
-    assignment: ($) => seq($.identifier, "=", $._expression),
+    // parseExpressionStatement assigns to any name, and an upper-case one
+    // is an identifier node to it too: `BODY = body()`.
+    assignment: ($) => seq(choice($.identifier, $.upper_identifier), "=", $._expression),
 
     // ============================================================
     // For loop: for x in expr do ... end
@@ -169,7 +220,7 @@ module.exports = grammar({
       prec.right(0, seq($._expression, "orelse", $._expression)),
 
     pipe_expression: ($) =>
-      prec.left(0, seq($._expression, "|>", $._expression)),
+      prec.left(0, seq($._expression, alias($._pipe_arrow, "|>"), $._expression)),
 
     // ...list, fn  (map)
     spread_map: ($) =>
@@ -183,15 +234,15 @@ module.exports = grammar({
       choice(
         prec.left(1, seq(
           $._expression,
-          token(prec(10, "<-")),
+          choice(token(prec(10, "<-")), token(prec(10, "<--"))),
           $.atom,
-          "(",
+          alias($._call_paren, "("),
           commaSep($._expression),
           ")",
         )),
         prec.left(0, seq(
           $._expression,
-          token(prec(10, "<-")),
+          choice(token(prec(10, "<-")), token(prec(10, "<--"))),
           $.atom,
         )),
       ),
@@ -203,10 +254,12 @@ module.exports = grammar({
     binary_expression: ($) =>
       choice(
         // Precedence from lowest to highest
-        prec.left(1, seq($._expression, "||", $._expression)),
-        prec.left(2, seq($._expression, "&&", $._expression)),
+        // `or` and `and` are the same operators as `||` and `&&`
+        // (parseBinaryOr, parseBinaryAnd).
+        prec.left(1, seq($._expression, choice("||", "or"), $._expression)),
+        prec.left(2, seq($._expression, choice("&&", "and"), $._expression)),
         prec.left(3, seq($._expression, choice("==", "!=", "<", ">", "<=", ">="), $._expression)),
-        prec.left(4, seq($._expression, choice("+", "-"), $._expression)),
+        prec.left(4, seq($._expression, choice("+", alias($._binary_minus, "-")), $._expression)),
         prec.left(5, seq($._expression, choice("*", "/"), $._expression)),
       ),
 
@@ -223,7 +276,7 @@ module.exports = grammar({
     dot_access: ($) => prec.left(7, seq($._postfix_expression, ".", $.identifier)),
 
     function_call: ($) =>
-      prec(7, seq($.identifier, "(", commaSep($._expression), ")")),
+      prec(7, seq($.identifier, alias($._call_paren, "("), commaSep($._expression), ")")),
 
     // ============================================================
     // Primary expressions
@@ -236,6 +289,7 @@ module.exports = grammar({
         $.situation_expression,
         $.case_expression,
         $.for_expression,
+        $.try_expression,
         $.self_ref,
         $.integer,
         $.float,
@@ -249,23 +303,36 @@ module.exports = grammar({
         $.list,
         $.tuple,
         $.map,
+        $.struct_literal,
         $.parenthesized_expression,
       ),
 
-    // spawn Counter or spawn Shop.Checkout or spawn Counter(count: 10)
+    // The four forms parseSpawnExpr reads: spawn Counter,
+    // spawn Counter, count: 10, spawn(Counter) and spawn(Counter, count: 10).
+    // `spawn Counter(count: 10)` is not one of them: parser.zig reads the
+    // `(` as the start of the next expression and fails on the `:`.
     spawn_expression: ($) =>
       choice(
-        prec(12, seq("spawn", $.spawn_target, "(", $.key_value_list, ")")),
-        prec(12, seq("spawn", $.spawn_target)),
+        prec.right(12, seq("spawn", $.spawn_target, optional(seq(",", $.key_value_list)))),
+        seq("spawn", "(", $.spawn_target, optional(seq(",", $.key_value_list)), ")"),
       ),
 
     // Spawn target greedily consumes dot notation: Shop.Checkout
     spawn_target: ($) =>
-      prec.left(15, seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
+      prec.right(15, seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
 
     // fn(x, y) do ... end
     fn_expression: ($) =>
-      seq("fn", "(", commaSep($.identifier), ")", "do", repeat($._statement), "end"),
+      seq("fn", $.parameter_list, optional($.return_type), "do", repeat($._statement), "end"),
+
+    // try do ... catch e do ... end (parseTryCatch): one `end` closes both
+    // bodies, and the catch clause and its variable are optional.
+    try_expression: ($) =>
+      seq(
+        "try", "do", repeat($._statement),
+        optional(seq("catch", optional($.identifier), "do", repeat($._statement))),
+        "end",
+      ),
 
     // self reference inside handler
     self_ref: (_) => "self",
@@ -292,7 +359,18 @@ module.exports = grammar({
 
     tuple: ($) => seq("{", commaSep($._expression), "}"),
 
-    map: ($) => seq("%", "{", commaSep($.key_value_pair), "}"),
+    // parseMapLitBody takes a string key as well as a name: %{"data-n": 1}.
+    map: ($) => seq("%", "{", commaSep(alias($._map_pair, $.key_value_pair)), "}"),
+
+    _map_pair: ($) => prec.right(seq(choice($.identifier, $.string), ":", $._expression)),
+
+    // %Shop.Checkout{total: 0} (parseStructLit): name pairs only.
+    struct_literal: ($) =>
+      seq(
+        "%",
+        prec.right(seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
+        "{", commaSep($.key_value_pair), "}",
+      ),
 
     // ============================================================
     // Situation expression (pattern matching)
@@ -302,7 +380,7 @@ module.exports = grammar({
       seq("situation", $._expression, "do", repeat1($.situation_branch), "end"),
 
     situation_branch: ($) =>
-      prec(8, seq(choice($.hole, $._expression), "->", repeat1($._statement))),
+      seq($._expression, optional($.when_guard), "->", repeat($._statement)),
 
     // ============================================================
     // Case expression (exhaustive pattern matching)
@@ -312,7 +390,7 @@ module.exports = grammar({
       seq("case", $._expression, "do", repeat1($.case_branch), "end"),
 
     case_branch: ($) =>
-      prec(8, seq(choice($.hole, $._expression), "->", repeat1($._statement))),
+      seq($._expression, optional($.when_guard), "->", repeat($._statement)),
 
     // ============================================================
     // Hole (wildcard/identity)
@@ -324,9 +402,13 @@ module.exports = grammar({
     // Key-value pairs (used by state, become, map)
     // ============================================================
 
-    key_value_list: ($) => commaSep1($.key_value_pair),
+    // Greedy, as parseKeyValueList is: it takes pairs while the next token
+    // is an identifier, so in `[spawn A, k: 1, x]` the `x` is not a list
+    // element but a pair missing its colon.
+    key_value_list: ($) => prec.right(commaSep1($.key_value_pair)),
 
-    key_value_pair: ($) => seq($.identifier, ":", $._expression),
+    // The value is a whole expression (parseExpression), orelse included.
+    key_value_pair: ($) => prec.right(seq($.identifier, ":", $._expression)),
 
     // ============================================================
     // Terminals
@@ -334,9 +416,16 @@ module.exports = grammar({
 
     integer: (_) => /\d+/,
 
-    float: (_) => /\d+\.\d+/,
+    // lexNumber: a decimal point needs a digit after it, and an exponent
+    // makes a float with or without one (`1e25`, `9.5E-3`). Without the
+    // exponent here, `1e25` was the integer 1 and then an identifier e25.
+    float: (_) => /\d+\.\d+([eE][+-]?\d+)?|\d+[eE][+-]?\d+/,
 
-    string: (_) => seq('"', /[^"\\]*(?:\\.[^"\\]*)*/, '"'),
+    // One token, so that the extras cannot apply inside it. As a seq of
+    // quote, body and quote, a `#` in the body was lexed as a comment that
+    // ran to the end of the line and took the closing quote with it, so
+    // every interpolated "#{x}" swallowed the rest of its line.
+    string: (_) => token(seq('"', /[^"\\]*(?:\\.[^"\\]*)*/, '"')),
 
     atom: (_) => /:[a-zA-Z_][a-zA-Z0-9_]*[?!]?/,
 

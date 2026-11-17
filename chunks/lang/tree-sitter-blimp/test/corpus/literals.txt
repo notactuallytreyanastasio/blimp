@@ -1,0 +1,47 @@
+================================================================================
+Floats with exponents, string map keys and struct literals
+================================================================================
+
+a = 1e25
+b = 9.5E-3
+c = 1.0e300
+d = %{"data-n": 3, plain: 1}
+e = %Shop.Checkout{total: 0, owner: "x"}
+f = 1e
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (float))
+  (assignment
+    (identifier)
+    (float))
+  (assignment
+    (identifier)
+    (float))
+  (assignment
+    (identifier)
+    (map
+      (key_value_pair
+        (string)
+        (integer))
+      (key_value_pair
+        (identifier)
+        (integer))))
+  (assignment
+    (identifier)
+    (struct_literal
+      (upper_identifier)
+      (upper_identifier)
+      (key_value_pair
+        (identifier)
+        (integer))
+      (key_value_pair
+        (identifier)
+        (string))))
+  (assignment
+    (identifier)
+    (integer))
+  (identifier))

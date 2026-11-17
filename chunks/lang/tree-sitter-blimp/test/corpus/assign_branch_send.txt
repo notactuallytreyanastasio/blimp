@@ -1,0 +1,30 @@
+================================================================================
+Upper-case assignment, an empty branch body and an async send
+================================================================================
+
+BODY = 1
+r = case BODY do
+  1 ->
+  _ -> :other
+end
+p <-- :set(42)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (upper_identifier)
+    (integer))
+  (assignment
+    (identifier)
+    (case_expression
+      (upper_identifier)
+      (case_branch
+        (integer))
+      (case_branch
+        (hole)
+        (atom))))
+  (message_send
+    (identifier)
+    (atom)
+    (integer)))

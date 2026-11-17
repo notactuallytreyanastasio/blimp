@@ -140,6 +140,12 @@ suite "python scripts" sh -c 'cd scripts && python3 -B -m unittest trace_receipt
 # one file for every checkout, and reuses it while it is newer than parser.c;
 # so another worktree's grammar could be what got tested. A private libdir.
 suite "tree-sitter test" sh -c "d=\$(mktemp -d) && cd tree-sitter-blimp && TREE_SITTER_LIBDIR=\$d $TREE_SITTER test; rc=\$?; rm -rf \"\$d\"; exit \$rc"
+
+# tree-sitter test checks the grammar against its own corpus. This checks it
+# against the interpreter: every tracked .blimp file must parse in both or in
+# neither. (It cannot see two parsers accepting a file and building different
+# trees; test/corpus/newlines.txt pins those by hand.)
+suite "tree-sitter and parser.zig accept the same files" sh tree-sitter-blimp/scripts/disagreements.sh
 suite "build blimp-compile (LLVM ${LLVM:-found by build.zig})" build_compiler
 suite "compiled fixtures" compiler_suite sh test/compiled/run.sh
 suite "diff harness" compiler_suite python3 -B test/diff/run.py

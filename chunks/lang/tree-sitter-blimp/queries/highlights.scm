@@ -12,6 +12,11 @@
 "when" @keyword
 "bubbles" @keyword
 "spawn" @keyword
+"test" @keyword
+"property" @keyword
+"given" @keyword
+"try" @keyword
+"catch" @keyword
 
 ; Literals
 (integer) @number
@@ -61,11 +66,14 @@
 ">=" @operator
 "||" @operator
 "&&" @operator
+"and" @keyword.operator
+"or" @keyword.operator
 "!" @operator
 "|" @operator
 "|>" @operator
 "->" @operator
 "<-" @operator
+"<--" @operator
 "." @punctuation.delimiter
 
 ; Delimiters

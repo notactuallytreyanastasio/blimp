@@ -1,0 +1,122 @@
+================================================================================
+Branch body with two assignments, then the next branch
+================================================================================
+
+case d do
+  0 -> 1
+  _ ->
+    l = f(d)
+    r = f(d)
+    l + r
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (case_expression
+    (identifier)
+    (case_branch
+      (integer)
+      (integer))
+    (case_branch
+      (hole)
+      (assignment
+        (identifier)
+        (function_call
+          (identifier)
+          (identifier)))
+      (assignment
+        (identifier)
+        (function_call
+          (identifier)
+          (identifier)))
+      (binary_expression
+        (identifier)
+        (identifier)))))
+
+================================================================================
+Case branch with a when guard
+================================================================================
+
+r = case n do
+  0 -> 1
+  m when m > 0 ->
+    a = f(m)
+    a + 1
+  _ -> 0
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (case_expression
+      (identifier)
+      (case_branch
+        (integer)
+        (integer))
+      (case_branch
+        (identifier)
+        (when_guard
+          (binary_expression
+            (identifier)
+            (integer)))
+        (assignment
+          (identifier)
+          (function_call
+            (identifier)
+            (identifier)))
+        (binary_expression
+          (identifier)
+          (integer)))
+      (case_branch
+        (hole)
+        (integer)))))
+
+================================================================================
+Situation branch with a when guard
+================================================================================
+
+situation n do
+  k when k < 0 -> :neg
+  _ -> :pos
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (situation_expression
+    (identifier)
+    (situation_branch
+      (identifier)
+      (when_guard
+        (binary_expression
+          (identifier)
+          (integer)))
+      (atom))
+    (situation_branch
+      (hole)
+      (atom))))
+
+================================================================================
+Two branches on one line
+================================================================================
+
+r = case x do
+  1 -> 5 _ -> 6
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (case_expression
+      (identifier)
+      (case_branch
+        (integer)
+        (integer))
+      (case_branch
+        (hole)
+        (integer)))))

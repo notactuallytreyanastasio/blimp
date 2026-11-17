@@ -1,0 +1,29 @@
+================================================================================
+A keyword is never a name
+================================================================================
+
+actor A do
+  on :go(t: Any) do
+    t <- :deposit(1) orelse bubble
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (message_send
+        (identifier)
+        (atom)
+        (integer))
+      (ERROR)
+      (bubble_statement))))
