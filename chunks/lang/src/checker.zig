@@ -476,12 +476,12 @@ pub const Checker = struct {
             },
             // Logical: &&, ||
             .and_op, .or_op => blk: {
-                if (left_type != .bool_type and left_type != .hole and left_type != .any) {
+                if (left_type != .bool_type and left_type != .hole and left_type != .any and left_type != .never) {
                     self.addError(loc, "logical operator expects Bool, got {s}", .{
                         left_type.typeName(),
                     });
                 }
-                if (right_type != .bool_type and right_type != .hole and right_type != .any) {
+                if (right_type != .bool_type and right_type != .hole and right_type != .any and right_type != .never) {
                     self.addError(loc, "logical operator expects Bool, got {s}", .{
                         right_type.typeName(),
                     });
@@ -496,6 +496,9 @@ pub const Checker = struct {
     /// Check arithmetic operations and return the result type.
     fn checkArithmetic(self: *Checker, left: Type, right: Type, loc: Loc, op: Node.BinaryOp.Op) Type {
         _ = op;
+        // Never is the type of an operand that was already reported:
+        // reporting it again as "Never and Int" says nothing new.
+        if (left == .never or right == .never) return .never;
         // hole or any => permissive (unknown types don't cause errors)
         if (left == .hole or right == .hole) return .hole;
         if (left == .any or right == .any) return .any;
@@ -519,7 +522,9 @@ pub const Checker = struct {
     /// Check if two types can be compared.
     fn areComparable(self: *Checker, left: Type, right: Type) bool {
         _ = self;
-        // Holes, any, and nil are always comparable
+        // Holes, any, and nil are always comparable; so is never, the type
+        // of an operand whose error is already reported.
+        if (left == .never or right == .never) return true;
         if (left == .hole or right == .hole) return true;
         if (left == .any or right == .any) return true;
         if (left == .nil or right == .nil) return true;
@@ -539,12 +544,14 @@ pub const Checker = struct {
                 if (operand_type == .int) return .int;
                 if (operand_type == .float) return .float;
                 if (operand_type == .hole or operand_type == .any) return .hole;
+                if (operand_type == .never) return .never;
                 self.addError(loc, "cannot negate {s}", .{operand_type.typeName()});
                 return .never;
             },
             .not => {
                 if (operand_type == .bool_type) return .bool_type;
                 if (operand_type == .hole or operand_type == .any) return .hole;
+                if (operand_type == .never) return .never;
                 self.addError(loc, "logical not expects Bool, got {s}", .{operand_type.typeName()});
                 return .never;
             },
@@ -584,20 +591,24 @@ pub const Checker = struct {
 
     /// Infer the return type of a function call using built-in signatures.
     fn inferFuncCall(self: *Checker, fc: Node.FuncCall, loc: Loc) Type {
-        // Always infer all arguments (catches untyped lambdas in map/filter/reduce/etc.)
-        for (fc.args) |arg| {
-            _ = self.inferExpr(arg);
+        // Always infer all arguments (catches untyped lambdas in map/filter/reduce/etc.),
+        // once: the builtin signatures below read these types instead of
+        // inferring the arguments again, which reported every error in an
+        // argument to length() or max() twice.
+        const arg_types = self.allocator.alloc(Type, fc.args.len) catch return .hole;
+        for (fc.args, 0..) |arg, i| {
+            arg_types[i] = self.inferExpr(arg);
         }
         // Check if it's a known built-in function for return type
         if (lookupBuiltin(fc.name)) |kind| {
-            return self.resolveBuiltinReturn(kind, fc.args, loc);
+            return self.resolveBuiltinReturn(kind, fc.args, arg_types, loc);
         }
         // Unknown function -- return hole
         return .hole;
     }
 
     /// Resolve the return type of a built-in function given its arguments.
-    fn resolveBuiltinReturn(self: *Checker, kind: BuiltinKind, args: []const Node, loc: Loc) Type {
+    fn resolveBuiltinReturn(self: *Checker, kind: BuiltinKind, args: []const Node, arg_types: []const Type, loc: Loc) Type {
         switch (kind) {
             .length => {
                 // length([T]) -> Int
@@ -605,9 +616,9 @@ pub const Checker = struct {
                     self.addError(loc, "length() expects 1 argument, got {d}", .{args.len});
                     return .hole;
                 }
-                const arg_type = self.inferExpr(args[0]);
+                const arg_type = arg_types[0];
                 const ok = switch (arg_type) {
-                    .list, .hole, .any, .nil, .string, .map, .tuple => true,
+                    .list, .hole, .any, .nil, .string, .map, .tuple, .never => true,
                     else => false,
                 };
                 if (!ok) {
@@ -622,12 +633,12 @@ pub const Checker = struct {
                     self.addError(loc, "{s}() expects 2 arguments, got {d}", .{ name, args.len });
                     return .hole;
                 }
-                const a = self.inferExpr(args[0]);
-                const b = self.inferExpr(args[1]);
-                if (a != .int and a != .hole and a != .any) {
+                const a = arg_types[0];
+                const b = arg_types[1];
+                if (a != .int and a != .hole and a != .any and a != .never) {
                     self.addError(loc, "max/min expects Int arguments, got {s}", .{a.typeName()});
                 }
-                if (b != .int and b != .hole and b != .any) {
+                if (b != .int and b != .hole and b != .any and b != .never) {
                     self.addError(loc, "max/min expects Int arguments, got {s}", .{b.typeName()});
                 }
                 return .int;
@@ -638,8 +649,7 @@ pub const Checker = struct {
                     self.addError(loc, "remove() expects 2 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const list_type = self.inferExpr(args[0]);
-                _ = self.inferExpr(args[1]);
+                const list_type = arg_types[0];
                 if (list_type == .list) return list_type;
                 return .hole;
             },
@@ -649,8 +659,7 @@ pub const Checker = struct {
                     self.addError(loc, "append() expects 2 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const list_type = self.inferExpr(args[0]);
-                _ = self.inferExpr(args[1]);
+                const list_type = arg_types[0];
                 if (list_type == .list) return list_type;
                 return .hole;
             },
@@ -661,9 +670,7 @@ pub const Checker = struct {
                     self.addError(loc, "lookup() expects 2 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const map_type = self.inferExpr(args[0]);
-                const key_type = self.inferExpr(args[1]);
-                _ = key_type;
+                const map_type = arg_types[0];
                 if (map_type == .map) return map_type.map.value.*;
                 // For record types, try to resolve the specific field type
                 if (map_type == .record_type) {
@@ -686,9 +693,7 @@ pub const Checker = struct {
                     self.addError(loc, "insert() expects 3 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const map_type = self.inferExpr(args[0]);
-                _ = self.inferExpr(args[1]);
-                _ = self.inferExpr(args[2]);
+                const map_type = arg_types[0];
                 if (map_type == .map) return map_type;
                 return .hole;
             },
@@ -698,7 +703,7 @@ pub const Checker = struct {
                     self.addError(loc, "keys() expects 1 argument, got {d}", .{args.len});
                     return .hole;
                 }
-                const map_type = self.inferExpr(args[0]);
+                const map_type = arg_types[0];
                 if (map_type == .map) {
                     const key_ptr = self.allocator.create(Type) catch return .hole;
                     key_ptr.* = map_type.map.key.*;
@@ -719,7 +724,6 @@ pub const Checker = struct {
                     self.addError(loc, "validate() expects 1 argument, got {d}", .{args.len});
                     return .hole;
                 }
-                _ = self.inferExpr(args[0]);
                 return .atom;
             },
         }

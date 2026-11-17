@@ -226,3 +226,27 @@ test "a Tuple annotation accepts a tuple" {
     const errs = c.checkFile(nodes).errors;
     try std.testing.expectEqual(@as(usize, 0), errs.len);
 }
+
+test "an operand already reported as wrong is not reported again by its parent" {
+    const sources = [_][]const u8{
+        "x = 1 + :a > 0",
+        "x = (1 + :a) && true",
+        "x = !(1 + :a)",
+        "x = -(1 + :a)",
+        "x = (1 + :a) + 1",
+        "x = length(1 + :a)",
+        "x = max(1 + :a, 2)",
+    };
+    for (sources) |src| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        var p = Parser.init(alloc, src);
+        const nodes = try p.parseFile();
+        var c = Checker.init(alloc);
+        const errs = c.checkFile(nodes).errors;
+        for (errs) |e| std.debug.print("{s}: {s}\n", .{ src, e.message });
+        try std.testing.expectEqual(@as(usize, 1), errs.len);
+        try std.testing.expect(std.mem.indexOf(u8, errs[0].message, "arithmetic on incompatible types") != null);
+    }
+}
