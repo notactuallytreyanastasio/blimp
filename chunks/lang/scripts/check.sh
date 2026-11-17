@@ -119,7 +119,10 @@ suite "runner reports failure" runner_reports_failure
 suite "regression_spawn_in_send_arg" regression_spawn_in_send_arg
 suite "node web/test" env BLIMP_WASM="$PWD/zig-out/web/blimp.wasm" node --test web/test/
 suite "python scripts" sh -c 'cd scripts && python3 -B -m unittest trace_receipt_test.py'
-suite "tree-sitter test" sh -c "cd tree-sitter-blimp && $TREE_SITTER test"
+# The CLI caches the compiled grammar as blimp.dylib in ~/.cache/tree-sitter/lib,
+# one file for every checkout, and reuses it while it is newer than parser.c;
+# so another worktree's grammar could be what got tested. A private libdir.
+suite "tree-sitter test" sh -c "d=\$(mktemp -d) && cd tree-sitter-blimp && TREE_SITTER_LIBDIR=\$d $TREE_SITTER test; rc=\$?; rm -rf \"\$d\"; exit \$rc"
 suite "build blimp-compile (LLVM ${LLVM:-found by build.zig})" build_compiler
 suite "compiled fixtures" compiler_suite sh test/compiled/run.sh
 suite "diff harness" compiler_suite python3 -B test/diff/run.py
