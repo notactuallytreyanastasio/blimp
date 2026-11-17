@@ -1,0 +1,107 @@
+================================================================================
+Typed def with a return type
+================================================================================
+
+def f(n: Int) -> Int do n end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (def_statement
+    (identifier)
+    (parameter_list
+      (handler_param
+        (identifier)
+        (type_name
+          (upper_identifier))))
+    (return_type
+      (type_name
+        (upper_identifier)))
+    (identifier)))
+
+================================================================================
+Def with no parameters
+================================================================================
+
+def status() -> Atom do :ok end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (def_statement
+    (identifier)
+    (parameter_list)
+    (return_type
+      (type_name
+        (upper_identifier)))
+    (atom)))
+
+================================================================================
+Def with a list parameter and a dotted parameter type
+================================================================================
+
+def total(items: [Int], shop: Shop.Checkout) do 0 end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (def_statement
+    (identifier)
+    (parameter_list
+      (handler_param
+        (identifier)
+        (type_name
+          (type_name
+            (upper_identifier))))
+      (handler_param
+        (identifier)
+        (type_name
+          (upper_identifier)
+          (upper_identifier))))
+    (integer)))
+
+================================================================================
+Typed fn with a return type
+================================================================================
+
+g = fn(x: Int) -> Int do x * 2 end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (fn_expression
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (return_type
+        (type_name
+          (upper_identifier)))
+      (binary_expression
+        (identifier)
+        (integer)))))
+
+================================================================================
+Handler with an empty parameter list
+================================================================================
+
+actor A do
+  on :ping() do
+    reply 1
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list)
+      (reply_statement
+        (integer)))))

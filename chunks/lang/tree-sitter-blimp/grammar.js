@@ -63,6 +63,9 @@ module.exports = grammar({
     type_name: ($) =>
       prec(10, choice(
         $.upper_identifier,
+        // Shop.Checkout: parseTypeName reads dotted names for parameters,
+        // return types and state fields alike.
+        seq($.upper_identifier, repeat1(seq(".", $.upper_identifier))),
         seq("[", $.type_name, "]"),                           // [Item], [Int]
         seq("{", commaSep1($.type_name), "}"),                // {Atom, Int}
         seq("%", "{", $.type_name, "=>", $.type_name, "}"),   // %{String => Int}
@@ -91,8 +94,10 @@ module.exports = grammar({
 
     return_type: ($) => seq("->", $.type_name),
 
+    // `(a: Int, b: [Item])`, also on def and fn. Empty `()` is allowed, as in
+    // parser.zig's parseTypedParamList.
     parameter_list: ($) =>
-      seq("(", commaSep1($.handler_param), ")"),
+      seq("(", commaSep($.handler_param), ")"),
 
     handler_param: ($) =>
       choice(
@@ -108,7 +113,8 @@ module.exports = grammar({
       seq(
         "def",
         $.identifier,
-        "(", commaSep($.identifier), ")",
+        $.parameter_list,
+        optional($.return_type),
         "do",
         repeat($._statement),
         "end",
@@ -265,7 +271,7 @@ module.exports = grammar({
 
     // fn(x, y) do ... end
     fn_expression: ($) =>
-      seq("fn", "(", commaSep($.identifier), ")", "do", repeat($._statement), "end"),
+      seq("fn", $.parameter_list, optional($.return_type), "do", repeat($._statement), "end"),
 
     // self reference inside handler
     self_ref: (_) => "self",

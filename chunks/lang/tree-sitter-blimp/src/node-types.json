@@ -971,6 +971,10 @@
           "named": true
         },
         {
+          "type": "parameter_list",
+          "named": true
+        },
+        {
           "type": "parenthesized_expression",
           "named": true
         },
@@ -980,6 +984,10 @@
         },
         {
           "type": "reply_statement",
+          "named": true
+        },
+        {
+          "type": "return_type",
           "named": true
         },
         {
@@ -1122,7 +1130,7 @@
     "fields": {},
     "children": {
       "multiple": true,
-      "required": false,
+      "required": true,
       "types": [
         {
           "type": "assignment",
@@ -1209,6 +1217,10 @@
           "named": true
         },
         {
+          "type": "parameter_list",
+          "named": true
+        },
+        {
           "type": "parenthesized_expression",
           "named": true
         },
@@ -1218,6 +1230,10 @@
         },
         {
           "type": "reply_statement",
+          "named": true
+        },
+        {
+          "type": "return_type",
           "named": true
         },
         {
@@ -2251,7 +2267,7 @@
     "fields": {},
     "children": {
       "multiple": true,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "handler_param",
