@@ -2083,21 +2083,24 @@
       "value": "\\d+\\.\\d+"
     },
     "string": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "\""
-        },
-        {
-          "type": "PATTERN",
-          "value": "[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*"
-        },
-        {
-          "type": "STRING",
-          "value": "\""
-        }
-      ]
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "\""
+          },
+          {
+            "type": "PATTERN",
+            "value": "[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*"
+          },
+          {
+            "type": "STRING",
+            "value": "\""
+          }
+        ]
+      }
     },
     "atom": {
       "type": "PATTERN",

@@ -3908,11 +3908,6 @@
     }
   },
   {
-    "type": "string",
-    "named": true,
-    "fields": {}
-  },
-  {
     "type": "test_definition",
     "named": true,
     "fields": {},
@@ -4745,10 +4740,6 @@
     "named": false
   },
   {
-    "type": "\"",
-    "named": false
-  },
-  {
     "type": "%",
     "named": false
   },
@@ -4976,6 +4967,10 @@
   {
     "type": "state",
     "named": false
+  },
+  {
+    "type": "string",
+    "named": true
   },
   {
     "type": "test",

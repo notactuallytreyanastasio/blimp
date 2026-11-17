@@ -391,7 +391,11 @@ module.exports = grammar({
 
     float: (_) => /\d+\.\d+/,
 
-    string: (_) => seq('"', /[^"\\]*(?:\\.[^"\\]*)*/, '"'),
+    // One token, so that the extras cannot apply inside it. As a seq of
+    // quote, body and quote, a `#` in the body was lexed as a comment that
+    // ran to the end of the line and took the closing quote with it, so
+    // every interpolated "#{x}" swallowed the rest of its line.
+    string: (_) => token(seq('"', /[^"\\]*(?:\\.[^"\\]*)*/, '"')),
 
     atom: (_) => /:[a-zA-Z_][a-zA-Z0-9_]*[?!]?/,
 
