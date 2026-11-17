@@ -1,0 +1,12 @@
+--- stdout
+--- stderr
+
+-- RUNTIME ERROR ─────────────────────────────────
+
+  DivisionByZero while evaluating this.
+
+4| rem(x, 0)
+     ^
+
+
+--- exit 1

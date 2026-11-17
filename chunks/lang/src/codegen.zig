@@ -489,8 +489,8 @@ pub const Codegen = struct {
 
     /// The builtins compiled code provides.  Every other interpreter builtin
     /// is refused at the call.
-    const Builtin = enum { max, min };
-    const builtin_list = "max, min";
+    const Builtin = enum { max, min, rem, abs, puts };
+    const builtin_list = "max, min, rem, abs, puts";
 
     fn resolveCallee(self: *Codegen, name: []const u8, loc: ast.Loc, argc: usize) CodegenError!Callee {
         const local = self.scope.get(name);
@@ -511,7 +511,8 @@ pub const Codegen = struct {
         };
         if (std.meta.stringToEnum(Builtin, name)) |b| {
             const want: usize = switch (b) {
-                .max, .min => 2,
+                .max, .min, .rem => 2,
+                .abs, .puts => 1,
             };
             if (argc != want) return self.reject(
                 loc,
@@ -529,19 +530,27 @@ pub const Codegen = struct {
         );
     }
 
-    /// A compiled def binds every parameter as an i64 Int, so it can be
-    /// passed an Int, or an actor (an i64 id, which `c <- :get` in the body
-    /// sends to).  max and min take Ints.  Anything else used to be passed
-    /// as it was to a function declared to take i64: a String was a pointer
-    /// and LLVM refused it, a Float would have been reinterpreted.
-    fn requireIntArgs(self: *Codegen, name: []const u8, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!void {
+    /// What each argument may be.  A compiled def binds every parameter as
+    /// an i64 Int, so it can be passed an Int, or an actor (an i64 id, which
+    /// `c <- :get` in the body sends to).  The builtins take what they are
+    /// compiled for below.  Anything else used to be passed as it was to a
+    /// function declared to take i64: a String was a pointer and LLVM
+    /// refused it, a Float would have been reinterpreted.
+    fn requireArgTags(self: *Codegen, name: []const u8, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!void {
+        const allowed: []const ValTag, const what: []const u8 = switch (callee) {
+            .def => .{ &.{ .int, .actor_ref }, "an Int or an actor" },
+            .builtin => |b| switch (b) {
+                .max, .min, .rem => .{ &.{.int}, "an Int" },
+                .abs => .{ &.{ .int, .float }, "an Int or a Float" },
+                .puts => .{ &.{ .int, .string }, "an Int or a String" },
+            },
+        };
         for (args, 0..) |a, i| {
-            if (a.tag == .int) continue;
-            if (a.tag == .actor_ref and callee == .def) continue;
+            if (std.mem.indexOfScalar(ValTag, allowed, a.tag) != null) continue;
             return self.reject(
                 locs[i],
-                "Argument {d} of `{s}` is {s}; compiled code can pass it only an Int{s}.",
-                .{ i + 1, name, tagNoun(a.tag), if (callee == .def) " or an actor" else "" },
+                "Argument {d} of `{s}` is {s}; compiled code can pass it only {s}.",
+                .{ i + 1, name, tagNoun(a.tag), what },
                 "Run this file with the interpreter.",
             );
         }
@@ -560,8 +569,8 @@ pub const Codegen = struct {
         };
     }
 
-    fn emitCall(self: *Codegen, name: []const u8, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!TaggedVal {
-        try self.requireIntArgs(name, callee, args, locs);
+    fn emitCall(self: *Codegen, name: []const u8, call_loc: ast.Loc, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!TaggedVal {
+        try self.requireArgTags(name, callee, args, locs);
         switch (callee) {
             .builtin => |b| switch (b) {
                 // icmp + select
@@ -570,6 +579,9 @@ pub const Codegen = struct {
                     const cmp = c.LLVMBuildICmp(self.builder, pred, args[0].val, args[1].val, "cmptmp");
                     return .{ .val = c.LLVMBuildSelect(self.builder, cmp, args[0].val, args[1].val, self.zname(name)), .tag = .int };
                 },
+                .rem => return self.emitRem(args[0].val, args[1].val, call_loc),
+                .abs => return self.emitAbs(args[0]),
+                .puts => return self.emitPuts(args[0]),
             },
             .def => {
                 // Declared by forwardDeclareDefs or compileDef before any call.
@@ -588,6 +600,51 @@ pub const Codegen = struct {
         }
     }
 
+    /// rem(a, b): the interpreter's @rem.  A zero divisor is its
+    /// DivisionByZero: caught by `try` as :division_by_zero and passed over
+    /// by `orelse`, like `a / 0`, but reported uncaught in the interpreter's
+    /// words for an error out of a builtin.  rem(minInt, -1) is
+    /// 0 there; LLVM's srem of those two is undefined behaviour, so a
+    /// divisor of -1 is replaced by 1, which has the same remainder (0).
+    fn emitRem(self: *Codegen, a: c.LLVMValueRef, b: c.LLVMValueRef, loc: ast.Loc) TaggedVal {
+        const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+        self.emitZeroCheck(c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, b, zero, "rem0"), loc, "blimp_raise_rem_zero");
+        const minus_one = c.LLVMConstInt(self.i64_type, @bitCast(@as(i64, -1)), 1);
+        const is_m1 = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, b, minus_one, "rem_m1");
+        const safe_b = c.LLVMBuildSelect(self.builder, is_m1, c.LLVMConstInt(self.i64_type, 1, 0), b, "rem_b");
+        return .{ .val = c.LLVMBuildSRem(self.builder, a, safe_b, "remtmp"), .tag = .int };
+    }
+
+    /// abs(n): an Int wraps at minInt (0 -% n, as the interpreter does; no
+    /// nsw on the sub), a Float drops its sign.  This used to be libc's
+    /// `int abs(int)`, which truncated 5000000000 to 705032704.
+    fn emitAbs(self: *Codegen, n: TaggedVal) TaggedVal {
+        if (n.tag == .float) {
+            const neg = c.LLVMBuildFCmp(self.builder, c.LLVMRealOLT, n.val, c.LLVMConstReal(self.f64_type, 0.0), "fabs_neg");
+            const flipped = c.LLVMBuildFNeg(self.builder, n.val, "fabs_flip");
+            return .{ .val = c.LLVMBuildSelect(self.builder, neg, flipped, n.val, "fabs"), .tag = .float };
+        }
+        const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+        const neg = c.LLVMBuildICmp(self.builder, c.LLVMIntSLT, n.val, zero, "abs_neg");
+        const flipped = c.LLVMBuildSub(self.builder, zero, n.val, "abs_flip");
+        return .{ .val = c.LLVMBuildSelect(self.builder, neg, flipped, n.val, "abs"), .tag = .int };
+    }
+
+    /// puts(x): the interpreter writes a String's bytes as they are and any
+    /// other value formatted, then a newline, and returns x.  An Int formats
+    /// the same either side; other tags are refused in requireArgTags.
+    fn emitPuts(self: *Codegen, x: TaggedVal) TaggedVal {
+        if (x.tag == .string) {
+            const f = self.getRuntimeFn("blimp_puts_string", &.{self.ptr_type}, self.void_type);
+            var pt = [_]c.LLVMTypeRef{self.ptr_type};
+            var args = [_]c.LLVMValueRef{x.val};
+            _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &pt, 1, 0), f, &args, 1, "");
+        } else {
+            self.emitPrint(x);
+        }
+        return x;
+    }
+
     fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall, loc: ast.Loc) CodegenError!TaggedVal {
         try self.checkDefCallCatchable(call.name);
         const callee = try self.resolveCallee(call.name, loc, call.args.len);
@@ -597,7 +654,7 @@ pub const Codegen = struct {
             args[i] = try self.compileExpr(arg);
             locs[i] = arg.loc;
         }
-        return self.emitCall(call.name, callee, args, locs);
+        return self.emitCall(call.name, loc, callee, args, locs);
     }
 
     /// `x |> f(a, _)` passes x where the hole is; `x |> f(a)` passes it
@@ -637,7 +694,7 @@ pub const Codegen = struct {
             }
             n += 1;
         }
-        return self.emitCall(name, callee, args, locs);
+        return self.emitCall(name, right.loc, callee, args, locs);
     }
 
     fn compileBinaryOp(self: *Codegen, op: ast.Node.BinaryOp, loc: ast.Loc) CodegenError!TaggedVal {
@@ -1133,13 +1190,18 @@ pub const Codegen = struct {
     /// `a / b` with b == 0: a fault at the operator, as the interpreter's
     /// DIVISION BY ZERO.  Leaves the builder where b != 0.
     fn emitDivZeroCheck(self: *Codegen, is_zero: c.LLVMValueRef, loc: ast.Loc) void {
+        self.emitZeroCheck(is_zero, loc, "blimp_raise_div_zero");
+    }
+
+    /// The same fault, raised by `raise_fn` (a BlimpRaise *(const BlimpSite *)).
+    fn emitZeroCheck(self: *Codegen, is_zero: c.LLVMValueRef, loc: ast.Loc, raise_fn: [*:0]const u8) void {
         const func = self.current_fn orelse return;
         _ = self.atoms.intern(self.allocator, "division_by_zero"); // what `catch e` binds
         const zero_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "div_by_zero");
         const ok_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "div_ok");
         _ = c.LLVMBuildCondBr(self.builder, is_zero, zero_bb, ok_bb);
         c.LLVMPositionBuilderAtEnd(self.builder, zero_bb);
-        const f = self.getRuntimeFn("blimp_raise_div_zero", &.{self.ptr_type}, self.ptr_type);
+        const f = self.getRuntimeFn(raise_fn, &.{self.ptr_type}, self.ptr_type);
         var args = [_]c.LLVMValueRef{self.siteGlobal(loc)};
         var pt = [_]c.LLVMTypeRef{self.ptr_type};
         const raise_ptr = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "div_zero");

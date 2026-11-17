@@ -1,0 +1,4 @@
+# puts of a Float would print through %g (0.3 for 0.30000000000000004), so
+# it is refused rather than compiled into a different number.
+puts(0.1 + 0.2)
+1

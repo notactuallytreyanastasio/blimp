@@ -2,7 +2,7 @@
 
 -- CANNOT COMPILE ──────────────────────────────────────────
 
-  There is no `lenght` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min).
+  There is no `lenght` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts).
 
 4| lenght(x)
     ^

@@ -1,0 +1,10 @@
+# rem and abs were extern calls: rem failed at link on `_rem`, abs was
+# libc's 32-bit int abs(int) and printed 705032704 for the 5000000000 here.
+m = 0 - 9223372036854775807 - 1
+puts(rem(17, 5))
+puts(rem(0 - 7, 2))
+puts(rem(m, 0 - 1))
+puts(abs(0 - 5000000000))
+puts(abs(m))
+puts(17 |> rem(5))
+abs(0 - 3)

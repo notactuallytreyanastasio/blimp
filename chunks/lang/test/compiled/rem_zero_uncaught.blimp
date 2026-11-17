@@ -1,0 +1,4 @@
+# The interpreter's rem returns DivisionByZero from a builtin: the uncaught
+# report is its generic RUNTIME ERROR, not the `/` operator's text.
+x = 7
+rem(x, 0)

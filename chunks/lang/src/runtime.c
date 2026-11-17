@@ -375,6 +375,13 @@ void blimp_print_nil(void) {
     printf("nil\n");
 }
 
+// puts(s) for a String: its bytes as they are, unquoted, then a newline.
+// (blimp_print_string quotes it, as the interpreter prints a final value.)
+void blimp_puts_string(const char *val) {
+    fputs(val, stdout);
+    fputc('\n', stdout);
+}
+
 // ── Builtins ─────────────────────────────────────────────
 
 long long blimp_max(long long a, long long b) {
@@ -588,6 +595,18 @@ BlimpRaise *blimp_raise_div_zero(const BlimpSite *site) {
     r->catch_atom = "division_by_zero";
     r->site = site;
     r->hint = (char *)"Check the denominator before dividing.";
+    return r;
+}
+
+// rem(a, 0).  The interpreter's builtin returns error.DivisionByZero, which
+// it reports with its generic renderer rather than the operator's text.
+BlimpRaise *blimp_raise_rem_zero(const BlimpSite *site) {
+    BlimpRaise *r = (BlimpRaise *)calloc(1, sizeof(BlimpRaise));
+    r->title = "RUNTIME ERROR";
+    r->message = (char *)"DivisionByZero while evaluating this.";
+    r->catch_atom = "division_by_zero";
+    r->site = site;
+    r->hint = NULL;
     return r;
 }
 
