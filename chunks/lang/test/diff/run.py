@@ -78,6 +78,11 @@ EXCLUDE = {
     "examples/jetstream_serve.blimp": "serves HTTP forever",
     "examples/web_push.blimp": "network",
     "examples/tetris.blimp": "interactive terminal game",
+    # A Hole the interpreter reaches runs `claude -p` and writes the answer
+    # into the .blimp file in place of the Hole. These three reach one.
+    "examples/content_pipeline.blimp": "a Hole calls the claude CLI and rewrites the file",
+    "examples/game_rules.blimp": "a Hole calls the claude CLI and rewrites the file",
+    "examples/rate_limiter.blimp": "a Hole calls the claude CLI and rewrites the file",
     "examples/bench_fib.blimp": "fib(40): a benchmark, not a test; fib is in corpus/",
     "benchmarks/fib.blimp": "benchmark sized for timing",
     "benchmarks/ring.blimp": "benchmark sized for timing",
