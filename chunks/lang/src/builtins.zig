@@ -1101,16 +1101,16 @@ fn builtinRange(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     if (args[0].* != .integer or args[1].* != .integer) return error.TypeError;
     const start = args[0].integer;
     const end_val = args[1].integer;
-    const len: usize = if (end_val >= start) @intCast(end_val - start + 1) else 0;
+    // In i128: end_val - start + 1 overflows i64 for range(minInt, 0), and
+    // counting n up to end_val overflowed when end_val was maxInt.
+    const wide_len: i128 = if (end_val >= start) @as(i128, end_val) - start + 1 else 0;
+    const len = std.math.cast(usize, wide_len) orelse return error.OutOfMemory;
 
-    var items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
-    var i: usize = 0;
-    var n = start;
-    while (n <= end_val) : (n += 1) {
+    const items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
+    for (items, 0..) |*slot, i| {
         const v = allocator.create(Value) catch return error.OutOfMemory;
-        v.* = Value{ .integer = n };
-        items[i] = v;
-        i += 1;
+        v.* = Value{ .integer = @intCast(@as(i128, start) + @as(i128, @intCast(i))) };
+        slot.* = v;
     }
 
     const result = allocator.create(Value) catch return error.OutOfMemory;
