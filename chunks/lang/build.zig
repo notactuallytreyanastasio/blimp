@@ -121,9 +121,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_main_tests.step);
 
     // -- Interpreter only --
-    // The default step also builds blimp-compile, which needs LLVM 20 on the
-    // machine.  The benchmarks, the REPL and the test suite do not, so they
-    // ask for this instead of failing on a dependency they never use.
+    // The default step also builds blimp-compile, which needs an LLVM with
+    // libLLVM on the machine (see findLlvm below).  The benchmarks, the REPL
+    // and the test suite do not, so they ask for this instead of failing on a
+    // dependency they never use.
     const interp_step = b.step("interp", "Build just the interpreter (no LLVM needed)");
     interp_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
 
@@ -136,12 +137,24 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // codegen.zig uses only the LLVM C API, which also builds and runs against
-    // LLVM 22. The default stays llvm@20; `-Dllvm=/opt/homebrew/opt/llvm@22`
-    // points it at whichever one the machine has.
-    const llvm_prefix = b.option([]const u8, "llvm", "LLVM install prefix for blimp-compile") orelse "/opt/homebrew/opt/llvm@20";
-    compile_exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{llvm_prefix}) });
-    compile_exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{llvm_prefix}) });
+    // codegen.zig uses only the LLVM C API. Which LLVM: see findLlvm. When
+    // none is found, only this artifact fails, by name, when something asks
+    // for it; `zig build interp` and `zig build test` never look.
+    const llvm_flag = b.option([]const u8, "llvm", "LLVM install prefix for blimp-compile (default: the first of findLlvm's list that exists)");
+    switch (findLlvm(b, llvm_flag)) {
+        .found => |llvm| {
+            compile_exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{llvm.prefix}) });
+            compile_exe.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{llvm.prefix}) });
+            const say = b.allocator.create(SayLlvm) catch @panic("OOM");
+            say.* = .{
+                .step = std.Build.Step.init(.{ .id = .custom, .name = "say which LLVM", .owner = b, .makeFn = SayLlvm.make }),
+                .prefix = llvm.prefix,
+                .how = llvm.how,
+            };
+            compile_exe.step.dependOn(&say.step);
+        },
+        .missing => |why| compile_exe.step.dependOn(&b.addFail(why).step),
+    }
     compile_exe.root_module.linkSystemLibrary("LLVM", .{});
     compile_exe.root_module.link_libc = true;
 
@@ -198,3 +211,86 @@ pub fn build(b: *std.Build) void {
 
     // TUI REPL is now in chunks/repl_tui (Rust/Ratatui)
 }
+
+// Where blimp-compile's LLVM comes from, in this order:
+//
+//  1. -Dllvm=PREFIX. Always wins. A PREFIX with no libLLVM in PREFIX/lib is
+//     a failure that names it, not a reason to look elsewhere: whoever typed
+//     it meant that one.
+//  2. The prefixes below, first that exists. They are versioned paths on
+//     purpose. LLVM 22 is first because every .expected in test/compiled and
+//     every entry in test/diff/known.json was recorded against it; LLVM 23
+//     gives the same results today (all fixtures, the whole harness), but
+//     preferring the newest would let an upgrade change what the harness
+//     compares without anyone choosing it. The unversioned
+//     /opt/homebrew/opt/llvm is left out for the same reason: it is whatever
+//     brew last upgraded to.
+//  3. `llvm-config --prefix` from PATH, of whatever version: the usual case
+//     on a Linux distribution's own llvm package. It is last because it is
+//     the one nobody picked for this repository.
+//
+// Built and run (fixtures and harness) on macOS: /opt/homebrew/opt/llvm@22
+// (22.1.8) and /opt/homebrew/opt/llvm@23 (23.1.5). The /usr/local and
+// /usr/lib/llvm-N entries are the same versions in Intel Homebrew's and
+// apt.llvm.org's layouts and have not been built here. llvm@20 was this
+// file's only default until now and is kept last so a machine that has only
+// it still builds; it has not been built here since the zig 0.16 port.
+const llvm_prefixes = [_][]const u8{
+    "/opt/homebrew/opt/llvm@22",
+    "/usr/local/opt/llvm@22",
+    "/usr/lib/llvm-22",
+    "/opt/homebrew/opt/llvm@23",
+    "/usr/local/opt/llvm@23",
+    "/usr/lib/llvm-23",
+    "/opt/homebrew/opt/llvm@20",
+};
+
+const Llvm = union(enum) {
+    found: struct { prefix: []const u8, how: []const u8 },
+    /// The message the compiler's build fails with.
+    missing: []const u8,
+};
+
+fn hasLibLlvm(b: *std.Build, prefix: []const u8) bool {
+    const io = b.graph.io;
+    for ([_][]const u8{ "libLLVM.dylib", "libLLVM.so" }) |name| {
+        const path = b.pathJoin(&.{ prefix, "lib", name });
+        if (!std.fs.path.isAbsolute(path)) continue;
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
+        return true;
+    }
+    return false;
+}
+
+fn findLlvm(b: *std.Build, flag: ?[]const u8) Llvm {
+    const fix = "Give an LLVM install prefix: zig build -Dllvm=PREFIX, or make check LLVM=PREFIX";
+    if (flag) |prefix| {
+        if (hasLibLlvm(b, prefix)) return .{ .found = .{ .prefix = prefix, .how = "-Dllvm" } };
+        return .{ .missing = b.fmt("blimp-compile: -Dllvm={s} has no lib/libLLVM.dylib or lib/libLLVM.so (an absolute path is required). {s}", .{ prefix, fix }) };
+    }
+    for (llvm_prefixes) |prefix| {
+        if (hasLibLlvm(b, prefix)) return .{ .found = .{ .prefix = prefix, .how = "first of build.zig's list that exists; -Dllvm overrides" } };
+    }
+    var code: u8 = undefined;
+    if (b.runAllowFail(&.{ "llvm-config", "--prefix" }, &code, .ignore)) |out| {
+        const prefix = std.mem.trim(u8, out, " \n\r\t");
+        if (hasLibLlvm(b, prefix)) return .{ .found = .{ .prefix = prefix, .how = "llvm-config --prefix on PATH; -Dllvm overrides" } };
+    } else |_| {}
+    var looked: std.ArrayList(u8) = .empty;
+    for (llvm_prefixes) |prefix| looked.print(b.allocator, "{s}, ", .{prefix}) catch @panic("OOM");
+    return .{ .missing = b.fmt("blimp-compile: no LLVM found. Looked for lib/libLLVM in {s}and in `llvm-config --prefix` from PATH. {s}", .{ looked.items, fix }) };
+}
+
+/// Prints which LLVM blimp-compile is built against, every time it is built,
+/// so no result has to be guessed back to a version.
+const SayLlvm = struct {
+    step: std.Build.Step,
+    prefix: []const u8,
+    how: []const u8,
+
+    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
+        _ = options;
+        const self: *SayLlvm = @fieldParentPtr("step", step);
+        std.debug.print("blimp-compile: LLVM at {s} ({s})\n", .{ self.prefix, self.how });
+    }
+};

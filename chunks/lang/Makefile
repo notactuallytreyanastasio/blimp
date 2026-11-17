@@ -8,7 +8,7 @@
 
 ZIG ?= zig
 # LLVM prefix for blimp-compile, e.g. make check LLVM=/opt/homebrew/opt/llvm@22.
-# Empty means build.zig's default.
+# Empty means build.zig finds one (findLlvm) and prints which.
 LLVM ?=
 
 .PHONY: all blimp run server test check wasm clean
