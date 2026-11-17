@@ -173,6 +173,11 @@ pub const Checker = struct {
     registry: ActorRegistry,
     /// The name of the actor currently being checked (for self-send resolution).
     current_actor: ?[]const u8,
+    /// The `-> Type` of the handler whose body is being checked, so that a
+    /// `reply` is held to it wherever it stands: inside a case branch as well
+    /// as at the top of the body.  Null outside a handler, and inside a def
+    /// or fn nested in one, whose reply is not the handler's.
+    declared_return: ?Type,
 
     pub fn init(allocator: std.mem.Allocator) Checker {
         return .{
@@ -181,6 +186,7 @@ pub const Checker = struct {
             .errors = .{ .items = &.{}, .capacity = 0 },
             .registry = ActorRegistry.init(allocator),
             .current_actor = null,
+            .declared_return = null,
         };
     }
 
@@ -256,17 +262,100 @@ pub const Checker = struct {
             .actor_def => |a| self.checkActorDef(a, node.loc),
             .state_def => |s| self.checkStateDef(s, node.loc),
             .become_stmt => |b| self.checkBecomeStmt(b, node.loc),
-            .reply_stmt => |r| self.checkReplyStmt(r),
+            .reply_stmt => |r| self.checkReplyStmt(r, node.loc),
             .assign_stmt => |a| self.checkAssignStmt(a),
             .message_handler => |h| self.checkMessageHandler(h, node.loc),
             .def_stmt => |d| self.checkDefStmt(d, node.loc),
             .fn_expr => |f| self.checkFnExpr(f, node.loc),
-            // Expression statements: infer type to trigger any errors (e.g., message sends)
-            .message_send, .func_call, .pipe_expr, .dot_access => {
+            .test_def => |t| self.checkBody(t.body),
+            .property_def => |p| self.checkBody(p.body),
+            .given_stmt => |g| {
+                _ = self.inferExpr(g.generator.*);
+                // A generated value: its type is the generator's, which no
+                // signature here records.
+                self.env.define(g.name, .hole);
+            },
+            .bubble_stmt => |b| {
+                if (b.reason) |r| _ = self.inferExpr(r.*);
+            },
+            // Anything else in statement position is an expression whose
+            // value is dropped: `1 + :a` on a line of its own, a case, a
+            // for, a try.  Inferring it is what checks it.
+            else => {
                 _ = self.inferExpr(node);
             },
+        }
+    }
+
+    /// Check a nested body: a case or situation branch, a for body, a try
+    /// or catch body, a test or property body.
+    ///
+    /// It gets a scope of its own, so a name it binds is not taken to exist
+    /// after it.  But whether an assignment in it is seen afterwards depends
+    /// on the construct and on whether the branch ran at all, so a name the
+    /// body assigned that was already bound outside is widened to hole once
+    /// the body is done.  Keeping the outer type would be wrong:
+    /// `x = nil` then `for i in xs do x = i end` then `x + 1` is fine at
+    /// run time if the loop body's assignment reaches the outer x, and the
+    /// checker would call it Nil plus Int.
+    fn checkBody(self: *Checker, body: []const Node) void {
+        self.checkBodyWith(body, null);
+    }
+
+    /// `checkBody` with a pattern whose names are bound first, as hole:
+    /// the pattern of a case branch.
+    fn checkBodyWith(self: *Checker, body: []const Node, pattern: ?*const Node) void {
+        self.env.pushScope();
+        if (pattern) |p| self.bindPattern(p.*);
+        for (body) |stmt| self.checkNode(stmt);
+        self.popScopeWidening();
+    }
+
+    /// Pop the innermost scope; every name bound in it that is also bound
+    /// further out is rebound as hole in the scope that is left.
+    fn popScopeWidening(self: *Checker) void {
+        const scopes = self.env.scopes.items;
+        if (scopes.len < 2) {
+            self.env.popScope();
+            return;
+        }
+        const inner = scopes[scopes.len - 1].bindings.items;
+        self.env.popScope();
+        for (inner) |b| {
+            if (self.env.lookup(b.name) != null) self.env.define(b.name, .hole);
+        }
+    }
+
+    /// Bind every name a pattern binds, as hole.  A pattern name is a fresh
+    /// binding of whatever matched, not a use of an outer variable of the
+    /// same name, so leaving it unbound would let an outer `n: Int` stand in
+    /// for the `n` in `{:add, n} ->`.
+    fn bindPattern(self: *Checker, pattern: Node) void {
+        switch (pattern.kind) {
+            .identifier => |id| self.env.define(id.name, .hole),
+            .tuple_lit => |t| for (t.elements) |e| self.bindPattern(e),
+            .list_lit => |l| {
+                for (l.elements) |e| self.bindPattern(e);
+                if (l.tail) |t| self.bindPattern(t.*);
+            },
+            .map_lit => |m| for (m.entries) |e| self.bindPattern(e.value),
             else => {},
         }
+    }
+
+    /// Check the subject, every guard and every branch body of a case or
+    /// situation.  The result is hole: the checker does not join the
+    /// branches' types.
+    fn inferBranches(self: *Checker, subject: Node, branches: []const Node.Branch) Type {
+        _ = self.inferExpr(subject);
+        for (branches) |br| {
+            self.env.pushScope();
+            if (br.pattern) |p| self.bindPattern(p.*);
+            if (br.guard) |g| _ = self.inferExpr(g.*);
+            for (br.body) |stmt| self.checkNode(stmt);
+            self.popScopeWidening();
+        }
+        return .hole;
     }
 
     /// Check an actor definition: push scope, check body, pop scope.
@@ -335,9 +424,17 @@ pub const Checker = struct {
         }
     }
 
-    /// Check a reply statement: just infer the type of the expression.
-    fn checkReplyStmt(self: *Checker, reply: Node.ReplyStmt) void {
-        _ = self.inferExpr(reply.value.*);
+    /// Check a reply statement against the enclosing handler's `-> Type`.
+    fn checkReplyStmt(self: *Checker, reply: Node.ReplyStmt, loc: Loc) void {
+        const reply_type = self.inferExpr(reply.value.*);
+        if (self.declared_return) |expected| {
+            if (!reply_type.isSubtypeOf(expected)) {
+                self.addError(loc, "reply type mismatch: expected {s}, got {s}", .{
+                    expected.typeName(),
+                    reply_type.typeName(),
+                });
+            }
+        }
     }
 
     /// Check an assignment: infer the RHS type and bind the variable.
@@ -362,30 +459,19 @@ pub const Checker = struct {
             }
         }
 
-        // Parse the declared return type (if any)
-        var declared_return: ?Type = null;
+        if (handler.guard) |g| _ = self.inferExpr(g.*);
+
+        // Parse the declared return type (if any); checkReplyStmt holds
+        // every reply in the body to it, nested or not.
+        const prev_return = self.declared_return;
+        self.declared_return = null;
         if (handler.return_type) |rt| {
-            declared_return = types.parseTypeName(self.allocator, rt) catch .hole;
+            self.declared_return = types.parseTypeName(self.allocator, rt) catch .hole;
         }
 
-        // Check body and collect reply types
-        for (handler.body) |stmt| {
-            switch (stmt.kind) {
-                .reply_stmt => |r| {
-                    const reply_type = self.inferExpr(r.value.*);
-                    if (declared_return) |expected| {
-                        if (!reply_type.isSubtypeOf(expected)) {
-                            self.addError(stmt.loc, "reply type mismatch: expected {s}, got {s}", .{
-                                expected.typeName(),
-                                reply_type.typeName(),
-                            });
-                        }
-                    }
-                },
-                else => self.checkNode(stmt),
-            }
-        }
+        for (handler.body) |stmt| self.checkNode(stmt);
 
+        self.declared_return = prev_return;
         self.env.popScope();
     }
 
@@ -403,20 +489,34 @@ pub const Checker = struct {
             }
         }
 
+        const prev_return = self.declared_return;
+        self.declared_return = null;
         for (def.body) |stmt| {
             self.checkNode(stmt);
         }
+        self.declared_return = prev_return;
 
         self.env.popScope();
     }
 
-    /// Check an fn expression: parameters must have type annotations.
+    /// Check an fn expression: parameters must have type annotations, and
+    /// the body is checked with them bound, as a def's is.
     fn checkFnExpr(self: *Checker, f: Node.FnExpr, loc: Loc) void {
+        self.env.pushScope();
         for (f.params) |param| {
-            if (param.type_name == null) {
+            if (param.type_name) |tn| {
+                self.env.define(param.name, types.parseTypeName(self.allocator, tn) catch .hole);
+            } else {
                 self.addError(loc, "lambda parameter '{s}' is missing a type annotation", .{param.name});
+                self.env.define(param.name, .any);
             }
         }
+        const prev_return = self.declared_return;
+        self.declared_return = null;
+        for (f.body) |stmt| self.checkNode(stmt);
+        self.declared_return = prev_return;
+        // A closure's assignments are its own: plain pop, no widening.
+        self.env.popScope();
     }
 
     // ============================================================
@@ -428,7 +528,21 @@ pub const Checker = struct {
         return switch (node.kind) {
             .integer_lit => .int,
             .float_lit => .float,
-            .string_lit => .string,
+            .string_lit => |sl| blk: {
+                if (sl.interp) |ip| {
+                    // The parser parses each `#{...}` on its own, so the
+                    // nodes in it carry locations counted from the start of
+                    // the braces: line 1, col 1 for the first.  An error in
+                    // one is reported at the string instead.
+                    const first_new = self.errors.items.len;
+                    for (ip.parts) |part| switch (part) {
+                        .expr => |e| _ = self.inferExpr(e.*),
+                        .text => {},
+                    };
+                    for (self.errors.items[first_new..]) |*e| e.loc = node.loc;
+                }
+                break :blk .string;
+            },
             .atom_lit => .atom,
             .bool_lit => .bool_type,
             .nil_lit => .nil,
@@ -443,15 +557,58 @@ pub const Checker = struct {
             .pipe_expr => |pe| self.inferPipeExpr(pe),
             .dot_access => |da| self.inferDotAccess(da, node.loc),
             .message_send => |ms| self.inferMessageSend(ms, node.loc),
-            .orelse_expr => |oe| self.inferExpr(oe.try_expr.*),
-            .spawn_expr => |se| Type{ .actor = se.actor_name },
-            .struct_lit => |sl| Type{ .actor = sl.type_name },
+            .orelse_expr => |oe| blk: {
+                const t = self.inferExpr(oe.try_expr.*);
+                _ = self.inferExpr(oe.fallback.*);
+                break :blk t;
+            },
+            .spawn_expr => |se| blk: {
+                for (se.overrides) |kv| _ = self.inferExpr(kv.value);
+                break :blk Type{ .actor = se.actor_name };
+            },
+            .struct_lit => |sl| blk: {
+                for (sl.fields) |kv| _ = self.inferExpr(kv.value);
+                break :blk Type{ .actor = sl.type_name };
+            },
             .fn_expr => |f| blk: {
                 self.checkFnExpr(f, node.loc);
                 break :blk .any; // closures are opaque at the type level
             },
-            .situation => .hole, // Cannot infer situation results yet
-            else => .hole,
+            .case_expr => |c| self.inferBranches(c.subject.*, c.branches),
+            .situation => |c| self.inferBranches(c.subject.*, c.branches),
+            .try_catch => |tc| blk: {
+                self.checkBody(tc.try_body);
+                self.env.pushScope();
+                if (tc.catch_var) |v| self.env.define(v, .hole);
+                for (tc.catch_body) |stmt| self.checkNode(stmt);
+                self.popScopeWidening();
+                break :blk .hole;
+            },
+            .for_expr => |fe| blk: {
+                _ = self.inferExpr(fe.iterable.*);
+                self.env.pushScope();
+                self.env.define(fe.var_name, .hole);
+                for (fe.body) |stmt| self.checkNode(stmt);
+                self.popScopeWidening();
+                break :blk .hole;
+            },
+            .spread_map, .spread_each => |sp| blk: {
+                _ = self.inferExpr(sp.iterable.*);
+                _ = self.inferExpr(sp.func.*);
+                break :blk .hole;
+            },
+            .range_expr => |r| blk: {
+                _ = self.inferExpr(r.start.*);
+                _ = self.inferExpr(r.end_val.*);
+                break :blk .hole;
+            },
+            .call_expr => |ce| blk: {
+                _ = self.inferExpr(ce.callee.*);
+                for (ce.args) |a| _ = self.inferExpr(a);
+                break :blk .hole;
+            },
+            // Statements, literals and self: nothing below them to check.
+            .actor_def, .state_def, .message_handler, .become_stmt, .reply_stmt, .assign_stmt, .def_stmt, .bubble_stmt, .test_def, .property_def, .given_stmt, .self_ref => .hole,
         };
     }
 
@@ -560,8 +717,11 @@ pub const Checker = struct {
 
     /// Infer a list literal type from its elements.
     fn inferListLit(self: *Checker, list: Node.ListLit) Type {
+        // Every element and the tail are checked; the type is the first
+        // element's, as it was.
+        for (list.elements[@min(1, list.elements.len)..]) |e| _ = self.inferExpr(e);
+        if (list.tail) |t| _ = self.inferExpr(t.*);
         if (list.elements.len == 0) return .nil; // empty list
-        // Infer from first element
         const first = self.inferExpr(list.elements[0]);
         const first_ptr = self.allocator.create(Type) catch return .hole;
         first_ptr.* = first;
@@ -579,6 +739,7 @@ pub const Checker = struct {
 
     /// Infer a map literal type from its entries.
     fn inferMapLit(self: *Checker, map: Node.MapLit) Type {
+        for (map.entries[@min(1, map.entries.len)..]) |e| _ = self.inferExpr(e.value);
         if (map.entries.len == 0) return .nil; // empty map
         // Infer from first entry: keys are atoms (shorthand syntax), values from expression
         const val_type = self.inferExpr(map.entries[0].value);

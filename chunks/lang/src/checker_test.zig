@@ -250,3 +250,132 @@ test "an operand already reported as wrong is not reported again by its parent" 
         try std.testing.expect(std.mem.indexOf(u8, errs[0].message, "arithmetic on incompatible types") != null);
     }
 }
+
+// ============================================================
+// Every body and expression position is checked
+// ============================================================
+
+fn checkSource(alloc: std.mem.Allocator, source: []const u8) ![]const checker_mod.TypeError {
+    var p = Parser.init(alloc, source);
+    const nodes = try p.parseFile();
+    var c = Checker.init(alloc);
+    return c.checkFile(nodes).errors;
+}
+
+/// One error, containing `want`, on line `line`.
+fn expectOneError(source: []const u8, want: []const u8, line: usize) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const errs = try checkSource(arena.allocator(), source);
+    if (errs.len != 1) {
+        for (errs) |e| std.debug.print("  line {d}: {s}\n", .{ e.loc.line, e.message });
+        std.debug.print("expected 1 error for:\n{s}\ngot {d}\n", .{ source, errs.len });
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, errs[0].message, want) != null);
+    try std.testing.expectEqual(line, errs[0].loc.line);
+}
+
+fn expectNoErrors(source: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const errs = try checkSource(arena.allocator(), source);
+    for (errs) |e| std.debug.print("  line {d}: {s}\n", .{ e.loc.line, e.message });
+    try std.testing.expectEqual(@as(usize, 0), errs.len);
+}
+
+const bad = "arithmetic on incompatible types";
+
+test "checker looks inside a case: scrutinee, guard, branch body, case as a value" {
+    try expectOneError("case 1 + :a do\n  _ -> 0\nend", bad, 1);
+    try expectOneError("case 1 do\n  n when 1 + :a > 0 -> 0\n  _ -> 0\nend", bad, 2);
+    try expectOneError("case 1 do\n  1 -> x = 1 + :a\n  _ -> 0\nend", bad, 2);
+    try expectOneError("y = case 1 do\n  _ -> 1 + :a\nend", bad, 2);
+}
+
+test "checker looks inside a situation" {
+    try expectOneError("situation 1 + :a do\n  _ -> 0\nend", bad, 1);
+    try expectOneError("situation 1 do\n  1 -> x = 1 + :a\n  _ -> 0\nend", bad, 2);
+}
+
+test "checker looks inside test and property bodies" {
+    try expectOneError("actor T do\n  test \"t\" do\n    x = 1 + :a\n  end\nend", bad, 3);
+    try expectOneError(
+        \\actor A do
+        \\  on :add(k: Int) -> Int do reply k end
+        \\end
+        \\actor T do
+        \\  state c: A :: spawn A
+        \\  test "t" do
+        \\    r = c <- :add("x")
+        \\  end
+        \\end
+    , "argument 1 to :add expected Int, got String", 7);
+    try expectOneError("actor T do\n  property \"p\" do\n    given a: gen_integer(0, 1)\n    x = 1 + :a\n  end\nend", bad, 4);
+    try expectOneError("actor T do\n  property \"p\" do\n    given a: gen_integer(0, 1 + :a)\n    assert(true)\n  end\nend", bad, 3);
+}
+
+test "checker looks inside fn, for, try and catch bodies" {
+    try expectOneError("f = fn(y: Int) do\n  x = 1 + :a\n  y\nend", bad, 2);
+    try expectOneError("y = map([1], fn(i: Int) do i + :a end)", bad, 1);
+    try expectOneError("for i in 1 + :a do i end", bad, 1);
+    try expectOneError("for i in [1] do\n  x = 1 + :a\nend", bad, 2);
+    try expectOneError("try do\n  x = 1 + :a\ncatch e do\n  0\nend", bad, 2);
+    try expectOneError("try do\n  0\ncatch e do\n  x = 1 + :a\nend", bad, 4);
+}
+
+test "checker looks at every element, the orelse fallback, overrides and interpolations" {
+    try expectOneError("1 + :a", bad, 1);
+    try expectOneError("y = [1, 1 + :a]", bad, 1);
+    try expectOneError("y = [1 | 1 + :a]", bad, 1);
+    try expectOneError("y = %{a: 1, b: 1 + :a}", bad, 1);
+    try expectOneError("y = nil orelse 1 + :a", bad, 1);
+    try expectOneError("actor A do\n  state n: Int :: 0\nend\ny = spawn A, n: 1 + :a", bad, 4);
+    try expectOneError("actor A do\n  state n: Int :: 0\nend\ny = %A{n: 1 + :a}", bad, 4);
+    try expectOneError("actor A do\n  on :m do bubble 1 + :a end\nend", bad, 2);
+    try expectOneError("actor A do\n  on :m(k: Int) when k + :a > 0 do reply k end\nend", bad, 2);
+    try expectOneError("y = ...[1], fn(i: Int) do i + :a end", bad, 1);
+}
+
+test "an error inside #{} is reported at the string, not at line 1" {
+    try expectOneError("z = 1\n\ny = \"v #{1 + :a}\"", bad, 3);
+}
+
+test "a reply inside a case branch is held to the handler's return type" {
+    try expectOneError("actor A do\n  on :m -> Int do\n    case 1 do\n      _ -> reply :a\n    end\n  end\nend", "reply type mismatch: expected Int, got Atom", 4);
+}
+
+test "a pattern name shadows an outer variable of the same name" {
+    // n is an Int outside; inside the branch it is whatever matched.
+    try expectNoErrors(
+        \\actor A do
+        \\  state n: Int :: 0
+        \\  on :m(msg: Any) do
+        \\    case msg do
+        \\      {:name, n} -> x = n ++ "!"
+        \\      _ -> 0
+        \\    end
+        \\  end
+        \\end
+    );
+}
+
+test "a name a nested body assigns is no longer its outer type afterwards" {
+    try expectNoErrors("x = nil\nfor i in [1, 2] do\n  x = i\nend\ny = x + 1");
+    try expectNoErrors("x = :none\ncase 1 do\n  _ -> x = 2\nend\ny = x + 1");
+}
+
+test "a reply in a def or fn inside a handler is not the handler's" {
+    try expectNoErrors(
+        \\actor A do
+        \\  on :m -> Int do
+        \\    f = fn(s: String) do s end
+        \\    reply 1
+        \\  end
+        \\end
+    );
+}
+
+test "a Tuple annotation inside a lambda compares with a tuple" {
+    try expectNoErrors("f = fn(o: Tuple) do o == {1, 2} end");
+}
