@@ -286,7 +286,7 @@ module.exports = grammar({
 
     // Spawn target greedily consumes dot notation: Shop.Checkout
     spawn_target: ($) =>
-      prec.left(15, seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
+      prec.right(15, seq($.upper_identifier, repeat(seq(".", $.upper_identifier)))),
 
     // fn(x, y) do ... end
     fn_expression: ($) =>

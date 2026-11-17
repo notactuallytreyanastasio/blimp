@@ -1450,7 +1450,7 @@
       ]
     },
     "spawn_target": {
-      "type": "PREC_LEFT",
+      "type": "PREC_RIGHT",
       "value": 15,
       "content": {
         "type": "SEQ",

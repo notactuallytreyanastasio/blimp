@@ -143,3 +143,24 @@ c = spawn Counter(count: 10)
     (identifier)
     (ERROR
       (integer))))
+
+================
+Spawn a dotted actor name without parentheses
+================
+
+checkout = spawn Shop.Checkout
+checkout <- :add(10)
+
+---
+
+(source_file
+  (assignment
+    (identifier)
+    (spawn_expression
+      (spawn_target
+        (upper_identifier)
+        (upper_identifier))))
+  (message_send
+    (identifier)
+    (atom)
+    (integer)))
