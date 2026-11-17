@@ -57,6 +57,9 @@ const Scope = struct {
         alloca: c.LLVMValueRef,
         tag: Codegen.ValTag,
         llvm_type: c.LLVMTypeRef,
+        /// A name compiled code cannot bind (a handler parameter of a type
+        /// it does not carry): reading it is refused with this message.
+        unbound: ?[]const u8 = null,
     };
     entries: std.ArrayList(Entry) = .empty,
 
@@ -115,6 +118,14 @@ const ActorDescriptor = struct {
         atom_id: u32,
         func: c.LLVMValueRef, // the compiled handler function
         param_count: u32,
+        /// What crosses the send, decided when the handler is compiled:
+        /// the tag of each parameter (from its annotation) and the tags
+        /// its replies carry (one bit per ValTag; nil is `may_nil`).
+        /// null: a type compiled code does not carry; the parameter is
+        /// refused where it is read, and every send to it in checkSends.
+        param_tags: []const ?Codegen.ValTag,
+        reply_mask: u16,
+        may_nil: bool,
     };
 };
 
@@ -153,6 +164,17 @@ pub const Codegen = struct {
     /// Status of the send compiled last, so `orelse` can tell a reply of 0
     /// from no reply at all.
     last_send_status: ?c.LLVMValueRef = null,
+    /// Set by `orelse` for the send that is its left side: that send may
+    /// end without a reply, since the status takes the fallback.
+    send_under_orelse: bool = false,
+    /// Replies of the handler being compiled (see HandlerFn).
+    reply_mask: u16 = 0,
+    reply_may_nil: bool = false,
+    /// Every send, with the reply tag it was compiled for, checked again in
+    /// checkSends once every handler is compiled.
+    sends: std.ArrayList(SendCheck) = .empty,
+    /// Every actor the program declares, for a parameter typed with one.
+    actor_names: std.ArrayList([]const u8) = .empty,
     /// Program text, for the source line a runtime report shows.
     source: []const u8 = "",
     /// Set when codegen refuses a construct; the first one set is reported.
@@ -206,6 +228,8 @@ pub const Codegen = struct {
 
     pub fn deinit(self: *Codegen) void {
         self.catches.deinit(self.allocator);
+        self.sends.deinit(self.allocator);
+        self.actor_names.deinit(self.allocator);
         self.defs.deinit(self.allocator);
         self.scope.deinit(self.allocator);
         self.atoms.deinit(self.allocator);
@@ -267,6 +291,24 @@ pub const Codegen = struct {
         tag: ValTag,
     };
 
+    fn tagBit(tag: ValTag) u16 {
+        return @as(u16, 1) << @intFromEnum(tag);
+    }
+
+    /// A send as compiled: what its reply was taken to be, and the tags of
+    /// its arguments.  A handler compiled after the send (one actor sending
+    /// to another declared later, or to itself) can disagree; checkSends
+    /// refuses the send then.
+    const SendCheck = struct {
+        message: []const u8,
+        loc: ast.Loc,
+        under_orelse: bool,
+        reply: ValTag,
+        /// null: an unbound parameter passed on as it is.
+        arg_tags: []const ?ValTag,
+        arg_locs: []const ast.Loc,
+    };
+
     /// Compile an expression, returning the value and its type tag.
     pub fn compileExpr(self: *Codegen, node: ast.Node) CodegenError!TaggedVal {
         return self.compileNode(node) catch |err| {
@@ -306,7 +348,7 @@ pub const Codegen = struct {
             .nil_lit => .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil },
             .string_lit => |lit| self.compileStringLit(lit),
             .atom_lit => |lit| self.compileAtomLit(lit),
-            .identifier => |id| self.compileIdentifier(id),
+            .identifier => |id| self.compileIdentifier(id, node.loc),
             .binary_op => |op| self.compileBinaryOp(op, node.loc),
             .unary_op => |op| self.compileUnaryOp(op),
             .assign_stmt => |stmt| self.compileAssign(stmt),
@@ -407,8 +449,9 @@ pub const Codegen = struct {
         };
     }
 
-    fn compileIdentifier(self: *Codegen, id: ast.Node.Identifier) CodegenError!TaggedVal {
+    fn compileIdentifier(self: *Codegen, id: ast.Node.Identifier, loc: ast.Loc) CodegenError!TaggedVal {
         const entry = self.scope.get(id.name) orelse return CodegenError.UndefinedVariable;
+        if (entry.unbound) |why| return self.reject(loc, "{s}", .{why}, "Run this file with the interpreter.");
         const val = c.LLVMBuildLoad2(self.builder, entry.llvm_type, entry.alloca, self.zname(id.name));
         return .{ .val = val, .tag = entry.tag };
     }
@@ -487,6 +530,7 @@ pub const Codegen = struct {
 
     fn resolveCallee(self: *Codegen, name: []const u8, loc: ast.Loc, argc: usize) CodegenError!Callee {
         const local = self.scope.get(name);
+        if (local) |entry| if (entry.unbound) |why| return self.reject(loc, "{s}", .{why}, "Run this file with the interpreter.");
         if (local) |entry| if (entry.tag == .tagged_val) {
             // A fault inside a closure body ends the program (a closure,
             // like a def, has no channel back to the caller's catch).
@@ -1066,11 +1110,15 @@ pub const Codegen = struct {
         const saved_catches = self.catches;
         self.fn_kind = .handler;
         self.catches = .empty;
+        self.reply_mask = 0;
+        self.reply_may_nil = false;
         defer {
             self.catches.deinit(self.allocator);
             self.catches = saved_catches;
             self.fn_kind = saved_kind;
         }
+        const param_tags = self.allocator.alloc(?ValTag, handler.params.len) catch return CodegenError.LLVMError;
+        for (handler.params, 0..) |param, i| param_tags[i] = self.handlerParamTag(param);
 
         // Create entry block
         const entry = c.LLVMAppendBasicBlockInContext(self.context, func, "entry");
@@ -1087,27 +1135,48 @@ pub const Codegen = struct {
             const gep = c.LLVMBuildStructGEP2(self.builder, actor_desc.state_type, state_ptr, idx, self.zname(field_name));
             const loaded = c.LLVMBuildLoad2(self.builder, self.i64_type, gep, self.zname(field_name));
 
-            // Store in local alloca so assignments work naturally
-            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(field_name));
-            _ = c.LLVMBuildStore(self.builder, loaded, alloca);
+            // Every field is stored as an i64; the local holds it as what
+            // its tag says (an Atom an i32, a String a ptr), as any other
+            // local of that tag does.
+            const tag = actor_desc.state_default_tags[i];
+            const alloca = c.LLVMBuildAlloca(self.builder, self.llvmTypeForTag(tag), self.zname(field_name));
+            _ = c.LLVMBuildStore(self.builder, self.coerceFromI64(loaded, tag), alloca);
             self.scope.put(self.allocator, .{
                 .name = field_name,
                 .alloca = alloca,
-                .tag = actor_desc.state_default_tags[i],
-                .llvm_type = self.i64_type,
+                .tag = tag,
+                .llvm_type = self.llvmTypeForTag(tag),
             });
         }
 
         // Bind handler params
         for (handler.params, 0..) |param, i| {
             const param_val = c.LLVMGetParam(func, @intCast(i + 1));
-            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param.name));
-            _ = c.LLVMBuildStore(self.builder, param_val, alloca);
+            const tag = param_tags[i] orelse {
+                // Kept as its i64 bits: it can be passed on, as it is, to a
+                // handler parameter that is not bound either.
+                const raw = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param.name));
+                _ = c.LLVMBuildStore(self.builder, param_val, raw);
+                self.scope.put(self.allocator, .{
+                    .name = param.name,
+                    .alloca = raw,
+                    .tag = .nil,
+                    .llvm_type = self.i64_type,
+                    .unbound = std.fmt.allocPrint(
+                        self.allocator,
+                        "Parameter `{s}` of :{s} is typed {s}; a compiled handler binds only Int, Float, Bool, String, Atom or actor parameters.",
+                        .{ param.name, handler.name, param.type_name orelse "nothing" },
+                    ) catch "unbound parameter",
+                });
+                continue;
+            };
+            const alloca = c.LLVMBuildAlloca(self.builder, self.llvmTypeForTag(tag), self.zname(param.name));
+            _ = c.LLVMBuildStore(self.builder, self.coerceFromI64(param_val, tag), alloca);
             self.scope.put(self.allocator, .{
                 .name = param.name,
                 .alloca = alloca,
-                .tag = .int,
-                .llvm_type = self.i64_type,
+                .tag = tag,
+                .llvm_type = self.llvmTypeForTag(tag),
             });
         }
 
@@ -1138,6 +1207,9 @@ pub const Codegen = struct {
         const current_bb = c.LLVMGetInsertBlock(self.builder);
         if (c.LLVMGetBasicBlockTerminator(current_bb) == null) {
             _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(Status.nil, c.LLVMConstInt(self.i64_type, 0, 0)));
+            // Not when the only way here is past a bubble: `_ -> bubble :bad`
+            // leaves the builder in a block nothing can reach.
+            if (self.blockReachable(current_bb, entry)) self.reply_may_nil = true;
         }
 
         // Register handler
@@ -1147,7 +1219,52 @@ pub const Codegen = struct {
             .atom_id = atom_id,
             .func = func,
             .param_count = param_count,
+            .param_tags = param_tags,
+            .reply_mask = self.reply_mask,
+            .may_nil = self.reply_may_nil,
         }) catch {};
+    }
+
+    /// A handler parameter is bound from an i64 argument slot, so the
+    /// compiler has to know what it holds: its annotation says.  Without
+    /// one it was bound as an Int, and a String argument printed as the
+    /// address it was.
+    fn handlerParamTag(self: *Codegen, param: ast.Node.HandlerParam) ?ValTag {
+        switch (param.check) {
+            .int => return .int,
+            .float => return .float,
+            .string => return .string,
+            .atom => return .atom,
+            .boolean => return .boolean,
+            .named => for (self.actor_names.items) |n| {
+                if (std.mem.eql(u8, n, param.type_name.?)) return .actor_ref;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    /// Whether any path from `entry` reaches `bb`, walking predecessors
+    /// (the terminators that use the block).  A block emitRaise or a dead
+    /// merge leaves behind has none that are reachable.
+    fn blockReachable(self: *Codegen, bb: c.LLVMBasicBlockRef, entry: c.LLVMBasicBlockRef) bool {
+        var seen: std.ArrayList(c.LLVMBasicBlockRef) = .empty;
+        defer seen.deinit(self.allocator);
+        var work: std.ArrayList(c.LLVMBasicBlockRef) = .empty;
+        defer work.deinit(self.allocator);
+        work.append(self.allocator, bb) catch return true;
+        while (work.pop()) |b| {
+            if (b == entry) return true;
+            if (std.mem.indexOfScalar(c.LLVMBasicBlockRef, seen.items, b) != null) continue;
+            seen.append(self.allocator, b) catch return true;
+            var use = c.LLVMGetFirstUse(c.LLVMBasicBlockAsValue(b));
+            while (use != null) : (use = c.LLVMGetNextUse(use)) {
+                const user = c.LLVMGetUser(use);
+                if (c.LLVMIsATerminatorInst(user) == null) continue;
+                work.append(self.allocator, c.LLVMGetInstructionParent(user)) catch return true;
+            }
+        }
+        return false;
     }
 
     fn compileBecome(self: *Codegen, become: ast.Node.BecomeStmt) CodegenError!TaggedVal {
@@ -1161,6 +1278,7 @@ pub const Codegen = struct {
             for (0..actor.state_field_count) |i| {
                 if (std.mem.eql(u8, actor.state_field_names[i], field.key)) {
                     const new_val = try self.compileExpr(field.value);
+                    try self.requireFieldTag(field.key, actor.state_default_tags[i], new_val.tag, field.value.loc);
                     const idx: u32 = @intCast(i);
                     const gep = c.LLVMBuildStructGEP2(
                         self.builder,
@@ -1179,8 +1297,28 @@ pub const Codegen = struct {
         return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
     }
 
+    /// A field is one i64 slot with one tag, the tag of its default: the
+    /// handlers read it back as that.  A value of another tag stored in it
+    /// would be read back as the wrong type, so it is refused.
+    fn requireFieldTag(self: *Codegen, field: []const u8, want: ValTag, got: ValTag, loc: ast.Loc) CodegenError!void {
+        if (want == got) return;
+        return self.reject(
+            loc,
+            "State field `{s}` holds {s} in compiled code (its default), and this is {s}.",
+            .{ field, tagNoun(want), tagNoun(got) },
+            "Run this file with the interpreter.",
+        );
+    }
+
     fn compileReply(self: *Codegen, reply: ast.Node.ReplyStmt) CodegenError!TaggedVal {
         const val = try self.compileExpr(reply.value.*);
+        if (val.tag == .tagged_val) return self.reject(
+            reply.value.loc,
+            "A compiled reply can be an Int, a Float, a Bool, a String, an Atom, an actor or nil; this is {s}.",
+            .{tagNoun(val.tag)},
+            "Run this file with the interpreter.",
+        );
+        if (val.tag == .nil) self.reply_may_nil = true else self.reply_mask |= tagBit(val.tag);
         // Coerce to i64 for the {i1, i64} handler return type
         const ret_val = self.coerceToI64(val);
         const status = if (val.tag == .nil) Status.nil else Status.ok;
@@ -1332,6 +1470,7 @@ pub const Codegen = struct {
                         self.failure = null;
                         break;
                     };
+                    try self.requireFieldTag(field_name, actor.state_default_tags[i], value.tag, ov.value.loc);
                     break;
                 }
             }
@@ -1976,7 +2115,11 @@ pub const Codegen = struct {
     }
 
     fn compileMessageSend(self: *Codegen, msg: ast.Node.MessageSend, loc: ast.Loc) CodegenError!TaggedVal {
+        const under_orelse = self.send_under_orelse;
+        self.send_under_orelse = false;
         const target = try self.compileExpr(msg.target.*);
+        const arg_tags = self.allocator.alloc(?ValTag, msg.args.len) catch return CodegenError.LLVMError;
+        const arg_locs = self.allocator.alloc(ast.Loc, msg.args.len) catch return CodegenError.LLVMError;
 
         // Target is now an actor_id (i64) -- truncate to i32 for the runtime
         const actor_id = c.LLVMBuildTrunc(self.builder, target.val, self.i32_type, "actor_id");
@@ -1992,9 +2135,17 @@ pub const Codegen = struct {
             c.LLVMConstNull(self.ptr_type);
 
         for (msg.args, 0..) |arg, i| {
-            const arg_val = try self.compileExpr(arg);
-            // Actor refs get their ID as i64
-            const store_val = arg_val.val;
+            arg_locs[i] = arg.loc;
+            // Each slot is an i64: an Atom (i32) used to be stored as 4
+            // bytes into 8, a String as its pointer.
+            const store_val = if (self.unboundArg(arg)) |raw| blk: {
+                arg_tags[i] = null;
+                break :blk raw;
+            } else blk: {
+                const arg_val = try self.compileExpr(arg);
+                arg_tags[i] = arg_val.tag;
+                break :blk self.coerceToI64(arg_val);
+            };
             if (arg_count > 0) {
                 var indices = [_]c.LLVMValueRef{
                     c.LLVMConstInt(self.i32_type, 0, 0),
@@ -2033,7 +2184,123 @@ pub const Codegen = struct {
         const result = c.LLVMBuildCall2(self.builder, send_ft, send_fn, &send_args, 5, "send");
         const checked = self.emitCheckResult(result);
         self.last_send_status = checked.status;
-        return .{ .val = checked.val, .tag = .int };
+        const reply = try self.replyTag(msg.message, loc, under_orelse);
+        self.sends.append(self.allocator, .{
+            .message = msg.message,
+            .loc = loc,
+            .under_orelse = under_orelse,
+            .reply = reply,
+            .arg_tags = arg_tags,
+            .arg_locs = arg_locs,
+        }) catch return CodegenError.LLVMError;
+        return .{ .val = self.coerceFromI64(checked.val, reply), .tag = reply };
+    }
+
+    /// A send argument that is an unbound handler parameter, by itself:
+    /// its i64 bits, passed on without being read as any type.
+    fn unboundArg(self: *Codegen, arg: ast.Node) ?c.LLVMValueRef {
+        if (arg.kind != .identifier) return null;
+        const entry = self.scope.get(arg.kind.identifier.name) orelse return null;
+        if (entry.unbound == null) return null;
+        return c.LLVMBuildLoad2(self.builder, self.i64_type, entry.alloca, "passed_on");
+    }
+
+    /// What a send of `message` hands back, from every handler of that name
+    /// compiled so far (the target's actor is not known statically, but
+    /// every handler is in this file).  A send is synchronous and returns
+    /// one i64, so the tag is static: one tag of reply, or nil when no
+    /// handler replies.  A handler that may also end without a reply makes
+    /// the result that tag or nil, which one i64 cannot say; that is
+    /// compiled only as the left side of an `orelse`, where the status
+    /// decides.  Before any handler of that name is compiled the send is
+    /// taken to reply an Int, and checkSends holds it to that.
+    fn replyTag(self: *Codegen, message: []const u8, loc: ast.Loc, under_orelse: bool) CodegenError!ValTag {
+        var mask: u16 = 0;
+        var may_nil = false;
+        var any = false;
+        for (self.actors.items) |a| for (a.handler_fns.items) |h| {
+            if (!std.mem.eql(u8, h.name, message)) continue;
+            any = true;
+            mask |= h.reply_mask;
+            may_nil = may_nil or h.may_nil;
+        };
+        if (!any) return .int;
+        // Every handler only raises: the send never hands back a value, so
+        // its tag is never read.  Int, as before, so a `try` around it
+        // does not box its arms for a value that cannot arrive.
+        if (mask == 0 and !may_nil) return .int;
+        if (mask == 0) return .nil;
+        if (@popCount(mask) > 1) return self.reject(
+            loc,
+            "Handlers of :{s} reply {s}; a compiled send takes one type of reply.",
+            .{ message, self.maskNouns(mask) },
+            "Run this file with the interpreter.",
+        );
+        const tag: ValTag = @enumFromInt(@ctz(mask));
+        if (may_nil and !under_orelse) return self.reject(
+            loc,
+            "A handler of :{s} replies {s} on one path and nothing on another; compiled code can take that only on the left of `orelse`.",
+            .{ message, tagNoun(tag) },
+            "Reply on every path, put the send before `orelse`, or run this file with the interpreter.",
+        );
+        return tag;
+    }
+
+    fn maskNouns(self: *Codegen, mask: u16) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        var first = true;
+        for (std.enums.values(ValTag)) |t| {
+            if (mask & tagBit(t) == 0) continue;
+            if (!first) out.appendSlice(self.allocator, " and ") catch {};
+            out.appendSlice(self.allocator, tagNoun(t)) catch {};
+            first = false;
+        }
+        return out.items;
+    }
+
+    /// Every send again, now that every handler is compiled: its reply must
+    /// be what it was compiled for, and each argument what the handlers of
+    /// that message bind it as.
+    fn checkSends(self: *Codegen) CodegenError!void {
+        for (self.sends.items) |snd| {
+            const now = try self.replyTag(snd.message, snd.loc, snd.under_orelse);
+            var any = false;
+            for (self.actors.items) |a| for (a.handler_fns.items) |h| {
+                if (!std.mem.eql(u8, h.name, snd.message)) continue;
+                any = true;
+                if (h.param_count != snd.arg_tags.len) continue;
+                for (snd.arg_tags, 0..) |maybe_t, i| {
+                    const t = maybe_t orelse {
+                        if (h.param_tags[i] == null) continue;
+                        return self.reject(
+                            snd.arg_locs[i],
+                            "Argument {d} of :{s} is a parameter compiled code did not bind; the handler binds it as {s}.",
+                            .{ i + 1, snd.message, tagNoun(h.param_tags[i].?) },
+                            "Run this file with the interpreter.",
+                        );
+                    };
+                    const want = h.param_tags[i] orelse return self.reject(
+                        snd.arg_locs[i],
+                        "Argument {d} of :{s} goes to a parameter of a type compiled code does not bind (Int, Float, Bool, String, Atom or an actor).",
+                        .{ i + 1, snd.message },
+                        "Run this file with the interpreter.",
+                    );
+                    if (t == want) continue;
+                    return self.reject(
+                        snd.arg_locs[i],
+                        "Argument {d} of :{s} is {s}; the handler binds it as {s}.",
+                        .{ i + 1, snd.message, tagNoun(t), tagNoun(want) },
+                        "Run this file with the interpreter.",
+                    );
+                }
+            };
+            if (any and now != snd.reply) return self.reject(
+                snd.loc,
+                "This send of :{s} was compiled before its handler, as replying {s}; the handler replies {s}.",
+                .{ snd.message, tagNoun(snd.reply), tagNoun(now) },
+                "Declare the handler before the code that sends to it, or run this file with the interpreter.",
+            );
+        }
     }
 
     fn getMalloc(self: *Codegen) c.LLVMValueRef {
@@ -2258,6 +2525,7 @@ pub const Codegen = struct {
 
         self.catches.append(self.allocator, .{ .kind = .orelse_, .landing = fallback_bb, .slot = null, .loc = loc }) catch return CodegenError.LLVMError;
         self.last_send_status = null;
+        self.send_under_orelse = ore.try_expr.kind == .message_send;
         const try_val = self.compileExpr(ore.try_expr.*) catch |err| {
             _ = self.catches.pop();
             return err;
@@ -2371,6 +2639,9 @@ pub const Codegen = struct {
 
         // Forward-declare all def functions so order doesn't matter
         self.forwardDeclareDefs(nodes);
+        for (nodes) |node| if (node.kind == .actor_def) {
+            self.actor_names.append(self.allocator, node.kind.actor_def.name) catch return CodegenError.LLVMError;
+        };
 
         // Canvas mode: enable event logging at program start
         if (self.canvas_mode) {
@@ -2383,6 +2654,7 @@ pub const Codegen = struct {
         for (nodes) |node| {
             last = try self.compileExpr(node);
         }
+        try self.checkSends();
 
         // Canvas mode: register atom names (must be after compilation interns all atoms)
         if (self.canvas_mode) {

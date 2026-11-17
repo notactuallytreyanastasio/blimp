@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  This send of :name was compiled before its handler, as replying an Int; the handler replies a String.
+
+6|     reply self <- :name
+              ^
+
+  Hint: Declare the handler before the code that sends to it, or run this file with the interpreter.
+
+1 construct cannot be compiled.

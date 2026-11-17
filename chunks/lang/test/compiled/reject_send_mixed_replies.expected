@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  Handlers of :q reply an Int and an Atom; a compiled send takes one type of reply.
+
+14| a <- :q(1)
+    ^
+
+  Hint: Run this file with the interpreter.
+
+1 construct cannot be compiled.

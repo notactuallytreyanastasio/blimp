@@ -1,0 +1,15 @@
+# :name is compiled after the send to it, which was taken to reply an Int.
+actor A do
+  state s: Int :: 0
+
+  on :go do
+    reply self <- :name
+  end
+
+  on :name do
+    reply "bee"
+  end
+end
+
+a = spawn A
+a <- :go

@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  A compiled reply can be an Int, a Float, a Bool, a String, an Atom, an actor or nil; this is a list, map or fn value.
+
+6|     reply [1, 2]
+              ^
+
+  Hint: Run this file with the interpreter.
+
+1 construct cannot be compiled.

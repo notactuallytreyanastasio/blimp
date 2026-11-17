@@ -1,0 +1,14 @@
+# One send, two types of reply: one i64 cannot say which, so it is refused.
+actor A do
+  state s: Int :: 0
+
+  on :q(n: Int) do
+    case n do
+      1 -> reply :one
+      _ -> reply 2
+    end
+  end
+end
+
+a = spawn A
+a <- :q(1)
