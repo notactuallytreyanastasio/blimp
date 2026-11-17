@@ -2363,16 +2363,22 @@ pub const Codegen = struct {
     /// Compile situation/case: chain of icmp + conditional branches.
     /// Both work the same way -- situation allows holes, case requires exhaustiveness,
     /// but codegen treats them identically.
+    ///
+    /// The value is the last expression of the branch taken, or nil when
+    /// none matches (the interpreter's answer; this used to be an Int 0).
+    /// Its tag is the one every branch that can get to the end shares;
+    /// when they differ (an Int branch and the nil of no match), each is
+    /// boxed as a BlimpVal, as try's arms are.
     fn compileBranching(self: *Codegen, subject_node: *const ast.Node, branches: []const ast.Node.Branch) CodegenError!TaggedVal {
         const func = self.current_fn orelse return CodegenError.LLVMError;
         const subject = try self.compileExpr(subject_node.*);
 
         const merge_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "merge");
-
-        // We'll collect {value, block} pairs for the phi node
-        var phi_vals: [16]c.LLVMValueRef = undefined;
-        var phi_blocks: [16]c.LLVMBasicBlockRef = undefined;
-        var phi_count: u32 = 0;
+        const Arm = struct { bb: c.LLVMBasicBlockRef, tv: TaggedVal };
+        var arms: std.ArrayList(Arm) = .empty;
+        defer arms.deinit(self.allocator);
+        const nil_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        var always_matches = false;
 
         for (branches, 0..) |branch, idx| {
             const is_wildcard = branch.pattern == null or
@@ -2380,83 +2386,38 @@ pub const Codegen = struct {
             const is_var_bind = !is_wildcard and branch.pattern != null and
                 branch.pattern.?.kind == .identifier;
 
-            if (is_wildcard or (is_var_bind and branch.guard == null)) {
-                // Wildcard/hole or unguarded variable bind: unconditional branch
-                if (is_var_bind) {
-                    const var_name = branch.pattern.?.kind.identifier.name;
-                    const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(var_name));
-                    _ = c.LLVMBuildStore(self.builder, subject.val, alloca);
-                    self.scope.put(self.allocator, .{
-                        .name = var_name,
-                        .alloca = alloca,
-                        .tag = subject.tag,
-                        .llvm_type = self.i64_type,
-                    });
-                }
-                var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
-                for (branch.body) |stmt| {
-                    last_val = try self.compileExpr(stmt);
-                }
-                // Only branch to merge if body didn't already terminate (e.g. reply/ret)
-                const bb = c.LLVMGetInsertBlock(self.builder);
-                if (c.LLVMGetBasicBlockTerminator(bb) == null) {
-                    if (phi_count < 16) {
-                        phi_vals[phi_count] = last_val.val;
-                        phi_blocks[phi_count] = bb;
-                        phi_count += 1;
-                    }
-                    _ = c.LLVMBuildBr(self.builder, merge_bb);
-                }
-                break; // Unconditional branch is always last
-            } else if (is_var_bind) {
-                // Variable bind with guard: bind subject to var, then test guard
+            if (is_var_bind) {
+                // The subject, under a name, as a local of its own type.
                 const var_name = branch.pattern.?.kind.identifier.name;
-                const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(var_name));
+                const lt = self.llvmTypeForTag(subject.tag);
+                const alloca = c.LLVMBuildAlloca(self.builder, lt, self.zname(var_name));
                 _ = c.LLVMBuildStore(self.builder, subject.val, alloca);
                 self.scope.put(self.allocator, .{
                     .name = var_name,
                     .alloca = alloca,
                     .tag = subject.tag,
-                    .llvm_type = self.i64_type,
+                    .llvm_type = lt,
                 });
+            }
 
-                const guard_val = try self.compileExpr(branch.guard.?.*);
-                const zero = c.LLVMConstInt(self.i64_type, 0, 0);
-                const guard_bool = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
-
-                const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
-                const is_last = idx + 1 >= branches.len;
-                const else_bb = if (!is_last)
-                    c.LLVMAppendBasicBlockInContext(self.context, func, "else")
-                else
-                    merge_bb;
-
-                _ = c.LLVMBuildCondBr(self.builder, guard_bool, then_bb, else_bb);
-
-                if (is_last and phi_count < 16) {
-                    phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
-                    phi_blocks[phi_count] = c.LLVMGetInsertBlock(self.builder);
-                    phi_count += 1;
-                }
-
-                c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
-                var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+            if (is_wildcard or (is_var_bind and branch.guard == null)) {
+                // Wildcard/hole or unguarded variable bind: always taken
+                var last_val = nil_val;
                 for (branch.body) |stmt| {
                     last_val = try self.compileExpr(stmt);
                 }
-                const then_end = c.LLVMGetInsertBlock(self.builder);
-                if (c.LLVMGetBasicBlockTerminator(then_end) == null) {
-                    if (phi_count < 16) {
-                        phi_vals[phi_count] = last_val.val;
-                        phi_blocks[phi_count] = then_end;
-                        phi_count += 1;
-                    }
-                    _ = c.LLVMBuildBr(self.builder, merge_bb);
-                }
+                const bb = c.LLVMGetInsertBlock(self.builder);
+                if (c.LLVMGetBasicBlockTerminator(bb) == null)
+                    arms.append(self.allocator, .{ .bb = bb, .tv = last_val }) catch return CodegenError.LLVMError;
+                always_matches = true;
+                break; // Unconditional branch is always last
+            }
 
-                if (!is_last) {
-                    c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
-                }
+            var cond: c.LLVMValueRef = undefined;
+            if (is_var_bind) {
+                const guard_val = try self.compileExpr(branch.guard.?.*);
+                const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+                cond = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
             } else {
                 // Literal pattern match: compare subject to pattern value
                 const pattern = try self.compileExpr(branch.pattern.?.*);
@@ -2471,80 +2432,78 @@ pub const Codegen = struct {
                         rhs_val = c.LLVMBuildZExt(self.builder, rhs_val, lhs_type, "widen_r");
                     }
                 }
-
-                var cmp = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs_val, rhs_val, "branchtmp");
+                cond = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs_val, rhs_val, "branchtmp");
                 if (branch.guard) |guard_node| {
                     const guard_val = try self.compileExpr(guard_node.*);
                     const zero = c.LLVMConstInt(self.i64_type, 0, 0);
                     const guard_bool = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
-                    cmp = c.LLVMBuildAnd(self.builder, cmp, guard_bool, "match_and_guard");
-                }
-
-                const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
-                const is_last = idx + 1 >= branches.len;
-                const else_bb = if (!is_last)
-                    c.LLVMAppendBasicBlockInContext(self.context, func, "else")
-                else
-                    merge_bb;
-
-                _ = c.LLVMBuildCondBr(self.builder, cmp, then_bb, else_bb);
-
-                if (is_last and phi_count < 16) {
-                    phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
-                    phi_blocks[phi_count] = c.LLVMGetInsertBlock(self.builder);
-                    phi_count += 1;
-                }
-
-                c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
-                var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
-                for (branch.body) |stmt| {
-                    last_val = try self.compileExpr(stmt);
-                }
-                const then_end = c.LLVMGetInsertBlock(self.builder);
-                if (c.LLVMGetBasicBlockTerminator(then_end) == null) {
-                    if (phi_count < 16) {
-                        phi_vals[phi_count] = last_val.val;
-                        phi_blocks[phi_count] = then_end;
-                        phi_count += 1;
-                    }
-                    _ = c.LLVMBuildBr(self.builder, merge_bb);
-                }
-
-                if (!is_last) {
-                    c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
+                    cond = c.LLVMBuildAnd(self.builder, cond, guard_bool, "match_and_guard");
                 }
             }
+
+            const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
+            const else_bb = c.LLVMAppendBasicBlockInContext(self.context, func, if (idx + 1 >= branches.len) "no_match" else "else");
+            _ = c.LLVMBuildCondBr(self.builder, cond, then_bb, else_bb);
+
+            c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
+            var last_val = nil_val;
+            for (branch.body) |stmt| {
+                last_val = try self.compileExpr(stmt);
+            }
+            const then_end = c.LLVMGetInsertBlock(self.builder);
+            if (c.LLVMGetBasicBlockTerminator(then_end) == null)
+                arms.append(self.allocator, .{ .bb = then_end, .tv = last_val }) catch return CodegenError.LLVMError;
+
+            c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
         }
 
-        // If we're in a block that hasn't been terminated yet (no wildcard matched),
-        // add a default nil branch to merge
+        // Still in a block nothing branched away from: no branch matched.
         const current_bb = c.LLVMGetInsertBlock(self.builder);
-        if (current_bb != merge_bb and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
-            if (phi_count < 16) {
-                phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
-                phi_blocks[phi_count] = current_bb;
-                phi_count += 1;
+        if (!always_matches and c.LLVMGetBasicBlockTerminator(current_bb) == null)
+            arms.append(self.allocator, .{ .bb = current_bb, .tv = nil_val }) catch return CodegenError.LLVMError;
+
+        // An arm that ends past a bubble is not reached; its nil is not a
+        // value the case can have.
+        const entry_bb = c.LLVMGetEntryBasicBlock(func);
+        var live: std.ArrayList(Arm) = .empty;
+        defer live.deinit(self.allocator);
+        for (arms.items) |arm| {
+            if (self.blockReachable(arm.bb, entry_bb)) {
+                live.append(self.allocator, arm) catch return CodegenError.LLVMError;
+            } else {
+                c.LLVMPositionBuilderAtEnd(self.builder, arm.bb);
+                _ = c.LLVMBuildUnreachable(self.builder);
             }
-            _ = c.LLVMBuildBr(self.builder, merge_bb);
         }
 
-        // Build phi in merge block
-        c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
-
-        if (phi_count == 0) {
-            // All branches terminated (reply/ret) -- merge is dead code.
-            // Delete the empty merge block and position at the last block.
+        if (live.items.len == 0) {
+            // Every branch ended the function (reply) or raised: merge is dead.
             c.LLVMDeleteBasicBlock(merge_bb);
             // Carry on in a fresh block with no predecessors.  The function's
             // last block is not that: it may be a raise path already ended.
             const dead_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "after_branches");
             c.LLVMPositionBuilderAtEnd(self.builder, dead_bb);
-            return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+            return nil_val;
         }
 
+        var same = true;
+        for (live.items) |arm| {
+            if (arm.tv.tag != live.items[0].tv.tag) same = false;
+        }
+        const result_tag: ValTag = if (same) live.items[0].tv.tag else .tagged_val;
+        const vals = self.allocator.alloc(c.LLVMValueRef, live.items.len) catch return CodegenError.LLVMError;
+        const blocks = self.allocator.alloc(c.LLVMBasicBlockRef, live.items.len) catch return CodegenError.LLVMError;
+        for (live.items, 0..) |arm, i| {
+            c.LLVMPositionBuilderAtEnd(self.builder, arm.bb);
+            vals[i] = if (same) self.coerceToI64(arm.tv) else self.coerceToI64(.{ .val = self.wrapAsBlimpVal(arm.tv), .tag = .tagged_val });
+            blocks[i] = c.LLVMGetInsertBlock(self.builder);
+            _ = c.LLVMBuildBr(self.builder, merge_bb);
+        }
+
+        c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
         const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "result");
-        c.LLVMAddIncoming(phi, &phi_vals, &phi_blocks, phi_count);
-        return .{ .val = phi, .tag = .int };
+        c.LLVMAddIncoming(phi, vals.ptr, blocks.ptr, @intCast(live.items.len));
+        return .{ .val = self.coerceFromI64(phi, result_tag), .tag = result_tag };
     }
 
     fn compileSituation(self: *Codegen, sit: ast.Node.Situation) CodegenError!TaggedVal {
