@@ -845,7 +845,7 @@ pub const Codegen = struct {
             .add => c.LLVMBuildAdd(self.builder, lhs.val, rhs.val, "addtmp"),
             .sub => c.LLVMBuildSub(self.builder, lhs.val, rhs.val, "subtmp"),
             .mul => c.LLVMBuildMul(self.builder, lhs.val, rhs.val, "multmp"),
-            .div => c.LLVMBuildSDiv(self.builder, lhs.val, rhs.val, "divtmp"),
+            .div => self.emitSDiv(lhs.val, rhs.val),
             .eq => blk: {
                 const cmp_val = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs.val, rhs.val, "eqtmp");
                 break :blk c.LLVMBuildZExt(self.builder, cmp_val, self.i64_type, "eqext");
@@ -878,6 +878,20 @@ pub const Codegen = struct {
             else => .int,
         };
         return .{ .val = val, .tag = tag };
+    }
+
+    /// a / b for b != 0.  LLVM's sdiv of minInt by -1 is undefined
+    /// behaviour (the quotient does not fit), and at O3 it printed 1; the
+    /// interpreter wraps it to minInt (test/int_overflow_test.blimp).  A
+    /// divisor of -1 is a negation with no nsw, which wraps the same way,
+    /// and the sdiv is given 1 instead so it never sees the pair.
+    fn emitSDiv(self: *Codegen, a: c.LLVMValueRef, b: c.LLVMValueRef) c.LLVMValueRef {
+        const minus_one = c.LLVMConstInt(self.i64_type, @bitCast(@as(i64, -1)), 1);
+        const is_m1 = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, b, minus_one, "div_m1");
+        const safe_b = c.LLVMBuildSelect(self.builder, is_m1, c.LLVMConstInt(self.i64_type, 1, 0), b, "div_b");
+        const q = c.LLVMBuildSDiv(self.builder, a, safe_b, "divtmp");
+        const neg = c.LLVMBuildSub(self.builder, c.LLVMConstInt(self.i64_type, 0, 0), a, "div_neg");
+        return c.LLVMBuildSelect(self.builder, is_m1, neg, q, "div");
     }
 
     /// `a && b`, `a || b`: the interpreter stops at the left side when it

@@ -1,0 +1,8 @@
+# The smallest Int divided by -1 wraps to itself, as the interpreter's does;
+# LLVM's sdiv of that pair is undefined, and the compiled program printed 1.
+m = 0 - 9223372036854775807 - 1
+d = 0 - 1
+puts(m / d)
+puts(7 / d)
+puts((0 - 7) / 2)
+m / 1
