@@ -1,3 +1,14 @@
+# SKETCH, NOT A PROGRAM. `blimp examples/bank_account.blimp` stops with
+#   Parse error: error.UnexpectedToken
+# at the `bubble` of `orelse bubble` in :transfer.
+# It was written on 2026-03-20, the day the grammar was, and uses syntax
+# the parser does not accept: `expr orelse bubble` (a re-raise on the
+# caller's side, D7 in docs/lang_design/parser.md). It also names a type,
+# Transaction, that nothing defines, and nothing runs at the top level.
+# For a bank that runs, see bank.blimp and supervision.blimp.
+# scripts/run_examples.sh lists it as expected to fail; if it starts to
+# parse, that suite says so.
+#
 # Bank account with typed state, guards, message sends, and bubble strategies
 actor Bank do
   state name: String :: "First National"
