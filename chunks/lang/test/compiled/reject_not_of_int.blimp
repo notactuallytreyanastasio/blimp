@@ -1,4 +1,5 @@
-# The checker refuses this before the interpreter runs it; the compiler,
-# which does not run the checker, refuses it at the operand of `!`.
+# The interpreter answers `!x` by truthiness: an Int 0 is true, so this
+# prints false there. Compiled code compared the i64 with 0 and gave 1;
+# it now takes only a Bool here and refuses the Int at the operand.
 x = 0
 !x
