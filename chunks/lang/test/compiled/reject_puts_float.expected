@@ -2,7 +2,7 @@
 
 -- CANNOT COMPILE ──────────────────────────────────────────
 
-  Argument 1 of `puts` is a Float; compiled code can pass it only an Int or a String.
+  Argument 1 of `puts` is a Float; compiled code can pass it only an Int, a String or a Bool.
 
 3| puts(0.1 + 0.2)
          ^

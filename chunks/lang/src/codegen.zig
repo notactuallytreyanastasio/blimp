@@ -554,7 +554,7 @@ pub const Codegen = struct {
             .builtin => |b| switch (b) {
                 .max, .min, .rem => .{ &.{.int}, "an Int" },
                 .abs => .{ &.{ .int, .float }, "an Int or a Float" },
-                .puts => .{ &.{ .int, .string }, "an Int or a String" },
+                .puts => .{ &.{ .int, .string, .boolean }, "an Int, a String or a Bool" },
             },
         };
         for (args, 0..) |a, i| {
@@ -749,6 +749,7 @@ pub const Codegen = struct {
     }
 
     fn compileBinaryOp(self: *Codegen, op: ast.Node.BinaryOp, loc: ast.Loc) CodegenError!TaggedVal {
+        if (op.op == .and_op or op.op == .or_op) return self.compileLogical(op);
         const lhs = try self.compileExpr(op.left.*);
         const rhs = try self.compileExpr(op.right.*);
 
@@ -786,9 +787,9 @@ pub const Codegen = struct {
                 },
                 else => return CodegenError.UnsupportedNode,
             };
-            // Comparisons return int, arithmetic returns float
+            // A comparison is a Bool (an i64 0 or 1), arithmetic a Float.
             const tag: ValTag = switch (op.op) {
-                .lt, .gt, .lte, .gte, .eq, .neq => .int,
+                .lt, .gt, .lte, .gte, .eq, .neq => .boolean,
                 else => .float,
             };
             return .{ .val = val, .tag = tag };
@@ -829,11 +830,56 @@ pub const Codegen = struct {
                 const cmp_val = c.LLVMBuildICmp(self.builder, c.LLVMIntSGE, lhs.val, rhs.val, "getmp");
                 break :blk c.LLVMBuildZExt(self.builder, cmp_val, self.i64_type, "geext");
             },
-            .and_op => c.LLVMBuildAnd(self.builder, lhs.val, rhs.val, "andtmp"),
-            .or_op => c.LLVMBuildOr(self.builder, lhs.val, rhs.val, "ortmp"),
+            .and_op, .or_op => unreachable, // compileLogical
             .concat => return CodegenError.UnsupportedNode, // ++ needs tagged values
         };
-        return .{ .val = val, .tag = .int };
+        const tag: ValTag = switch (op.op) {
+            .eq, .neq, .lt, .gt, .lte, .gte => .boolean,
+            else => .int,
+        };
+        return .{ .val = val, .tag = tag };
+    }
+
+    /// `a && b`, `a || b`: the interpreter stops at the left side when it
+    /// decides the answer, so the right side runs only when it must (a send
+    /// or a division on the right is not evaluated), and the result is a
+    /// Bool.  Both sides must be Bools here: the interpreter's truthiness
+    /// counts an Int 0 as true, and an i64 compared with 0 would not.
+    fn compileLogical(self: *Codegen, op: ast.Node.BinaryOp) CodegenError!TaggedVal {
+        const func = self.current_fn orelse return CodegenError.LLVMError;
+        const sym = if (op.op == .and_op) "&&" else "||";
+        const lhs = try self.compileExpr(op.left.*);
+        if (lhs.tag != .boolean) return self.rejectLogicalSide(op.left.loc, sym, lhs.tag);
+        const lhs_end = c.LLVMGetInsertBlock(self.builder);
+        const rhs_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "logic_rhs");
+        const merge_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "logic_merge");
+        const is_true = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, lhs.val, c.LLVMConstInt(self.i64_type, 0, 0), "lhs_true");
+        if (op.op == .and_op)
+            _ = c.LLVMBuildCondBr(self.builder, is_true, rhs_bb, merge_bb)
+        else
+            _ = c.LLVMBuildCondBr(self.builder, is_true, merge_bb, rhs_bb);
+
+        c.LLVMPositionBuilderAtEnd(self.builder, rhs_bb);
+        const rhs = try self.compileExpr(op.right.*);
+        if (rhs.tag != .boolean) return self.rejectLogicalSide(op.right.loc, sym, rhs.tag);
+        const rhs_end = c.LLVMGetInsertBlock(self.builder);
+        _ = c.LLVMBuildBr(self.builder, merge_bb);
+
+        c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
+        const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "logic");
+        var vals = [_]c.LLVMValueRef{ c.LLVMConstInt(self.i64_type, if (op.op == .and_op) 0 else 1, 0), rhs.val };
+        var blocks = [_]c.LLVMBasicBlockRef{ lhs_end, rhs_end };
+        c.LLVMAddIncoming(phi, &vals, &blocks, 2);
+        return .{ .val = phi, .tag = .boolean };
+    }
+
+    fn rejectLogicalSide(self: *Codegen, loc: ast.Loc, sym: []const u8, tag: ValTag) CodegenError {
+        return self.reject(
+            loc,
+            "This side of `{s}` is {s}; compiled code takes only a Bool here.",
+            .{ sym, tagNoun(tag) },
+            "Run this file with the interpreter.",
+        );
     }
 
     fn compileUnaryOp(self: *Codegen, op: ast.Node.UnaryOp) CodegenError!TaggedVal {
@@ -844,12 +890,18 @@ pub const Codegen = struct {
             else
                 c.LLVMBuildNeg(self.builder, operand.val, "negtmp"),
             .not => blk: {
+                if (operand.tag != .boolean) return self.reject(
+                    op.operand.loc,
+                    "`!` of {s}; compiled code takes only a Bool here.",
+                    .{tagNoun(operand.tag)},
+                    "Run this file with the interpreter.",
+                );
                 const zero = c.LLVMConstInt(self.i64_type, 0, 0);
                 const cmp_val = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, operand.val, zero, "nottmp");
                 break :blk c.LLVMBuildZExt(self.builder, cmp_val, self.i64_type, "notext");
             },
         };
-        return .{ .val = val, .tag = operand.tag };
+        return .{ .val = val, .tag = if (op.op == .not) .boolean else operand.tag };
     }
 
     fn compileDotAccess(self: *Codegen, dot: ast.Node.DotAccess) CodegenError!TaggedVal {

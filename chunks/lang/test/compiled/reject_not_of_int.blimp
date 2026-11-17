@@ -1,0 +1,4 @@
+# The checker refuses this before the interpreter runs it; the compiler,
+# which does not run the checker, refuses it at the operand of `!`.
+x = 0
+!x

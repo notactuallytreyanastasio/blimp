@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  `!` of an Int; compiled code takes only a Bool here.
+
+4| !x
+     ^
+
+  Hint: Run this file with the interpreter.
+
+1 construct cannot be compiled.
