@@ -121,10 +121,13 @@ pub const Evaluator = struct {
             var reply_val: ?*const Value = null;
             for (handler.body) |*stmt| {
                 if (stmt.kind == .reply_stmt) {
-                    reply_val = self.eval(stmt.kind.reply_stmt.value) catch null;
+                    reply_val = self.eval(stmt.kind.reply_stmt.value) catch blk: {
+                        self.dropHandledError();
+                        break :blk null;
+                    };
                     break;
                 }
-                _ = self.eval(stmt) catch {};
+                _ = self.eval(stmt) catch self.dropHandledError();
             }
 
             self.actor_ctx = prev_ctx;
@@ -219,24 +222,23 @@ pub const Evaluator = struct {
                 // Fresh scope per test: re-evaluate state defaults from AST
                 // This gives each test fresh actor spawns (not shared singletons)
                 self.env.pushScope();
-                for (def.body) |state_node| {
-                    if (state_node.kind != .state_def) continue;
-                    for (state_node.kind.state_def.fields) |field| {
-                        if (field.default_value) |default_ptr| {
-                            const val = self.eval(default_ptr) catch continue;
-                            self.env.define(field.key, val);
-                        }
-                    }
-                }
+                self.clearTestFailure();
+                var why: ?[]const u8 = null;
+                // A state default that fails fails the test. Skipping it left
+                // the field undefined, and the test then failed on that
+                // instead of on the spawn that never happened.
+                if (self.evalTestState(def)) |err| why = self.describeTestFailure(err, "assertion failed");
 
                 // Run test body
-                var test_passed = true;
-                for (test_def.body) |*stmt| {
-                    _ = self.eval(stmt) catch {
-                        test_passed = false;
-                        break;
-                    };
+                if (why == null) {
+                    for (test_def.body) |*stmt| {
+                        _ = self.eval(stmt) catch |err| {
+                            why = self.describeTestFailure(err, "assertion failed");
+                            break;
+                        };
+                    }
                 }
+                const test_passed = why == null;
 
                 self.env.popScope();
                 self.actor_ctx = null;
@@ -251,7 +253,7 @@ pub const Evaluator = struct {
                         failure_details[failure_count] = .{
                             .actor_name = def.name,
                             .test_name = test_name,
-                            .error_msg = "assertion failed",
+                            .error_msg = why.?,
                         };
                         failure_count += 1;
                     }
@@ -273,28 +275,27 @@ pub const Evaluator = struct {
                 var prop_passed = true;
                 var run: u32 = 0;
                 const num_runs: u32 = 100;
+                var prop_why: ?[]const u8 = null;
                 while (run < num_runs) : (run += 1) {
                     self.env.pushScope();
-                    // Evaluate state defaults
-                    for (def.body) |state_node| {
-                        if (state_node.kind != .state_def) continue;
-                        for (state_node.kind.state_def.fields) |field| {
-                            if (field.default_value) |default_ptr| {
-                                const val = self.eval(default_ptr) catch continue;
-                                self.env.define(field.key, val);
-                            }
-                        }
-                    }
+                    self.clearTestFailure();
+                    if (self.evalTestState(def)) |err| prop_why = self.describeTestFailure(err, "property falsified");
 
                     // Run property body (given + assertions)
-                    for (prop.body) |*stmt| {
-                        _ = self.eval(stmt) catch {
-                            prop_passed = false;
-                            break;
-                        };
+                    if (prop_why == null) {
+                        for (prop.body) |*stmt| {
+                            _ = self.eval(stmt) catch |err| {
+                                prop_why = self.describeTestFailure(err, "property falsified");
+                                break;
+                            };
+                        }
                     }
                     self.env.popScope();
-                    if (!prop_passed) break;
+                    self.actor_ctx = null;
+                    if (prop_why != null) {
+                        prop_passed = false;
+                        break;
+                    }
                 }
 
                 if (prop_passed) {
@@ -307,7 +308,7 @@ pub const Evaluator = struct {
                         failure_details[failure_count] = .{
                             .actor_name = def.name,
                             .test_name = prop_name,
-                            .error_msg = "property falsified",
+                            .error_msg = prop_why.?,
                         };
                         failure_count += 1;
                     }
@@ -338,6 +339,73 @@ pub const Evaluator = struct {
         }
 
         return failed == 0;
+    }
+
+    /// Nothing from the previous test may be reported as this one's failure.
+    /// `locate` keeps the first located error it sees, so a stale one would
+    /// win over the real one.
+    fn clearTestFailure(self: *Evaluator) void {
+        self.dropHandledError();
+        self.bubble_reason = null;
+    }
+
+    /// An error something handled -- a `try` that caught it, an `orelse`, a
+    /// guard that failed, a mailbox handler whose failure is swallowed -- is
+    /// over, and so is its report. Every report slot goes, the assertion
+    /// detail too: left in place, the next failure that builds no report of
+    /// its own (a bubble, a `1 + "a"`) is described with the handled one's.
+    fn dropHandledError(self: *Evaluator) void {
+        self.last_error = null;
+        self.bubble_line = 0;
+        self.bubble_col = 0;
+        builtins_mod.last_assertion_detail_len = 0;
+    }
+
+    /// Evaluate an actor's state defaults into the current scope for a test.
+    /// Returns the error of the first one that fails.
+    fn evalTestState(self: *Evaluator, def: ast.Node.ActorDef) ?EvalError {
+        for (def.body) |state_node| {
+            if (state_node.kind != .state_def) continue;
+            for (state_node.kind.state_def.fields) |field| {
+                if (field.default_value) |default_ptr| {
+                    const val = self.eval(default_ptr) catch |err| return err;
+                    self.env.define(field.key, val);
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Why a test stopped, as the line under its FAIL. An assertion builtin
+    /// leaves its expected/actual. Anything else is the evaluator's own
+    /// report, `last_error`, printed with formatPlain: a `----` rule and no
+    /// colour, where a plain run's top level prints the coloured `──` form.
+    /// It is not always what a plain run would say about the same line.
+    /// The static checker does not look inside test bodies, so `1 + "a"`
+    /// in a test reaches the evaluator and reads TYPE MISMATCH here, while
+    /// at top level `blimp FILE` and `--test` stop in the checker first with
+    /// "Type error at line 1, col 5: arithmetic on incompatible types: Int
+    /// and String" (`blimp test DIR` ignores the checker's result).
+    /// Before this, every failure of any kind read "assertion failed", and
+    /// a test that spawned an actor nobody defined looked like one whose
+    /// assertion was wrong.
+    fn describeTestFailure(self: *Evaluator, err: EvalError, assertion_label: []const u8) []const u8 {
+        const alloc = std.heap.page_allocator;
+        if (err == error.TypeError and builtins_mod.last_assertion_detail_len > 0) {
+            const detail = builtins_mod.last_assertion_detail[0..builtins_mod.last_assertion_detail_len];
+            return std.fmt.allocPrint(alloc, "{s}: {s}", .{ assertion_label, detail }) catch assertion_label;
+        }
+        var report = self.last_error;
+        if (report == null and err == error.Bubble) {
+            report = errors.uncaughtBubbleIn("test", self.bubble_reason, self.source, self.bubble_line, self.bubble_col);
+        }
+        const blimp_err = report orelse
+            return std.fmt.allocPrint(alloc, "{s}, with no error report recorded for it", .{@errorName(err)}) catch @errorName(err);
+        var aw = std.Io.Writer.Allocating.init(alloc);
+        blimp_err.formatPlain(&aw.writer);
+        const text = std.mem.trim(u8, aw.written(), "\n");
+        // Indented to sit under the FAIL line like the one-line messages.
+        return std.mem.replaceOwned(u8, alloc, text, "\n", "\n    ") catch text;
     }
 
     const FailureDetail = struct {
@@ -944,8 +1012,7 @@ pub const Evaluator = struct {
                 // now, so its details go with it: a stale one left here is
                 // what the top level would report instead of whatever
                 // actually stopped the program later.
-                self.bubble_line = 0;
-                self.last_error = null;
+                self.dropHandledError();
                 self.env.pushScope();
                 if (tc.catch_var) |var_name| {
                     // Bind the error reason if we have one
@@ -2493,8 +2560,7 @@ pub const Evaluator = struct {
         const try_val = self.eval(oe.try_expr) catch |err| {
             if (err == error.Bubble) {
                 // Bubble caught by orelse - execute fallback
-                self.bubble_line = 0;
-                self.last_error = null;
+                self.dropHandledError();
                 return self.eval(oe.fallback);
             }
             return err;
@@ -2532,7 +2598,10 @@ pub const Evaluator = struct {
                     if (subject.* != .boolean or subject.boolean != (branch.mode == .is_true)) continue;
                     if (!branch.scoped) {
                         if (branch.guard) |guard_node| {
-                            const guard_val = self.eval(guard_node) catch continue;
+                            const guard_val = self.eval(guard_node) catch {
+                                self.dropHandledError();
+                                continue;
+                            };
                             if (!guard_val.truthy()) continue;
                         }
                         return self.evalBodyTail(branch.body, slot);
@@ -2552,6 +2621,7 @@ pub const Evaluator = struct {
                     // Check optional when guard
                     if (branch.guard) |guard_node| {
                         const guard_val = self.eval(guard_node) catch {
+                            self.dropHandledError();
                             self.env.popScope();
                             continue; // guard eval failed, skip branch
                         };
@@ -2590,6 +2660,7 @@ pub const Evaluator = struct {
     fn branchBody(self: *Evaluator, branch: *const ast.Node.Branch, slot: *ArgSlot) EvalError!?TailResult {
         if (branch.guard) |guard_node| {
             const guard_val = self.eval(guard_node) catch {
+                self.dropHandledError();
                 self.env.popScope();
                 return null;
             };

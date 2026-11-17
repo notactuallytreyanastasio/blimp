@@ -1,0 +1,136 @@
+# Every test here fails on purpose; scripts/check.sh runs it with --test and
+# compares what the runner says against failures.expected. Each FAIL must
+# name why its test stopped. Until this file, all of them said
+# "assertion failed", including the ones that spawned an actor nobody defined.
+# Not named *_test.blimp, so `blimp test test` does not pick it up.
+
+actor Maker do
+  on :make do
+    l = spawn Lexer
+    reply l
+  end
+  on :boom do
+    bubble :kaboom
+  end
+end
+
+actor SpawnTests do
+  test "spawns an actor nobody defined" do
+    l = spawn Lexer
+    assert_eq(1, 1)
+  end
+
+  test "a handler spawns an actor nobody defined" do
+    m = spawn Maker
+    l = m <- :make
+    assert_eq(1, 1)
+  end
+
+  test "an undefined variable is named" do
+    assert_eq(missing, 1)
+  end
+
+  test "an assertion still says what it compared" do
+    assert_eq(2 + 2, 5)
+  end
+
+  # After three located failures: with the previous test's error left in
+  # place, this one reported `missing` from two tests up.
+  test "a bubble says its reason, not an earlier test's error" do
+    m = spawn Maker
+    m <- :boom
+  end
+
+  property "a property that spawns an actor nobody defined" do
+    given n: gen_integer(0, 9)
+    p = spawn Parser
+  end
+
+  property "a property that is false" do
+    # One value, so the expected output does not depend on the generator.
+    given n: gen_integer(7, 7)
+    assert_eq(n, 10)
+  end
+end
+
+actor StateSpawnTests do
+  state lexer: Any :: spawn Tokenizer
+
+  test "a state default that spawns an actor nobody defined" do
+    assert_eq(lexer, 1)
+  end
+end
+
+# A failure something handled must not describe the next one. Each test here
+# handles one failure and is then stopped by a different one; the report must
+# name the second. With the assertion detail left behind by a `try`, the first
+# test read "assertion failed: expected 2, got 1".
+actor Swallower do
+  on :put do
+    assert_eq(1, 2)
+  end
+end
+
+actor HandledTests do
+  test "caught assertion, then a type error" do
+    x = try do
+      assert_eq(1, 2)
+    catch e do
+      0
+    end
+    y = 1 + "a"
+  end
+
+  test "caught type error, then a failed assertion" do
+    x = try do
+      1 + "a"
+    catch e do
+      0
+    end
+    assert_eq(3, 4)
+  end
+
+  test "caught assertion, then a bubble" do
+    x = try do
+      assert_eq(1, 2)
+    catch e do
+      0
+    end
+    bubble :after_assertion
+  end
+
+  test "caught bubble, then a type error" do
+    m = spawn Maker
+    x = try do
+      m <- :boom
+    catch e do
+      0
+    end
+    y = 1 + "a"
+  end
+
+  test "caught bubble, then a failed assertion" do
+    m = spawn Maker
+    x = try do
+      m <- :boom
+    catch e do
+      0
+    end
+    assert_eq(5, 6)
+  end
+
+  test "an async handler's failed assertion, then a type error" do
+    s = spawn Swallower
+    s <-- :put
+    schedule()
+    y = 1 + "a"
+  end
+
+  test "a guard that fails, then a bubble" do
+    y = case 1 do
+      n when n + "a" -> 1
+      _ -> 2
+    end
+    bubble :after_guard
+  end
+end
