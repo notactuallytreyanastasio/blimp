@@ -10,7 +10,10 @@
 # This is a good Hole example because the logic is genuinely domain-specific
 # and benefits from Claude reasoning about the game structure from context.
 #
-# Run: blimp examples/game_rules.blimp --no-type-check
+# Run: blimp examples/game_rules.blimp
+# Each Hole the run reaches shells out to the `claude` CLI, and the answer is
+# written back into this file in place of the Hole. Without `claude` on PATH
+# a Hole evaluates to nil and the run goes on.
 
 actor Board do
   state cells: List :: [0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -25,8 +28,7 @@ actor Board do
         become cells: new_cells,
                move_count: move_count + 1
         reply :ok
-      _ ->
-        reply :illegal
+      _ # Hole: the cell is already occupied — this is an illegal move.
         # Decide whether to reply with :illegal, raise an error, or
         # silently ignore it. Think about what's best for game UX.
     end
@@ -40,37 +42,12 @@ actor Board do
       [0, 4, 8], [2, 4, 6]
     ]
     situation move_count >= 5 do
-      true ->
-        _ ->
-          winner = :no_winner
-          i = 0
-          situation i < length(lines) do
-          true ->
-          line = elem(lines, i)
-          a = elem(cells, elem(line, 0))
-          b = elem(cells, elem(line, 1))
-          c = elem(cells, elem(line, 2))
-          situation a > 0 do
-          true ->
-          situation a == b do
-          true ->
-          situation b == c do
-          true -> winner = {:winner, a}
-          _ -> :skip
-          end
-          _ -> :skip
-          end
-          _ -> :skip
-          end
-          i = i + 1
-          _ -> :skip
-          end
-          reply winner
-          # the same non-zero player value, that player has won. Return
-          # {:winner, player_id} or :no_winner. The cells list holds 0 for empty,
-          # 1 for player one, 2 for player two.
-      _ ->
+      false ->
         reply :no_winner
+      _ # Hole: check each line in lines — if all three cells in a line have
+        # the same non-zero player value, that player has won. Return
+        # {:winner, player_id} or :no_winner. The cells list holds 0 for empty,
+        # 1 for player one, 2 for player two.
     end
   end
 
@@ -121,14 +98,14 @@ actor AIOpponent do
 end
 
 actor Game do
-  state board: Map :: %{}
+  state board: Board :: nil
+  state scorer: Scorer :: nil
   state current_player: Int :: 1
   state status: Atom :: :playing
   state round: Int :: 1
 
   on :start do
-    become board: %{cells: [0, 0, 0, 0, 0, 0, 0, 0, 0], move_count: 0},
-           status: :playing,
+    become status: :playing,
            current_player: 1
     reply :started
   end
@@ -136,17 +113,17 @@ actor Game do
   on :move(pos: Int) do
     case status do
       :playing ->
-        result = Board <- :place(pos, current_player)
+        result = board <- :place(pos, current_player)
         case result do
           :ok ->
-            winner = Board <- :check_winner
+            winner = board <- :check_winner
             case winner do
               {:winner, p} ->
                 become status: :done
-                Scorer <- :record_win(to_string(p), lookup(board, "move_count"))
+                scorer <- :record_win(to_string(p), lookup(board <- :state, "move_count"))
                 reply {:win, p}
               _ ->
-                draw = Board <- :is_draw
+                draw = board <- :is_draw
                 case draw do
                   :draw  -> become status: :done
                              reply :draw
@@ -169,12 +146,15 @@ actor Game do
 end
 
 # Play a game
-Game <- :start
-Game <- :move(4)
-Game <- :move(0)
-Game <- :move(2)
-Game <- :move(6)
-result = Game <- :move(6)
+board = spawn Board
+scorer = spawn Scorer
+game = spawn Game, board: board, scorer: scorer
+game <- :start
+game <- :move(4)
+game <- :move(0)
+game <- :move(2)
+game <- :move(6)
+result = game <- :move(6)
 print(result)
-scores = Scorer <- :leaderboard
+scores = scorer <- :leaderboard
 print(scores)
