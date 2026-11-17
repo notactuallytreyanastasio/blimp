@@ -225,8 +225,10 @@ module.exports = grammar({
     binary_expression: ($) =>
       choice(
         // Precedence from lowest to highest
-        prec.left(1, seq($._expression, "||", $._expression)),
-        prec.left(2, seq($._expression, "&&", $._expression)),
+        // `or` and `and` are the same operators as `||` and `&&`
+        // (parseBinaryOr, parseBinaryAnd).
+        prec.left(1, seq($._expression, choice("||", "or"), $._expression)),
+        prec.left(2, seq($._expression, choice("&&", "and"), $._expression)),
         prec.left(3, seq($._expression, choice("==", "!=", "<", ">", "<=", ">="), $._expression)),
         prec.left(4, seq($._expression, choice("+", alias($._binary_minus, "-")), $._expression)),
         prec.left(5, seq($._expression, choice("*", "/"), $._expression)),

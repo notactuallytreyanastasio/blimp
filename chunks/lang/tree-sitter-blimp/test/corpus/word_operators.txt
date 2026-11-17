@@ -1,0 +1,52 @@
+================================================================================
+or and and bind like || and &&
+================================================================================
+
+ok = x < 0 or x > 9 and y
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (binary_expression
+      (binary_expression
+        (identifier)
+        (integer))
+      (binary_expression
+        (binary_expression
+          (identifier)
+          (integer))
+        (identifier)))))
+
+================================================================================
+or in a handler guard
+================================================================================
+
+actor Board do
+  on :blocked?(x: Int) when x < 0 or x > 9 do reply true end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (when_guard
+        (binary_expression
+          (binary_expression
+            (identifier)
+            (integer))
+          (binary_expression
+            (identifier)
+            (integer))))
+      (reply_statement
+        (boolean)))))

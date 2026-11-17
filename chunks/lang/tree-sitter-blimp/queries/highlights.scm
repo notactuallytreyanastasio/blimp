@@ -61,6 +61,8 @@
 ">=" @operator
 "||" @operator
 "&&" @operator
+"and" @keyword.operator
+"or" @keyword.operator
 "!" @operator
 "|" @operator
 "|>" @operator

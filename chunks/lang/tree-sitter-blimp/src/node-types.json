@@ -4157,6 +4157,10 @@
     "named": false
   },
   {
+    "type": "and",
+    "named": false
+  },
+  {
     "type": "atom",
     "named": true
   },
@@ -4231,6 +4235,10 @@
   },
   {
     "type": "on",
+    "named": false
+  },
+  {
+    "type": "or",
     "named": false
   },
   {
