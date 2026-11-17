@@ -109,7 +109,7 @@ An uncaught bubble from a handler and a send to a handler that does not exist do
 
 Integer overflow wraps on both sides, Int and Float mix the same way, `fib` matches, and a 100000-deep tail call runs compiled without trouble. Actors that reply with Ints agree, and so does `orelse` catching a bubble from a send. Two matching outputs can still both be wrong: `2.0` prints as `2` on both sides.
 
-The last commit adds two programs that another branch, 03-numeric, reported as not compiling: `[1.5, 2.5]` and `to_int(1.5)`. The harness flagged both as NEW until they went into `known.json`. They fail verification for different reasons. `to_int` goes through the unknown-name fallback. The list literal boxes each element with `blimp_val_int`, which expects an integer, and hands it a double.
+The last commit adds two programs that the float-to-int work in the next chapter reported as not compiling: `[1.5, 2.5]` and `to_int(1.5)`. The harness flagged both as NEW until they went into `known.json`. They fail verification for different reasons. `to_int` goes through the unknown-name fallback. The list literal boxes each element with `blimp_val_int`, which expects an integer, and hands it a double.
 
 ## What it does not cover
 

@@ -126,7 +126,7 @@ The hard part is `region`. The CLAUDE.md sketch reads Shop's state from inside C
   I can't find a variable called `region`.
 ```
 
-A parser that rewrote nested actors into flat ones would pick the compilation.md answer for every program, and the project owner would not have chosen it. The same goes for the other open parts: whether actors in the same tree can reach each other by short name (`core-language-feel.md` has Checkout send `TaxCalculator <- :calculate(...)` to its own child, and says siblings address each other by name), and whether spawning Shop spawns and supervises its children. Until those questions have answers, the parser says "not supported" and points at the spelling that works.
+A parser that rewrote nested actors into flat ones would pick the compilation.md answer for every program, and nobody has made that choice yet. The same goes for the other open parts: whether actors in the same tree can reach each other by short name (`core-language-feel.md` has Checkout send `TaxCalculator <- :calculate(...)` to its own child, and says siblings address each other by name), and whether spawning Shop spawns and supervises its children. Until those questions have answers, the parser says "not supported" and points at the spelling that works.
 
 ## Still loose
 
@@ -152,7 +152,7 @@ print(c <- :ping)
 :pong
 ```
 
-`spawn Checkout` finds the template, but `Checkout <- :ping` outside the function is `UNDEFINED VARIABLE`, because the function bound the name in its own call scope. The project owner has not decided whether an actor may be defined there, so this chapter leaves it alone.
+`spawn Checkout` finds the template, but `Checkout <- :ping` outside the function is `UNDEFINED VARIABLE`, because the function bound the name in its own call scope. Whether an actor may be defined there is undecided, so this chapter leaves it alone.
 
 The checker also skips `test` and `property` bodies. At top level, `c <- :add("x")` gets `argument 1 to :add expected Int, got String`, while the same line inside a test passes under `blimp test`.
 
