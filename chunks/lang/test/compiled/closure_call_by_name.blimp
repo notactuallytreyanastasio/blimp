@@ -1,0 +1,7 @@
+# Calling a fn value by name was an extern C call: `_f` at link.
+f = fn(x: Int) do x * 2 end
+add = fn(a: Int, b: Int) do a + b end
+g = add
+puts(f(21))
+puts(g(2, 3))
+10 |> add(5)

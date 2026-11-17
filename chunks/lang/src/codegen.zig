@@ -339,7 +339,7 @@ pub const Codegen = struct {
             .spread_map => |se| self.compileSpreadMap(se),
             .spread_each => |se| self.compileSpreadEach(se),
             .list_lit => |ll| self.compileListLit(ll),
-            .fn_expr => |fe| self.compileFnExpr(fe),
+            .fn_expr => |fe| self.compileFnExpr(fe, node.loc),
             .def_stmt => |ds| self.compileDef(ds),
             else => CodegenError.UnsupportedNode,
         };
@@ -485,6 +485,8 @@ pub const Codegen = struct {
     const Callee = union(enum) {
         def: ast.Node.DefStmt,
         builtin: Builtin,
+        /// A local holding a value: called as a closure, checked at run time.
+        closure: Scope.Entry,
     };
 
     /// The builtins compiled code provides.  Every other interpreter builtin
@@ -494,12 +496,20 @@ pub const Codegen = struct {
 
     fn resolveCallee(self: *Codegen, name: []const u8, loc: ast.Loc, argc: usize) CodegenError!Callee {
         const local = self.scope.get(name);
-        if (local) |entry| if (entry.tag == .tagged_val) return self.reject(
-            loc,
-            "`{s}` is a value here, and compiled code cannot call a fn value by name yet.",
-            .{name},
-            "Run this file with the interpreter.",
-        );
+        if (local) |entry| if (entry.tag == .tagged_val) {
+            // A fault inside a closure body ends the program (a closure,
+            // like a def, has no channel back to the caller's catch).
+            if (self.catches.items.len > 0) {
+                const k = self.catches.items[self.catches.items.len - 1];
+                return self.reject(
+                    k.loc,
+                    "`{s}` around a call of the fn value `{s}`: a fault inside it cannot reach this catch in compiled code.",
+                    .{ if (k.kind == .try_) "try" else "orelse", name },
+                    "Call it outside the `try`, or run this file with the interpreter.",
+                );
+            }
+            return .{ .closure = entry };
+        };
         if (local == null) if (self.findDef(name)) |d| {
             if (d.params.len != argc) return self.reject(
                 loc,
@@ -539,6 +549,8 @@ pub const Codegen = struct {
     fn requireArgTags(self: *Codegen, name: []const u8, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!void {
         const allowed: []const ValTag, const what: []const u8 = switch (callee) {
             .def => .{ &.{ .int, .actor_ref }, "an Int or an actor" },
+            // compileFnExpr unwraps every parameter with blimp_val_to_int.
+            .closure => .{ &.{.int}, "an Int" },
             .builtin => |b| switch (b) {
                 .max, .min, .rem => .{ &.{.int}, "an Int" },
                 .abs => .{ &.{ .int, .float }, "an Int or a Float" },
@@ -583,6 +595,7 @@ pub const Codegen = struct {
                 .abs => return self.emitAbs(args[0]),
                 .puts => return self.emitPuts(args[0]),
             },
+            .closure => |entry| return self.emitClosureCall(name, call_loc, entry, args),
             .def => {
                 // Declared by forwardDeclareDefs or compileDef before any call.
                 const func = c.LLVMGetNamedFunction(self.module, self.defSymbol(name));
@@ -643,6 +656,44 @@ pub const Codegen = struct {
             self.emitPrint(x);
         }
         return x;
+    }
+
+    /// `f(21)` where f holds a value.  The runtime checks it is a closure
+    /// taking that many arguments (UNKNOWN FUNCTION or WRONG ARGUMENT COUNT
+    /// and exit 1 otherwise, as the interpreter reports them) and hands back
+    /// its function, BlimpVal *(BlimpVal *, ...): each Int is boxed, the
+    /// result unboxed.  compileFnExpr makes sure that result is an Int.
+    fn emitClosureCall(self: *Codegen, name: []const u8, loc: ast.Loc, entry: Scope.Entry, args: []const TaggedVal) CodegenError!TaggedVal {
+        const n: u32 = @intCast(args.len);
+        const v = c.LLVMBuildLoad2(self.builder, entry.llvm_type, entry.alloca, self.zname(name));
+        const check = self.getRuntimeFn("blimp_closure_fn", &.{ self.ptr_type, self.i32_type, self.ptr_type, self.ptr_type }, self.ptr_type);
+        var cpt = [_]c.LLVMTypeRef{ self.ptr_type, self.i32_type, self.ptr_type, self.ptr_type };
+        var cargs = [_]c.LLVMValueRef{
+            v,
+            c.LLVMConstInt(self.i32_type, n, 0),
+            c.LLVMBuildGlobalStringPtr(self.builder, self.zname(name), "callee_name"),
+            self.siteGlobal(loc),
+        };
+        const fp = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &cpt, 4, 0), check, &cargs, 4, "closure_fn");
+
+        const box = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
+        var bpt = [_]c.LLVMTypeRef{self.i64_type};
+        const box_ft = c.LLVMFunctionType(self.ptr_type, &bpt, 1, 0);
+        const vals = self.allocator.alloc(c.LLVMValueRef, n) catch return CodegenError.LLVMError;
+        const tys = self.allocator.alloc(c.LLVMTypeRef, n) catch return CodegenError.LLVMError;
+        for (args, 0..) |a, i| {
+            var one = [_]c.LLVMValueRef{a.val};
+            vals[i] = c.LLVMBuildCall2(self.builder, box_ft, box, &one, 1, "arg_box");
+            tys[i] = self.ptr_type;
+        }
+        const ft = c.LLVMFunctionType(self.ptr_type, tys.ptr, n, 0);
+        const boxed = c.LLVMBuildCall2(self.builder, ft, fp, vals.ptr, n, "closure_ret");
+
+        const unbox = self.getRuntimeFn("blimp_val_to_int", &.{self.ptr_type}, self.i64_type);
+        var upt = [_]c.LLVMTypeRef{self.ptr_type};
+        var uargs = [_]c.LLVMValueRef{boxed};
+        const val = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.i64_type, &upt, 1, 0), unbox, &uargs, 1, "closure_int");
+        return .{ .val = val, .tag = .int };
     }
 
     fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall, loc: ast.Loc) CodegenError!TaggedVal {
@@ -1717,7 +1768,7 @@ pub const Codegen = struct {
         return .{ .val = list, .tag = .tagged_val };
     }
 
-    fn compileFnExpr(self: *Codegen, fe: ast.Node.FnExpr) CodegenError!TaggedVal {
+    fn compileFnExpr(self: *Codegen, fe: ast.Node.FnExpr, loc: ast.Loc) CodegenError!TaggedVal {
         // Create an LLVM function for the closure body
         const cur_fn = self.current_fn;
         const saved_scope = self.scope;
@@ -1770,7 +1821,14 @@ pub const Codegen = struct {
             last_tv = try self.compileExpr(stmt);
         }
 
-        // Wrap result as BlimpVal if it's an i64
+        // The body's value is boxed as an Int.  Anything else was boxed as
+        // one too (a Bool as 1, nil as 0) or failed verification (a pointer).
+        if (last_tv.tag != .int) return self.reject(
+            if (fe.body.len > 0) fe.body[fe.body.len - 1].loc else loc,
+            "This fn returns {s}; a compiled fn can return only an Int.",
+            .{tagNoun(last_tv.tag)},
+            "Run this file with the interpreter.",
+        );
         const wrap_fn = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
         var wrap_args = [_]c.LLVMValueRef{last_tv.val};
         var wrap_pt = [_]c.LLVMTypeRef{self.i64_type};

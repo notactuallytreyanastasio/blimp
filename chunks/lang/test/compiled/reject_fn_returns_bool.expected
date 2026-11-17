@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  This fn returns a Bool; a compiled fn can return only an Int.
+
+2| f = fn(x: Int) do true end
+                      ^
+
+  Hint: Run this file with the interpreter.
+
+1 construct cannot be compiled.

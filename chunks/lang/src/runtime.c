@@ -610,6 +610,29 @@ BlimpRaise *blimp_raise_rem_zero(const BlimpSite *site) {
     return r;
 }
 
+void blimp_uncaught(BlimpRaise *r);
+
+// f(args) where f is a local: the function to call, after checking f is a
+// closure taking argc arguments.  Otherwise reports what the interpreter
+// reports for that call and exits 1 (codegen refuses such a call inside a
+// try or orelse, so nothing could catch it).
+void *blimp_closure_fn(BlimpVal *v, int argc, const char *name, const BlimpSite *site) {
+    if (v && v->tag == VAL_CLOSURE && v->closure.param_count == argc) return v->closure.func_ptr;
+    BlimpRaise *r = (BlimpRaise *)calloc(1, sizeof(BlimpRaise));
+    r->site = site;
+    char buf[256];
+    if (!v || v->tag != VAL_CLOSURE) {
+        r->title = "UNKNOWN FUNCTION";
+        snprintf(buf, sizeof buf, "I don't know a function called `%s`.", name);
+    } else {
+        r->title = "WRONG ARGUMENT COUNT";
+        snprintf(buf, sizeof buf, "Handler :fn expects %d argument(s), got %d.", v->closure.param_count, argc);
+    }
+    r->message = strdup(buf);
+    blimp_uncaught(r);
+    return NULL;
+}
+
 static BlimpRaise *blimp_raise_no_handler(int actor_id, int msg_atom, const BlimpSite *site) {
     const char *msg = atom_text(msg_atom);
     if (!msg) msg = "?";
