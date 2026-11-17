@@ -176,7 +176,9 @@ module.exports = grammar({
     bubble_statement: ($) =>
       prec.right(0, seq("bubble", optional(seq($._same_line, $._expression)))),
 
-    assignment: ($) => seq($.identifier, "=", $._expression),
+    // parseExpressionStatement assigns to any name, and an upper-case one
+    // is an identifier node to it too: `BODY = body()`.
+    assignment: ($) => seq(choice($.identifier, $.upper_identifier), "=", $._expression),
 
     // ============================================================
     // For loop: for x in expr do ... end
@@ -219,7 +221,7 @@ module.exports = grammar({
       choice(
         prec.left(1, seq(
           $._expression,
-          token(prec(10, "<-")),
+          choice(token(prec(10, "<-")), token(prec(10, "<--"))),
           $.atom,
           alias($._call_paren, "("),
           commaSep($._expression),
@@ -227,7 +229,7 @@ module.exports = grammar({
         )),
         prec.left(0, seq(
           $._expression,
-          token(prec(10, "<-")),
+          choice(token(prec(10, "<-")), token(prec(10, "<--"))),
           $.atom,
         )),
       ),
@@ -365,7 +367,7 @@ module.exports = grammar({
       seq("situation", $._expression, "do", repeat1($.situation_branch), "end"),
 
     situation_branch: ($) =>
-      seq($._expression, optional($.when_guard), "->", repeat1($._statement)),
+      seq($._expression, optional($.when_guard), "->", repeat($._statement)),
 
     // ============================================================
     // Case expression (exhaustive pattern matching)
@@ -375,7 +377,7 @@ module.exports = grammar({
       seq("case", $._expression, "do", repeat1($.case_branch), "end"),
 
     case_branch: ($) =>
-      seq($._expression, optional($.when_guard), "->", repeat1($._statement)),
+      seq($._expression, optional($.when_guard), "->", repeat($._statement)),
 
     // ============================================================
     // Hole (wildcard/identity)

@@ -73,6 +73,7 @@
 "|>" @operator
 "->" @operator
 "<-" @operator
+"<--" @operator
 "." @punctuation.delimiter
 
 ; Delimiters
