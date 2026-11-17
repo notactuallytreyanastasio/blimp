@@ -360,9 +360,46 @@ test "a pattern name shadows an outer variable of the same name" {
     );
 }
 
-test "a name a nested body assigns is no longer its outer type afterwards" {
-    try expectNoErrors("x = nil\nfor i in [1, 2] do\n  x = i\nend\ny = x + 1");
+// Which nested bodies' assignments are seen afterwards, as the
+// interpreter runs them: a for body, a catch body and a case branch other
+// than `_ ->` have a scope of their own; a try body and a `_ ->` branch
+// run in the enclosing one.
+
+test "an assignment in a for body leaves the outer type alone" {
+    // Both stop with TYPE MISMATCH at run time: the outer x is unchanged.
+    try expectOneError("x = nil\nfor i in [1, 2] do\n  x = i\nend\ny = x + 1", bad, 5);
+    try expectOneError("x = 1\nfor i in [1] do\n  x = 2\nend\ny = x + :a", bad, 5);
+}
+
+test "an assignment in a case branch other than _ leaves the outer type alone" {
+    try expectOneError("x = :none\ncase 1 do\n  1 -> x = 2\n  _ -> 0\nend\ny = x + 1", bad, 6);
+    try expectOneError("x = :none\ncase true do\n  true -> x = 2\n  false -> 0\nend\ny = x + 1", bad, 6);
+    try expectNoErrors("x = 1\nsituation 1 do\n  1 -> x = :a\n  _ -> 0\nend\ny = x + 1");
+}
+
+test "an assignment in a catch body leaves the outer type alone" {
+    try expectOneError("x = :none\ntry do\n  0\ncatch e do\n  x = 2\nend\ny = x + 1", bad, 7);
+}
+
+test "an assignment in a try body is seen after it" {
+    try expectNoErrors("x = :none\ntry do\n  x = 2\ncatch e do\n  0\nend\ny = x + 1");
+    try expectOneError("x = 1\ntry do\n  x = :a\ncatch e do\n  0\nend\ny = x + 1", bad, 7);
+}
+
+test "a first _ branch always runs, and its assignment is seen after the case" {
     try expectNoErrors("x = :none\ncase 1 do\n  _ -> x = 2\nend\ny = x + 1");
+    try expectOneError("x = 1\ncase 1 do\n  _ -> x = :a\nend\ny = x + 1", bad, 5);
+}
+
+test "a later _ branch that changes an outer name's type is reported" {
+    try expectOneError("x = 1\ncase 2 do\n  1 -> 0\n  _ -> x = :a\nend", "only a `_ ->` branch's assignment is seen after the case", 4);
+    try expectOneError("x = 1\nsituation 2 do\n  1 -> 0\n  _ -> x = :a\nend", "only a `_ ->` branch's assignment is seen after the case", 4);
+    // Same type, or a name the outer scope does not have: nothing to say.
+    try expectNoErrors("x = 1\ncase 2 do\n  1 -> 0\n  _ -> x = 5\nend\ny = x + 1");
+    try expectNoErrors("case 2 do\n  1 -> 0\n  _ -> z = :a\nend");
+    // Inside a for body the branch's assignment escapes only into the
+    // for body's scope, which does not escape.
+    try expectNoErrors("x = 1\nfor i in [1] do\n  case 2 do\n    _ -> x = :a\n  end\nend\ny = x + 1");
 }
 
 test "a reply in a def or fn inside a handler is not the handler's" {

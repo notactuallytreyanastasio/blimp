@@ -287,42 +287,63 @@ pub const Checker = struct {
         }
     }
 
-    /// Check a nested body: a case or situation branch, a for body, a try
-    /// or catch body, a test or property body.
+    /// Check a body the interpreter runs in a scope of its own, so that
+    /// nothing it assigns is visible after it: a test or property body.
+    /// The for body, the catch body and every case or situation branch but
+    /// `_ ->` are the same, and are checked the same way below.
     ///
-    /// It gets a scope of its own, so a name it binds is not taken to exist
-    /// after it.  But whether an assignment in it is seen afterwards depends
-    /// on the construct and on whether the branch ran at all, so a name the
-    /// body assigned that was already bound outside is widened to hole once
-    /// the body is done.  Keeping the outer type would be wrong:
-    /// `x = nil` then `for i in xs do x = i end` then `x + 1` is fine at
-    /// run time if the loop body's assignment reaches the outer x, and the
-    /// checker would call it Nil plus Int.
+    /// The scope is pushed and popped and the outer types are left alone.
+    /// `x = 1; for i in [1] do x = 2 end; puts(x)` prints 1, and
+    /// `x = nil; for i in [1, 2] do x = i end; y = x + 1` stops with TYPE
+    /// MISMATCH at run time, so x is still Nil after the loop and the
+    /// checker says so.
     fn checkBody(self: *Checker, body: []const Node) void {
-        self.checkBodyWith(body, null);
-    }
-
-    /// `checkBody` with a pattern whose names are bound first, as hole:
-    /// the pattern of a case branch.
-    fn checkBodyWith(self: *Checker, body: []const Node, pattern: ?*const Node) void {
         self.env.pushScope();
-        if (pattern) |p| self.bindPattern(p.*);
         for (body) |stmt| self.checkNode(stmt);
-        self.popScopeWidening();
+        self.env.popScope();
     }
 
-    /// Pop the innermost scope; every name bound in it that is also bound
-    /// further out is rebound as hole in the scope that is left.
-    fn popScopeWidening(self: *Checker) void {
+    /// The body of a `_ ->` branch that is not the first branch.
+    ///
+    /// The interpreter runs a `_ ->` branch in the enclosing scope
+    /// (evalSituationTail, `.wild => return self.evalBodyTail(...)`), so
+    /// what it assigns is visible after the case, and the other branches
+    /// run in a scope of their own, so what they assign is not:
+    ///
+    ///   x = 1; case 1 do 1 -> x = 2  _ -> 0 end; puts(x)   prints 1
+    ///   x = 1; case 1 do _ -> x = 2 end; puts(x)           prints 2
+    ///
+    /// When the `_ ->` branch is first it always runs, and its body is
+    /// checked in the enclosing scope like a try body.  When it is not, a
+    /// name it assigns is after the case either its old type or its new
+    /// one, depending on which branch ran, and the checker has no type for
+    /// "one of the two".  Keeping either would let a run-time type error
+    /// through on the other path, so an assignment that changes an outer
+    /// name to a type that is not a subtype of the old one is reported.
+    /// A name only this branch binds stays unbound afterwards.
+    fn checkWildBranch(self: *Checker, body: []const Node) void {
+        self.env.pushScope();
+        for (body) |stmt| self.checkNode(stmt);
         const scopes = self.env.scopes.items;
-        if (scopes.len < 2) {
-            self.env.popScope();
-            return;
-        }
         const inner = scopes[scopes.len - 1].bindings.items;
         self.env.popScope();
-        for (inner) |b| {
-            if (self.env.lookup(b.name) != null) self.env.define(b.name, .hole);
+        for (inner, 0..) |b, i| {
+            // Only the last binding of a name in the branch is its type at
+            // the end of the branch.
+            var later = false;
+            for (inner[i + 1 ..]) |b2| {
+                if (std.mem.eql(u8, b2.name, b.name)) later = true;
+            }
+            if (later) continue;
+            const old = self.env.lookup(b.name) orelse continue;
+            // Hole and Any on either side are subtypes both ways.
+            if (b.ty.isSubtypeOf(old)) continue;
+            const loc = if (body.len > 0) body[0].loc else Loc{ .line = 0, .col = 0 };
+            self.addError(loc, "'{s}' is {s} before this case and the `_ ->` branch makes it {s}; only a `_ ->` branch's assignment is seen after the case, so afterwards it is either", .{
+                b.name,
+                old.typeName(),
+                b.ty.typeName(),
+            });
         }
     }
 
@@ -348,12 +369,22 @@ pub const Checker = struct {
     /// branches' types.
     fn inferBranches(self: *Checker, subject: Node, branches: []const Node.Branch) Type {
         _ = self.inferExpr(subject);
-        for (branches) |br| {
+        for (branches, 0..) |br, i| {
+            if (br.mode == .wild) {
+                // See checkWildBranch: the interpreter runs this body in
+                // the enclosing scope.  First, it always runs.
+                if (i == 0) {
+                    for (br.body) |stmt| self.checkNode(stmt);
+                } else {
+                    self.checkWildBranch(br.body);
+                }
+                continue;
+            }
             self.env.pushScope();
             if (br.pattern) |p| self.bindPattern(p.*);
             if (br.guard) |g| _ = self.inferExpr(g.*);
             for (br.body) |stmt| self.checkNode(stmt);
-            self.popScopeWidening();
+            self.env.popScope();
         }
         return .hole;
     }
@@ -577,19 +608,29 @@ pub const Checker = struct {
             .case_expr => |c| self.inferBranches(c.subject.*, c.branches),
             .situation => |c| self.inferBranches(c.subject.*, c.branches),
             .try_catch => |tc| blk: {
-                self.checkBody(tc.try_body);
+                // The interpreter runs a try body in the enclosing scope:
+                // `x = 1; try do x = 2 catch e do 0 end; puts(x)` prints 2,
+                // and a name first bound in it is bound after it.  So it is
+                // checked there, and x is the try body's type afterwards.
+                // That is wrong only when the body bubbles before the
+                // assignment and the catch falls through; the checker
+                // takes the path where the body finished.
+                for (tc.try_body) |stmt| self.checkNode(stmt);
+                // The catch body has a scope of its own: its `x = 2`
+                // leaves the outer x as it was.
                 self.env.pushScope();
                 if (tc.catch_var) |v| self.env.define(v, .hole);
                 for (tc.catch_body) |stmt| self.checkNode(stmt);
-                self.popScopeWidening();
+                self.env.popScope();
                 break :blk .hole;
             },
             .for_expr => |fe| blk: {
                 _ = self.inferExpr(fe.iterable.*);
                 self.env.pushScope();
                 self.env.define(fe.var_name, .hole);
+                // Its own scope, every iteration: the outer x is unchanged.
                 for (fe.body) |stmt| self.checkNode(stmt);
-                self.popScopeWidening();
+                self.env.popScope();
                 break :blk .hole;
             },
             .spread_map, .spread_each => |sp| blk: {
