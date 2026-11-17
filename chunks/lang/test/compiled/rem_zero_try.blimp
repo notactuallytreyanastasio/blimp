@@ -1,0 +1,7 @@
+# A zero divisor in rem is the same fault as `/ 0`: try catches it.
+r = try do
+  rem(7, 0)
+catch err do
+  err
+end
+r

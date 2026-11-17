@@ -1,0 +1,4 @@
+# Checked when the call runs, as the interpreter checks it.
+f = fn(x: Int) do x * 2 end
+puts(f(4))
+f(1, 2)

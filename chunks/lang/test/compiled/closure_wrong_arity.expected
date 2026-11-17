@@ -1,0 +1,13 @@
+--- stdout
+8
+--- stderr
+
+-- WRONG ARGUMENT COUNT ──────────────────────────
+
+  Handler :fn expects 1 argument(s), got 2.
+
+4| f(1, 2)
+     ^
+
+
+--- exit 1

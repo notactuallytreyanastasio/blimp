@@ -1,0 +1,4 @@
+# A def wins over a builtin of the same name, in the interpreter and now in
+# compiled code; max was inlined before any def was looked at, so this was 2.
+def max(a: Int, b: Int) -> Int do 99 end
+max(1, 2)

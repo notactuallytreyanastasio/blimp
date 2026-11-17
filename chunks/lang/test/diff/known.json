@@ -9,7 +9,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `dot_access` yet."
+      "error": "CANNOT COMPILE: There is no `validate` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -37,7 +37,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `hole` yet."
+      "error": "CANNOT COMPILE: There is no `split` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -51,9 +51,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Linker failed (exit 1): undefined: _print"
+      "error": "CANNOT COMPILE: There is no `print` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "examples/errors/01_typo_variable.blimp": {
     "interp": {
@@ -79,9 +79,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `lenght` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "examples/errors/03_type_mismatch_add.blimp": {
     "interp": {
@@ -177,7 +177,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
+      "error": "CANNOT COMPILE: There is no `elem` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -205,7 +205,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
+      "error": "CANNOT COMPILE: There is no `lookup` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -248,9 +248,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "examples/rate_limiter.blimp": {
     "interp": {
@@ -262,7 +262,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `hole` yet."
+      "error": "CANNOT COMPILE: There is no `append` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -276,7 +276,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
+      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -306,7 +306,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: Nothing called `s` is in scope here."
+      "error": "CANNOT COMPILE: There is no `blimp_eval` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -320,9 +320,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Linker failed (exit 1): undefined: _elem, _length"
+      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "lib/complete_test.blimp": {
     "interp": {
@@ -334,9 +334,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `empty?` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "lib/language_test.blimp": {
     "interp": {
@@ -348,9 +348,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `put` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "lib/lexer_test.blimp": {
     "interp": {
@@ -420,14 +420,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4300176412\n",
+      "stdout": "4344757736\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4372610076\n",
+      "stdout": "4375608808\n",
       "stderr": ""
     },
     "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
@@ -458,9 +458,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Linker failed (exit 1): undefined: _length"
+      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/arith_compare_eq.blimp": {
     "interp": {
@@ -558,20 +558,6 @@
     "category": "diverge",
     "note": "minInt / -1: interpreter wraps to minInt (test/int_overflow_test.blimp says so), compiled prints 1."
   },
-  "test/diff/corpus/arith_rem_negative.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "-1\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "Linker failed (exit 1): undefined: _rem"
-    },
-    "category": "compile-error"
-  },
   "test/diff/corpus/atom_eq.blimp": {
     "interp": {
       "end": "exit",
@@ -664,36 +650,6 @@
     },
     "category": "unsupported"
   },
-  "test/diff/corpus/builtin_abs_large.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "5000000000\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "705032704\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "abs is not a codegen builtin; the call goes to libc's int abs(int), which truncates to 32 bits."
-  },
-  "test/diff/corpus/builtin_rem.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "2\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "Linker failed (exit 1): undefined: _rem"
-    },
-    "category": "compile-error"
-  },
   "test/diff/corpus/builtin_to_int_float.blimp": {
     "interp": {
       "end": "exit",
@@ -704,9 +660,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `to_int` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/case_int.blimp": {
     "interp": {
@@ -739,21 +695,6 @@
     "category": "diverge",
     "note": "no case branch matches: interpreter gives nil, compiled 0."
   },
-  "test/diff/corpus/closure_call.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "42\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "Linker failed (exit 1): undefined: _f"
-    },
-    "category": "compile-error",
-    "note": "calling a closure variable f(21) links against an extern C symbol _f."
-  },
   "test/diff/corpus/closure_capture.blimp": {
     "interp": {
       "end": "exit",
@@ -778,9 +719,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `map` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/def_returns_atom.blimp": {
     "interp": {
@@ -835,9 +776,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: Argument 1 of `same` is a String; compiled code can pass it only an Int or an actor."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/list_head.blimp": {
     "interp": {
@@ -849,9 +790,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `head` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/list_length.blimp": {
     "interp": {
@@ -863,9 +804,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/diff/corpus/list_of_atoms.blimp": {
     "interp": {
@@ -939,36 +880,6 @@
     "category": "diverge",
     "note": "`blimp FILE` prints nothing for the final value; a compiled binary prints it. The harness uses --print-last everywhere else."
   },
-  "test/diff/corpus/puts_int.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "3\n3\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "signal 11",
-      "exit": -11,
-      "stdout": "",
-      "stderr": ""
-    },
-    "category": "crash",
-    "note": "puts is not a codegen builtin; puts(3) links libc puts and passes 3 as a char*: SIGSEGV."
-  },
-  "test/diff/corpus/puts_string.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "hi\n\"hi\"\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
-    },
-    "category": "compile-error"
-  },
   "test/diff/corpus/situation_atom_result.blimp": {
     "interp": {
       "end": "exit",
@@ -1040,9 +951,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/handles_test.blimp": {
     "interp": {
@@ -1054,9 +965,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Both operands to ICmp instruction are not of the same type!"
+      "error": "CANNOT COMPILE: There is no `blimp_eval` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/puts_test.blimp": {
     "interp": {
@@ -1068,9 +979,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: Call parameter type does not match function signature!"
+      "error": "CANNOT COMPILE: There is no `concat` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/regression_spawn_in_send_arg.blimp": {
     "interp": {
@@ -1082,9 +993,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "Linker failed (exit 1): undefined: _to_string"
+      "error": "CANNOT COMPILE: There is no `to_string` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
-    "category": "compile-error"
+    "category": "unsupported"
   },
   "test/shadow_builtin_test.blimp": {
     "interp": {

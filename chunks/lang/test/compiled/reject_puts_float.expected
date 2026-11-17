@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  Argument 1 of `puts` is a Float; compiled code can pass it only an Int or a String.
+
+3| puts(0.1 + 0.2)
+         ^
+
+  Hint: Run this file with the interpreter.
+
+1 construct cannot be compiled.

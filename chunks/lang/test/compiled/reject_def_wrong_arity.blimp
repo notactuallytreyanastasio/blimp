@@ -1,0 +1,4 @@
+# The interpreter reports WRONG ARGUMENT COUNT when the call runs; compiled
+# code refuses it at the call.
+def twice(n: Int) -> Int do n * 2 end
+twice(1, 2)

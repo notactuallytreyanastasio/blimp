@@ -1,0 +1,3 @@
+# A compiled fn boxes its result as an Int: `true` came back as 1.
+f = fn(x: Int) do true end
+f(1)

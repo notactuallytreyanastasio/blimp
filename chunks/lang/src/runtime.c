@@ -375,6 +375,13 @@ void blimp_print_nil(void) {
     printf("nil\n");
 }
 
+// puts(s) for a String: its bytes as they are, unquoted, then a newline.
+// (blimp_print_string quotes it, as the interpreter prints a final value.)
+void blimp_puts_string(const char *val) {
+    fputs(val, stdout);
+    fputc('\n', stdout);
+}
+
 // ── Builtins ─────────────────────────────────────────────
 
 long long blimp_max(long long a, long long b) {
@@ -589,6 +596,41 @@ BlimpRaise *blimp_raise_div_zero(const BlimpSite *site) {
     r->site = site;
     r->hint = (char *)"Check the denominator before dividing.";
     return r;
+}
+
+// rem(a, 0).  The interpreter's builtin returns error.DivisionByZero, which
+// it reports with its generic renderer rather than the operator's text.
+BlimpRaise *blimp_raise_rem_zero(const BlimpSite *site) {
+    BlimpRaise *r = (BlimpRaise *)calloc(1, sizeof(BlimpRaise));
+    r->title = "RUNTIME ERROR";
+    r->message = (char *)"DivisionByZero while evaluating this.";
+    r->catch_atom = "division_by_zero";
+    r->site = site;
+    r->hint = NULL;
+    return r;
+}
+
+void blimp_uncaught(BlimpRaise *r);
+
+// f(args) where f is a local: the function to call, after checking f is a
+// closure taking argc arguments.  Otherwise reports what the interpreter
+// reports for that call and exits 1 (codegen refuses such a call inside a
+// try or orelse, so nothing could catch it).
+void *blimp_closure_fn(BlimpVal *v, int argc, const char *name, const BlimpSite *site) {
+    if (v && v->tag == VAL_CLOSURE && v->closure.param_count == argc) return v->closure.func_ptr;
+    BlimpRaise *r = (BlimpRaise *)calloc(1, sizeof(BlimpRaise));
+    r->site = site;
+    char buf[256];
+    if (!v || v->tag != VAL_CLOSURE) {
+        r->title = "UNKNOWN FUNCTION";
+        snprintf(buf, sizeof buf, "I don't know a function called `%s`.", name);
+    } else {
+        r->title = "WRONG ARGUMENT COUNT";
+        snprintf(buf, sizeof buf, "Handler :fn expects %d argument(s), got %d.", v->closure.param_count, argc);
+    }
+    r->message = strdup(buf);
+    blimp_uncaught(r);
+    return NULL;
 }
 
 static BlimpRaise *blimp_raise_no_handler(int actor_id, int msg_atom, const BlimpSite *site) {

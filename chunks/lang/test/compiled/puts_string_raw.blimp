@@ -1,0 +1,5 @@
+# puts writes a String's bytes unquoted; the final value is printed quoted.
+# puts(3) used to hand 3 to libc's puts as a char* and die on SIGSEGV.
+puts("hello")
+puts(3)
+0

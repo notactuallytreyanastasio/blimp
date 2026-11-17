@@ -147,8 +147,9 @@ pub const Codegen = struct {
     current_def_name: []const u8 = "",
     /// Enclosing try/orelse in the current function.
     catches: std.ArrayList(Catch) = .empty,
-    /// Top-level def names: a call to one inside a try/orelse is refused.
-    def_names: std.ArrayList([]const u8) = .empty,
+    /// Every def: what a call by its name resolves to; a call to one inside
+    /// a try/orelse is refused.
+    defs: std.ArrayList(ast.Node.DefStmt) = .empty,
     /// Status of the send compiled last, so `orelse` can tell a reply of 0
     /// from no reply at all.
     last_send_status: ?c.LLVMValueRef = null,
@@ -206,7 +207,7 @@ pub const Codegen = struct {
 
     pub fn deinit(self: *Codegen) void {
         self.catches.deinit(self.allocator);
-        self.def_names.deinit(self.allocator);
+        self.defs.deinit(self.allocator);
         self.scope.deinit(self.allocator);
         self.atoms.deinit(self.allocator);
         for (self.actors.items) |*a| a.handler_fns.deinit(self.allocator);
@@ -318,7 +319,7 @@ pub const Codegen = struct {
             .binary_op => |op| self.compileBinaryOp(op, node.loc),
             .unary_op => |op| self.compileUnaryOp(op),
             .assign_stmt => |stmt| self.compileAssign(stmt),
-            .func_call => |call| self.compileFuncCall(call),
+            .func_call => |call| self.compileFuncCall(call, node.loc),
             .pipe_expr => |pipe| self.compilePipe(pipe),
             .situation => |sit| self.compileSituation(sit),
             .case_expr => |cas| self.compileCase(cas),
@@ -338,7 +339,7 @@ pub const Codegen = struct {
             .spread_map => |se| self.compileSpreadMap(se),
             .spread_each => |se| self.compileSpreadEach(se),
             .list_lit => |ll| self.compileListLit(ll),
-            .fn_expr => |fe| self.compileFnExpr(fe),
+            .fn_expr => |fe| self.compileFnExpr(fe, node.loc),
             .def_stmt => |ds| self.compileDef(ds),
             else => CodegenError.UnsupportedNode,
         };
@@ -458,8 +459,8 @@ pub const Codegen = struct {
     /// Refused here rather than compiled into a catch that cannot fire.
     fn checkDefCallCatchable(self: *Codegen, name: []const u8) CodegenError!void {
         if (self.catches.items.len == 0) return;
-        for (self.def_names.items) |d| {
-            if (!std.mem.eql(u8, d, name)) continue;
+        for (self.defs.items) |d| {
+            if (!std.mem.eql(u8, d.name, name)) continue;
             const k = self.catches.items[self.catches.items.len - 1];
             return self.reject(
                 k.loc,
@@ -470,113 +471,281 @@ pub const Codegen = struct {
         }
     }
 
-    fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall) CodegenError!TaggedVal {
-        const name = call.name;
-        try self.checkDefCallCatchable(name);
+    fn findDef(self: *const Codegen, name: []const u8) ?ast.Node.DefStmt {
+        for (self.defs.items) |d| if (std.mem.eql(u8, d.name, name)) return d;
+        return null;
+    }
 
-        // max(a, b) and min(a, b) - inline as icmp+select
-        if ((std.mem.eql(u8, name, "max") or std.mem.eql(u8, name, "min")) and call.args.len == 2) {
-            const a = try self.compileExpr(call.args[0]);
-            const b = try self.compileExpr(call.args[1]);
-            const pred: c_uint = if (std.mem.eql(u8, name, "max")) c.LLVMIntSGT else c.LLVMIntSLT;
-            const cmp = c.LLVMBuildICmp(self.builder, pred, a.val, b.val, "cmptmp");
-            const val = c.LLVMBuildSelect(self.builder, cmp, a.val, b.val, self.zname(name));
-            return .{ .val = val, .tag = .int };
-        }
+    /// What a call by name runs.  The interpreter looks the name up in the
+    /// environment first (a closure there is called, and a def is one), and
+    /// only then among its builtins; a local that is not a closure hides a
+    /// def of the same name.  Anything else is refused here, by name: there
+    /// is no "call a C function of that name" case, because Blimp has no
+    /// foreign calls and every such symbol the linker found was an accident.
+    const Callee = union(enum) {
+        def: ast.Node.DefStmt,
+        builtin: Builtin,
+        /// A local holding a value: called as a closure, checked at run time.
+        closure: Scope.Entry,
+    };
 
-        // Generic: call extern blimp_<name>(args...)
-        // For now, only support i64 args and return
-        var arg_vals: [8]c.LLVMValueRef = undefined;
-        var arg_types: [8]c.LLVMTypeRef = undefined;
-        const n: u32 = @intCast(@min(call.args.len, 8));
-        for (0..n) |i| {
-            const arg = try self.compileExpr(call.args[i]);
-            arg_vals[i] = arg.val;
-            arg_types[i] = self.i64_type;
-        }
-        const ft = c.LLVMFunctionType(self.i64_type, &arg_types, n, 0);
-        const extern_name = self.zname(name);
-        var func = c.LLVMGetNamedFunction(self.module, extern_name);
-        if (func == null) {
-            func = c.LLVMAddFunction(self.module, extern_name, ft);
-        }
-        const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, n, "calltmp");
-        // Mark as tail call if this is a recursive call to the current def
-        if (self.tail_call_target) |target| {
-            if (std.mem.eql(u8, name, target)) {
-                c.LLVMSetTailCall(val, 1);
+    /// The builtins compiled code provides.  Every other interpreter builtin
+    /// is refused at the call.
+    const Builtin = enum { max, min, rem, abs, puts };
+    const builtin_list = "max, min, rem, abs, puts";
+
+    fn resolveCallee(self: *Codegen, name: []const u8, loc: ast.Loc, argc: usize) CodegenError!Callee {
+        const local = self.scope.get(name);
+        if (local) |entry| if (entry.tag == .tagged_val) {
+            // A fault inside a closure body ends the program (a closure,
+            // like a def, has no channel back to the caller's catch).
+            if (self.catches.items.len > 0) {
+                const k = self.catches.items[self.catches.items.len - 1];
+                return self.reject(
+                    k.loc,
+                    "`{s}` around a call of the fn value `{s}`: a fault inside it cannot reach this catch in compiled code.",
+                    .{ if (k.kind == .try_) "try" else "orelse", name },
+                    "Call it outside the `try`, or run this file with the interpreter.",
+                );
             }
+            return .{ .closure = entry };
+        };
+        if (local == null) if (self.findDef(name)) |d| {
+            if (d.params.len != argc) return self.reject(
+                loc,
+                "`{s}` takes {d} argument(s); this call passes {d}.",
+                .{ name, d.params.len, argc },
+                "Pass one argument for each parameter of the def.",
+            );
+            return .{ .def = d };
+        };
+        if (std.meta.stringToEnum(Builtin, name)) |b| {
+            const want: usize = switch (b) {
+                .max, .min, .rem => 2,
+                .abs, .puts => 1,
+            };
+            if (argc != want) return self.reject(
+                loc,
+                "`{s}` takes {d} argument(s); this call passes {d}.",
+                .{ name, want, argc },
+                "Run this file with the interpreter.",
+            );
+            return .{ .builtin = b };
         }
+        return self.reject(
+            loc,
+            "There is no `{s}` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides ({s}).",
+            .{ name, builtin_list },
+            "The interpreter's other builtins are not compiled yet. Run this file with the interpreter.",
+        );
+    }
+
+    /// What each argument may be.  A compiled def binds every parameter as
+    /// an i64 Int, so it can be passed an Int, or an actor (an i64 id, which
+    /// `c <- :get` in the body sends to).  The builtins take what they are
+    /// compiled for below.  Anything else used to be passed as it was to a
+    /// function declared to take i64: a String was a pointer and LLVM
+    /// refused it, a Float would have been reinterpreted.
+    fn requireArgTags(self: *Codegen, name: []const u8, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!void {
+        const allowed: []const ValTag, const what: []const u8 = switch (callee) {
+            .def => .{ &.{ .int, .actor_ref }, "an Int or an actor" },
+            // compileFnExpr unwraps every parameter with blimp_val_to_int.
+            .closure => .{ &.{.int}, "an Int" },
+            .builtin => |b| switch (b) {
+                .max, .min, .rem => .{ &.{.int}, "an Int" },
+                .abs => .{ &.{ .int, .float }, "an Int or a Float" },
+                .puts => .{ &.{ .int, .string }, "an Int or a String" },
+            },
+        };
+        for (args, 0..) |a, i| {
+            if (std.mem.indexOfScalar(ValTag, allowed, a.tag) != null) continue;
+            return self.reject(
+                locs[i],
+                "Argument {d} of `{s}` is {s}; compiled code can pass it only {s}.",
+                .{ i + 1, name, tagNoun(a.tag), what },
+                "Run this file with the interpreter.",
+            );
+        }
+    }
+
+    fn tagNoun(tag: ValTag) []const u8 {
+        return switch (tag) {
+            .int => "an Int",
+            .float => "a Float",
+            .boolean => "a Bool",
+            .string => "a String",
+            .atom => "an Atom",
+            .nil => "nil",
+            .actor_ref => "an actor",
+            .tagged_val => "a list, map or fn value",
+        };
+    }
+
+    fn emitCall(self: *Codegen, name: []const u8, call_loc: ast.Loc, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!TaggedVal {
+        try self.requireArgTags(name, callee, args, locs);
+        switch (callee) {
+            .builtin => |b| switch (b) {
+                // icmp + select
+                .max, .min => {
+                    const pred: c_uint = if (b == .max) c.LLVMIntSGT else c.LLVMIntSLT;
+                    const cmp = c.LLVMBuildICmp(self.builder, pred, args[0].val, args[1].val, "cmptmp");
+                    return .{ .val = c.LLVMBuildSelect(self.builder, cmp, args[0].val, args[1].val, self.zname(name)), .tag = .int };
+                },
+                .rem => return self.emitRem(args[0].val, args[1].val, call_loc),
+                .abs => return self.emitAbs(args[0]),
+                .puts => return self.emitPuts(args[0]),
+            },
+            .closure => |entry| return self.emitClosureCall(name, call_loc, entry, args),
+            .def => {
+                // Declared by forwardDeclareDefs or compileDef before any call.
+                const func = c.LLVMGetNamedFunction(self.module, self.defSymbol(name));
+                if (func == null) return CodegenError.LLVMError;
+                const ft = c.LLVMGlobalGetValueType(func);
+                const vals = self.allocator.alloc(c.LLVMValueRef, args.len) catch return CodegenError.LLVMError;
+                for (args, 0..) |a, i| vals[i] = a.val;
+                const val = c.LLVMBuildCall2(self.builder, ft, func, vals.ptr, @intCast(vals.len), "calltmp");
+                // Mark as tail call if this is a recursive call to the current def
+                if (self.tail_call_target) |target| {
+                    if (std.mem.eql(u8, name, target)) c.LLVMSetTailCall(val, 1);
+                }
+                return .{ .val = val, .tag = .int };
+            },
+        }
+    }
+
+    /// rem(a, b): the interpreter's @rem.  A zero divisor is its
+    /// DivisionByZero: caught by `try` as :division_by_zero and passed over
+    /// by `orelse`, like `a / 0`, but reported uncaught in the interpreter's
+    /// words for an error out of a builtin.  rem(minInt, -1) is
+    /// 0 there; LLVM's srem of those two is undefined behaviour, so a
+    /// divisor of -1 is replaced by 1, which has the same remainder (0).
+    fn emitRem(self: *Codegen, a: c.LLVMValueRef, b: c.LLVMValueRef, loc: ast.Loc) TaggedVal {
+        const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+        self.emitZeroCheck(c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, b, zero, "rem0"), loc, "blimp_raise_rem_zero");
+        const minus_one = c.LLVMConstInt(self.i64_type, @bitCast(@as(i64, -1)), 1);
+        const is_m1 = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, b, minus_one, "rem_m1");
+        const safe_b = c.LLVMBuildSelect(self.builder, is_m1, c.LLVMConstInt(self.i64_type, 1, 0), b, "rem_b");
+        return .{ .val = c.LLVMBuildSRem(self.builder, a, safe_b, "remtmp"), .tag = .int };
+    }
+
+    /// abs(n): an Int wraps at minInt (0 -% n, as the interpreter does; no
+    /// nsw on the sub), a Float drops its sign.  This used to be libc's
+    /// `int abs(int)`, which truncated 5000000000 to 705032704.
+    fn emitAbs(self: *Codegen, n: TaggedVal) TaggedVal {
+        if (n.tag == .float) {
+            const neg = c.LLVMBuildFCmp(self.builder, c.LLVMRealOLT, n.val, c.LLVMConstReal(self.f64_type, 0.0), "fabs_neg");
+            const flipped = c.LLVMBuildFNeg(self.builder, n.val, "fabs_flip");
+            return .{ .val = c.LLVMBuildSelect(self.builder, neg, flipped, n.val, "fabs"), .tag = .float };
+        }
+        const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+        const neg = c.LLVMBuildICmp(self.builder, c.LLVMIntSLT, n.val, zero, "abs_neg");
+        const flipped = c.LLVMBuildSub(self.builder, zero, n.val, "abs_flip");
+        return .{ .val = c.LLVMBuildSelect(self.builder, neg, flipped, n.val, "abs"), .tag = .int };
+    }
+
+    /// puts(x): the interpreter writes a String's bytes as they are and any
+    /// other value formatted, then a newline, and returns x.  An Int formats
+    /// the same either side; other tags are refused in requireArgTags.
+    fn emitPuts(self: *Codegen, x: TaggedVal) TaggedVal {
+        if (x.tag == .string) {
+            const f = self.getRuntimeFn("blimp_puts_string", &.{self.ptr_type}, self.void_type);
+            var pt = [_]c.LLVMTypeRef{self.ptr_type};
+            var args = [_]c.LLVMValueRef{x.val};
+            _ = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.void_type, &pt, 1, 0), f, &args, 1, "");
+        } else {
+            self.emitPrint(x);
+        }
+        return x;
+    }
+
+    /// `f(21)` where f holds a value.  The runtime checks it is a closure
+    /// taking that many arguments (UNKNOWN FUNCTION or WRONG ARGUMENT COUNT
+    /// and exit 1 otherwise, as the interpreter reports them) and hands back
+    /// its function, BlimpVal *(BlimpVal *, ...): each Int is boxed, the
+    /// result unboxed.  compileFnExpr makes sure that result is an Int.
+    fn emitClosureCall(self: *Codegen, name: []const u8, loc: ast.Loc, entry: Scope.Entry, args: []const TaggedVal) CodegenError!TaggedVal {
+        const n: u32 = @intCast(args.len);
+        const v = c.LLVMBuildLoad2(self.builder, entry.llvm_type, entry.alloca, self.zname(name));
+        const check = self.getRuntimeFn("blimp_closure_fn", &.{ self.ptr_type, self.i32_type, self.ptr_type, self.ptr_type }, self.ptr_type);
+        var cpt = [_]c.LLVMTypeRef{ self.ptr_type, self.i32_type, self.ptr_type, self.ptr_type };
+        var cargs = [_]c.LLVMValueRef{
+            v,
+            c.LLVMConstInt(self.i32_type, n, 0),
+            c.LLVMBuildGlobalStringPtr(self.builder, self.zname(name), "callee_name"),
+            self.siteGlobal(loc),
+        };
+        const fp = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &cpt, 4, 0), check, &cargs, 4, "closure_fn");
+
+        const box = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
+        var bpt = [_]c.LLVMTypeRef{self.i64_type};
+        const box_ft = c.LLVMFunctionType(self.ptr_type, &bpt, 1, 0);
+        const vals = self.allocator.alloc(c.LLVMValueRef, n) catch return CodegenError.LLVMError;
+        const tys = self.allocator.alloc(c.LLVMTypeRef, n) catch return CodegenError.LLVMError;
+        for (args, 0..) |a, i| {
+            var one = [_]c.LLVMValueRef{a.val};
+            vals[i] = c.LLVMBuildCall2(self.builder, box_ft, box, &one, 1, "arg_box");
+            tys[i] = self.ptr_type;
+        }
+        const ft = c.LLVMFunctionType(self.ptr_type, tys.ptr, n, 0);
+        const boxed = c.LLVMBuildCall2(self.builder, ft, fp, vals.ptr, n, "closure_ret");
+
+        const unbox = self.getRuntimeFn("blimp_val_to_int", &.{self.ptr_type}, self.i64_type);
+        var upt = [_]c.LLVMTypeRef{self.ptr_type};
+        var uargs = [_]c.LLVMValueRef{boxed};
+        const val = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.i64_type, &upt, 1, 0), unbox, &uargs, 1, "closure_int");
         return .{ .val = val, .tag = .int };
     }
 
+    fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall, loc: ast.Loc) CodegenError!TaggedVal {
+        try self.checkDefCallCatchable(call.name);
+        const callee = try self.resolveCallee(call.name, loc, call.args.len);
+        const args = self.allocator.alloc(TaggedVal, call.args.len) catch return CodegenError.LLVMError;
+        const locs = self.allocator.alloc(ast.Loc, call.args.len) catch return CodegenError.LLVMError;
+        for (call.args, 0..) |arg, i| {
+            args[i] = try self.compileExpr(arg);
+            locs[i] = arg.loc;
+        }
+        return self.emitCall(call.name, loc, callee, args, locs);
+    }
+
+    /// `x |> f(a, _)` passes x where the hole is; `x |> f(a)` passes it
+    /// first; `x |> f` passes it alone.  Then it is a call like any other.
     fn compilePipe(self: *Codegen, pipe: ast.Node.PipeExpr) CodegenError!TaggedVal {
-        // Evaluate left side
-        const left_val = try self.compileExpr(pipe.left.*);
-
-        // Right side must be a func_call (with _ placeholder) or bare identifier
         const right = pipe.right.*;
-        switch (right.kind) {
-            .func_call => |call| try self.checkDefCallCatchable(call.name),
-            .identifier => |id| try self.checkDefCallCatchable(id.name),
-            else => {},
-        }
-        switch (right.kind) {
-            .func_call => |call| {
-                // Replace the hole/placeholder arg with left_val
-                var arg_vals: [8]c.LLVMValueRef = undefined;
-                var arg_types: [8]c.LLVMTypeRef = undefined;
-                const n: u32 = @intCast(@min(call.args.len, 8));
-                var used_placeholder = false;
-                for (0..n) |i| {
-                    if (call.args[i].kind == .hole) {
-                        arg_vals[i] = left_val.val;
-                        used_placeholder = true;
-                    } else {
-                        const arg = try self.compileExpr(call.args[i]);
-                        arg_vals[i] = arg.val;
-                    }
-                    arg_types[i] = self.i64_type;
-                }
-                // If no placeholder found, insert left as first arg
-                if (!used_placeholder) {
-                    var shifted_vals: [8]c.LLVMValueRef = undefined;
-                    var shifted_types: [8]c.LLVMTypeRef = undefined;
-                    shifted_vals[0] = left_val.val;
-                    shifted_types[0] = self.i64_type;
-                    for (0..n) |i| {
-                        shifted_vals[i + 1] = arg_vals[i];
-                        shifted_types[i + 1] = arg_types[i];
-                    }
-                    const total: u32 = n + 1;
-                    const ft = c.LLVMFunctionType(self.i64_type, &shifted_types, total, 0);
-                    const func_name = self.zname(call.name);
-                    var func = c.LLVMGetNamedFunction(self.module, func_name);
-                    if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
-                    const val = c.LLVMBuildCall2(self.builder, ft, func, &shifted_vals, total, "pipetmp");
-                    return .{ .val = val, .tag = .int };
-                }
-
-                const ft = c.LLVMFunctionType(self.i64_type, &arg_types, n, 0);
-                const func_name = self.zname(call.name);
-                var func = c.LLVMGetNamedFunction(self.module, func_name);
-                if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
-                const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, n, "pipetmp");
-                return .{ .val = val, .tag = .int };
-            },
-            .identifier => |id| {
-                // Bare function: pipe as sole argument
-                var arg_vals = [_]c.LLVMValueRef{left_val.val};
-                var arg_types = [_]c.LLVMTypeRef{self.i64_type};
-                const ft = c.LLVMFunctionType(self.i64_type, &arg_types, 1, 0);
-                const func_name = self.zname(id.name);
-                var func = c.LLVMGetNamedFunction(self.module, func_name);
-                if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
-                const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, 1, "pipetmp");
-                return .{ .val = val, .tag = .int };
-            },
+        const name: []const u8, const call_args: []const ast.Node = switch (right.kind) {
+            .func_call => |call| .{ call.name, call.args },
+            .identifier => |id| .{ id.name, &.{} },
             else => return CodegenError.UnsupportedNode,
+        };
+        try self.checkDefCallCatchable(name);
+
+        var holes: usize = 0;
+        for (call_args) |a| if (a.kind == .hole) {
+            holes += 1;
+        };
+        const argc = if (holes > 0) call_args.len else call_args.len + 1;
+        const callee = try self.resolveCallee(name, right.loc, argc);
+
+        const left_val = try self.compileExpr(pipe.left.*);
+        const args = self.allocator.alloc(TaggedVal, argc) catch return CodegenError.LLVMError;
+        const locs = self.allocator.alloc(ast.Loc, argc) catch return CodegenError.LLVMError;
+        var n: usize = 0;
+        if (holes == 0) {
+            args[0] = left_val;
+            locs[0] = pipe.left.loc;
+            n = 1;
         }
+        for (call_args) |a| {
+            if (a.kind == .hole) {
+                args[n] = left_val;
+                locs[n] = pipe.left.loc;
+            } else {
+                args[n] = try self.compileExpr(a);
+                locs[n] = a.loc;
+            }
+            n += 1;
+        }
+        return self.emitCall(name, right.loc, callee, args, locs);
     }
 
     fn compileBinaryOp(self: *Codegen, op: ast.Node.BinaryOp, loc: ast.Loc) CodegenError!TaggedVal {
@@ -1072,13 +1241,18 @@ pub const Codegen = struct {
     /// `a / b` with b == 0: a fault at the operator, as the interpreter's
     /// DIVISION BY ZERO.  Leaves the builder where b != 0.
     fn emitDivZeroCheck(self: *Codegen, is_zero: c.LLVMValueRef, loc: ast.Loc) void {
+        self.emitZeroCheck(is_zero, loc, "blimp_raise_div_zero");
+    }
+
+    /// The same fault, raised by `raise_fn` (a BlimpRaise *(const BlimpSite *)).
+    fn emitZeroCheck(self: *Codegen, is_zero: c.LLVMValueRef, loc: ast.Loc, raise_fn: [*:0]const u8) void {
         const func = self.current_fn orelse return;
         _ = self.atoms.intern(self.allocator, "division_by_zero"); // what `catch e` binds
         const zero_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "div_by_zero");
         const ok_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "div_ok");
         _ = c.LLVMBuildCondBr(self.builder, is_zero, zero_bb, ok_bb);
         c.LLVMPositionBuilderAtEnd(self.builder, zero_bb);
-        const f = self.getRuntimeFn("blimp_raise_div_zero", &.{self.ptr_type}, self.ptr_type);
+        const f = self.getRuntimeFn(raise_fn, &.{self.ptr_type}, self.ptr_type);
         var args = [_]c.LLVMValueRef{self.siteGlobal(loc)};
         var pt = [_]c.LLVMTypeRef{self.ptr_type};
         const raise_ptr = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "div_zero");
@@ -1504,6 +1678,7 @@ pub const Codegen = struct {
             self.current_def_name = saved_def_name;
         }
         self.scope = .{};
+        if (self.findDef(ds.name) == null) self.defs.append(self.allocator, ds) catch return CodegenError.LLVMError;
 
         // Create function: i64 name(i64, i64, ...)
         const param_count: u32 = @intCast(ds.params.len);
@@ -1514,9 +1689,8 @@ pub const Codegen = struct {
         const fn_type = c.LLVMFunctionType(self.i64_type, param_types.ptr, param_count, 0);
 
         // Use existing forward declaration if present, otherwise create
-        const fn_name = self.zname(ds.name);
-        const func = c.LLVMGetNamedFunction(self.module, fn_name) orelse
-            c.LLVMAddFunction(self.module, fn_name, fn_type);
+        const func = c.LLVMGetNamedFunction(self.module, self.defSymbol(ds.name)) orelse
+            self.addDefFunction(ds.name, fn_type);
 
         const entry_bb = c.LLVMAppendBasicBlock(func, "entry");
         c.LLVMPositionBuilderAtEnd(self.builder, entry_bb);
@@ -1594,7 +1768,7 @@ pub const Codegen = struct {
         return .{ .val = list, .tag = .tagged_val };
     }
 
-    fn compileFnExpr(self: *Codegen, fe: ast.Node.FnExpr) CodegenError!TaggedVal {
+    fn compileFnExpr(self: *Codegen, fe: ast.Node.FnExpr, loc: ast.Loc) CodegenError!TaggedVal {
         // Create an LLVM function for the closure body
         const cur_fn = self.current_fn;
         const saved_scope = self.scope;
@@ -1647,7 +1821,14 @@ pub const Codegen = struct {
             last_tv = try self.compileExpr(stmt);
         }
 
-        // Wrap result as BlimpVal if it's an i64
+        // The body's value is boxed as an Int.  Anything else was boxed as
+        // one too (a Bool as 1, nil as 0) or failed verification (a pointer).
+        if (last_tv.tag != .int) return self.reject(
+            if (fe.body.len > 0) fe.body[fe.body.len - 1].loc else loc,
+            "This fn returns {s}; a compiled fn can return only an Int.",
+            .{tagNoun(last_tv.tag)},
+            "Run this file with the interpreter.",
+        );
         const wrap_fn = self.getRuntimeFn("blimp_val_int", &.{self.i64_type}, self.ptr_type);
         var wrap_args = [_]c.LLVMValueRef{last_tv.val};
         var wrap_pt = [_]c.LLVMTypeRef{self.i64_type};
@@ -2209,21 +2390,39 @@ pub const Codegen = struct {
         c.LLVMSetGlobalConstant(count, 1);
     }
 
+    /// The LLVM name of `def name`.  A def is not a C function: named
+    /// `printf` or `malloc` under its own name, it was the symbol the runtime
+    /// linked for printf or malloc, and `def printf(n: Int)` turned every
+    /// print in the program into a call to it.  `def.` cannot begin a C
+    /// identifier, so no def can take a libc or runtime symbol.
+    fn defSymbol(self: *Codegen, name: []const u8) [*:0]const u8 {
+        const s = std.fmt.allocPrintSentinel(self.allocator, "def.{s}", .{name}, 0) catch return "def.?";
+        return s.ptr;
+    }
+
+    /// Declare `def name` with internal linkage: nothing outside the module
+    /// calls a def, so its symbol is never exported to the linker either.
+    fn addDefFunction(self: *Codegen, name: []const u8, fn_type: c.LLVMTypeRef) c.LLVMValueRef {
+        const func = c.LLVMAddFunction(self.module, self.defSymbol(name), fn_type);
+        c.LLVMSetLinkage(func, c.LLVMInternalLinkage);
+        return func;
+    }
+
     /// Forward-declare all `def` functions so call order doesn't matter.
     fn forwardDeclareDefs(self: *Codegen, nodes: []const ast.Node) void {
         for (nodes) |node| {
             if (node.kind == .def_stmt) {
                 const ds = node.kind.def_stmt;
-                self.def_names.append(self.allocator, ds.name) catch {};
+                self.defs.append(self.allocator, ds) catch {};
                 // Only declare if not already present
-                if (c.LLVMGetNamedFunction(self.module, self.zname(ds.name)) == null) {
+                if (c.LLVMGetNamedFunction(self.module, self.defSymbol(ds.name)) == null) {
                     const param_count: u32 = @intCast(ds.params.len);
                     const param_types = self.allocator.alloc(c.LLVMTypeRef, param_count) catch continue;
                     for (0..param_count) |i| {
                         param_types[i] = self.i64_type;
                     }
                     const fn_type = c.LLVMFunctionType(self.i64_type, param_types.ptr, param_count, 0);
-                    _ = c.LLVMAddFunction(self.module, self.zname(ds.name), fn_type);
+                    _ = self.addDefFunction(ds.name, fn_type);
                 }
             }
         }
