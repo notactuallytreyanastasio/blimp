@@ -48,6 +48,7 @@ from the current run; review the diff before committing it.
 """
 
 import argparse
+import atexit
 import concurrent.futures
 import json
 import os
@@ -78,11 +79,6 @@ EXCLUDE = {
     "examples/jetstream_serve.blimp": "serves HTTP forever",
     "examples/web_push.blimp": "network",
     "examples/tetris.blimp": "interactive terminal game",
-    # A Hole the interpreter reaches runs `claude -p` and writes the answer
-    # into the .blimp file in place of the Hole. These three reach one.
-    "examples/content_pipeline.blimp": "a Hole calls the claude CLI and rewrites the file",
-    "examples/game_rules.blimp": "a Hole calls the claude CLI and rewrites the file",
-    "examples/rate_limiter.blimp": "a Hole calls the claude CLI and rewrites the file",
     "examples/bench_fib.blimp": "fib(40): a benchmark, not a test; fib is in corpus/",
     "benchmarks/fib.blimp": "benchmark sized for timing",
     "benchmarks/ring.blimp": "benchmark sized for timing",
@@ -113,12 +109,30 @@ def corpus():
     return progs
 
 
+# A Hole the interpreter reaches runs `claude -p <prompt>`, whatever `claude`
+# is first on PATH, and patchHole writes a non-empty answer into the .blimp
+# file the program was run from. Every program here runs with STUB_ENV: a
+# PATH whose first entry holds a `claude` that answers nothing, and an
+# empty answer is never written back (evalHole returns nil before
+# patchHole). That holds for every program in the corpus, listed or not, so
+# no Hole can reach a model or rewrite a file in the tree. Programs are not
+# run from copies: lib/ and test/ programs may load files beside them.
+STUB_DIR = tempfile.mkdtemp(prefix="blimp-diff-claude-")
+with open(os.path.join(STUB_DIR, "claude"), "w") as _fh:
+    _fh.write("#!/bin/sh\n# Stands in for the claude CLI in test/diff/run.py: answers nothing.\n"
+              "[ -n \"$BLIMP_DIFF_CLAUDE_LOG\" ] && echo called >> \"$BLIMP_DIFF_CLAUDE_LOG\"\nexit 0\n")
+os.chmod(os.path.join(STUB_DIR, "claude"), 0o755)
+atexit.register(shutil.rmtree, STUB_DIR, True)
+STUB_ENV = dict(os.environ, PATH=STUB_DIR + os.pathsep + os.environ.get("PATH", ""))
+
+
 def run(argv, cwd, timeout):
     """Run argv; return a dict that says how it ended. Never raises."""
     try:
         p = subprocess.run(
             argv,
             cwd=cwd,
+            env=STUB_ENV,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
