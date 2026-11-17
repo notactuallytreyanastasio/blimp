@@ -1,0 +1,8 @@
+# The interpreter answers `!x` by truthiness: an Int 0 is true, so this
+# prints false there. Compiled code compared the i64 with 0 and gave 1;
+# it now takes only a Bool here and refuses the Int at the operand.
+# The checker refuses `!x` when it can see x is an Int, before either side
+# runs; dyn hides the type from it so this still reaches the compiler.
+def dyn(v: Any) -> Any do v end
+x = dyn(0)
+!x

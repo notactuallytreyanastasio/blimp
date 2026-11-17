@@ -1,0 +1,7 @@
+--- stdout
+0
+5
+false
+:one
+--- stderr
+--- exit 0

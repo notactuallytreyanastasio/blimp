@@ -1,0 +1,6 @@
+--- stdout
+true
+hi
+nil
+--- stderr
+--- exit 0

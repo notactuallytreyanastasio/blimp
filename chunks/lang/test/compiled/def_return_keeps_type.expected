@@ -1,0 +1,6 @@
+--- stdout
+true
+bob
+false
+--- stderr
+--- exit 0

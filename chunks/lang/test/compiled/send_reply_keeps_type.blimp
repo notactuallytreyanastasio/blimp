@@ -1,0 +1,33 @@
+# A reply keeps its type across the send. Every send was tagged Int: an Atom
+# printed as its intern id, a String as its address, a Bool as 1.
+actor Light do
+  state color: Atom :: :red
+
+  on :next do
+    situation color do
+      :red -> become color: :green
+      :green -> become color: :yellow
+      :yellow -> become color: :red
+    end
+    reply color
+  end
+end
+
+actor Greeter do
+  state n: Int :: 0
+
+  on :greet(name: String) do
+    reply name
+  end
+
+  on :big(x: Int) do
+    reply x > 10
+  end
+end
+
+g = spawn Greeter
+puts(g <- :greet("bob"))
+puts(g <- :big(11))
+l = spawn Light
+l <- :next
+l <- :next

@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const errors = @import("errors.zig");
+const literal = @import("literal.zig");
 
 const c = @cImport({
     @cInclude("llvm-c/Core.h");
@@ -57,6 +58,9 @@ const Scope = struct {
         alloca: c.LLVMValueRef,
         tag: Codegen.ValTag,
         llvm_type: c.LLVMTypeRef,
+        /// A name compiled code cannot bind (a handler parameter of a type
+        /// it does not carry): reading it is refused with this message.
+        unbound: ?[]const u8 = null,
     };
     entries: std.ArrayList(Entry) = .empty,
 
@@ -115,6 +119,14 @@ const ActorDescriptor = struct {
         atom_id: u32,
         func: c.LLVMValueRef, // the compiled handler function
         param_count: u32,
+        /// What crosses the send, decided when the handler is compiled:
+        /// the tag of each parameter (from its annotation) and the tags
+        /// its replies carry (one bit per ValTag; nil is `may_nil`).
+        /// null: a type compiled code does not carry; the parameter is
+        /// refused where it is read, and every send to it in checkSends.
+        param_tags: []const ?Codegen.ValTag,
+        reply_mask: u16,
+        may_nil: bool,
     };
 };
 
@@ -153,6 +165,24 @@ pub const Codegen = struct {
     /// Status of the send compiled last, so `orelse` can tell a reply of 0
     /// from no reply at all.
     last_send_status: ?c.LLVMValueRef = null,
+    /// Set by `orelse` for the send that is its left side: that send may
+    /// end without a reply, since the status takes the fallback.
+    send_under_orelse: bool = false,
+    /// The send compiled last cannot hand back a value (no handler of that
+    /// name, or every one only raises), so `orelse` takes only its fallback.
+    last_send_never: bool = false,
+    /// Replies of the handler being compiled (see HandlerFn).
+    reply_mask: u16 = 0,
+    reply_may_nil: bool = false,
+    /// Every send, with the reply tag it was compiled for, checked again in
+    /// checkSends once every handler is compiled.
+    sends: std.ArrayList(SendCheck) = .empty,
+    /// What each compiled def returns, and every call made before its def
+    /// was compiled (taken to return an Int), checked in checkSends.
+    def_tags: std.ArrayList(struct { name: []const u8, tag: ValTag }) = .empty,
+    def_calls: std.ArrayList(struct { name: []const u8, loc: ast.Loc, tag: ValTag }) = .empty,
+    /// Every actor the program declares, for a parameter typed with one.
+    actor_names: std.ArrayList([]const u8) = .empty,
     /// Program text, for the source line a runtime report shows.
     source: []const u8 = "",
     /// Set when codegen refuses a construct; the first one set is reported.
@@ -166,7 +196,6 @@ pub const Codegen = struct {
     print_float_fn: ?c.LLVMValueRef = null,
     print_bool_fn: ?c.LLVMValueRef = null,
     print_string_fn: ?c.LLVMValueRef = null,
-    print_atom_fn: ?c.LLVMValueRef = null,
     print_nil_fn: ?c.LLVMValueRef = null,
 
     pub fn init(allocator: std.mem.Allocator, module_name: [*:0]const u8) Codegen {
@@ -207,6 +236,10 @@ pub const Codegen = struct {
 
     pub fn deinit(self: *Codegen) void {
         self.catches.deinit(self.allocator);
+        self.sends.deinit(self.allocator);
+        self.def_tags.deinit(self.allocator);
+        self.def_calls.deinit(self.allocator);
+        self.actor_names.deinit(self.allocator);
         self.defs.deinit(self.allocator);
         self.scope.deinit(self.allocator);
         self.atoms.deinit(self.allocator);
@@ -251,14 +284,6 @@ pub const Codegen = struct {
         return self.print_string_fn.?;
     }
 
-    fn getPrintAtom(self: *Codegen) c.LLVMValueRef {
-        if (self.print_atom_fn) |f| return f;
-        var params = [_]c.LLVMTypeRef{self.ptr_type};
-        const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
-        self.print_atom_fn = c.LLVMAddFunction(self.module, "blimp_print_atom", ft);
-        return self.print_atom_fn.?;
-    }
-
     fn getPrintNil(self: *Codegen) c.LLVMValueRef {
         if (self.print_nil_fn) |f| return f;
         const ft = c.LLVMFunctionType(self.void_type, &[_]c.LLVMTypeRef{}, 0, 0);
@@ -274,6 +299,25 @@ pub const Codegen = struct {
     const TaggedVal = struct {
         val: c.LLVMValueRef,
         tag: ValTag,
+    };
+
+    fn tagBit(tag: ValTag) u16 {
+        return @as(u16, 1) << @intFromEnum(tag);
+    }
+
+    /// A send as compiled: what its reply was taken to be, and the tags of
+    /// its arguments.  A handler compiled after the send (one actor sending
+    /// to another declared later, or to itself) can disagree; checkSends
+    /// refuses the send then.
+    const SendCheck = struct {
+        message: []const u8,
+        loc: ast.Loc,
+        under_orelse: bool,
+        reply: ValTag,
+        never: bool,
+        /// null: an unbound parameter passed on as it is.
+        arg_tags: []const ?ValTag,
+        arg_locs: []const ast.Loc,
     };
 
     /// Compile an expression, returning the value and its type tag.
@@ -313,9 +357,9 @@ pub const Codegen = struct {
                 .tag = .boolean,
             },
             .nil_lit => .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil },
-            .string_lit => |lit| self.compileStringLit(lit),
+            .string_lit => |lit| self.compileStringLit(lit, node.loc),
             .atom_lit => |lit| self.compileAtomLit(lit),
-            .identifier => |id| self.compileIdentifier(id),
+            .identifier => |id| self.compileIdentifier(id, node.loc),
             .binary_op => |op| self.compileBinaryOp(op, node.loc),
             .unary_op => |op| self.compileUnaryOp(op),
             .assign_stmt => |stmt| self.compileAssign(stmt),
@@ -396,13 +440,23 @@ pub const Codegen = struct {
         };
     }
 
-    fn compileStringLit(self: *Codegen, lit: ast.Node.StringLit) TaggedVal {
-        const raw = lit.value;
-        const s = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
-            raw[1 .. raw.len - 1]
-        else
-            raw;
-        const global = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(s), "str");
+    /// The text a string literal stands for: its escapes turned into the
+    /// bytes they name, with the same rules the parser applies for the
+    /// interpreter (literal.appendUnescaped).  The lexeme used to be
+    /// emitted as written, so puts("a\nb") printed a backslash and an n.
+    /// An interpolated literal is refused: it needs every part formatted
+    /// at run time, as the interpreter does, and printing the `#{n}`
+    /// itself was the old answer.
+    fn compileStringLit(self: *Codegen, lit: ast.Node.StringLit, loc: ast.Loc) CodegenError!TaggedVal {
+        if (lit.interp != null) return self.reject(
+            loc,
+            "This string has `#{{...}}` in it; compiled code does not interpolate strings yet.",
+            .{},
+            "Run this file with the interpreter.",
+        );
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        literal.appendUnescaped(self.allocator, &buf, literal.stripQuotes(lit.value)) catch return CodegenError.LLVMError;
+        const global = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(buf.items), "str");
         return .{ .val = global, .tag = .string };
     }
 
@@ -416,8 +470,9 @@ pub const Codegen = struct {
         };
     }
 
-    fn compileIdentifier(self: *Codegen, id: ast.Node.Identifier) CodegenError!TaggedVal {
+    fn compileIdentifier(self: *Codegen, id: ast.Node.Identifier, loc: ast.Loc) CodegenError!TaggedVal {
         const entry = self.scope.get(id.name) orelse return CodegenError.UndefinedVariable;
+        if (entry.unbound) |why| return self.reject(loc, "{s}", .{why}, "Run this file with the interpreter.");
         const val = c.LLVMBuildLoad2(self.builder, entry.llvm_type, entry.alloca, self.zname(id.name));
         return .{ .val = val, .tag = entry.tag };
     }
@@ -496,14 +551,18 @@ pub const Codegen = struct {
 
     fn resolveCallee(self: *Codegen, name: []const u8, loc: ast.Loc, argc: usize) CodegenError!Callee {
         const local = self.scope.get(name);
+        if (local) |entry| if (entry.unbound) |why| return self.reject(loc, "{s}", .{why}, "Run this file with the interpreter.");
         if (local) |entry| if (entry.tag == .tagged_val) {
             // A fault inside a closure body ends the program (a closure,
             // like a def, has no channel back to the caller's catch).
             if (self.catches.items.len > 0) {
                 const k = self.catches.items[self.catches.items.len - 1];
+                // The tag says list, map or fn, not which: the runtime finds
+                // out at the call, and its UNKNOWN FUNCTION for a list ends
+                // the program here too, where the interpreter's try catches it.
                 return self.reject(
                     k.loc,
-                    "`{s}` around a call of the fn value `{s}`: a fault inside it cannot reach this catch in compiled code.",
+                    "`{s}` around a call of `{s}`, a local holding a list, map or fn value: if it is not a fn, or a fault happens inside it, the error cannot reach this catch in compiled code.",
                     .{ if (k.kind == .try_) "try" else "orelse", name },
                     "Call it outside the `try`, or run this file with the interpreter.",
                 );
@@ -519,7 +578,23 @@ pub const Codegen = struct {
             );
             return .{ .def = d };
         };
-        if (std.meta.stringToEnum(Builtin, name)) |b| {
+        // A local that is not a fn value hides a def of its name (the
+        // interpreter finds the local first and reports UNKNOWN FUNCTION);
+        // a builtin of that name is still called, as it is there.
+        const builtin = std.meta.stringToEnum(Builtin, name);
+        if (local) |entry| if (builtin == null) {
+            const hides = if (self.findDef(name) != null)
+                std.fmt.allocPrint(self.allocator, ", and it hides the def `{s}`", .{name}) catch ""
+            else
+                "";
+            return self.reject(
+                loc,
+                "`{s}` is a local holding {s}, which is not a function{s}. The interpreter reports UNKNOWN FUNCTION here.",
+                .{ name, tagNoun(entry.tag), hides },
+                "Rename the local or the def, or run this file with the interpreter.",
+            );
+        };
+        if (builtin) |b| {
             const want: usize = switch (b) {
                 .max, .min, .rem => 2,
                 .abs, .puts => 1,
@@ -554,7 +629,7 @@ pub const Codegen = struct {
             .builtin => |b| switch (b) {
                 .max, .min, .rem => .{ &.{.int}, "an Int" },
                 .abs => .{ &.{ .int, .float }, "an Int or a Float" },
-                .puts => .{ &.{ .int, .string }, "an Int or a String" },
+                .puts => .{ &.{ .int, .float, .string, .boolean, .actor_ref }, "an Int, a Float, a String, a Bool or an actor" },
             },
         };
         for (args, 0..) |a, i| {
@@ -608,7 +683,12 @@ pub const Codegen = struct {
                 if (self.tail_call_target) |target| {
                     if (std.mem.eql(u8, name, target)) c.LLVMSetTailCall(val, 1);
                 }
-                return .{ .val = val, .tag = .int };
+                // A def returns an i64; what it holds is the tag of the
+                // def's last expression.  Every call was tagged Int, so a
+                // def ending in a comparison printed 1.
+                const tag = self.defTag(name) orelse ValTag.int;
+                self.def_calls.append(self.allocator, .{ .name = name, .loc = call_loc, .tag = tag }) catch return CodegenError.LLVMError;
+                return .{ .val = self.coerceFromI64(val, tag), .tag = tag };
             },
         }
     }
@@ -644,8 +724,9 @@ pub const Codegen = struct {
     }
 
     /// puts(x): the interpreter writes a String's bytes as they are and any
-    /// other value formatted, then a newline, and returns x.  An Int formats
-    /// the same either side; other tags are refused in requireArgTags.
+    /// other value formatted, then a newline, and returns x.  An Int, a
+    /// Float, a Bool and an actor format the same either side; other tags are
+    /// refused in requireArgTags.
     fn emitPuts(self: *Codegen, x: TaggedVal) TaggedVal {
         if (x.tag == .string) {
             const f = self.getRuntimeFn("blimp_puts_string", &.{self.ptr_type}, self.void_type);
@@ -749,6 +830,7 @@ pub const Codegen = struct {
     }
 
     fn compileBinaryOp(self: *Codegen, op: ast.Node.BinaryOp, loc: ast.Loc) CodegenError!TaggedVal {
+        if (op.op == .and_op or op.op == .or_op) return self.compileLogical(op);
         const lhs = try self.compileExpr(op.left.*);
         const rhs = try self.compileExpr(op.right.*);
 
@@ -786,9 +868,9 @@ pub const Codegen = struct {
                 },
                 else => return CodegenError.UnsupportedNode,
             };
-            // Comparisons return int, arithmetic returns float
+            // A comparison is a Bool (an i64 0 or 1), arithmetic a Float.
             const tag: ValTag = switch (op.op) {
-                .lt, .gt, .lte, .gte, .eq, .neq => .int,
+                .lt, .gt, .lte, .gte, .eq, .neq => .boolean,
                 else => .float,
             };
             return .{ .val = val, .tag = tag };
@@ -804,7 +886,7 @@ pub const Codegen = struct {
             .add => c.LLVMBuildAdd(self.builder, lhs.val, rhs.val, "addtmp"),
             .sub => c.LLVMBuildSub(self.builder, lhs.val, rhs.val, "subtmp"),
             .mul => c.LLVMBuildMul(self.builder, lhs.val, rhs.val, "multmp"),
-            .div => c.LLVMBuildSDiv(self.builder, lhs.val, rhs.val, "divtmp"),
+            .div => self.emitSDiv(lhs.val, rhs.val),
             .eq => blk: {
                 const cmp_val = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs.val, rhs.val, "eqtmp");
                 break :blk c.LLVMBuildZExt(self.builder, cmp_val, self.i64_type, "eqext");
@@ -829,11 +911,70 @@ pub const Codegen = struct {
                 const cmp_val = c.LLVMBuildICmp(self.builder, c.LLVMIntSGE, lhs.val, rhs.val, "getmp");
                 break :blk c.LLVMBuildZExt(self.builder, cmp_val, self.i64_type, "geext");
             },
-            .and_op => c.LLVMBuildAnd(self.builder, lhs.val, rhs.val, "andtmp"),
-            .or_op => c.LLVMBuildOr(self.builder, lhs.val, rhs.val, "ortmp"),
+            .and_op, .or_op => unreachable, // compileLogical
             .concat => return CodegenError.UnsupportedNode, // ++ needs tagged values
         };
-        return .{ .val = val, .tag = .int };
+        const tag: ValTag = switch (op.op) {
+            .eq, .neq, .lt, .gt, .lte, .gte => .boolean,
+            else => .int,
+        };
+        return .{ .val = val, .tag = tag };
+    }
+
+    /// a / b for b != 0.  LLVM's sdiv of minInt by -1 is undefined
+    /// behaviour (the quotient does not fit), and at O3 it printed 1; the
+    /// interpreter wraps it to minInt (test/int_overflow_test.blimp).  A
+    /// divisor of -1 is a negation with no nsw, which wraps the same way,
+    /// and the sdiv is given 1 instead so it never sees the pair.
+    fn emitSDiv(self: *Codegen, a: c.LLVMValueRef, b: c.LLVMValueRef) c.LLVMValueRef {
+        const minus_one = c.LLVMConstInt(self.i64_type, @bitCast(@as(i64, -1)), 1);
+        const is_m1 = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, b, minus_one, "div_m1");
+        const safe_b = c.LLVMBuildSelect(self.builder, is_m1, c.LLVMConstInt(self.i64_type, 1, 0), b, "div_b");
+        const q = c.LLVMBuildSDiv(self.builder, a, safe_b, "divtmp");
+        const neg = c.LLVMBuildSub(self.builder, c.LLVMConstInt(self.i64_type, 0, 0), a, "div_neg");
+        return c.LLVMBuildSelect(self.builder, is_m1, neg, q, "div");
+    }
+
+    /// `a && b`, `a || b`: the interpreter stops at the left side when it
+    /// decides the answer, so the right side runs only when it must (a send
+    /// or a division on the right is not evaluated), and the result is a
+    /// Bool.  Both sides must be Bools here: the interpreter's truthiness
+    /// counts an Int 0 as true, and an i64 compared with 0 would not.
+    fn compileLogical(self: *Codegen, op: ast.Node.BinaryOp) CodegenError!TaggedVal {
+        const func = self.current_fn orelse return CodegenError.LLVMError;
+        const sym = if (op.op == .and_op) "&&" else "||";
+        const lhs = try self.compileExpr(op.left.*);
+        if (lhs.tag != .boolean) return self.rejectLogicalSide(op.left.loc, sym, lhs.tag);
+        const lhs_end = c.LLVMGetInsertBlock(self.builder);
+        const rhs_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "logic_rhs");
+        const merge_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "logic_merge");
+        const is_true = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, lhs.val, c.LLVMConstInt(self.i64_type, 0, 0), "lhs_true");
+        if (op.op == .and_op)
+            _ = c.LLVMBuildCondBr(self.builder, is_true, rhs_bb, merge_bb)
+        else
+            _ = c.LLVMBuildCondBr(self.builder, is_true, merge_bb, rhs_bb);
+
+        c.LLVMPositionBuilderAtEnd(self.builder, rhs_bb);
+        const rhs = try self.compileExpr(op.right.*);
+        if (rhs.tag != .boolean) return self.rejectLogicalSide(op.right.loc, sym, rhs.tag);
+        const rhs_end = c.LLVMGetInsertBlock(self.builder);
+        _ = c.LLVMBuildBr(self.builder, merge_bb);
+
+        c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
+        const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "logic");
+        var vals = [_]c.LLVMValueRef{ c.LLVMConstInt(self.i64_type, if (op.op == .and_op) 0 else 1, 0), rhs.val };
+        var blocks = [_]c.LLVMBasicBlockRef{ lhs_end, rhs_end };
+        c.LLVMAddIncoming(phi, &vals, &blocks, 2);
+        return .{ .val = phi, .tag = .boolean };
+    }
+
+    fn rejectLogicalSide(self: *Codegen, loc: ast.Loc, sym: []const u8, tag: ValTag) CodegenError {
+        return self.reject(
+            loc,
+            "This side of `{s}` is {s}; compiled code takes only a Bool here.",
+            .{ sym, tagNoun(tag) },
+            "Run this file with the interpreter.",
+        );
     }
 
     fn compileUnaryOp(self: *Codegen, op: ast.Node.UnaryOp) CodegenError!TaggedVal {
@@ -844,12 +985,18 @@ pub const Codegen = struct {
             else
                 c.LLVMBuildNeg(self.builder, operand.val, "negtmp"),
             .not => blk: {
+                if (operand.tag != .boolean) return self.reject(
+                    op.operand.loc,
+                    "`!` of {s}; compiled code takes only a Bool here.",
+                    .{tagNoun(operand.tag)},
+                    "Run this file with the interpreter.",
+                );
                 const zero = c.LLVMConstInt(self.i64_type, 0, 0);
                 const cmp_val = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, operand.val, zero, "nottmp");
                 break :blk c.LLVMBuildZExt(self.builder, cmp_val, self.i64_type, "notext");
             },
         };
-        return .{ .val = val, .tag = operand.tag };
+        return .{ .val = val, .tag = if (op.op == .not) .boolean else operand.tag };
     }
 
     fn compileDotAccess(self: *Codegen, dot: ast.Node.DotAccess) CodegenError!TaggedVal {
@@ -1023,11 +1170,15 @@ pub const Codegen = struct {
         const saved_catches = self.catches;
         self.fn_kind = .handler;
         self.catches = .empty;
+        self.reply_mask = 0;
+        self.reply_may_nil = false;
         defer {
             self.catches.deinit(self.allocator);
             self.catches = saved_catches;
             self.fn_kind = saved_kind;
         }
+        const param_tags = self.allocator.alloc(?ValTag, handler.params.len) catch return CodegenError.LLVMError;
+        for (handler.params, 0..) |param, i| param_tags[i] = self.handlerParamTag(param);
 
         // Create entry block
         const entry = c.LLVMAppendBasicBlockInContext(self.context, func, "entry");
@@ -1044,27 +1195,48 @@ pub const Codegen = struct {
             const gep = c.LLVMBuildStructGEP2(self.builder, actor_desc.state_type, state_ptr, idx, self.zname(field_name));
             const loaded = c.LLVMBuildLoad2(self.builder, self.i64_type, gep, self.zname(field_name));
 
-            // Store in local alloca so assignments work naturally
-            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(field_name));
-            _ = c.LLVMBuildStore(self.builder, loaded, alloca);
+            // Every field is stored as an i64; the local holds it as what
+            // its tag says (an Atom an i32, a String a ptr), as any other
+            // local of that tag does.
+            const tag = actor_desc.state_default_tags[i];
+            const alloca = c.LLVMBuildAlloca(self.builder, self.llvmTypeForTag(tag), self.zname(field_name));
+            _ = c.LLVMBuildStore(self.builder, self.coerceFromI64(loaded, tag), alloca);
             self.scope.put(self.allocator, .{
                 .name = field_name,
                 .alloca = alloca,
-                .tag = actor_desc.state_default_tags[i],
-                .llvm_type = self.i64_type,
+                .tag = tag,
+                .llvm_type = self.llvmTypeForTag(tag),
             });
         }
 
         // Bind handler params
         for (handler.params, 0..) |param, i| {
             const param_val = c.LLVMGetParam(func, @intCast(i + 1));
-            const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param.name));
-            _ = c.LLVMBuildStore(self.builder, param_val, alloca);
+            const tag = param_tags[i] orelse {
+                // Kept as its i64 bits: it can be passed on, as it is, to a
+                // handler parameter that is not bound either.
+                const raw = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(param.name));
+                _ = c.LLVMBuildStore(self.builder, param_val, raw);
+                self.scope.put(self.allocator, .{
+                    .name = param.name,
+                    .alloca = raw,
+                    .tag = .nil,
+                    .llvm_type = self.i64_type,
+                    .unbound = std.fmt.allocPrint(
+                        self.allocator,
+                        "Parameter `{s}` of :{s} is typed {s}; a compiled handler binds only Int, Float, Bool, String, Atom or actor parameters.",
+                        .{ param.name, handler.name, param.type_name orelse "nothing" },
+                    ) catch "unbound parameter",
+                });
+                continue;
+            };
+            const alloca = c.LLVMBuildAlloca(self.builder, self.llvmTypeForTag(tag), self.zname(param.name));
+            _ = c.LLVMBuildStore(self.builder, self.coerceFromI64(param_val, tag), alloca);
             self.scope.put(self.allocator, .{
                 .name = param.name,
                 .alloca = alloca,
-                .tag = .int,
-                .llvm_type = self.i64_type,
+                .tag = tag,
+                .llvm_type = self.llvmTypeForTag(tag),
             });
         }
 
@@ -1095,6 +1267,9 @@ pub const Codegen = struct {
         const current_bb = c.LLVMGetInsertBlock(self.builder);
         if (c.LLVMGetBasicBlockTerminator(current_bb) == null) {
             _ = c.LLVMBuildRet(self.builder, self.makeHandlerRet(Status.nil, c.LLVMConstInt(self.i64_type, 0, 0)));
+            // Not when the only way here is past a bubble: `_ -> bubble :bad`
+            // leaves the builder in a block nothing can reach.
+            if (self.blockReachable(current_bb, entry)) self.reply_may_nil = true;
         }
 
         // Register handler
@@ -1104,7 +1279,52 @@ pub const Codegen = struct {
             .atom_id = atom_id,
             .func = func,
             .param_count = param_count,
+            .param_tags = param_tags,
+            .reply_mask = self.reply_mask,
+            .may_nil = self.reply_may_nil,
         }) catch {};
+    }
+
+    /// A handler parameter is bound from an i64 argument slot, so the
+    /// compiler has to know what it holds: its annotation says.  Without
+    /// one it was bound as an Int, and a String argument printed as the
+    /// address it was.
+    fn handlerParamTag(self: *Codegen, param: ast.Node.HandlerParam) ?ValTag {
+        switch (param.check) {
+            .int => return .int,
+            .float => return .float,
+            .string => return .string,
+            .atom => return .atom,
+            .boolean => return .boolean,
+            .named => for (self.actor_names.items) |n| {
+                if (std.mem.eql(u8, n, param.type_name.?)) return .actor_ref;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    /// Whether any path from `entry` reaches `bb`, walking predecessors
+    /// (the terminators that use the block).  A block emitRaise or a dead
+    /// merge leaves behind has none that are reachable.
+    fn blockReachable(self: *Codegen, bb: c.LLVMBasicBlockRef, entry: c.LLVMBasicBlockRef) bool {
+        var seen: std.ArrayList(c.LLVMBasicBlockRef) = .empty;
+        defer seen.deinit(self.allocator);
+        var work: std.ArrayList(c.LLVMBasicBlockRef) = .empty;
+        defer work.deinit(self.allocator);
+        work.append(self.allocator, bb) catch return true;
+        while (work.pop()) |b| {
+            if (b == entry) return true;
+            if (std.mem.indexOfScalar(c.LLVMBasicBlockRef, seen.items, b) != null) continue;
+            seen.append(self.allocator, b) catch return true;
+            var use = c.LLVMGetFirstUse(c.LLVMBasicBlockAsValue(b));
+            while (use != null) : (use = c.LLVMGetNextUse(use)) {
+                const user = c.LLVMGetUser(use);
+                if (c.LLVMIsATerminatorInst(user) == null) continue;
+                work.append(self.allocator, c.LLVMGetInstructionParent(user)) catch return true;
+            }
+        }
+        return false;
     }
 
     fn compileBecome(self: *Codegen, become: ast.Node.BecomeStmt) CodegenError!TaggedVal {
@@ -1118,6 +1338,7 @@ pub const Codegen = struct {
             for (0..actor.state_field_count) |i| {
                 if (std.mem.eql(u8, actor.state_field_names[i], field.key)) {
                     const new_val = try self.compileExpr(field.value);
+                    try self.requireFieldTag(field.key, actor.state_default_tags[i], new_val.tag, field.value.loc);
                     const idx: u32 = @intCast(i);
                     const gep = c.LLVMBuildStructGEP2(
                         self.builder,
@@ -1136,8 +1357,28 @@ pub const Codegen = struct {
         return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
     }
 
+    /// A field is one i64 slot with one tag, the tag of its default: the
+    /// handlers read it back as that.  A value of another tag stored in it
+    /// would be read back as the wrong type, so it is refused.
+    fn requireFieldTag(self: *Codegen, field: []const u8, want: ValTag, got: ValTag, loc: ast.Loc) CodegenError!void {
+        if (want == got) return;
+        return self.reject(
+            loc,
+            "State field `{s}` holds {s} in compiled code (its default), and this is {s}.",
+            .{ field, tagNoun(want), tagNoun(got) },
+            "Run this file with the interpreter.",
+        );
+    }
+
     fn compileReply(self: *Codegen, reply: ast.Node.ReplyStmt) CodegenError!TaggedVal {
         const val = try self.compileExpr(reply.value.*);
+        if (val.tag == .tagged_val) return self.reject(
+            reply.value.loc,
+            "A compiled reply can be an Int, a Float, a Bool, a String, an Atom, an actor or nil; this is {s}.",
+            .{tagNoun(val.tag)},
+            "Run this file with the interpreter.",
+        );
+        if (val.tag == .nil) self.reply_may_nil = true else self.reply_mask |= tagBit(val.tag);
         // Coerce to i64 for the {i1, i64} handler return type
         const ret_val = self.coerceToI64(val);
         const status = if (val.tag == .nil) Status.nil else Status.ok;
@@ -1289,6 +1530,7 @@ pub const Codegen = struct {
                         self.failure = null;
                         break;
                     };
+                    try self.requireFieldTag(field_name, actor.state_default_tags[i], value.tag, ov.value.loc);
                     break;
                 }
             }
@@ -1507,7 +1749,7 @@ pub const Codegen = struct {
             },
             .atom => blk: {
                 const f = self.getRuntimeFn("blimp_val_atom", &.{self.i32_type}, self.ptr_type);
-                var args = [_]c.LLVMValueRef{tv.val};
+                var args = [_]c.LLVMValueRef{self.atomId32(tv.val)};
                 var pt = [_]c.LLVMTypeRef{self.i32_type};
                 break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
             },
@@ -1519,7 +1761,15 @@ pub const Codegen = struct {
                 break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
             },
             .tagged_val => tv.val, // Already a BlimpVal*
-            .nil, .actor_ref => blk: {
+            // An actor boxed as nil was what a try or case with an actor on
+            // one side handed back.
+            .actor_ref => blk: {
+                const f = self.getRuntimeFn("blimp_val_actor_ref", &.{self.i32_type}, self.ptr_type);
+                var args = [_]c.LLVMValueRef{c.LLVMBuildTrunc(self.builder, tv.val, self.i32_type, "ref_id")};
+                var pt = [_]c.LLVMTypeRef{self.i32_type};
+                break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &pt, 1, 0), f, &args, 1, "boxed");
+            },
+            .nil => blk: {
                 const f = self.getRuntimeFn("blimp_val_nil", &.{}, self.ptr_type);
                 break :blk c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.ptr_type, &[_]c.LLVMTypeRef{}, 0, 0), f, &[_]c.LLVMValueRef{}, 0, "boxed");
             },
@@ -1712,10 +1962,22 @@ pub const Codegen = struct {
             last_tv = try self.compileExpr(stmt);
         }
 
-        // Return the last expression value
+        // Return the last expression value, widened to the i64 every def
+        // returns (a String body failed LLVM verification: ret ptr in an
+        // i64 function).  A boxed value has no lifetime the caller manages.
         if (c.LLVMGetBasicBlockTerminator(c.LLVMGetInsertBlock(self.builder)) == null) {
-            _ = c.LLVMBuildRet(self.builder, last_tv.val);
+            if (last_tv.tag == .tagged_val) {
+                const at = if (ds.body.len > 0) ds.body[ds.body.len - 1].loc else ast.Loc{ .line = 0, .col = 0 };
+                return self.reject(
+                    at,
+                    "`{s}` returns a list, map or fn value; a compiled def can return an Int, a Float, a Bool, a String, an Atom, an actor or nil.",
+                    .{ds.name},
+                    "Run this file with the interpreter.",
+                );
+            }
+            _ = c.LLVMBuildRet(self.builder, self.coerceToI64(last_tv));
         }
+        self.def_tags.append(self.allocator, .{ .name = ds.name, .tag = last_tv.tag }) catch return CodegenError.LLVMError;
 
         // Restore context
         self.current_fn = saved_fn;
@@ -1933,7 +2195,11 @@ pub const Codegen = struct {
     }
 
     fn compileMessageSend(self: *Codegen, msg: ast.Node.MessageSend, loc: ast.Loc) CodegenError!TaggedVal {
+        const under_orelse = self.send_under_orelse;
+        self.send_under_orelse = false;
         const target = try self.compileExpr(msg.target.*);
+        const arg_tags = self.allocator.alloc(?ValTag, msg.args.len) catch return CodegenError.LLVMError;
+        const arg_locs = self.allocator.alloc(ast.Loc, msg.args.len) catch return CodegenError.LLVMError;
 
         // Target is now an actor_id (i64) -- truncate to i32 for the runtime
         const actor_id = c.LLVMBuildTrunc(self.builder, target.val, self.i32_type, "actor_id");
@@ -1949,9 +2215,17 @@ pub const Codegen = struct {
             c.LLVMConstNull(self.ptr_type);
 
         for (msg.args, 0..) |arg, i| {
-            const arg_val = try self.compileExpr(arg);
-            // Actor refs get their ID as i64
-            const store_val = arg_val.val;
+            arg_locs[i] = arg.loc;
+            // Each slot is an i64: an Atom (i32) used to be stored as 4
+            // bytes into 8, a String as its pointer.
+            const store_val = if (self.unboundArg(arg)) |raw| blk: {
+                arg_tags[i] = null;
+                break :blk raw;
+            } else blk: {
+                const arg_val = try self.compileExpr(arg);
+                arg_tags[i] = arg_val.tag;
+                break :blk self.coerceToI64(arg_val);
+            };
             if (arg_count > 0) {
                 var indices = [_]c.LLVMValueRef{
                     c.LLVMConstInt(self.i32_type, 0, 0),
@@ -1990,7 +2264,158 @@ pub const Codegen = struct {
         const result = c.LLVMBuildCall2(self.builder, send_ft, send_fn, &send_args, 5, "send");
         const checked = self.emitCheckResult(result);
         self.last_send_status = checked.status;
-        return .{ .val = checked.val, .tag = .int };
+        const reply = try self.replyTag(msg.message, loc, under_orelse);
+        const never = self.sendNeverReturns(msg.message);
+        self.last_send_never = never;
+        self.sends.append(self.allocator, .{
+            .message = msg.message,
+            .loc = loc,
+            .under_orelse = under_orelse,
+            .reply = reply,
+            .never = never,
+            .arg_tags = arg_tags,
+            .arg_locs = arg_locs,
+        }) catch return CodegenError.LLVMError;
+        return .{ .val = self.coerceFromI64(checked.val, reply), .tag = reply };
+    }
+
+    /// A send argument that is an unbound handler parameter, by itself:
+    /// its i64 bits, passed on without being read as any type.
+    fn unboundArg(self: *Codegen, arg: ast.Node) ?c.LLVMValueRef {
+        if (arg.kind != .identifier) return null;
+        const entry = self.scope.get(arg.kind.identifier.name) orelse return null;
+        if (entry.unbound == null) return null;
+        return c.LLVMBuildLoad2(self.builder, self.i64_type, entry.alloca, "passed_on");
+    }
+
+    /// What a send of `message` hands back, from every handler of that name
+    /// compiled so far (the target's actor is not known statically, but
+    /// every handler is in this file).  A send is synchronous and returns
+    /// one i64, so the tag is static: one tag of reply, or nil when no
+    /// handler replies.  A handler that may also end without a reply makes
+    /// the result that tag or nil, which one i64 cannot say; that is
+    /// compiled only as the left side of an `orelse`, where the status
+    /// decides.  Before any handler of that name is compiled the send is
+    /// taken to reply an Int, and checkSends holds it to that.
+    fn replyTag(self: *Codegen, message: []const u8, loc: ast.Loc, under_orelse: bool) CodegenError!ValTag {
+        var mask: u16 = 0;
+        var may_nil = false;
+        var any = false;
+        for (self.actors.items) |a| for (a.handler_fns.items) |h| {
+            if (!std.mem.eql(u8, h.name, message)) continue;
+            any = true;
+            mask |= h.reply_mask;
+            may_nil = may_nil or h.may_nil;
+        };
+        if (!any) return .int;
+        // Every handler only raises: the send never hands back a value, so
+        // its tag is never read.  Int, as before, so a `try` around it
+        // does not box its arms for a value that cannot arrive.
+        if (mask == 0 and !may_nil) return .int;
+        if (mask == 0) return .nil;
+        if (@popCount(mask) > 1) return self.reject(
+            loc,
+            "Handlers of :{s} reply {s}; a compiled send takes one type of reply.",
+            .{ message, self.maskNouns(mask) },
+            "Run this file with the interpreter.",
+        );
+        const tag: ValTag = @enumFromInt(@ctz(mask));
+        if (may_nil and !under_orelse) return self.reject(
+            loc,
+            "A handler of :{s} replies {s} on one path and nothing on another; compiled code can take that only on the left of `orelse`.",
+            .{ message, tagNoun(tag) },
+            "Reply on every path, put the send before `orelse`, or run this file with the interpreter.",
+        );
+        return tag;
+    }
+
+    /// No handler of `message` compiled so far can end without raising:
+    /// there is none (the send is NO MATCHING HANDLER, a fault), or each
+    /// one only bubbles.
+    fn sendNeverReturns(self: *Codegen, message: []const u8) bool {
+        for (self.actors.items) |a| for (a.handler_fns.items) |h| {
+            if (!std.mem.eql(u8, h.name, message)) continue;
+            if (h.reply_mask != 0 or h.may_nil) return false;
+        };
+        return true;
+    }
+
+    fn maskNouns(self: *Codegen, mask: u16) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        var first = true;
+        for (std.enums.values(ValTag)) |t| {
+            if (mask & tagBit(t) == 0) continue;
+            if (!first) out.appendSlice(self.allocator, " and ") catch {};
+            out.appendSlice(self.allocator, tagNoun(t)) catch {};
+            first = false;
+        }
+        return out.items;
+    }
+
+    /// Every send again, now that every handler is compiled: its reply must
+    /// be what it was compiled for, and each argument what the handlers of
+    /// that message bind it as.
+    fn defTag(self: *const Codegen, name: []const u8) ?ValTag {
+        for (self.def_tags.items) |d| if (std.mem.eql(u8, d.name, name)) return d.tag;
+        return null;
+    }
+
+    fn checkSends(self: *Codegen) CodegenError!void {
+        for (self.def_calls.items) |call| {
+            const tag = self.defTag(call.name) orelse continue;
+            if (tag != call.tag) return self.reject(
+                call.loc,
+                "This call of `{s}` was compiled before the def was, as returning {s}; the def returns {s}.",
+                .{ call.name, tagNoun(call.tag), tagNoun(tag) },
+                "Define the def before the code that calls it, or run this file with the interpreter.",
+            );
+        }
+        for (self.sends.items) |snd| {
+            const now = try self.replyTag(snd.message, snd.loc, snd.under_orelse);
+            var any = false;
+            for (self.actors.items) |a| for (a.handler_fns.items) |h| {
+                if (!std.mem.eql(u8, h.name, snd.message)) continue;
+                any = true;
+                if (h.param_count != snd.arg_tags.len) continue;
+                for (snd.arg_tags, 0..) |maybe_t, i| {
+                    const t = maybe_t orelse {
+                        if (h.param_tags[i] == null) continue;
+                        return self.reject(
+                            snd.arg_locs[i],
+                            "Argument {d} of :{s} is a parameter compiled code did not bind; the handler binds it as {s}.",
+                            .{ i + 1, snd.message, tagNoun(h.param_tags[i].?) },
+                            "Run this file with the interpreter.",
+                        );
+                    };
+                    const want = h.param_tags[i] orelse return self.reject(
+                        snd.arg_locs[i],
+                        "Argument {d} of :{s} goes to a parameter of a type compiled code does not bind (Int, Float, Bool, String, Atom or an actor).",
+                        .{ i + 1, snd.message },
+                        "Run this file with the interpreter.",
+                    );
+                    if (t == want) continue;
+                    return self.reject(
+                        snd.arg_locs[i],
+                        "Argument {d} of :{s} is {s}; the handler binds it as {s}.",
+                        .{ i + 1, snd.message, tagNoun(t), tagNoun(want) },
+                        "Run this file with the interpreter.",
+                    );
+                }
+            };
+            // Only `orelse` acts on `never`: it drops the left side.
+            if (snd.under_orelse and snd.never and !self.sendNeverReturns(snd.message)) return self.reject(
+                snd.loc,
+                "This send of :{s} was compiled before its handler, as never handing back a value; the handler can.",
+                .{snd.message},
+                "Declare the handler before the code that sends to it, or run this file with the interpreter.",
+            );
+            if (any and now != snd.reply) return self.reject(
+                snd.loc,
+                "This send of :{s} was compiled before its handler, as replying {s}; the handler replies {s}.",
+                .{ snd.message, tagNoun(snd.reply), tagNoun(now) },
+                "Declare the handler before the code that sends to it, or run this file with the interpreter.",
+            );
+        }
     }
 
     fn getMalloc(self: *Codegen) c.LLVMValueRef {
@@ -2013,16 +2438,22 @@ pub const Codegen = struct {
     /// Compile situation/case: chain of icmp + conditional branches.
     /// Both work the same way -- situation allows holes, case requires exhaustiveness,
     /// but codegen treats them identically.
+    ///
+    /// The value is the last expression of the branch taken, or nil when
+    /// none matches (the interpreter's answer; this used to be an Int 0).
+    /// Its tag is the one every branch that can get to the end shares;
+    /// when they differ (an Int branch and the nil of no match), each is
+    /// boxed as a BlimpVal, as try's arms are.
     fn compileBranching(self: *Codegen, subject_node: *const ast.Node, branches: []const ast.Node.Branch) CodegenError!TaggedVal {
         const func = self.current_fn orelse return CodegenError.LLVMError;
         const subject = try self.compileExpr(subject_node.*);
 
         const merge_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "merge");
-
-        // We'll collect {value, block} pairs for the phi node
-        var phi_vals: [16]c.LLVMValueRef = undefined;
-        var phi_blocks: [16]c.LLVMBasicBlockRef = undefined;
-        var phi_count: u32 = 0;
+        const Arm = struct { bb: c.LLVMBasicBlockRef, tv: TaggedVal };
+        var arms: std.ArrayList(Arm) = .empty;
+        defer arms.deinit(self.allocator);
+        const nil_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+        var always_matches = false;
 
         for (branches, 0..) |branch, idx| {
             const is_wildcard = branch.pattern == null or
@@ -2030,83 +2461,38 @@ pub const Codegen = struct {
             const is_var_bind = !is_wildcard and branch.pattern != null and
                 branch.pattern.?.kind == .identifier;
 
-            if (is_wildcard or (is_var_bind and branch.guard == null)) {
-                // Wildcard/hole or unguarded variable bind: unconditional branch
-                if (is_var_bind) {
-                    const var_name = branch.pattern.?.kind.identifier.name;
-                    const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(var_name));
-                    _ = c.LLVMBuildStore(self.builder, subject.val, alloca);
-                    self.scope.put(self.allocator, .{
-                        .name = var_name,
-                        .alloca = alloca,
-                        .tag = subject.tag,
-                        .llvm_type = self.i64_type,
-                    });
-                }
-                var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
-                for (branch.body) |stmt| {
-                    last_val = try self.compileExpr(stmt);
-                }
-                // Only branch to merge if body didn't already terminate (e.g. reply/ret)
-                const bb = c.LLVMGetInsertBlock(self.builder);
-                if (c.LLVMGetBasicBlockTerminator(bb) == null) {
-                    if (phi_count < 16) {
-                        phi_vals[phi_count] = last_val.val;
-                        phi_blocks[phi_count] = bb;
-                        phi_count += 1;
-                    }
-                    _ = c.LLVMBuildBr(self.builder, merge_bb);
-                }
-                break; // Unconditional branch is always last
-            } else if (is_var_bind) {
-                // Variable bind with guard: bind subject to var, then test guard
+            if (is_var_bind) {
+                // The subject, under a name, as a local of its own type.
                 const var_name = branch.pattern.?.kind.identifier.name;
-                const alloca = c.LLVMBuildAlloca(self.builder, self.i64_type, self.zname(var_name));
+                const lt = self.llvmTypeForTag(subject.tag);
+                const alloca = c.LLVMBuildAlloca(self.builder, lt, self.zname(var_name));
                 _ = c.LLVMBuildStore(self.builder, subject.val, alloca);
                 self.scope.put(self.allocator, .{
                     .name = var_name,
                     .alloca = alloca,
                     .tag = subject.tag,
-                    .llvm_type = self.i64_type,
+                    .llvm_type = lt,
                 });
+            }
 
-                const guard_val = try self.compileExpr(branch.guard.?.*);
-                const zero = c.LLVMConstInt(self.i64_type, 0, 0);
-                const guard_bool = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
-
-                const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
-                const is_last = idx + 1 >= branches.len;
-                const else_bb = if (!is_last)
-                    c.LLVMAppendBasicBlockInContext(self.context, func, "else")
-                else
-                    merge_bb;
-
-                _ = c.LLVMBuildCondBr(self.builder, guard_bool, then_bb, else_bb);
-
-                if (is_last and phi_count < 16) {
-                    phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
-                    phi_blocks[phi_count] = c.LLVMGetInsertBlock(self.builder);
-                    phi_count += 1;
-                }
-
-                c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
-                var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+            if (is_wildcard or (is_var_bind and branch.guard == null)) {
+                // Wildcard/hole or unguarded variable bind: always taken
+                var last_val = nil_val;
                 for (branch.body) |stmt| {
                     last_val = try self.compileExpr(stmt);
                 }
-                const then_end = c.LLVMGetInsertBlock(self.builder);
-                if (c.LLVMGetBasicBlockTerminator(then_end) == null) {
-                    if (phi_count < 16) {
-                        phi_vals[phi_count] = last_val.val;
-                        phi_blocks[phi_count] = then_end;
-                        phi_count += 1;
-                    }
-                    _ = c.LLVMBuildBr(self.builder, merge_bb);
-                }
+                const bb = c.LLVMGetInsertBlock(self.builder);
+                if (c.LLVMGetBasicBlockTerminator(bb) == null)
+                    arms.append(self.allocator, .{ .bb = bb, .tv = last_val }) catch return CodegenError.LLVMError;
+                always_matches = true;
+                break; // Unconditional branch is always last
+            }
 
-                if (!is_last) {
-                    c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
-                }
+            var cond: c.LLVMValueRef = undefined;
+            if (is_var_bind) {
+                const guard_val = try self.compileExpr(branch.guard.?.*);
+                const zero = c.LLVMConstInt(self.i64_type, 0, 0);
+                cond = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
             } else {
                 // Literal pattern match: compare subject to pattern value
                 const pattern = try self.compileExpr(branch.pattern.?.*);
@@ -2121,80 +2507,78 @@ pub const Codegen = struct {
                         rhs_val = c.LLVMBuildZExt(self.builder, rhs_val, lhs_type, "widen_r");
                     }
                 }
-
-                var cmp = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs_val, rhs_val, "branchtmp");
+                cond = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, lhs_val, rhs_val, "branchtmp");
                 if (branch.guard) |guard_node| {
                     const guard_val = try self.compileExpr(guard_node.*);
                     const zero = c.LLVMConstInt(self.i64_type, 0, 0);
                     const guard_bool = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_val.val, zero, "guard");
-                    cmp = c.LLVMBuildAnd(self.builder, cmp, guard_bool, "match_and_guard");
-                }
-
-                const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
-                const is_last = idx + 1 >= branches.len;
-                const else_bb = if (!is_last)
-                    c.LLVMAppendBasicBlockInContext(self.context, func, "else")
-                else
-                    merge_bb;
-
-                _ = c.LLVMBuildCondBr(self.builder, cmp, then_bb, else_bb);
-
-                if (is_last and phi_count < 16) {
-                    phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
-                    phi_blocks[phi_count] = c.LLVMGetInsertBlock(self.builder);
-                    phi_count += 1;
-                }
-
-                c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
-                var last_val: TaggedVal = .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
-                for (branch.body) |stmt| {
-                    last_val = try self.compileExpr(stmt);
-                }
-                const then_end = c.LLVMGetInsertBlock(self.builder);
-                if (c.LLVMGetBasicBlockTerminator(then_end) == null) {
-                    if (phi_count < 16) {
-                        phi_vals[phi_count] = last_val.val;
-                        phi_blocks[phi_count] = then_end;
-                        phi_count += 1;
-                    }
-                    _ = c.LLVMBuildBr(self.builder, merge_bb);
-                }
-
-                if (!is_last) {
-                    c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
+                    cond = c.LLVMBuildAnd(self.builder, cond, guard_bool, "match_and_guard");
                 }
             }
+
+            const then_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "then");
+            const else_bb = c.LLVMAppendBasicBlockInContext(self.context, func, if (idx + 1 >= branches.len) "no_match" else "else");
+            _ = c.LLVMBuildCondBr(self.builder, cond, then_bb, else_bb);
+
+            c.LLVMPositionBuilderAtEnd(self.builder, then_bb);
+            var last_val = nil_val;
+            for (branch.body) |stmt| {
+                last_val = try self.compileExpr(stmt);
+            }
+            const then_end = c.LLVMGetInsertBlock(self.builder);
+            if (c.LLVMGetBasicBlockTerminator(then_end) == null)
+                arms.append(self.allocator, .{ .bb = then_end, .tv = last_val }) catch return CodegenError.LLVMError;
+
+            c.LLVMPositionBuilderAtEnd(self.builder, else_bb);
         }
 
-        // If we're in a block that hasn't been terminated yet (no wildcard matched),
-        // add a default nil branch to merge
+        // Still in a block nothing branched away from: no branch matched.
         const current_bb = c.LLVMGetInsertBlock(self.builder);
-        if (current_bb != merge_bb and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
-            if (phi_count < 16) {
-                phi_vals[phi_count] = c.LLVMConstInt(self.i64_type, 0, 0);
-                phi_blocks[phi_count] = current_bb;
-                phi_count += 1;
+        if (!always_matches and c.LLVMGetBasicBlockTerminator(current_bb) == null)
+            arms.append(self.allocator, .{ .bb = current_bb, .tv = nil_val }) catch return CodegenError.LLVMError;
+
+        // An arm that ends past a bubble is not reached; its nil is not a
+        // value the case can have.
+        const entry_bb = c.LLVMGetEntryBasicBlock(func);
+        var live: std.ArrayList(Arm) = .empty;
+        defer live.deinit(self.allocator);
+        for (arms.items) |arm| {
+            if (self.blockReachable(arm.bb, entry_bb)) {
+                live.append(self.allocator, arm) catch return CodegenError.LLVMError;
+            } else {
+                c.LLVMPositionBuilderAtEnd(self.builder, arm.bb);
+                _ = c.LLVMBuildUnreachable(self.builder);
             }
-            _ = c.LLVMBuildBr(self.builder, merge_bb);
         }
 
-        // Build phi in merge block
-        c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
-
-        if (phi_count == 0) {
-            // All branches terminated (reply/ret) -- merge is dead code.
-            // Delete the empty merge block and position at the last block.
+        if (live.items.len == 0) {
+            // Every branch ended the function (reply) or raised: merge is dead.
             c.LLVMDeleteBasicBlock(merge_bb);
             // Carry on in a fresh block with no predecessors.  The function's
             // last block is not that: it may be a raise path already ended.
             const dead_bb = c.LLVMAppendBasicBlockInContext(self.context, func, "after_branches");
             c.LLVMPositionBuilderAtEnd(self.builder, dead_bb);
-            return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
+            return nil_val;
         }
 
+        var same = true;
+        for (live.items) |arm| {
+            if (arm.tv.tag != live.items[0].tv.tag) same = false;
+        }
+        const result_tag: ValTag = if (same) live.items[0].tv.tag else .tagged_val;
+        const vals = self.allocator.alloc(c.LLVMValueRef, live.items.len) catch return CodegenError.LLVMError;
+        const blocks = self.allocator.alloc(c.LLVMBasicBlockRef, live.items.len) catch return CodegenError.LLVMError;
+        for (live.items, 0..) |arm, i| {
+            c.LLVMPositionBuilderAtEnd(self.builder, arm.bb);
+            vals[i] = if (same) self.coerceToI64(arm.tv) else self.coerceToI64(.{ .val = self.wrapAsBlimpVal(arm.tv), .tag = .tagged_val });
+            blocks[i] = c.LLVMGetInsertBlock(self.builder);
+            _ = c.LLVMBuildBr(self.builder, merge_bb);
+        }
+
+        c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
         const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "result");
-        c.LLVMAddIncoming(phi, &phi_vals, &phi_blocks, phi_count);
-        return .{ .val = phi, .tag = .int };
+        c.LLVMAddIncoming(phi, vals.ptr, blocks.ptr, @intCast(live.items.len));
+        return .{ .val = self.coerceFromI64(phi, result_tag), .tag = result_tag };
     }
 
     fn compileSituation(self: *Codegen, sit: ast.Node.Situation) CodegenError!TaggedVal {
@@ -2215,6 +2599,8 @@ pub const Codegen = struct {
 
         self.catches.append(self.allocator, .{ .kind = .orelse_, .landing = fallback_bb, .slot = null, .loc = loc }) catch return CodegenError.LLVMError;
         self.last_send_status = null;
+        self.last_send_never = false;
+        self.send_under_orelse = ore.try_expr.kind == .message_send;
         const try_val = self.compileExpr(ore.try_expr.*) catch |err| {
             _ = self.catches.pop();
             return err;
@@ -2222,31 +2608,84 @@ pub const Codegen = struct {
         _ = self.catches.pop();
 
         // Nil.  For a send, the status says whether there was a reply: a
-        // reply of 0 is a value, not nil, and used to take the fallback.
-        // TODO: anything else is still compared against 0, so an Int 0 from
-        // a def or a variable takes the fallback where the interpreter keeps it.
-        const is_nil = if (ore.try_expr.kind == .message_send and self.last_send_status != null)
-            c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.last_send_status.?, c.LLVMConstInt(self.i8_type, Status.nil, 0), "noreply")
-        else
-            c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.coerceToI64(try_val), c.LLVMConstInt(self.i64_type, 0, 0), "isniltmp");
-        const try_bb = c.LLVMGetInsertBlock(self.builder);
-
-        _ = c.LLVMBuildCondBr(self.builder, is_nil, fallback_bb, merge_bb);
+        // reply of 0 is a value, not nil.  For anything else the tag does:
+        // a nil is nil, a boxed value is asked at run time, and an Int, a
+        // Bool, a String or an Atom is never nil.  Comparing the i64 with 0
+        // was the old test, and `x = 0; x orelse 5` gave 5.
+        const try_end = c.LLVMGetInsertBlock(self.builder);
+        const try_live = c.LLVMGetBasicBlockTerminator(try_end) == null;
+        var try_i64: c.LLVMValueRef = null;
+        if (try_live) {
+            const is_nil: ?c.LLVMValueRef = if (ore.try_expr.kind == .message_send and self.last_send_status != null)
+                c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, self.last_send_status.?, c.LLVMConstInt(self.i8_type, Status.nil, 0), "noreply")
+            else switch (try_val.tag) {
+                .nil => c.LLVMConstInt(self.i1_type, 1, 0),
+                .tagged_val => blk: {
+                    const f = self.getRuntimeFn("blimp_val_is_nil", &.{self.ptr_type}, self.i32_type);
+                    var pt = [_]c.LLVMTypeRef{self.ptr_type};
+                    var args = [_]c.LLVMValueRef{try_val.val};
+                    const r = c.LLVMBuildCall2(self.builder, c.LLVMFunctionType(self.i32_type, &pt, 1, 0), f, &args, 1, "is_nil");
+                    break :blk c.LLVMBuildICmp(self.builder, c.LLVMIntNE, r, c.LLVMConstInt(self.i32_type, 0, 0), "isniltmp");
+                },
+                else => null,
+            };
+            if (is_nil) |cond| {
+                _ = c.LLVMBuildCondBr(self.builder, cond, fallback_bb, merge_bb);
+            } else {
+                _ = c.LLVMBuildBr(self.builder, merge_bb);
+            }
+        }
 
         // Fallback block
         c.LLVMPositionBuilderAtEnd(self.builder, fallback_bb);
         const fallback_val = try self.compileExpr(ore.fallback.*);
-        const fallback_end_bb = c.LLVMGetInsertBlock(self.builder);
-        _ = c.LLVMBuildBr(self.builder, merge_bb);
+        const fallback_end = c.LLVMGetInsertBlock(self.builder);
+        const fallback_live = c.LLVMGetBasicBlockTerminator(fallback_end) == null;
 
-        // Merge with phi -- coerce both to i64 for uniform type
+        // One tag on both sides: that tag.  A nil left side only ever takes
+        // the fallback, so the fallback's.  Otherwise both are boxed, as
+        // try's two arms are.  Each side is widened in its own block: the
+        // widening used to be emitted in the merge block, which LLVM
+        // refused for anything not already an i64.
+        const left_never = ore.try_expr.kind == .message_send and self.last_send_never;
+        const left_counts = try_live and try_val.tag != .nil and !left_never;
+        const same = !left_counts or !fallback_live or try_val.tag == fallback_val.tag;
+        const result_tag: ValTag = if (!left_counts) fallback_val.tag else if (same) try_val.tag else .tagged_val;
+        var fallback_i64: c.LLVMValueRef = null;
+        if (fallback_live) {
+            fallback_i64 = if (same) self.coerceToI64(fallback_val) else self.coerceToI64(.{ .val = self.wrapAsBlimpVal(fallback_val), .tag = .tagged_val });
+            _ = c.LLVMBuildBr(self.builder, merge_bb);
+        }
+        const fallback_from = c.LLVMGetInsertBlock(self.builder);
+        if (try_live) {
+            // Before the branch try_end ended with.
+            c.LLVMPositionBuilderBefore(self.builder, c.LLVMGetBasicBlockTerminator(try_end));
+            try_i64 = if (!left_counts)
+                c.LLVMConstInt(self.i64_type, 0, 0)
+            else if (same)
+                self.coerceToI64(try_val)
+            else
+                self.coerceToI64(.{ .val = self.wrapAsBlimpVal(try_val), .tag = .tagged_val });
+        }
+
         c.LLVMPositionBuilderAtEnd(self.builder, merge_bb);
+        var vals: [2]c.LLVMValueRef = undefined;
+        var blocks: [2]c.LLVMBasicBlockRef = undefined;
+        var n: u32 = 0;
+        if (try_live) {
+            vals[n] = try_i64;
+            blocks[n] = try_end;
+            n += 1;
+        }
+        if (fallback_live) {
+            vals[n] = fallback_i64;
+            blocks[n] = fallback_from;
+            n += 1;
+        }
+        if (n == 0) return .{ .val = c.LLVMConstInt(self.i64_type, 0, 0), .tag = .nil };
         const phi = c.LLVMBuildPhi(self.builder, self.i64_type, "orelse");
-        var vals = [_]c.LLVMValueRef{ self.coerceToI64(try_val), self.coerceToI64(fallback_val) };
-        var blocks = [_]c.LLVMBasicBlockRef{ try_bb, fallback_end_bb };
-        c.LLVMAddIncoming(phi, &vals, &blocks, 2);
-
-        return .{ .val = phi, .tag = .int };
+        c.LLVMAddIncoming(phi, &vals, &blocks, n);
+        return .{ .val = self.coerceFromI64(phi, result_tag), .tag = result_tag };
     }
 
     /// `try do ... catch e do ... end`.  Any bubble or fault raised in the
@@ -2328,6 +2767,9 @@ pub const Codegen = struct {
 
         // Forward-declare all def functions so order doesn't matter
         self.forwardDeclareDefs(nodes);
+        for (nodes) |node| if (node.kind == .actor_def) {
+            self.actor_names.append(self.allocator, node.kind.actor_def.name) catch return CodegenError.LLVMError;
+        };
 
         // Canvas mode: enable event logging at program start
         if (self.canvas_mode) {
@@ -2340,6 +2782,7 @@ pub const Codegen = struct {
         for (nodes) |node| {
             last = try self.compileExpr(node);
         }
+        try self.checkSends();
 
         // Canvas mode: register atom names (must be after compilation interns all atoms)
         if (self.canvas_mode) {
@@ -2433,6 +2876,13 @@ pub const Codegen = struct {
         return self.buildProgram(&.{expr});
     }
 
+    /// An atom is an i32 id, except where it was widened to i64 to be
+    /// stored (a state field, a handler's return value, a def's own name).
+    fn atomId32(self: *Codegen, v: c.LLVMValueRef) c.LLVMValueRef {
+        if (c.LLVMTypeOf(v) == self.i32_type) return v;
+        return c.LLVMBuildTrunc(self.builder, v, self.i32_type, "atom_id");
+    }
+
     fn emitPrint(self: *Codegen, tv: TaggedVal) void {
         switch (tv.tag) {
             .int => {
@@ -2464,23 +2914,14 @@ pub const Codegen = struct {
                 _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
             },
             .atom => {
-                // Resolve atom ID back to name string for printing
-                // tv.val is a constant i32 -- extract the ID
-                const f = self.getPrintAtom();
-                var params = [_]c.LLVMTypeRef{self.ptr_type};
+                // By id, through the runtime's copy of the intern table: an
+                // atom read from a variable or a state field is not a
+                // constant, and printing only constants gave `:?` for those.
+                const f = self.getRuntimeFn("blimp_print_atom_id", &.{self.i32_type}, self.void_type);
+                var params = [_]c.LLVMTypeRef{self.i32_type};
                 const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
-                // Try to get the atom name from the intern table
-                const atom_id = c.LLVMConstIntGetZExtValue(tv.val);
-                if (atom_id < self.atoms.names.items.len) {
-                    const name = self.atoms.names.items[@intCast(atom_id)];
-                    const str_ptr = c.LLVMBuildGlobalStringPtr(self.builder, self.zname(name), "atom_name");
-                    var args = [_]c.LLVMValueRef{str_ptr};
-                    _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
-                } else {
-                    const str_ptr = c.LLVMBuildGlobalStringPtr(self.builder, "?", "atom_unknown");
-                    var args = [_]c.LLVMValueRef{str_ptr};
-                    _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
-                }
+                var args = [_]c.LLVMValueRef{self.atomId32(tv.val)};
+                _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
             },
             .nil => {
                 const f = self.getPrintNil();
@@ -2488,11 +2929,12 @@ pub const Codegen = struct {
                 _ = c.LLVMBuildCall2(self.builder, ft, f, &[_]c.LLVMValueRef{}, 0, "");
             },
             .actor_ref => {
-                // Print actor ref as its ID
-                const f = self.getPrintInt();
-                var params = [_]c.LLVMTypeRef{self.i64_type};
+                // ref<Type:n>, as the interpreter prints one; it printed
+                // the runtime's slot number.
+                const f = self.getRuntimeFn("blimp_print_actor_ref", &.{self.i32_type}, self.void_type);
+                var params = [_]c.LLVMTypeRef{self.i32_type};
                 const ft = c.LLVMFunctionType(self.void_type, &params, 1, 0);
-                var args = [_]c.LLVMValueRef{tv.val};
+                var args = [_]c.LLVMValueRef{c.LLVMBuildTrunc(self.builder, tv.val, self.i32_type, "ref_id")};
                 _ = c.LLVMBuildCall2(self.builder, ft, f, &args, 1, "");
             },
             .tagged_val => {

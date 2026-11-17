@@ -1,0 +1,4 @@
+# Interpolation is refused, not compiled: the literal text "n is #{n}"
+# was what the compiled program printed.
+n = 3
+"n is #{n}"

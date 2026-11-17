@@ -1,0 +1,16 @@
+# A case is the value of the branch taken, with that branch's type, and nil
+# when no branch matches. Compiled, every case was an Int: these printed 1,
+# an address and 0, and Atom branches failed LLVM verification.
+x = 5
+puts(case x do
+  5 -> true
+  _ -> false
+end)
+s = "hi"
+puts(case s do
+  t -> t
+end)
+y = case x do
+  1 -> 10
+end
+y

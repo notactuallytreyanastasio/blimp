@@ -1,0 +1,6 @@
+--- stdout
+bob
+true
+:green
+--- stderr
+--- exit 0

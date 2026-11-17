@@ -1,0 +1,7 @@
+# Escapes in a string literal are the bytes they name, by the rules the
+# parser applies for the interpreter. The compiler emitted the lexeme as
+# written: a backslash and an n.
+puts("a\nb")
+puts("tab\there, quote \" and backslash \\")
+puts("\#{not interpolated}")
+"x\ny"

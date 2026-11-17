@@ -163,7 +163,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `hole` yet."
+      "error": "CANNOT COMPILE: Parameter `event` of :process is typed Event; a compiled handler binds only Int, Float, Bool, String, Atom or actor parameters."
     },
     "category": "unsupported"
   },
@@ -206,7 +206,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: The compiler does not handle this `tuple_lit` yet."
+      "error": "CANNOT COMPILE: Parameter `item` of :push is typed Item; a compiled handler binds only Int, Float, Bool, String, Atom or actor parameters."
     },
     "category": "unsupported"
   },
@@ -220,7 +220,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
+      "error": "CANNOT COMPILE: Parameter `item` of :push is typed Item; a compiled handler binds only Int, Float, Bool, String, Atom or actor parameters."
     },
     "category": "unsupported"
   },
@@ -248,7 +248,7 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
+      "error": "CANNOT COMPILE: Parameter `item` of :add is typed Item; a compiled handler binds only Int, Float, Bool, String, Atom or actor parameters."
     },
     "category": "unsupported"
   },
@@ -265,22 +265,6 @@
       "error": "CANNOT COMPILE: `bubble` in a handler of `Bank.Account` restarts it under its supervisor `Bank`; compiled actors have no supervisor, so the restart would not happen."
     },
     "category": "unsupported"
-  },
-  "examples/traffic_light.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":yellow\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "2\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "an Atom reply prints as its intern id (2) in compiled code."
   },
   "lib/builtin_test.blimp": {
     "interp": {
@@ -376,63 +360,9 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "LLVM verification error: PHI node operands are not the same type as the result!"
+      "error": "CANNOT COMPILE: State field `v` holds an Int in compiled code (its default), and this is an Atom."
     },
-    "category": "compile-error"
-  },
-  "test/diff/corpus/actor_reply_atom.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":pong\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "an Atom reply prints as its intern id in compiled code."
-  },
-  "test/diff/corpus/actor_reply_string.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "\"alice\"\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "4305419752\n",
-      "stderr": ""
-    },
-    "category": "flaky",
-    "compiled_second_run": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "4378770920\n",
-      "stderr": ""
-    },
-    "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
-  },
-  "test/diff/corpus/actor_spawn_value.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "ref<C:1>\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "an actor ref prints as 0 in compiled code, ref<C:1> in the interpreter."
+    "category": "unsupported"
   },
   "test/diff/corpus/actor_state_list.blimp": {
     "interp": {
@@ -447,166 +377,6 @@
       "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
-  },
-  "test/diff/corpus/arith_compare_eq.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "true\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "Bool from a comparison prints as 1/0 in compiled code."
-  },
-  "test/diff/corpus/arith_compare_lt.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "true\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "Bool from a comparison prints as 1/0 in compiled code."
-  },
-  "test/diff/corpus/arith_compare_ne_false.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "false\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "Bool from a comparison prints as 1/0 in compiled code."
-  },
-  "test/diff/corpus/arith_float_large.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1000000000000\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1e+12\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "compiled %g: 1e+12 where the interpreter prints 1000000000000."
-  },
-  "test/diff/corpus/arith_float_sum.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0.30000000000000004\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0.3\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "compiled prints floats with %g (6 significant digits): 0.3 for 0.30000000000000004."
-  },
-  "test/diff/corpus/arith_min_div_neg1.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "-9223372036854775808\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "minInt / -1: interpreter wraps to minInt (test/int_overflow_test.blimp says so), compiled prints 1."
-  },
-  "test/diff/corpus/atom_eq.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "true\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "Bool from a comparison prints as 1/0 in compiled code."
-  },
-  "test/diff/corpus/atom_from_variable.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":green\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":?\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "an Atom read back from a variable prints as :? in compiled code."
-  },
-  "test/diff/corpus/bool_and.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "false\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "Bool from && prints as 0/1 in compiled code."
-  },
-  "test/diff/corpus/bool_or.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "true\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "Bool from || prints as 0/1 in compiled code."
   },
   "test/diff/corpus/bubble_orelse_def.blimp": {
     "interp": {
@@ -650,37 +420,6 @@
     },
     "category": "unsupported"
   },
-  "test/diff/corpus/case_int.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":two\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: PHI node operands are not the same type as the result!"
-    },
-    "category": "compile-error",
-    "note": "case whose branches yield atoms fails LLVM verification (PHI type mismatch) rather than UnsupportedNode."
-  },
-  "test/diff/corpus/case_no_match.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "nil\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "0\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "no case branch matches: interpreter gives nil, compiled 0."
-  },
   "test/diff/corpus/closure_capture.blimp": {
     "interp": {
       "end": "exit",
@@ -708,49 +447,6 @@
       "error": "CANNOT COMPILE: There is no `map` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
-  },
-  "test/diff/corpus/def_returns_atom.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":ready\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: Function return type does not match operand type of return inst!"
-    },
-    "category": "compile-error"
-  },
-  "test/diff/corpus/def_returns_float.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1.5\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: Function return type does not match operand type of return inst!"
-    },
-    "category": "compile-error"
-  },
-  "test/diff/corpus/def_returns_string.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "\"hi\"\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: Function return type does not match operand type of return inst!"
-    },
-    "category": "compile-error",
-    "note": "a def returning anything but Int fails LLVM verification: defs are i64 -> i64."
   },
   "test/diff/corpus/def_string_param.blimp": {
     "interp": {
@@ -866,21 +562,6 @@
     "category": "diverge",
     "note": "`blimp FILE` prints nothing for the final value; a compiled binary prints it. The harness uses --print-last everywhere else."
   },
-  "test/diff/corpus/situation_atom_result.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":many\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: PHI node operands are not the same type as the result!"
-    },
-    "category": "compile-error",
-    "note": "same PHI type mismatch as corpus/case_int."
-  },
   "test/diff/corpus/string_concat.blimp": {
     "interp": {
       "end": "exit",
@@ -895,22 +576,6 @@
     },
     "category": "unsupported"
   },
-  "test/diff/corpus/string_eq.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "true\n",
-      "stderr": ""
-    },
-    "compiled": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": "1\n",
-      "stderr": ""
-    },
-    "category": "diverge",
-    "note": "Bool from a comparison prints as 1/0 in compiled code."
-  },
   "test/diff/corpus/string_interpolation.blimp": {
     "interp": {
       "end": "exit",
@@ -918,13 +583,12 @@
       "stdout": "\"n is 3\"\n",
       "stderr": ""
     },
-    "compiled": {
+    "compiler": {
       "end": "exit",
-      "exit": 0,
-      "stdout": "\"n is #{n}\"\n",
-      "stderr": ""
+      "exit": 1,
+      "error": "CANNOT COMPILE: This string has `#{...}` in it; compiled code does not interpolate strings yet."
     },
-    "category": "diverge",
+    "category": "unsupported",
     "note": "compiled prints the literal text \"n is #{n}\": no interpolation."
   },
   "test/diff/corpus/string_length.blimp": {
@@ -979,22 +643,8 @@
     "compiler": {
       "end": "exit",
       "exit": 1,
-      "error": "CANNOT COMPILE: There is no `to_string` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
+      "error": "CANNOT COMPILE: Parameter `c` of :set is typed Any; a compiled handler binds only Int, Float, Bool, String, Atom or actor parameters."
     },
     "category": "unsupported"
-  },
-  "test/shadow_builtin_test.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 0,
-      "stdout": ":ShadowBuiltinTests\n",
-      "stderr": ""
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: Function return type does not match operand type of return inst!"
-    },
-    "category": "compile-error"
   }
 }

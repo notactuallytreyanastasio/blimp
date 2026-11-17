@@ -1,0 +1,7 @@
+# A local that is not a fn hides the def of its name; the interpreter
+# reports UNKNOWN FUNCTION. The refusal said there was no such def.
+def double(x: Int) -> Int do
+  x * 2
+end
+double = 5
+double(3)

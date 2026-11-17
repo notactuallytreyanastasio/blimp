@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  A handler of :q replies an Atom on one path and nothing on another; compiled code can take that only on the left of `orelse`.
+
+15| a <- :q(2)
+    ^
+
+  Hint: Reply on every path, put the send before `orelse`, or run this file with the interpreter.
+
+1 construct cannot be compiled.

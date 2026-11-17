@@ -1,0 +1,11 @@
+# A list crosses a send as a pointer the receiver has no tag for.
+actor A do
+  state s: Int :: 0
+
+  on :q do
+    reply [1, 2]
+  end
+end
+
+a = spawn A
+a <- :q

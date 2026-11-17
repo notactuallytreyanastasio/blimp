@@ -1,0 +1,6 @@
+# An atom read back from a variable is not an LLVM constant; it printed :?
+# because only constants were looked up in the intern table at compile time.
+x = :red
+y = :green
+x = y
+x

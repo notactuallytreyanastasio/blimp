@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 
 // ── Tagged Values ───────────────────────────────────────
@@ -42,6 +43,7 @@ void blimp_rc_inc(BlimpVal *v);
 void blimp_rc_dec(BlimpVal *v);
 BlimpVal *blimp_rc_reuse(BlimpVal *v);
 static const char *atom_text(int id);
+static void put_actor_ref(FILE *f, int id);
 
 // ── Value constructors ──────────────────────────────────
 
@@ -292,13 +294,70 @@ BlimpVal *blimp_rc_reuse(BlimpVal *v) {
     return NULL;
 }
 
+// ── Floats, as the interpreter prints them ──────────────
+
+// The interpreter prints a Float with Zig's `{d}`: the shortest digits
+// that read back as the same double, written out in plain decimal (no
+// exponent, however large or small), "inf", "-inf", "nan", "-0".  printf's
+// %g gives six significant digits and an exponent past 1e6, so
+// 0.30000000000000004 came out as 0.3 and 1e12 as 1e+12.
+//
+// The digits: the smallest precision whose %.*e reads back exactly.  That
+// is the correctly rounded p-digit decimal, which is the one Zig's
+// shortest-digit search lands on too.  Then the point is placed by hand.
+static void format_float(char *out, size_t cap, double v) {
+    if (isnan(v)) { snprintf(out, cap, "nan"); return; }
+    if (isinf(v)) { snprintf(out, cap, v < 0 ? "-inf" : "inf"); return; }
+    if (v == 0) { snprintf(out, cap, signbit(v) ? "-0" : "0"); return; }
+    char e[40];
+    for (int p = 1; p <= 17; p++) {
+        snprintf(e, sizeof e, "%.*e", p - 1, v);
+        if (strtod(e, NULL) == v) break;
+    }
+    // e is [-]d[.ddd]e[+-]xx
+    char digits[24];
+    int nd = 0;
+    const char *c = e;
+    int neg = 0;
+    if (*c == '-') { neg = 1; c++; }
+    for (; *c && *c != 'e'; c++) if (*c != '.') digits[nd++] = *c;
+    int exp10 = atoi(c + 1);
+    while (nd > 1 && digits[nd - 1] == '0') nd--;
+    size_t n = 0;
+#define PUT(ch) do { if (n + 1 < cap) out[n++] = (ch); } while (0)
+    if (neg) PUT('-');
+    if (exp10 < 0) {
+        PUT('0'); PUT('.');
+        for (int i = 0; i < -exp10 - 1; i++) PUT('0');
+        for (int i = 0; i < nd; i++) PUT(digits[i]);
+    } else if (exp10 + 1 >= nd) {
+        for (int i = 0; i < nd; i++) PUT(digits[i]);
+        for (int i = 0; i < exp10 + 1 - nd; i++) PUT('0');
+    } else {
+        for (int i = 0; i <= exp10; i++) PUT(digits[i]);
+        PUT('.');
+        for (int i = exp10 + 1; i < nd; i++) PUT(digits[i]);
+    }
+#undef PUT
+    out[n] = 0;
+}
+
+// The longest is 326 bytes: 5e-324 and 2.2250738585072014e-308.
+#define FLOAT_BUF 400
+
+static void put_float(FILE *f, double v) {
+    char buf[FLOAT_BUF];
+    format_float(buf, sizeof buf, v);
+    fputs(buf, f);
+}
+
 // ── Tagged value printing ───────────────────────────────
 
 void blimp_print_val(BlimpVal *v) {
     if (!v) { printf("nil\n"); return; }
     switch (v->tag) {
         case VAL_INT: printf("%lld\n", v->integer); break;
-        case VAL_FLOAT: printf("%g\n", v->float_val); break;
+        case VAL_FLOAT: put_float(stdout, v->float_val); putchar('\n'); break;
         case VAL_STRING: printf("\"%s\"\n", v->string); break;
         case VAL_ATOM:
             if (atom_text(v->atom_id)) printf(":%s\n", atom_text(v->atom_id));
@@ -306,7 +365,7 @@ void blimp_print_val(BlimpVal *v) {
             break;
         case VAL_BOOL: printf("%s\n", v->bool_val ? "true" : "false"); break;
         case VAL_NIL: printf("nil\n"); break;
-        case VAL_ACTOR_REF: printf("ref<%d>\n", v->actor_id); break;
+        case VAL_ACTOR_REF: put_actor_ref(stdout, v->actor_id); putchar('\n'); break;
         case VAL_CLOSURE: printf("fn/%d\n", v->closure.param_count); break;
         case VAL_LIST:
             printf("[");
@@ -315,7 +374,7 @@ void blimp_print_val(BlimpVal *v) {
                 // Inline print without newline
                 switch (v->list.items[i]->tag) {
                     case VAL_INT: printf("%lld", v->list.items[i]->integer); break;
-                    case VAL_FLOAT: printf("%g", v->list.items[i]->float_val); break;
+                    case VAL_FLOAT: put_float(stdout, v->list.items[i]->float_val); break;
                     case VAL_STRING: printf("\"%s\"", v->list.items[i]->string); break;
                     case VAL_BOOL: printf("%s", v->list.items[i]->bool_val ? "true" : "false"); break;
                     case VAL_NIL: printf("nil"); break;
@@ -332,7 +391,7 @@ void blimp_print_val(BlimpVal *v) {
                 BlimpVal *mv = v->map.vals[i];
                 switch (mv->tag) {
                     case VAL_INT: printf("%lld", mv->integer); break;
-                    case VAL_FLOAT: printf("%g", mv->float_val); break;
+                    case VAL_FLOAT: put_float(stdout, mv->float_val); break;
                     case VAL_STRING: printf("\"%s\"", mv->string); break;
                     case VAL_ATOM:
                         if (atom_text(mv->atom_id)) printf(":%s", atom_text(mv->atom_id));
@@ -340,13 +399,18 @@ void blimp_print_val(BlimpVal *v) {
                         break;
                     case VAL_BOOL: printf("%s", mv->bool_val ? "true" : "false"); break;
                     case VAL_NIL: printf("nil"); break;
-                    case VAL_ACTOR_REF: printf("ref<%d>", mv->actor_id); break;
+                    case VAL_ACTOR_REF: put_actor_ref(stdout, mv->actor_id); break;
                     default: printf("?"); break;
                 }
             }
             printf("}\n");
             break;
     }
+}
+
+// `orelse` on a boxed value: NULL and a boxed nil are both nil.
+int blimp_val_is_nil(BlimpVal *v) {
+    return v == NULL || v->tag == VAL_NIL;
 }
 
 // ── Print functions (legacy i64 path) ───────────────────
@@ -356,7 +420,8 @@ void blimp_print_int(long long val) {
 }
 
 void blimp_print_float(double val) {
-    printf("%g\n", val);
+    put_float(stdout, val);
+    putchar('\n');
 }
 
 void blimp_print_bool(long long val) {
@@ -369,6 +434,17 @@ void blimp_print_string(const char *val) {
 
 void blimp_print_atom(const char *val) {
     printf(":%s\n", val);
+}
+
+// An atom by its intern id.  An id outside the table is a codegen bug, and
+// printing a placeholder for it would look like output: abort instead.
+void blimp_print_atom_id(int id) {
+    const char *name = atom_text(id);
+    if (!name) {
+        fprintf(stderr, "blimp runtime: atom id %d is not in the intern table\n", id);
+        abort();
+    }
+    printf(":%s\n", name);
 }
 
 void blimp_print_nil(void) {
@@ -429,6 +505,24 @@ static int atom_name_count = 0;
 
 // Actor type names (set at spawn time)
 static const char *actor_type_names[256];
+
+// An actor as the interpreter prints one: ref<Type:n>, n counting spawns
+// from 1 (its registry's next_id).  Runtime slots count from 0.  Every
+// spawn names its type; a slot without one is a codegen bug, and a
+// made-up name would look like output, so it aborts.
+static void put_actor_ref(FILE *f, int id) {
+    const char *name = (id >= 0 && id < 256) ? actor_type_names[id] : NULL;
+    if (!name) {
+        fprintf(stderr, "blimp runtime: actor %d has no type name\n", id);
+        abort();
+    }
+    fprintf(f, "ref<%s:%d>", name, id + 1);
+}
+
+void blimp_print_actor_ref(int id) {
+    put_actor_ref(stdout, id);
+    putchar('\n');
+}
 
 // Actor field names and counts (set by codegen)
 typedef struct {
@@ -546,7 +640,7 @@ static void format_val(FILE *out, BlimpVal *v) {
     if (!v) { fputs("nil", out); return; }
     switch (v->tag) {
         case VAL_INT: fprintf(out, "%lld", v->integer); break;
-        case VAL_FLOAT: fprintf(out, "%g", v->float_val); break;
+        case VAL_FLOAT: put_float(out, v->float_val); break;
         case VAL_STRING: fprintf(out, "\"%s\"", v->string); break;
         case VAL_ATOM: {
             const char *name = atom_text(v->atom_id);
@@ -555,7 +649,7 @@ static void format_val(FILE *out, BlimpVal *v) {
         }
         case VAL_BOOL: fputs(v->bool_val ? "true" : "false", out); break;
         case VAL_NIL: fputs("nil", out); break;
-        case VAL_ACTOR_REF: fprintf(out, "ref<%d>", v->actor_id); break;
+        case VAL_ACTOR_REF: put_actor_ref(out, v->actor_id); break;
         default: fputs("<value>", out); break;
     }
 }

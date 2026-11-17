@@ -2,10 +2,10 @@
 
 -- CANNOT COMPILE ──────────────────────────────────────────
 
-  Argument 1 of `puts` is a Float; compiled code can pass it only an Int or a String.
+  A compiled reply can be an Int, a Float, a Bool, a String, an Atom, an actor or nil; this is a list, map or fn value.
 
-3| puts(0.1 + 0.2)
-         ^
+6|     reply [1, 2]
+              ^
 
   Hint: Run this file with the interpreter.
 
