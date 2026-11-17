@@ -3,6 +3,9 @@
 # name why its test stopped. Until this file, all of them said
 # "assertion failed", including the ones that spawned an actor nobody defined.
 # Not named *_test.blimp, so `blimp test test` does not pick it up.
+# dyn hides a value's type from the checker, which reads test bodies and would
+# otherwise refuse this file before a test ran; the runner is what is under test.
+def dyn(v: Any) -> Any do v end
 
 actor Maker do
   on :make do
@@ -78,12 +81,12 @@ actor HandledTests do
     catch e do
       0
     end
-    y = 1 + "a"
+    y = 1 + dyn("a")
   end
 
   test "caught type error, then a failed assertion" do
     x = try do
-      1 + "a"
+      1 + dyn("a")
     catch e do
       0
     end
@@ -106,7 +109,7 @@ actor HandledTests do
     catch e do
       0
     end
-    y = 1 + "a"
+    y = 1 + dyn("a")
   end
 
   test "caught bubble, then a failed assertion" do
@@ -123,7 +126,7 @@ actor HandledTests do
     s = spawn Swallower
     s <-- :put
     schedule()
-    y = 1 + "a"
+    y = 1 + dyn("a")
   end
 
   test "a guard that fails, then a bubble" do

@@ -193,6 +193,12 @@ pub fn parseTypeName(allocator: std.mem.Allocator, type_str: []const u8) error{O
         v.* = .any;
         return Type{ .map = .{ .key = k, .value = v } };
     }
+    // A tuple of any arity. The lattice only has tuples of a known arity,
+    // and without this line `Tuple` fell through to the actor type of that
+    // name, which no tuple value is a subtype of or comparable with:
+    // `fn(o: Tuple) do o == {px, py} end` was "cannot compare Tuple with
+    // {...}". 57 annotations in the repository say `: Tuple`.
+    if (std.mem.eql(u8, type_str, "Tuple")) return .any;
     // ViewNode is a first-class value but not yet in the type lattice — treat as Any
     if (std.mem.eql(u8, type_str, "ViewNode")) return .any;
 

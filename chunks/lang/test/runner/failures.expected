@@ -3,7 +3,7 @@ warning: first-pass eval failed:
 
   No actor template called `Tokenizer` is defined.
 
-57|   state lexer: Any :: spawn Tokenizer
+60|   state lexer: Any :: spawn Tokenizer
                            ^
 
   Hint: Define an actor first:
@@ -42,7 +42,7 @@ FF
     
       No actor template called `Lexer` is defined.
     
-    19|     l = spawn Lexer
+    22|     l = spawn Lexer
                  ^
     
       Hint: Define an actor first:
@@ -56,7 +56,7 @@ FF
     
       No actor template called `Lexer` is defined.
     
-    9|     l = spawn Lexer
+    12|     l = spawn Lexer
                  ^
     
       Hint: Define an actor first:
@@ -70,10 +70,11 @@ FF
     
       I can't find a variable called `missing`.
     
-    30|     assert_eq(missing, 1)
+    33|     assert_eq(missing, 1)
                        ^
     
       Hint: Variables in scope:
+          dyn = fn(v: Any) -> Any do ... end
           Maker = :Maker
           SpawnTests = :SpawnTests
           Swallower = :Swallower
@@ -87,7 +88,7 @@ FF
     
       A bubble reached the top of the test: :kaboom
     
-    13|     bubble :kaboom
+    16|     bubble :kaboom
              ^
     
       Hint: Handle it with `try ... catch` or `orelse`.
@@ -97,7 +98,7 @@ FF
     
       No actor template called `Parser` is defined.
     
-    46|     p = spawn Parser
+    49|     p = spawn Parser
                  ^
     
       Hint: Define an actor first:
@@ -114,7 +115,7 @@ FF
     
       No actor template called `Tokenizer` is defined.
     
-    57|   state lexer: Any :: spawn Tokenizer
+    60|   state lexer: Any :: spawn Tokenizer
                                ^
     
       Hint: Define an actor first:
@@ -128,7 +129,7 @@ FF
     
       I can't do this operation because the types don't match.
     
-    81|     y = 1 + "a"
+    84|     y = 1 + dyn("a")
                  ^
     
       Hint: Both sides of an operator need to be compatible types.
@@ -146,7 +147,7 @@ FF
     
       A bubble reached the top of the test: :after_assertion
     
-    99|     bubble :after_assertion
+    102|     bubble :after_assertion
              ^
     
       Hint: Handle it with `try ... catch` or `orelse`.
@@ -156,7 +157,7 @@ FF
     
       I can't do this operation because the types don't match.
     
-    109|     y = 1 + "a"
+    112|     y = 1 + dyn("a")
                  ^
     
       Hint: Both sides of an operator need to be compatible types.
@@ -174,7 +175,7 @@ FF
     
       I can't do this operation because the types don't match.
     
-    126|     y = 1 + "a"
+    129|     y = 1 + dyn("a")
                  ^
     
       Hint: Both sides of an operator need to be compatible types.
@@ -189,7 +190,7 @@ FF
     
       A bubble reached the top of the test: :after_guard
     
-    134|     bubble :after_guard
+    137|     bubble :after_guard
              ^
     
       Hint: Handle it with `try ... catch` or `orelse`.

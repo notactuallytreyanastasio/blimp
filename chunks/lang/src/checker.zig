@@ -173,6 +173,11 @@ pub const Checker = struct {
     registry: ActorRegistry,
     /// The name of the actor currently being checked (for self-send resolution).
     current_actor: ?[]const u8,
+    /// The `-> Type` of the handler whose body is being checked, so that a
+    /// `reply` is held to it wherever it stands: inside a case branch as well
+    /// as at the top of the body.  Null outside a handler, and inside a def
+    /// or fn nested in one, whose reply is not the handler's.
+    declared_return: ?Type,
 
     pub fn init(allocator: std.mem.Allocator) Checker {
         return .{
@@ -181,6 +186,7 @@ pub const Checker = struct {
             .errors = .{ .items = &.{}, .capacity = 0 },
             .registry = ActorRegistry.init(allocator),
             .current_actor = null,
+            .declared_return = null,
         };
     }
 
@@ -256,17 +262,143 @@ pub const Checker = struct {
             .actor_def => |a| self.checkActorDef(a, node.loc),
             .state_def => |s| self.checkStateDef(s, node.loc),
             .become_stmt => |b| self.checkBecomeStmt(b, node.loc),
-            .reply_stmt => |r| self.checkReplyStmt(r),
+            .reply_stmt => |r| self.checkReplyStmt(r, node.loc),
             .assign_stmt => |a| self.checkAssignStmt(a),
             .message_handler => |h| self.checkMessageHandler(h, node.loc),
             .def_stmt => |d| self.checkDefStmt(d, node.loc),
             .fn_expr => |f| self.checkFnExpr(f, node.loc),
-            // Expression statements: infer type to trigger any errors (e.g., message sends)
-            .message_send, .func_call, .pipe_expr, .dot_access => {
+            .test_def => |t| self.checkBody(t.body),
+            .property_def => |p| self.checkBody(p.body),
+            .given_stmt => |g| {
+                _ = self.inferExpr(g.generator.*);
+                // A generated value: its type is the generator's, which no
+                // signature here records.
+                self.env.define(g.name, .hole);
+            },
+            .bubble_stmt => |b| {
+                if (b.reason) |r| _ = self.inferExpr(r.*);
+            },
+            // Anything else in statement position is an expression whose
+            // value is dropped: `1 + :a` on a line of its own, a case, a
+            // for, a try.  Inferring it is what checks it.
+            else => {
                 _ = self.inferExpr(node);
             },
+        }
+    }
+
+    /// Check a body the interpreter runs in a scope of its own, so that
+    /// nothing it assigns is visible after it: a test or property body.
+    /// The for body, the catch body and every case or situation branch but
+    /// `_ ->` are the same, and are checked the same way below.
+    ///
+    /// The scope is pushed and popped and the outer types are left alone.
+    /// `x = 1; for i in [1] do x = 2 end; puts(x)` prints 1, and
+    /// `x = nil; for i in [1, 2] do x = i end; y = x + 1` stops with TYPE
+    /// MISMATCH at run time, so x is still Nil after the loop and the
+    /// checker says so.
+    fn checkBody(self: *Checker, body: []const Node) void {
+        self.env.pushScope();
+        for (body) |stmt| self.checkNode(stmt);
+        self.env.popScope();
+    }
+
+    /// The body of a `_ ->` branch that is not the first branch.
+    ///
+    /// The interpreter runs a `_ ->` branch in the enclosing scope
+    /// (evalSituationTail, `.wild => return self.evalBodyTail(...)`), so
+    /// what it assigns is visible after the case, and the other branches
+    /// run in a scope of their own, so what they assign is not:
+    ///
+    ///   x = 1; case 1 do 1 -> x = 2  _ -> 0 end; puts(x)   prints 1
+    ///   x = 1; case 1 do _ -> x = 2 end; puts(x)           prints 2
+    ///
+    /// When the `_ ->` branch is first it always runs, and its body is
+    /// checked in the enclosing scope like a try body.  When it is not, a
+    /// name it assigns is after the case either its old type or its new
+    /// one, depending on which branch ran, and the checker has no type for
+    /// "one of the two".  Keeping either would let a run-time type error
+    /// through on the other path, so an assignment that changes an outer
+    /// name to a type that is not a subtype of the old one is reported.
+    ///
+    /// A name only this branch binds exists after the case only when the
+    /// branch ran (`case 2 do 1 -> 0  _ -> z = :a end; z + 1` stops with
+    /// TYPE MISMATCH), and on every other path using it is an undefined
+    /// variable at run time, which is an error either way.  So it is bound
+    /// afterwards with the type the branch gave it: that is the only path
+    /// on which a use can get as far as a type error.
+    fn checkWildBranch(self: *Checker, body: []const Node) void {
+        self.env.pushScope();
+        for (body) |stmt| self.checkNode(stmt);
+        const scopes = self.env.scopes.items;
+        const inner = scopes[scopes.len - 1].bindings.items;
+        self.env.popScope();
+        for (inner, 0..) |b, i| {
+            // Only the last binding of a name in the branch is its type at
+            // the end of the branch.
+            var later = false;
+            for (inner[i + 1 ..]) |b2| {
+                if (std.mem.eql(u8, b2.name, b.name)) later = true;
+            }
+            if (later) continue;
+            const old = self.env.lookup(b.name) orelse {
+                self.env.define(b.name, b.ty);
+                continue;
+            };
+            // Hole and Any on either side are subtypes both ways.
+            if (b.ty.isSubtypeOf(old)) continue;
+            const loc = if (body.len > 0) body[0].loc else Loc{ .line = 0, .col = 0 };
+            self.addError(loc, "'{s}' is {s} before this case and the `_ ->` branch makes it {s}; only a `_ ->` branch's assignment is seen after the case, so after it '{s}' is {s} or {s} depending on which branch ran", .{
+                b.name,
+                old.typeName(),
+                b.ty.typeName(),
+                b.name,
+                old.typeName(),
+                b.ty.typeName(),
+            });
+        }
+    }
+
+    /// Bind every name a pattern binds, as hole.  A pattern name is a fresh
+    /// binding of whatever matched, not a use of an outer variable of the
+    /// same name, so leaving it unbound would let an outer `n: Int` stand in
+    /// for the `n` in `{:add, n} ->`.
+    fn bindPattern(self: *Checker, pattern: Node) void {
+        switch (pattern.kind) {
+            .identifier => |id| self.env.define(id.name, .hole),
+            .tuple_lit => |t| for (t.elements) |e| self.bindPattern(e),
+            .list_lit => |l| {
+                for (l.elements) |e| self.bindPattern(e);
+                if (l.tail) |t| self.bindPattern(t.*);
+            },
+            .map_lit => |m| for (m.entries) |e| self.bindPattern(e.value),
             else => {},
         }
+    }
+
+    /// Check the subject, every guard and every branch body of a case or
+    /// situation.  The result is hole: the checker does not join the
+    /// branches' types.
+    fn inferBranches(self: *Checker, subject: Node, branches: []const Node.Branch) Type {
+        _ = self.inferExpr(subject);
+        for (branches, 0..) |br, i| {
+            if (br.mode == .wild) {
+                // See checkWildBranch: the interpreter runs this body in
+                // the enclosing scope.  First, it always runs.
+                if (i == 0) {
+                    for (br.body) |stmt| self.checkNode(stmt);
+                } else {
+                    self.checkWildBranch(br.body);
+                }
+                continue;
+            }
+            self.env.pushScope();
+            if (br.pattern) |p| self.bindPattern(p.*);
+            if (br.guard) |g| _ = self.inferExpr(g.*);
+            for (br.body) |stmt| self.checkNode(stmt);
+            self.env.popScope();
+        }
+        return .hole;
     }
 
     /// Check an actor definition: push scope, check body, pop scope.
@@ -335,9 +467,17 @@ pub const Checker = struct {
         }
     }
 
-    /// Check a reply statement: just infer the type of the expression.
-    fn checkReplyStmt(self: *Checker, reply: Node.ReplyStmt) void {
-        _ = self.inferExpr(reply.value.*);
+    /// Check a reply statement against the enclosing handler's `-> Type`.
+    fn checkReplyStmt(self: *Checker, reply: Node.ReplyStmt, loc: Loc) void {
+        const reply_type = self.inferExpr(reply.value.*);
+        if (self.declared_return) |expected| {
+            if (!reply_type.isSubtypeOf(expected)) {
+                self.addError(loc, "reply type mismatch: expected {s}, got {s}", .{
+                    expected.typeName(),
+                    reply_type.typeName(),
+                });
+            }
+        }
     }
 
     /// Check an assignment: infer the RHS type and bind the variable.
@@ -362,30 +502,19 @@ pub const Checker = struct {
             }
         }
 
-        // Parse the declared return type (if any)
-        var declared_return: ?Type = null;
+        if (handler.guard) |g| _ = self.inferExpr(g.*);
+
+        // Parse the declared return type (if any); checkReplyStmt holds
+        // every reply in the body to it, nested or not.
+        const prev_return = self.declared_return;
+        self.declared_return = null;
         if (handler.return_type) |rt| {
-            declared_return = types.parseTypeName(self.allocator, rt) catch .hole;
+            self.declared_return = types.parseTypeName(self.allocator, rt) catch .hole;
         }
 
-        // Check body and collect reply types
-        for (handler.body) |stmt| {
-            switch (stmt.kind) {
-                .reply_stmt => |r| {
-                    const reply_type = self.inferExpr(r.value.*);
-                    if (declared_return) |expected| {
-                        if (!reply_type.isSubtypeOf(expected)) {
-                            self.addError(stmt.loc, "reply type mismatch: expected {s}, got {s}", .{
-                                expected.typeName(),
-                                reply_type.typeName(),
-                            });
-                        }
-                    }
-                },
-                else => self.checkNode(stmt),
-            }
-        }
+        for (handler.body) |stmt| self.checkNode(stmt);
 
+        self.declared_return = prev_return;
         self.env.popScope();
     }
 
@@ -403,20 +532,34 @@ pub const Checker = struct {
             }
         }
 
+        const prev_return = self.declared_return;
+        self.declared_return = null;
         for (def.body) |stmt| {
             self.checkNode(stmt);
         }
+        self.declared_return = prev_return;
 
         self.env.popScope();
     }
 
-    /// Check an fn expression: parameters must have type annotations.
+    /// Check an fn expression: parameters must have type annotations, and
+    /// the body is checked with them bound, as a def's is.
     fn checkFnExpr(self: *Checker, f: Node.FnExpr, loc: Loc) void {
+        self.env.pushScope();
         for (f.params) |param| {
-            if (param.type_name == null) {
+            if (param.type_name) |tn| {
+                self.env.define(param.name, types.parseTypeName(self.allocator, tn) catch .hole);
+            } else {
                 self.addError(loc, "lambda parameter '{s}' is missing a type annotation", .{param.name});
+                self.env.define(param.name, .any);
             }
         }
+        const prev_return = self.declared_return;
+        self.declared_return = null;
+        for (f.body) |stmt| self.checkNode(stmt);
+        self.declared_return = prev_return;
+        // A closure's assignments are its own: plain pop, no widening.
+        self.env.popScope();
     }
 
     // ============================================================
@@ -428,7 +571,21 @@ pub const Checker = struct {
         return switch (node.kind) {
             .integer_lit => .int,
             .float_lit => .float,
-            .string_lit => .string,
+            .string_lit => |sl| blk: {
+                if (sl.interp) |ip| {
+                    // The parser parses each `#{...}` on its own, so the
+                    // nodes in it carry locations counted from the start of
+                    // the braces: line 1, col 1 for the first.  An error in
+                    // one is reported at the string instead.
+                    const first_new = self.errors.items.len;
+                    for (ip.parts) |part| switch (part) {
+                        .expr => |e| _ = self.inferExpr(e.*),
+                        .text => {},
+                    };
+                    for (self.errors.items[first_new..]) |*e| e.loc = node.loc;
+                }
+                break :blk .string;
+            },
             .atom_lit => .atom,
             .bool_lit => .bool_type,
             .nil_lit => .nil,
@@ -443,15 +600,68 @@ pub const Checker = struct {
             .pipe_expr => |pe| self.inferPipeExpr(pe),
             .dot_access => |da| self.inferDotAccess(da, node.loc),
             .message_send => |ms| self.inferMessageSend(ms, node.loc),
-            .orelse_expr => |oe| self.inferExpr(oe.try_expr.*),
-            .spawn_expr => |se| Type{ .actor = se.actor_name },
-            .struct_lit => |sl| Type{ .actor = sl.type_name },
+            .orelse_expr => |oe| blk: {
+                const t = self.inferExpr(oe.try_expr.*);
+                _ = self.inferExpr(oe.fallback.*);
+                break :blk t;
+            },
+            .spawn_expr => |se| blk: {
+                for (se.overrides) |kv| _ = self.inferExpr(kv.value);
+                break :blk Type{ .actor = se.actor_name };
+            },
+            .struct_lit => |sl| blk: {
+                for (sl.fields) |kv| _ = self.inferExpr(kv.value);
+                break :blk Type{ .actor = sl.type_name };
+            },
             .fn_expr => |f| blk: {
                 self.checkFnExpr(f, node.loc);
                 break :blk .any; // closures are opaque at the type level
             },
-            .situation => .hole, // Cannot infer situation results yet
-            else => .hole,
+            .case_expr => |c| self.inferBranches(c.subject.*, c.branches),
+            .situation => |c| self.inferBranches(c.subject.*, c.branches),
+            .try_catch => |tc| blk: {
+                // The interpreter runs a try body in the enclosing scope:
+                // `x = 1; try do x = 2 catch e do 0 end; puts(x)` prints 2,
+                // and a name first bound in it is bound after it.  So it is
+                // checked there, and x is the try body's type afterwards.
+                // That is wrong only when the body bubbles before the
+                // assignment and the catch falls through; the checker
+                // takes the path where the body finished.
+                for (tc.try_body) |stmt| self.checkNode(stmt);
+                // The catch body has a scope of its own: its `x = 2`
+                // leaves the outer x as it was.
+                self.env.pushScope();
+                if (tc.catch_var) |v| self.env.define(v, .hole);
+                for (tc.catch_body) |stmt| self.checkNode(stmt);
+                self.env.popScope();
+                break :blk .hole;
+            },
+            .for_expr => |fe| blk: {
+                _ = self.inferExpr(fe.iterable.*);
+                self.env.pushScope();
+                self.env.define(fe.var_name, .hole);
+                // Its own scope, every iteration: the outer x is unchanged.
+                for (fe.body) |stmt| self.checkNode(stmt);
+                self.env.popScope();
+                break :blk .hole;
+            },
+            .spread_map, .spread_each => |sp| blk: {
+                _ = self.inferExpr(sp.iterable.*);
+                _ = self.inferExpr(sp.func.*);
+                break :blk .hole;
+            },
+            .range_expr => |r| blk: {
+                _ = self.inferExpr(r.start.*);
+                _ = self.inferExpr(r.end_val.*);
+                break :blk .hole;
+            },
+            .call_expr => |ce| blk: {
+                _ = self.inferExpr(ce.callee.*);
+                for (ce.args) |a| _ = self.inferExpr(a);
+                break :blk .hole;
+            },
+            // Statements, literals and self: nothing below them to check.
+            .actor_def, .state_def, .message_handler, .become_stmt, .reply_stmt, .assign_stmt, .def_stmt, .bubble_stmt, .test_def, .property_def, .given_stmt, .self_ref => .hole,
         };
     }
 
@@ -476,12 +686,12 @@ pub const Checker = struct {
             },
             // Logical: &&, ||
             .and_op, .or_op => blk: {
-                if (left_type != .bool_type and left_type != .hole and left_type != .any) {
+                if (left_type != .bool_type and left_type != .hole and left_type != .any and left_type != .never) {
                     self.addError(loc, "logical operator expects Bool, got {s}", .{
                         left_type.typeName(),
                     });
                 }
-                if (right_type != .bool_type and right_type != .hole and right_type != .any) {
+                if (right_type != .bool_type and right_type != .hole and right_type != .any and right_type != .never) {
                     self.addError(loc, "logical operator expects Bool, got {s}", .{
                         right_type.typeName(),
                     });
@@ -496,6 +706,9 @@ pub const Checker = struct {
     /// Check arithmetic operations and return the result type.
     fn checkArithmetic(self: *Checker, left: Type, right: Type, loc: Loc, op: Node.BinaryOp.Op) Type {
         _ = op;
+        // Never is the type of an operand that was already reported:
+        // reporting it again as "Never and Int" says nothing new.
+        if (left == .never or right == .never) return .never;
         // hole or any => permissive (unknown types don't cause errors)
         if (left == .hole or right == .hole) return .hole;
         if (left == .any or right == .any) return .any;
@@ -519,7 +732,9 @@ pub const Checker = struct {
     /// Check if two types can be compared.
     fn areComparable(self: *Checker, left: Type, right: Type) bool {
         _ = self;
-        // Holes, any, and nil are always comparable
+        // Holes, any, and nil are always comparable; so is never, the type
+        // of an operand whose error is already reported.
+        if (left == .never or right == .never) return true;
         if (left == .hole or right == .hole) return true;
         if (left == .any or right == .any) return true;
         if (left == .nil or right == .nil) return true;
@@ -539,12 +754,14 @@ pub const Checker = struct {
                 if (operand_type == .int) return .int;
                 if (operand_type == .float) return .float;
                 if (operand_type == .hole or operand_type == .any) return .hole;
+                if (operand_type == .never) return .never;
                 self.addError(loc, "cannot negate {s}", .{operand_type.typeName()});
                 return .never;
             },
             .not => {
                 if (operand_type == .bool_type) return .bool_type;
                 if (operand_type == .hole or operand_type == .any) return .hole;
+                if (operand_type == .never) return .never;
                 self.addError(loc, "logical not expects Bool, got {s}", .{operand_type.typeName()});
                 return .never;
             },
@@ -553,8 +770,11 @@ pub const Checker = struct {
 
     /// Infer a list literal type from its elements.
     fn inferListLit(self: *Checker, list: Node.ListLit) Type {
+        // Every element and the tail are checked; the type is the first
+        // element's, as it was.
+        for (list.elements[@min(1, list.elements.len)..]) |e| _ = self.inferExpr(e);
+        if (list.tail) |t| _ = self.inferExpr(t.*);
         if (list.elements.len == 0) return .nil; // empty list
-        // Infer from first element
         const first = self.inferExpr(list.elements[0]);
         const first_ptr = self.allocator.create(Type) catch return .hole;
         first_ptr.* = first;
@@ -572,6 +792,7 @@ pub const Checker = struct {
 
     /// Infer a map literal type from its entries.
     fn inferMapLit(self: *Checker, map: Node.MapLit) Type {
+        for (map.entries[@min(1, map.entries.len)..]) |e| _ = self.inferExpr(e.value);
         if (map.entries.len == 0) return .nil; // empty map
         // Infer from first entry: keys are atoms (shorthand syntax), values from expression
         const val_type = self.inferExpr(map.entries[0].value);
@@ -584,20 +805,24 @@ pub const Checker = struct {
 
     /// Infer the return type of a function call using built-in signatures.
     fn inferFuncCall(self: *Checker, fc: Node.FuncCall, loc: Loc) Type {
-        // Always infer all arguments (catches untyped lambdas in map/filter/reduce/etc.)
-        for (fc.args) |arg| {
-            _ = self.inferExpr(arg);
+        // Always infer all arguments (catches untyped lambdas in map/filter/reduce/etc.),
+        // once: the builtin signatures below read these types instead of
+        // inferring the arguments again, which reported every error in an
+        // argument to length() or max() twice.
+        const arg_types = self.allocator.alloc(Type, fc.args.len) catch return .hole;
+        for (fc.args, 0..) |arg, i| {
+            arg_types[i] = self.inferExpr(arg);
         }
         // Check if it's a known built-in function for return type
         if (lookupBuiltin(fc.name)) |kind| {
-            return self.resolveBuiltinReturn(kind, fc.args, loc);
+            return self.resolveBuiltinReturn(kind, fc.args, arg_types, loc);
         }
         // Unknown function -- return hole
         return .hole;
     }
 
     /// Resolve the return type of a built-in function given its arguments.
-    fn resolveBuiltinReturn(self: *Checker, kind: BuiltinKind, args: []const Node, loc: Loc) Type {
+    fn resolveBuiltinReturn(self: *Checker, kind: BuiltinKind, args: []const Node, arg_types: []const Type, loc: Loc) Type {
         switch (kind) {
             .length => {
                 // length([T]) -> Int
@@ -605,9 +830,9 @@ pub const Checker = struct {
                     self.addError(loc, "length() expects 1 argument, got {d}", .{args.len});
                     return .hole;
                 }
-                const arg_type = self.inferExpr(args[0]);
+                const arg_type = arg_types[0];
                 const ok = switch (arg_type) {
-                    .list, .hole, .any, .nil, .string, .map, .tuple => true,
+                    .list, .hole, .any, .nil, .string, .map, .tuple, .never => true,
                     else => false,
                 };
                 if (!ok) {
@@ -622,12 +847,12 @@ pub const Checker = struct {
                     self.addError(loc, "{s}() expects 2 arguments, got {d}", .{ name, args.len });
                     return .hole;
                 }
-                const a = self.inferExpr(args[0]);
-                const b = self.inferExpr(args[1]);
-                if (a != .int and a != .hole and a != .any) {
+                const a = arg_types[0];
+                const b = arg_types[1];
+                if (a != .int and a != .hole and a != .any and a != .never) {
                     self.addError(loc, "max/min expects Int arguments, got {s}", .{a.typeName()});
                 }
-                if (b != .int and b != .hole and b != .any) {
+                if (b != .int and b != .hole and b != .any and b != .never) {
                     self.addError(loc, "max/min expects Int arguments, got {s}", .{b.typeName()});
                 }
                 return .int;
@@ -638,8 +863,7 @@ pub const Checker = struct {
                     self.addError(loc, "remove() expects 2 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const list_type = self.inferExpr(args[0]);
-                _ = self.inferExpr(args[1]);
+                const list_type = arg_types[0];
                 if (list_type == .list) return list_type;
                 return .hole;
             },
@@ -649,8 +873,7 @@ pub const Checker = struct {
                     self.addError(loc, "append() expects 2 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const list_type = self.inferExpr(args[0]);
-                _ = self.inferExpr(args[1]);
+                const list_type = arg_types[0];
                 if (list_type == .list) return list_type;
                 return .hole;
             },
@@ -661,9 +884,7 @@ pub const Checker = struct {
                     self.addError(loc, "lookup() expects 2 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const map_type = self.inferExpr(args[0]);
-                const key_type = self.inferExpr(args[1]);
-                _ = key_type;
+                const map_type = arg_types[0];
                 if (map_type == .map) return map_type.map.value.*;
                 // For record types, try to resolve the specific field type
                 if (map_type == .record_type) {
@@ -686,9 +907,7 @@ pub const Checker = struct {
                     self.addError(loc, "insert() expects 3 arguments, got {d}", .{args.len});
                     return .hole;
                 }
-                const map_type = self.inferExpr(args[0]);
-                _ = self.inferExpr(args[1]);
-                _ = self.inferExpr(args[2]);
+                const map_type = arg_types[0];
                 if (map_type == .map) return map_type;
                 return .hole;
             },
@@ -698,7 +917,7 @@ pub const Checker = struct {
                     self.addError(loc, "keys() expects 1 argument, got {d}", .{args.len});
                     return .hole;
                 }
-                const map_type = self.inferExpr(args[0]);
+                const map_type = arg_types[0];
                 if (map_type == .map) {
                     const key_ptr = self.allocator.create(Type) catch return .hole;
                     key_ptr.* = map_type.map.key.*;
@@ -719,7 +938,6 @@ pub const Checker = struct {
                     self.addError(loc, "validate() expects 1 argument, got {d}", .{args.len});
                     return .hole;
                 }
-                _ = self.inferExpr(args[0]);
                 return .atom;
             },
         }
