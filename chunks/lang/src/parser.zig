@@ -27,6 +27,13 @@ fn internName(tok: Token) Token {
     return t;
 }
 
+/// True for the digits of 2^63 (leading zeros allowed): the one magnitude
+/// that is an Int only when negated.
+fn isMinIntMagnitude(digits: []const u8) bool {
+    const n = std.fmt.parseInt(u64, digits, 10) catch return false;
+    return n == @as(u64, 1) << 63;
+}
+
 /// Why a parse failed, in words, where the parser knows more than the error
 /// name.  `error.UnexpectedToken` alone told the user only a line and column.
 pub const Diagnostic = struct {
@@ -915,6 +922,19 @@ pub const Parser = struct {
         if (self.current.kind == .minus and self.pending_primary == null) {
             const loc = self.currentLoc();
             self.advance();
+            // 9223372036854775808 is 2^63, one more than maxInt, so it has no
+            // i64 value on its own; behind a unary minus it is minInt. Fold the
+            // pair into one literal, as Java does for its long literal, rather
+            // than parse the magnitude first and wrap it. Any other place the
+            // magnitude appears (`0 - 9223372036854775808`, in parentheses,
+            // alone) is refused in parsePrimary.
+            if (self.current.kind == .integer and isMinIntMagnitude(self.current.lexeme)) {
+                const value: i64 = std.math.minInt(i64);
+                self.advance();
+                const pre = try self.buildValue(.{ .integer = value });
+                const lit = Node{ .kind = .{ .integer_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };
+                return self.parseDotAccesses(lit);
+            }
             const operand = try self.parsePostfix();
             const operand_ptr = self.allocator.create(Node) catch return error.OutOfMemory;
             operand_ptr.* = operand;
@@ -938,7 +958,11 @@ pub const Parser = struct {
     }
 
     fn parsePostfix(self: *Parser) ParseError!Node {
-        var left = try self.parsePrimary();
+        return self.parseDotAccesses(try self.parsePrimary());
+    }
+
+    fn parseDotAccesses(self: *Parser, primary: Node) ParseError!Node {
+        var left = primary;
         // Dot access: expr.field or expr.UpperName (for dotted actor names like Shop.Checkout)
         while (self.current.kind == .dot) {
             self.advance();
@@ -1060,7 +1084,19 @@ pub const Parser = struct {
         const loc = self.currentLoc();
         switch (self.current.kind) {
             .integer => {
-                const value = std.fmt.parseInt(i64, self.current.lexeme, 10) catch return error.InvalidNumber;
+                const value = std.fmt.parseInt(i64, self.current.lexeme, 10) catch {
+                    const lexeme = self.current.lexeme;
+                    const message = if (isMinIntMagnitude(lexeme))
+                        std.fmt.allocPrint(self.allocator, "integer literal {s} is one more than the largest Int, 9223372036854775807; it is an Int only as the operand of a unary minus, `-{s}`, not after a binary one as in `x - {s}`", .{ lexeme, lexeme, lexeme })
+                    else
+                        std.fmt.allocPrint(self.allocator, "integer literal {s} does not fit in an Int, which runs from -9223372036854775808 to 9223372036854775807", .{lexeme});
+                    self.diagnostic = .{
+                        .message = message catch return error.OutOfMemory,
+                        .line = self.current.line,
+                        .col = self.current.col,
+                    };
+                    return error.InvalidNumber;
+                };
                 self.advance();
                 const pre = try self.buildValue(.{ .integer = value });
                 return Node{ .kind = .{ .integer_lit = .{ .value = value, .prebuilt = pre } }, .loc = loc };

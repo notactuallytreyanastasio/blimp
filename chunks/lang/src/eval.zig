@@ -4031,9 +4031,9 @@ test "a spawn inside a handler does not invalidate the receiver's entry" {
 // ============================================================
 // Integer overflow: wrapping at the i64 boundaries (issue #27)
 //
-// `9223372036854775808` does not lex, so minInt is spelled
-// `0 - 9223372036854775807 - 1` in these sources — the same way the
-// issue's probes spell it.
+// minInt is spelled `0 - 9223372036854775807 - 1` in these sources, the
+// way the issue's probes spell it, so they test the arithmetic and not the
+// literal `-9223372036854775808` (which parser_test.zig covers).
 // ============================================================
 
 const min_i64_src = "(0 - 9223372036854775807 - 1)";

@@ -1,7 +1,10 @@
 # Regression test for issue #27: arithmetic that leaves signed 64-bit range
 # used to panic the interpreter with a Zig stack trace. It now wraps.
 #
-# 9223372036854775808 does not lex, so minInt is written 0 - maxInt - 1.
+# minInt is written 0 - maxInt - 1 in the arithmetic tests, so they do not
+# lean on the literal; the last three tests are about the literal
+# -9223372036854775808 itself. The bare 9223372036854775808 is a parse error
+# (src/parser_test.zig), which a test here cannot express.
 
 actor IntOverflowTests do
   test "add wraps past maxInt" do
@@ -48,5 +51,20 @@ actor IntOverflowTests do
     assert_eq(9223372036854775807 + 0, 9223372036854775807)
     assert_eq((0 - 9223372036854775807 - 1) + 9223372036854775807, 0 - 1)
     assert_eq((0 - 9223372036854775807 - 1) / 2, 0 - 4611686018427387904)
+  end
+
+  test "-9223372036854775808 is minInt" do
+    assert_eq(-9223372036854775808, 0 - 9223372036854775807 - 1)
+    assert_eq(- 9223372036854775808, 0 - 9223372036854775807 - 1)
+    assert_eq(type_of(-9223372036854775808), :integer)
+  end
+
+  test "the literal minInt then minus one wraps to maxInt" do
+    assert_eq(-9223372036854775808 - 1, 9223372036854775807)
+  end
+
+  test "the literal minInt is the same Int to_int reads from the string" do
+    assert_eq(to_int("-9223372036854775808"), -9223372036854775808)
+    assert_eq(to_string(-9223372036854775808), "-9223372036854775808")
   end
 end

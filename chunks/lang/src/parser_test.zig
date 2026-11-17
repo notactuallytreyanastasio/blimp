@@ -19,6 +19,51 @@ test "parse integer literal" {
     try std.testing.expectEqual(@as(i64, 42), nodes[0].kind.integer_lit.value);
 }
 
+test "a unary minus before 2^63 is the literal minInt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "-9223372036854775808", "- 9223372036854775808", "-09223372036854775808" }) |src| {
+        var p = Parser.init(arena.allocator(), src);
+        const nodes = try p.parseFile();
+        try std.testing.expectEqual(@as(usize, 1), nodes.len);
+        try std.testing.expectEqual(Node.Kind.integer_lit, std.meta.activeTag(nodes[0].kind));
+        try std.testing.expectEqual(std.math.minInt(i64), nodes[0].kind.integer_lit.value);
+    }
+}
+
+test "-9223372036854775808 - 1 is minInt minus one, not a negated 9223372036854775809" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var p = Parser.init(arena.allocator(), "-9223372036854775808 - 1");
+    const nodes = try p.parseFile();
+    const sub = nodes[0].kind.binary_op;
+    try std.testing.expectEqual(ast.Node.BinaryOp.Op.sub, sub.op);
+    try std.testing.expectEqual(std.math.minInt(i64), sub.left.kind.integer_lit.value);
+    try std.testing.expectEqual(@as(i64, 1), sub.right.kind.integer_lit.value);
+}
+
+test "2^63 anywhere but behind a unary minus is refused, with words" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "9223372036854775808", "0 - 9223372036854775808", "-(9223372036854775808)", "x -9223372036854775808" }) |src| {
+        var p = Parser.init(arena.allocator(), src);
+        try std.testing.expectError(error.InvalidNumber, p.parseFile());
+        const d = p.diagnostic orelse return error.TestExpectedDiagnostic;
+        try std.testing.expect(std.mem.indexOf(u8, d.message, "one more than the largest Int") != null);
+    }
+}
+
+test "an integer literal past 2^63 is refused, negated or not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "92233720368547758080", "-92233720368547758080", "-9223372036854775809", "18446744073709551616" }) |src| {
+        var p = Parser.init(arena.allocator(), src);
+        try std.testing.expectError(error.InvalidNumber, p.parseFile());
+        const d = p.diagnostic orelse return error.TestExpectedDiagnostic;
+        try std.testing.expect(std.mem.indexOf(u8, d.message, "does not fit in an Int") != null);
+    }
+}
+
 test "parse float literal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
