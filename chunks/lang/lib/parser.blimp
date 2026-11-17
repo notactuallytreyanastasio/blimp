@@ -553,6 +553,15 @@ def parse_multiplication_loop(tokens: List, pos: Int, left: Map) -> Map do
 end
 
 def parse_unary(tokens: List, pos: Int) -> Map do
+  case tok_kind(tokens, pos) == :minus && tok_kind(tokens, pos + 1) == :integer && is_min_int_magnitude(tok_lexeme(tokens, pos + 1)) do
+    # 2^63 is an Int only behind a unary minus, where it is minInt; folded
+    # into one literal, as src/parser.zig does.
+    true -> %{ok: true, node: %{kind: :integer_lit, value: to_int("-9223372036854775808"), line: tok_line(tokens, pos)}, pos: pos + 2}
+    _ -> parse_negation(tokens, pos)
+  end
+end
+
+def parse_negation(tokens: List, pos: Int) -> Map do
   case tok_kind(tokens, pos) == :minus do
     true ->
       result = parse_primary(tokens, pos + 1)
@@ -641,7 +650,7 @@ def parse_primary(tokens: List, pos: Int) -> Map do
   line = tok_line(tokens, pos)
 
   case kind do
-    :integer -> %{ok: true, node: %{kind: :integer_lit, value: to_int(lexeme), line: line}, pos: pos + 1}
+    :integer -> parse_integer(lexeme, line, pos)
     :float -> %{ok: true, node: %{kind: :float_lit, value: lexeme, line: line}, pos: pos + 1}
     :string -> %{ok: true, node: %{kind: :string_lit, value: lexeme, line: line}, pos: pos + 1}
     :atom -> %{ok: true, node: %{kind: :atom_lit, name: lexeme, line: line}, pos: pos + 1}
@@ -669,6 +678,32 @@ def parse_primary(tokens: List, pos: Int) -> Map do
     :kw_case -> parse_case(tokens, pos)
     _ -> %{ok: false, error: concat("unexpected token: ", to_string(kind)), pos: pos}
   end
+end
+
+# to_int refuses digits past maxInt with a catchable :type_error; an
+# uncaught one would stop the parser actor with no reason, so catch it and
+# refuse in words.
+def parse_integer(lexeme: String, line: Int, pos: Int) -> Map do
+  r = try do
+    %{ok: true, node: %{kind: :integer_lit, value: to_int(lexeme), line: line}, pos: pos + 1}
+  catch err do
+    case is_min_int_magnitude(lexeme) do
+      true -> %{ok: false, error: concat("integer literal ", concat(lexeme, " is one more than the largest Int, 9223372036854775807; it is an Int only as the operand of a unary minus")), pos: pos}
+      _ -> %{ok: false, error: concat("integer literal ", concat(lexeme, " does not fit in an Int, which runs from -9223372036854775808 to 9223372036854775807")), pos: pos}
+    end
+  end
+  r
+end
+
+def strip_leading_zeros(digits: String) -> String do
+  case length(digits) > 1 && slice(digits, 0, 1) == "0" do
+    true -> strip_leading_zeros(slice(digits, 1, length(digits) - 1))
+    _ -> digits
+  end
+end
+
+def is_min_int_magnitude(digits: String) -> Bool do
+  strip_leading_zeros(digits) == "9223372036854775808"
 end
 
 def parse_list_lit(tokens: List, pos: Int) -> Map do

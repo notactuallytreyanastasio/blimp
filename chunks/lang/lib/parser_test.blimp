@@ -120,6 +120,30 @@ actor ParserTests do
     assert_eq(lookup(first_node(result), "kind"), :unary_op)
   end
 
+  test "a unary minus before 2^63 is the literal minInt" do
+    result = parse("-9223372036854775808")
+    assert(lookup(result, "ok"))
+    assert_eq(lookup(first_node(result), "kind"), :integer_lit)
+    assert_eq(lookup(first_node(result), "value"), -9223372036854775808)
+  end
+
+  test "maxInt still parses, negated or not" do
+    assert_eq(lookup(first_node(parse("9223372036854775807")), "value"), 9223372036854775807)
+    assert_eq(lookup(first_node(parse("-9223372036854775807")), "kind"), :unary_op)
+  end
+
+  test "2^63 without a unary minus is refused in words" do
+    result = parse("9223372036854775808")
+    assert_eq(lookup(result, "ok"), false)
+    assert(contains(lookup(result, "error"), "one more than the largest Int"))
+    assert_eq(lookup(parse("0 - 9223372036854775808"), "ok"), false)
+  end
+
+  test "an integer literal past 2^63 is refused, negated or not" do
+    assert(contains(lookup(parse("92233720368547758080"), "error"), "does not fit in an Int"))
+    assert(contains(lookup(parse("-9223372036854775809"), "error"), "does not fit in an Int"))
+  end
+
   test "parses parenthesized expression" do
     result = parse("(2 + 3)")
     assert(lookup(result, "ok"))
