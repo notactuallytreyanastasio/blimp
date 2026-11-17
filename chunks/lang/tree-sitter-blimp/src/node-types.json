@@ -616,6 +616,10 @@
         {
           "type": "upper_identifier",
           "named": true
+        },
+        {
+          "type": "when_guard",
+          "named": true
         }
       ]
     }
@@ -2810,6 +2814,10 @@
         },
         {
           "type": "upper_identifier",
+          "named": true
+        },
+        {
+          "type": "when_guard",
           "named": true
         }
       ]

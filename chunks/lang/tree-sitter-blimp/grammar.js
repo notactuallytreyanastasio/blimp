@@ -10,6 +10,13 @@ module.exports = grammar({
 
   conflicts: ($) => [
     [$.spawn_expression],
+    // A statement after a branch body may be the body's next statement or
+    // the next branch's pattern; only a later `->` tells. parser.zig decides
+    // the same way (looksLikeBranch parses ahead to the `->`), so let GLR
+    // carry both until one dies, instead of a precedence that picks one
+    // before the `->` is seen.
+    [$.case_branch],
+    [$.situation_branch],
   ],
 
   rules: {
@@ -308,7 +315,7 @@ module.exports = grammar({
       seq("situation", $._expression, "do", repeat1($.situation_branch), "end"),
 
     situation_branch: ($) =>
-      prec(8, seq(choice($.hole, $._expression), "->", repeat1($._statement))),
+      seq($._expression, optional($.when_guard), "->", repeat1($._statement)),
 
     // ============================================================
     // Case expression (exhaustive pattern matching)
@@ -318,7 +325,7 @@ module.exports = grammar({
       seq("case", $._expression, "do", repeat1($.case_branch), "end"),
 
     case_branch: ($) =>
-      prec(8, seq(choice($.hole, $._expression), "->", repeat1($._statement))),
+      seq($._expression, optional($.when_guard), "->", repeat1($._statement)),
 
     // ============================================================
     // Hole (wildcard/identity)
