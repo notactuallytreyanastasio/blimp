@@ -50,7 +50,12 @@ found=0
 while read -r f; do
   rel=${f#"$root"/}
   ts=$(awk -F'	' -v f="$f" '$1 == f { print $2 " " $3; exit }' "$tmp/ts")
-  msg=$("$BLIMP" "$f" --ast 2>&1 >/dev/null </dev/null | grep -m1 '^Parse error')
+  # An integer literal too big for an Int is refused by parser.zig with a
+  # "Parse error", but the digits are well-formed and a grammar has no way
+  # to know 2^63 from 2^63-1. That refusal is about range, not syntax, so
+  # it is the one parse error not counted here.
+  msg=$("$BLIMP" "$f" --ast 2>&1 >/dev/null </dev/null | grep -m1 '^Parse error' |
+    grep -v ': integer literal [0-9]* \(is one more than the largest Int\|does not fit in an Int\)')
   if [ -n "$ts" ] && [ -z "$msg" ]; then
     set -- $ts
     line=$(($1 + 1))
