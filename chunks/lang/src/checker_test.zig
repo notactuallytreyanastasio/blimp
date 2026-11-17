@@ -245,7 +245,9 @@ test "an operand already reported as wrong is not reported again by its parent" 
         const nodes = try p.parseFile();
         var c = Checker.init(alloc);
         const errs = c.checkFile(nodes).errors;
-        for (errs) |e| std.debug.print("{s}: {s}\n", .{ src, e.message });
+        if (errs.len != 1) {
+            for (errs) |e| std.debug.print("{s}: {s}\n", .{ src, e.message });
+        }
         try std.testing.expectEqual(@as(usize, 1), errs.len);
         try std.testing.expect(std.mem.indexOf(u8, errs[0].message, "arithmetic on incompatible types") != null);
     }
@@ -397,6 +399,9 @@ test "a later _ branch that changes an outer name's type is reported" {
     // Same type, or a name the outer scope does not have: nothing to say.
     try expectNoErrors("x = 1\ncase 2 do\n  1 -> 0\n  _ -> x = 5\nend\ny = x + 1");
     try expectNoErrors("case 2 do\n  1 -> 0\n  _ -> z = :a\nend");
+    // A name only a later `_ ->` binds is known afterwards with its type.
+    try expectOneError("case 2 do\n  1 -> 0\n  _ -> z = :a\nend\ny = z + 1", bad, 5);
+    try expectNoErrors("case 2 do\n  1 -> 0\n  _ -> z = 5\nend\ny = z + 1");
     // Inside a for body the branch's assignment escapes only into the
     // for body's scope, which does not escape.
     try expectNoErrors("x = 1\nfor i in [1] do\n  case 2 do\n    _ -> x = :a\n  end\nend\ny = x + 1");
@@ -415,4 +420,15 @@ test "a reply in a def or fn inside a handler is not the handler's" {
 
 test "a Tuple annotation inside a lambda compares with a tuple" {
     try expectNoErrors("f = fn(o: Tuple) do o == {1, 2} end");
+}
+
+test "the later _ branch message is whole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const errs = try checkSource(arena.allocator(), "x = 1\ncase 2 do\n  1 -> 0\n  _ -> x = :a\nend");
+    try std.testing.expectEqual(@as(usize, 1), errs.len);
+    try std.testing.expectEqualStrings(
+        "'x' is Int before this case and the `_ ->` branch makes it Atom; only a `_ ->` branch's assignment is seen after the case, so after it 'x' is Int or Atom depending on which branch ran",
+        errs[0].message,
+    );
 }

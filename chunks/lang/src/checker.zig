@@ -320,7 +320,13 @@ pub const Checker = struct {
     /// "one of the two".  Keeping either would let a run-time type error
     /// through on the other path, so an assignment that changes an outer
     /// name to a type that is not a subtype of the old one is reported.
-    /// A name only this branch binds stays unbound afterwards.
+    ///
+    /// A name only this branch binds exists after the case only when the
+    /// branch ran (`case 2 do 1 -> 0  _ -> z = :a end; z + 1` stops with
+    /// TYPE MISMATCH), and on every other path using it is an undefined
+    /// variable at run time, which is an error either way.  So it is bound
+    /// afterwards with the type the branch gave it: that is the only path
+    /// on which a use can get as far as a type error.
     fn checkWildBranch(self: *Checker, body: []const Node) void {
         self.env.pushScope();
         for (body) |stmt| self.checkNode(stmt);
@@ -335,11 +341,17 @@ pub const Checker = struct {
                 if (std.mem.eql(u8, b2.name, b.name)) later = true;
             }
             if (later) continue;
-            const old = self.env.lookup(b.name) orelse continue;
+            const old = self.env.lookup(b.name) orelse {
+                self.env.define(b.name, b.ty);
+                continue;
+            };
             // Hole and Any on either side are subtypes both ways.
             if (b.ty.isSubtypeOf(old)) continue;
             const loc = if (body.len > 0) body[0].loc else Loc{ .line = 0, .col = 0 };
-            self.addError(loc, "'{s}' is {s} before this case and the `_ ->` branch makes it {s}; only a `_ ->` branch's assignment is seen after the case, so afterwards it is either", .{
+            self.addError(loc, "'{s}' is {s} before this case and the `_ ->` branch makes it {s}; only a `_ ->` branch's assignment is seen after the case, so after it '{s}' is {s} or {s} depending on which branch ran", .{
+                b.name,
+                old.typeName(),
+                b.ty.typeName(),
                 b.name,
                 old.typeName(),
                 b.ty.typeName(),
