@@ -83,34 +83,6 @@
     },
     "category": "unsupported"
   },
-  "examples/errors/03_type_mismatch_add.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- TYPE MISMATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: Both operands to a binary operator are not of the same type!"
-    },
-    "category": "compile-error"
-  },
-  "examples/errors/04_list_add.blimp": {
-    "interp": {
-      "end": "exit",
-      "exit": 1,
-      "stdout": "",
-      "stderr": "-- TYPE MISMATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    "compiler": {
-      "end": "exit",
-      "exit": 1,
-      "error": "LLVM verification error: Integer arithmetic operators only work with integral types!"
-    },
-    "category": "compile-error"
-  },
   "examples/errors/07_class_keyword.blimp": {
     "interp": {
       "end": "exit",
@@ -420,14 +392,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4344757736\n",
+      "stdout": "4308237800\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4375608808\n",
+      "stdout": "4329504232\n",
       "stderr": ""
     },
     "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
