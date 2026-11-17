@@ -7,14 +7,16 @@
 # The pipeline: raw text -> sanitize -> classify -> score -> publish/reject
 #
 # Run this and let Claude fill in the classification and scoring logic:
-#   blimp examples/content_pipeline.blimp --no-type-check
+#   blimp examples/content_pipeline.blimp
+# Each Hole the run reaches shells out to the `claude` CLI, and the answer is
+# written back into this file in place of the Hole. Without `claude` on PATH
+# a Hole evaluates to nil and the run goes on.
 
 actor Sanitizer do
   on :clean(text: String) do
     # Strip leading/trailing whitespace, collapse internal spaces
-    trimmed = split(text, " ")
-    cleaned = concat(head(trimmed), "")
-    reply cleaned
+    words = filter(split(text, " "), fn(w: String) do w != "" end)
+    reply join(words, " ")
   end
 end
 
@@ -28,29 +30,7 @@ actor Classifier do
       0 ->
         reply :empty
 
-      _ ->
-        caps_count = length(split(text, "AAAA"))
-        has_exclaim = length(split(text, "!!!")) > 1
-        situation word_count < 3 do
-        true ->
-        situation has_exclaim do
-        true -> reply %{label: :spam, confidence: 75}
-        _ -> reply %{label: :safe, confidence: 50}
-        end
-        _ ->
-        situation caps_count > 1 do
-        true ->
-        situation has_exclaim do
-        true -> reply %{label: :spam, confidence: 90}
-        _ -> reply %{label: :hate, confidence: 70}
-        end
-        _ ->
-        situation word_count > 20 do
-        true -> reply %{label: :promotional, confidence: 65}
-        _ -> reply %{label: :safe, confidence: 85}
-        end
-        end
-        end
+      _ # Hole: classify text as one of :spam :hate :safe or :promotional
         # based on its content and word_count. Check for suspicious patterns
         # like all-caps, excessive punctuation, or very short text.
         # Use the categories list as reference. Return a map with
@@ -96,14 +76,17 @@ actor Scorer do
 end
 
 actor Publisher do
+  state sanitizer: Sanitizer :: nil
+  state classifier: Classifier :: nil
+  state scorer: Scorer :: nil
   state published: List :: []
   state rejected: List :: []
   state review_queue: List :: []
 
   on :process(text: String) do
-    clean = Sanitizer <- :clean(text)
-    classification = Classifier <- :classify(clean)
-    decision = Scorer <- :score(classification)
+    clean = sanitizer <- :clean(text)
+    classification = classifier <- :classify(clean)
+    decision = scorer <- :score(classification)
     action = lookup(decision, "action")
 
     case action do
@@ -131,9 +114,13 @@ actor Publisher do
 end
 
 # Run the pipeline on some sample content
-Publisher <- :process("Hello world, this is a nice post about baking")
-Publisher <- :process("BUY NOW!!! LIMITED TIME OFFER!!! CLICK HERE!!!")
-Publisher <- :process("check out my totally legitimate website at example.com")
-Publisher <- :process("")
-stats = Publisher <- :stats
+sanitizer = spawn Sanitizer
+classifier = spawn Classifier
+scorer = spawn Scorer
+publisher = spawn Publisher, sanitizer: sanitizer, classifier: classifier, scorer: scorer
+publisher <- :process("Hello world, this is a nice post about baking")
+publisher <- :process("BUY NOW!!! LIMITED TIME OFFER!!! CLICK HERE!!!")
+publisher <- :process("check out my totally legitimate website at example.com")
+publisher <- :process("")
+stats = publisher <- :stats
 print(stats)
