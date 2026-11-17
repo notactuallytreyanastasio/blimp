@@ -27,6 +27,20 @@
     },
     "category": "unsupported"
   },
+  "examples/content_pipeline.blimp": {
+    "interp": {
+      "end": "exit",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "[Hole] Calling Claude to fill in: Hole: classify text as one of :spam :hate :safe or :promotional"
+    },
+    "compiler": {
+      "end": "exit",
+      "exit": 1,
+      "error": "CANNOT COMPILE: There is no `filter` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
+    },
+    "category": "unsupported"
+  },
   "examples/dot_notation.blimp": {
     "interp": {
       "end": "exit",
@@ -125,6 +139,20 @@
     },
     "category": "unsupported"
   },
+  "examples/game_rules.blimp": {
+    "interp": {
+      "end": "exit",
+      "exit": 0,
+      "stdout": ":illegal\n%{}\n%{}\n",
+      "stderr": "[Hole] Calling Claude to fill in: Hole: the cell is already occupied \u2014 this is an illegal move."
+    },
+    "compiler": {
+      "end": "exit",
+      "exit": 1,
+      "error": "CANNOT COMPILE: There is no `elem` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
+    },
+    "category": "unsupported"
+  },
   "examples/hole_test.blimp": {
     "interp": {
       "end": "exit",
@@ -193,6 +221,20 @@
       "end": "exit",
       "exit": 1,
       "error": "CANNOT COMPILE: There is no `length` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
+    },
+    "category": "unsupported"
+  },
+  "examples/rate_limiter.blimp": {
+    "interp": {
+      "end": "exit",
+      "exit": 0,
+      "stdout": ":allowed\n:allowed\n",
+      "stderr": "[Hole] Calling Claude to fill in: Hole: not enough tokens \u2014 check if this client is a repeat offender in"
+    },
+    "compiler": {
+      "end": "exit",
+      "exit": 1,
+      "error": "CANNOT COMPILE: There is no `append` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min, rem, abs, puts)."
     },
     "category": "unsupported"
   },
@@ -364,14 +406,14 @@
     "compiled": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4368956904\n",
+      "stdout": "4305419752\n",
       "stderr": ""
     },
     "category": "flaky",
     "compiled_second_run": {
       "end": "exit",
       "exit": 0,
-      "stdout": "4365581800\n",
+      "stdout": "4378770920\n",
       "stderr": ""
     },
     "note": "a String reply prints as a heap address in compiled code, different every run (ASLR)."
