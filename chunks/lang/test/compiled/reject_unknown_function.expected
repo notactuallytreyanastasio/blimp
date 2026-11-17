@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  There is no `lenght` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides (max, min).
+
+4| lenght(x)
+    ^
+
+  Hint: The interpreter's other builtins are not compiled yet. Run this file with the interpreter.
+
+1 construct cannot be compiled.

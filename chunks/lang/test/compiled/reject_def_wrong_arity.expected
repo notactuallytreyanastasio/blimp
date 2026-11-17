@@ -1,0 +1,12 @@
+--- compile failed
+
+-- CANNOT COMPILE ──────────────────────────────────────────
+
+  `twice` takes 1 argument(s); this call passes 2.
+
+4| twice(1, 2)
+    ^
+
+  Hint: Pass one argument for each parameter of the def.
+
+1 construct cannot be compiled.

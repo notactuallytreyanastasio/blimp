@@ -147,8 +147,9 @@ pub const Codegen = struct {
     current_def_name: []const u8 = "",
     /// Enclosing try/orelse in the current function.
     catches: std.ArrayList(Catch) = .empty,
-    /// Every def's name: a call to one inside a try/orelse is refused.
-    def_names: std.ArrayList([]const u8) = .empty,
+    /// Every def: what a call by its name resolves to; a call to one inside
+    /// a try/orelse is refused.
+    defs: std.ArrayList(ast.Node.DefStmt) = .empty,
     /// Status of the send compiled last, so `orelse` can tell a reply of 0
     /// from no reply at all.
     last_send_status: ?c.LLVMValueRef = null,
@@ -206,7 +207,7 @@ pub const Codegen = struct {
 
     pub fn deinit(self: *Codegen) void {
         self.catches.deinit(self.allocator);
-        self.def_names.deinit(self.allocator);
+        self.defs.deinit(self.allocator);
         self.scope.deinit(self.allocator);
         self.atoms.deinit(self.allocator);
         for (self.actors.items) |*a| a.handler_fns.deinit(self.allocator);
@@ -318,7 +319,7 @@ pub const Codegen = struct {
             .binary_op => |op| self.compileBinaryOp(op, node.loc),
             .unary_op => |op| self.compileUnaryOp(op),
             .assign_stmt => |stmt| self.compileAssign(stmt),
-            .func_call => |call| self.compileFuncCall(call),
+            .func_call => |call| self.compileFuncCall(call, node.loc),
             .pipe_expr => |pipe| self.compilePipe(pipe),
             .situation => |sit| self.compileSituation(sit),
             .case_expr => |cas| self.compileCase(cas),
@@ -458,8 +459,8 @@ pub const Codegen = struct {
     /// Refused here rather than compiled into a catch that cannot fire.
     fn checkDefCallCatchable(self: *Codegen, name: []const u8) CodegenError!void {
         if (self.catches.items.len == 0) return;
-        for (self.def_names.items) |d| {
-            if (!std.mem.eql(u8, d, name)) continue;
+        for (self.defs.items) |d| {
+            if (!std.mem.eql(u8, d.name, name)) continue;
             const k = self.catches.items[self.catches.items.len - 1];
             return self.reject(
                 k.loc,
@@ -470,124 +471,173 @@ pub const Codegen = struct {
         }
     }
 
-    fn isDef(self: *const Codegen, name: []const u8) bool {
-        for (self.def_names.items) |d| if (std.mem.eql(u8, d, name)) return true;
-        return false;
+    fn findDef(self: *const Codegen, name: []const u8) ?ast.Node.DefStmt {
+        for (self.defs.items) |d| if (std.mem.eql(u8, d.name, name)) return d;
+        return null;
     }
 
-    /// The symbol a call by name goes to: a def's own, or else (for now) a C
-    /// function of that name.
-    fn calleeSymbol(self: *Codegen, name: []const u8) [*:0]const u8 {
-        return if (self.isDef(name)) self.defSymbol(name) else self.zname(name);
+    /// What a call by name runs.  The interpreter looks the name up in the
+    /// environment first (a closure there is called, and a def is one), and
+    /// only then among its builtins; a local that is not a closure hides a
+    /// def of the same name.  Anything else is refused here, by name: there
+    /// is no "call a C function of that name" case, because Blimp has no
+    /// foreign calls and every such symbol the linker found was an accident.
+    const Callee = union(enum) {
+        def: ast.Node.DefStmt,
+        builtin: Builtin,
+    };
+
+    /// The builtins compiled code provides.  Every other interpreter builtin
+    /// is refused at the call.
+    const Builtin = enum { max, min };
+    const builtin_list = "max, min";
+
+    fn resolveCallee(self: *Codegen, name: []const u8, loc: ast.Loc, argc: usize) CodegenError!Callee {
+        const local = self.scope.get(name);
+        if (local) |entry| if (entry.tag == .tagged_val) return self.reject(
+            loc,
+            "`{s}` is a value here, and compiled code cannot call a fn value by name yet.",
+            .{name},
+            "Run this file with the interpreter.",
+        );
+        if (local == null) if (self.findDef(name)) |d| {
+            if (d.params.len != argc) return self.reject(
+                loc,
+                "`{s}` takes {d} argument(s); this call passes {d}.",
+                .{ name, d.params.len, argc },
+                "Pass one argument for each parameter of the def.",
+            );
+            return .{ .def = d };
+        };
+        if (std.meta.stringToEnum(Builtin, name)) |b| {
+            const want: usize = switch (b) {
+                .max, .min => 2,
+            };
+            if (argc != want) return self.reject(
+                loc,
+                "`{s}` takes {d} argument(s); this call passes {d}.",
+                .{ name, want, argc },
+                "Run this file with the interpreter.",
+            );
+            return .{ .builtin = b };
+        }
+        return self.reject(
+            loc,
+            "There is no `{s}` in compiled code: it is not a def in this file, and not one of the builtins the compiler provides ({s}).",
+            .{ name, builtin_list },
+            "The interpreter's other builtins are not compiled yet. Run this file with the interpreter.",
+        );
     }
 
-    fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall) CodegenError!TaggedVal {
-        const name = call.name;
+    /// A compiled def binds every parameter as an i64 Int, so it can be
+    /// passed an Int, or an actor (an i64 id, which `c <- :get` in the body
+    /// sends to).  max and min take Ints.  Anything else used to be passed
+    /// as it was to a function declared to take i64: a String was a pointer
+    /// and LLVM refused it, a Float would have been reinterpreted.
+    fn requireIntArgs(self: *Codegen, name: []const u8, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!void {
+        for (args, 0..) |a, i| {
+            if (a.tag == .int) continue;
+            if (a.tag == .actor_ref and callee == .def) continue;
+            return self.reject(
+                locs[i],
+                "Argument {d} of `{s}` is {s}; compiled code can pass it only an Int{s}.",
+                .{ i + 1, name, tagNoun(a.tag), if (callee == .def) " or an actor" else "" },
+                "Run this file with the interpreter.",
+            );
+        }
+    }
+
+    fn tagNoun(tag: ValTag) []const u8 {
+        return switch (tag) {
+            .int => "an Int",
+            .float => "a Float",
+            .boolean => "a Bool",
+            .string => "a String",
+            .atom => "an Atom",
+            .nil => "nil",
+            .actor_ref => "an actor",
+            .tagged_val => "a list, map or fn value",
+        };
+    }
+
+    fn emitCall(self: *Codegen, name: []const u8, callee: Callee, args: []const TaggedVal, locs: []const ast.Loc) CodegenError!TaggedVal {
+        try self.requireIntArgs(name, callee, args, locs);
+        switch (callee) {
+            .builtin => |b| switch (b) {
+                // icmp + select
+                .max, .min => {
+                    const pred: c_uint = if (b == .max) c.LLVMIntSGT else c.LLVMIntSLT;
+                    const cmp = c.LLVMBuildICmp(self.builder, pred, args[0].val, args[1].val, "cmptmp");
+                    return .{ .val = c.LLVMBuildSelect(self.builder, cmp, args[0].val, args[1].val, self.zname(name)), .tag = .int };
+                },
+            },
+            .def => {
+                // Declared by forwardDeclareDefs or compileDef before any call.
+                const func = c.LLVMGetNamedFunction(self.module, self.defSymbol(name));
+                if (func == null) return CodegenError.LLVMError;
+                const ft = c.LLVMGlobalGetValueType(func);
+                const vals = self.allocator.alloc(c.LLVMValueRef, args.len) catch return CodegenError.LLVMError;
+                for (args, 0..) |a, i| vals[i] = a.val;
+                const val = c.LLVMBuildCall2(self.builder, ft, func, vals.ptr, @intCast(vals.len), "calltmp");
+                // Mark as tail call if this is a recursive call to the current def
+                if (self.tail_call_target) |target| {
+                    if (std.mem.eql(u8, name, target)) c.LLVMSetTailCall(val, 1);
+                }
+                return .{ .val = val, .tag = .int };
+            },
+        }
+    }
+
+    fn compileFuncCall(self: *Codegen, call: ast.Node.FuncCall, loc: ast.Loc) CodegenError!TaggedVal {
+        try self.checkDefCallCatchable(call.name);
+        const callee = try self.resolveCallee(call.name, loc, call.args.len);
+        const args = self.allocator.alloc(TaggedVal, call.args.len) catch return CodegenError.LLVMError;
+        const locs = self.allocator.alloc(ast.Loc, call.args.len) catch return CodegenError.LLVMError;
+        for (call.args, 0..) |arg, i| {
+            args[i] = try self.compileExpr(arg);
+            locs[i] = arg.loc;
+        }
+        return self.emitCall(call.name, callee, args, locs);
+    }
+
+    /// `x |> f(a, _)` passes x where the hole is; `x |> f(a)` passes it
+    /// first; `x |> f` passes it alone.  Then it is a call like any other.
+    fn compilePipe(self: *Codegen, pipe: ast.Node.PipeExpr) CodegenError!TaggedVal {
+        const right = pipe.right.*;
+        const name: []const u8, const call_args: []const ast.Node = switch (right.kind) {
+            .func_call => |call| .{ call.name, call.args },
+            .identifier => |id| .{ id.name, &.{} },
+            else => return CodegenError.UnsupportedNode,
+        };
         try self.checkDefCallCatchable(name);
 
-        // max(a, b) and min(a, b) - inline as icmp+select
-        if ((std.mem.eql(u8, name, "max") or std.mem.eql(u8, name, "min")) and call.args.len == 2) {
-            const a = try self.compileExpr(call.args[0]);
-            const b = try self.compileExpr(call.args[1]);
-            const pred: c_uint = if (std.mem.eql(u8, name, "max")) c.LLVMIntSGT else c.LLVMIntSLT;
-            const cmp = c.LLVMBuildICmp(self.builder, pred, a.val, b.val, "cmptmp");
-            const val = c.LLVMBuildSelect(self.builder, cmp, a.val, b.val, self.zname(name));
-            return .{ .val = val, .tag = .int };
-        }
+        var holes: usize = 0;
+        for (call_args) |a| if (a.kind == .hole) {
+            holes += 1;
+        };
+        const argc = if (holes > 0) call_args.len else call_args.len + 1;
+        const callee = try self.resolveCallee(name, right.loc, argc);
 
-        // Generic: call extern blimp_<name>(args...)
-        // For now, only support i64 args and return
-        var arg_vals: [8]c.LLVMValueRef = undefined;
-        var arg_types: [8]c.LLVMTypeRef = undefined;
-        const n: u32 = @intCast(@min(call.args.len, 8));
-        for (0..n) |i| {
-            const arg = try self.compileExpr(call.args[i]);
-            arg_vals[i] = arg.val;
-            arg_types[i] = self.i64_type;
-        }
-        const ft = c.LLVMFunctionType(self.i64_type, &arg_types, n, 0);
-        const extern_name = self.calleeSymbol(name);
-        var func = c.LLVMGetNamedFunction(self.module, extern_name);
-        if (func == null) {
-            func = c.LLVMAddFunction(self.module, extern_name, ft);
-        }
-        const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, n, "calltmp");
-        // Mark as tail call if this is a recursive call to the current def
-        if (self.tail_call_target) |target| {
-            if (std.mem.eql(u8, name, target)) {
-                c.LLVMSetTailCall(val, 1);
-            }
-        }
-        return .{ .val = val, .tag = .int };
-    }
-
-    fn compilePipe(self: *Codegen, pipe: ast.Node.PipeExpr) CodegenError!TaggedVal {
-        // Evaluate left side
         const left_val = try self.compileExpr(pipe.left.*);
-
-        // Right side must be a func_call (with _ placeholder) or bare identifier
-        const right = pipe.right.*;
-        switch (right.kind) {
-            .func_call => |call| try self.checkDefCallCatchable(call.name),
-            .identifier => |id| try self.checkDefCallCatchable(id.name),
-            else => {},
+        const args = self.allocator.alloc(TaggedVal, argc) catch return CodegenError.LLVMError;
+        const locs = self.allocator.alloc(ast.Loc, argc) catch return CodegenError.LLVMError;
+        var n: usize = 0;
+        if (holes == 0) {
+            args[0] = left_val;
+            locs[0] = pipe.left.loc;
+            n = 1;
         }
-        switch (right.kind) {
-            .func_call => |call| {
-                // Replace the hole/placeholder arg with left_val
-                var arg_vals: [8]c.LLVMValueRef = undefined;
-                var arg_types: [8]c.LLVMTypeRef = undefined;
-                const n: u32 = @intCast(@min(call.args.len, 8));
-                var used_placeholder = false;
-                for (0..n) |i| {
-                    if (call.args[i].kind == .hole) {
-                        arg_vals[i] = left_val.val;
-                        used_placeholder = true;
-                    } else {
-                        const arg = try self.compileExpr(call.args[i]);
-                        arg_vals[i] = arg.val;
-                    }
-                    arg_types[i] = self.i64_type;
-                }
-                // If no placeholder found, insert left as first arg
-                if (!used_placeholder) {
-                    var shifted_vals: [8]c.LLVMValueRef = undefined;
-                    var shifted_types: [8]c.LLVMTypeRef = undefined;
-                    shifted_vals[0] = left_val.val;
-                    shifted_types[0] = self.i64_type;
-                    for (0..n) |i| {
-                        shifted_vals[i + 1] = arg_vals[i];
-                        shifted_types[i + 1] = arg_types[i];
-                    }
-                    const total: u32 = n + 1;
-                    const ft = c.LLVMFunctionType(self.i64_type, &shifted_types, total, 0);
-                    const func_name = self.calleeSymbol(call.name);
-                    var func = c.LLVMGetNamedFunction(self.module, func_name);
-                    if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
-                    const val = c.LLVMBuildCall2(self.builder, ft, func, &shifted_vals, total, "pipetmp");
-                    return .{ .val = val, .tag = .int };
-                }
-
-                const ft = c.LLVMFunctionType(self.i64_type, &arg_types, n, 0);
-                const func_name = self.calleeSymbol(call.name);
-                var func = c.LLVMGetNamedFunction(self.module, func_name);
-                if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
-                const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, n, "pipetmp");
-                return .{ .val = val, .tag = .int };
-            },
-            .identifier => |id| {
-                // Bare function: pipe as sole argument
-                var arg_vals = [_]c.LLVMValueRef{left_val.val};
-                var arg_types = [_]c.LLVMTypeRef{self.i64_type};
-                const ft = c.LLVMFunctionType(self.i64_type, &arg_types, 1, 0);
-                const func_name = self.calleeSymbol(id.name);
-                var func = c.LLVMGetNamedFunction(self.module, func_name);
-                if (func == null) func = c.LLVMAddFunction(self.module, func_name, ft);
-                const val = c.LLVMBuildCall2(self.builder, ft, func, &arg_vals, 1, "pipetmp");
-                return .{ .val = val, .tag = .int };
-            },
-            else => return CodegenError.UnsupportedNode,
+        for (call_args) |a| {
+            if (a.kind == .hole) {
+                args[n] = left_val;
+                locs[n] = pipe.left.loc;
+            } else {
+                args[n] = try self.compileExpr(a);
+                locs[n] = a.loc;
+            }
+            n += 1;
         }
+        return self.emitCall(name, callee, args, locs);
     }
 
     fn compileBinaryOp(self: *Codegen, op: ast.Node.BinaryOp, loc: ast.Loc) CodegenError!TaggedVal {
@@ -1515,7 +1565,7 @@ pub const Codegen = struct {
             self.current_def_name = saved_def_name;
         }
         self.scope = .{};
-        if (!self.isDef(ds.name)) self.def_names.append(self.allocator, ds.name) catch return CodegenError.LLVMError;
+        if (self.findDef(ds.name) == null) self.defs.append(self.allocator, ds) catch return CodegenError.LLVMError;
 
         // Create function: i64 name(i64, i64, ...)
         const param_count: u32 = @intCast(ds.params.len);
@@ -2243,7 +2293,7 @@ pub const Codegen = struct {
         for (nodes) |node| {
             if (node.kind == .def_stmt) {
                 const ds = node.kind.def_stmt;
-                self.def_names.append(self.allocator, ds.name) catch {};
+                self.defs.append(self.allocator, ds) catch {};
                 // Only declare if not already present
                 if (c.LLVMGetNamedFunction(self.module, self.defSymbol(ds.name)) == null) {
                     const param_count: u32 = @intCast(ds.params.len);

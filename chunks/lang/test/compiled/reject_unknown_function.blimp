@@ -1,0 +1,4 @@
+# Not a def, not a builtin. This used to be a call to an extern C function
+# `lenght`, and the link failed on `_lenght`.
+x = 3
+lenght(x)
