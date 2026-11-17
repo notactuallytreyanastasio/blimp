@@ -9,12 +9,12 @@ actor Bank.Account do
   state balance: Int :: 0
   state owner: String :: "unknown"
 
-  on :deposit(amount) when amount > 0 do
+  on :deposit(amount: Int) when amount > 0 do
     become balance: balance + amount
     reply balance + amount
   end
 
-  on :withdraw(amount) when amount > 0 do
+  on :withdraw(amount: Int) when amount > 0 do
     become balance: balance - amount
     reply balance - amount
   end
@@ -53,13 +53,14 @@ audit <- :log
 audit <- :log
 audit <- :log
 
-# Check state
-acct <- :balance
-audit <- :count
+# Check state: 800 and 3
+print(acct <- :balance)
+print(audit <- :count)
 
 # Now trigger CascadeBubble - both Account and Audit restart
 result = acct <- :overdraft orelse :caught
+print(result)
 
-# Both siblings reset to defaults
-acct <- :balance
-audit <- :count
+# Both siblings reset to defaults: 0 and 0
+print(acct <- :balance)
+print(audit <- :count)
