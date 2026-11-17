@@ -2095,14 +2095,31 @@ fn builtinSetAt(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     return result;
 }
 
-/// sum([1,2,3]) => 6
+/// sum([1,2,3]) => 6, sum([1.5, 2]) => 3.5, sum([]) => 0
+///
+/// The same left fold as `+` from 0: Ints add with wrapping (#27) until the
+/// first Float, and from there the total is a Float. Anything that is not a
+/// number is a TypeError, as `1 + :a` is; skipping it would return a total
+/// of some other list.
 fn builtinSum(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
-    var total: i64 = 0;
+    var int_total: i64 = 0;
+    var float_total: ?f64 = null;
     for (args[0].list) |item| {
-        if (item.* == .integer) total +%= item.integer;
+        if (float_total) |f| {
+            float_total = switch (item.*) {
+                .integer => |n| f + @as(f64, @floatFromInt(n)),
+                .float => |x| f + x,
+                else => return error.TypeError,
+            };
+        } else switch (item.*) {
+            .integer => |n| int_total +%= n,
+            .float => |x| float_total = @as(f64, @floatFromInt(int_total)) + x,
+            else => return error.TypeError,
+        }
     }
-    return make(allocator, .{ .integer = total });
+    if (float_total) |f| return make(allocator, .{ .float = f });
+    return make(allocator, .{ .integer = int_total });
 }
 
 /// random(min, max) => random integer in [min, max] inclusive

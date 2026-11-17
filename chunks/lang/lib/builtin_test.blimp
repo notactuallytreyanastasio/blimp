@@ -547,6 +547,44 @@ actor ListTests do
     assert_eq(sum([0, 0, 0]), 0)
   end
 
+  test "sum counts Floats" do
+    assert_eq(sum([1.5]), 1.5)
+    assert_eq(sum([1.5, 2]), 3.5)
+    assert_eq(sum([2, 1.5]), 3.5)
+    assert_eq(sum([0.5, 0.25]), 0.75)
+  end
+
+  test "sum with a Float in it is a Float, even a whole one" do
+    assert_eq(type_of(sum([1, 2.0])), :float)
+    assert_eq(type_of(sum([1, 2])), :integer)
+  end
+
+  test "sum is the left fold of +" do
+    assert_eq(sum([1, 2.5, 3]), 1 + 2.5 + 3)
+    assert_eq(sum([9223372036854775807, 1, 0.5]), 9223372036854775807 + 1 + 0.5)
+  end
+
+  test "sum refuses a list with a non-number in it" do
+    r1 = try do
+      sum([1, :a])
+    catch err do
+      err
+    end
+    assert_eq(r1, :type_error)
+    r2 = try do
+      sum([1.5, "x"])
+    catch err do
+      err
+    end
+    assert_eq(r2, :type_error)
+    r3 = try do
+      sum([nil])
+    catch err do
+      err
+    end
+    assert_eq(r3, :type_error)
+  end
+
   # -- elem --
   test "elem list first" do
     assert_eq(elem([10, 20, 30], 0), 10)
