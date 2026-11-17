@@ -1,0 +1,11 @@
+# A def returns what its last expression is. Every call was tagged Int:
+# a comparison came back as 1, and a String body failed LLVM verification.
+def big(x: Int) do
+  x > 10
+end
+def name(x: Int) do
+  "bob"
+end
+puts(big(11))
+puts(name(1))
+big(3)

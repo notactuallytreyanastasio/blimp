@@ -177,6 +177,10 @@ pub const Codegen = struct {
     /// Every send, with the reply tag it was compiled for, checked again in
     /// checkSends once every handler is compiled.
     sends: std.ArrayList(SendCheck) = .empty,
+    /// What each compiled def returns, and every call made before its def
+    /// was compiled (taken to return an Int), checked in checkSends.
+    def_tags: std.ArrayList(struct { name: []const u8, tag: ValTag }) = .empty,
+    def_calls: std.ArrayList(struct { name: []const u8, loc: ast.Loc, tag: ValTag }) = .empty,
     /// Every actor the program declares, for a parameter typed with one.
     actor_names: std.ArrayList([]const u8) = .empty,
     /// Program text, for the source line a runtime report shows.
@@ -233,6 +237,8 @@ pub const Codegen = struct {
     pub fn deinit(self: *Codegen) void {
         self.catches.deinit(self.allocator);
         self.sends.deinit(self.allocator);
+        self.def_tags.deinit(self.allocator);
+        self.def_calls.deinit(self.allocator);
         self.actor_names.deinit(self.allocator);
         self.defs.deinit(self.allocator);
         self.scope.deinit(self.allocator);
@@ -677,7 +683,12 @@ pub const Codegen = struct {
                 if (self.tail_call_target) |target| {
                     if (std.mem.eql(u8, name, target)) c.LLVMSetTailCall(val, 1);
                 }
-                return .{ .val = val, .tag = .int };
+                // A def returns an i64; what it holds is the tag of the
+                // def's last expression.  Every call was tagged Int, so a
+                // def ending in a comparison printed 1.
+                const tag = self.defTag(name) orelse ValTag.int;
+                self.def_calls.append(self.allocator, .{ .name = name, .loc = call_loc, .tag = tag }) catch return CodegenError.LLVMError;
+                return .{ .val = self.coerceFromI64(val, tag), .tag = tag };
             },
         }
     }
@@ -1951,10 +1962,22 @@ pub const Codegen = struct {
             last_tv = try self.compileExpr(stmt);
         }
 
-        // Return the last expression value
+        // Return the last expression value, widened to the i64 every def
+        // returns (a String body failed LLVM verification: ret ptr in an
+        // i64 function).  A boxed value has no lifetime the caller manages.
         if (c.LLVMGetBasicBlockTerminator(c.LLVMGetInsertBlock(self.builder)) == null) {
-            _ = c.LLVMBuildRet(self.builder, last_tv.val);
+            if (last_tv.tag == .tagged_val) {
+                const at = if (ds.body.len > 0) ds.body[ds.body.len - 1].loc else ast.Loc{ .line = 0, .col = 0 };
+                return self.reject(
+                    at,
+                    "`{s}` returns a list, map or fn value; a compiled def can return an Int, a Float, a Bool, a String, an Atom, an actor or nil.",
+                    .{ds.name},
+                    "Run this file with the interpreter.",
+                );
+            }
+            _ = c.LLVMBuildRet(self.builder, self.coerceToI64(last_tv));
         }
+        self.def_tags.append(self.allocator, .{ .name = ds.name, .tag = last_tv.tag }) catch return CodegenError.LLVMError;
 
         // Restore context
         self.current_fn = saved_fn;
@@ -2332,7 +2355,21 @@ pub const Codegen = struct {
     /// Every send again, now that every handler is compiled: its reply must
     /// be what it was compiled for, and each argument what the handlers of
     /// that message bind it as.
+    fn defTag(self: *const Codegen, name: []const u8) ?ValTag {
+        for (self.def_tags.items) |d| if (std.mem.eql(u8, d.name, name)) return d.tag;
+        return null;
+    }
+
     fn checkSends(self: *Codegen) CodegenError!void {
+        for (self.def_calls.items) |call| {
+            const tag = self.defTag(call.name) orelse continue;
+            if (tag != call.tag) return self.reject(
+                call.loc,
+                "This call of `{s}` was compiled before the def was, as returning {s}; the def returns {s}.",
+                .{ call.name, tagNoun(call.tag), tagNoun(tag) },
+                "Define the def before the code that calls it, or run this file with the interpreter.",
+            );
+        }
         for (self.sends.items) |snd| {
             const now = try self.replyTag(snd.message, snd.loc, snd.under_orelse);
             var any = false;
