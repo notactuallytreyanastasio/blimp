@@ -1101,16 +1101,16 @@ fn builtinRange(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     if (args[0].* != .integer or args[1].* != .integer) return error.TypeError;
     const start = args[0].integer;
     const end_val = args[1].integer;
-    const len: usize = if (end_val >= start) @intCast(end_val - start + 1) else 0;
+    // In i128: end_val - start + 1 overflows i64 for range(minInt, 0), and
+    // counting n up to end_val overflowed when end_val was maxInt.
+    const wide_len: i128 = if (end_val >= start) @as(i128, end_val) - start + 1 else 0;
+    const len = std.math.cast(usize, wide_len) orelse return error.OutOfMemory;
 
-    var items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
-    var i: usize = 0;
-    var n = start;
-    while (n <= end_val) : (n += 1) {
+    const items = allocator.alloc(*const Value, len) catch return error.OutOfMemory;
+    for (items, 0..) |*slot, i| {
         const v = allocator.create(Value) catch return error.OutOfMemory;
-        v.* = Value{ .integer = n };
-        items[i] = v;
-        i += 1;
+        v.* = Value{ .integer = @intCast(@as(i128, start) + @as(i128, @intCast(i))) };
+        slot.* = v;
     }
 
     const result = allocator.create(Value) catch return error.OutOfMemory;
@@ -1748,7 +1748,9 @@ fn builtinAbs(allocator: std.mem.Allocator, args: []const *const Value) EvalErro
     switch (args[0].*) {
         // abs(minInt) has no i64 answer; wrap to minInt, as the operators do.
         .integer => |n| result.* = Value{ .integer = if (n < 0) 0 -% n else n },
-        .float => |f| result.* = Value{ .float = if (f < 0) -f else f },
+        // @abs clears the sign bit: `f < 0` is false for -0.0, which then
+        // came back as -0.0.
+        .float => |f| result.* = Value{ .float = @abs(f) },
         else => return error.TypeError,
     }
     return result;
@@ -2095,14 +2097,31 @@ fn builtinSetAt(allocator: std.mem.Allocator, args: []const *const Value) EvalEr
     return result;
 }
 
-/// sum([1,2,3]) => 6
+/// sum([1,2,3]) => 6, sum([1.5, 2]) => 3.5, sum([]) => 0
+///
+/// The same left fold as `+` from 0: Ints add with wrapping (#27) until the
+/// first Float, and from there the total is a Float. Anything that is not a
+/// number is a TypeError, as `1 + :a` is; skipping it would return a total
+/// of some other list.
 fn builtinSum(allocator: std.mem.Allocator, args: []const *const Value) EvalError!*const Value {
     if (args.len != 1 or args[0].* != .list) return error.TypeError;
-    var total: i64 = 0;
+    var int_total: i64 = 0;
+    var float_total: ?f64 = null;
     for (args[0].list) |item| {
-        if (item.* == .integer) total +%= item.integer;
+        if (float_total) |f| {
+            float_total = switch (item.*) {
+                .integer => |n| f + @as(f64, @floatFromInt(n)),
+                .float => |x| f + x,
+                else => return error.TypeError,
+            };
+        } else switch (item.*) {
+            .integer => |n| int_total +%= n,
+            .float => |x| float_total = @as(f64, @floatFromInt(int_total)) + x,
+            else => return error.TypeError,
+        }
     }
-    return make(allocator, .{ .integer = total });
+    if (float_total) |f| return make(allocator, .{ .float = f });
+    return make(allocator, .{ .integer = int_total });
 }
 
 /// random(min, max) => random integer in [min, max] inclusive
