@@ -593,7 +593,7 @@ pub const Codegen = struct {
             .builtin => |b| switch (b) {
                 .max, .min, .rem => .{ &.{.int}, "an Int" },
                 .abs => .{ &.{ .int, .float }, "an Int or a Float" },
-                .puts => .{ &.{ .int, .string, .boolean }, "an Int, a String or a Bool" },
+                .puts => .{ &.{ .int, .float, .string, .boolean }, "an Int, a Float, a String or a Bool" },
             },
         };
         for (args, 0..) |a, i| {
@@ -683,8 +683,9 @@ pub const Codegen = struct {
     }
 
     /// puts(x): the interpreter writes a String's bytes as they are and any
-    /// other value formatted, then a newline, and returns x.  An Int formats
-    /// the same either side; other tags are refused in requireArgTags.
+    /// other value formatted, then a newline, and returns x.  An Int, a
+    /// Float and a Bool format the same either side; other tags are
+    /// refused in requireArgTags.
     fn emitPuts(self: *Codegen, x: TaggedVal) TaggedVal {
         if (x.tag == .string) {
             const f = self.getRuntimeFn("blimp_puts_string", &.{self.ptr_type}, self.void_type);

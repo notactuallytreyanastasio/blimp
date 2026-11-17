@@ -1,0 +1,12 @@
+# Floats print as the interpreter's {d} does: the shortest digits that read
+# back as the same double, in plain decimal. printf's %g printed 0.3 here
+# and 1e+12, and puts of a Float was refused because of it.
+puts(0.1 + 0.2)
+puts(1000000.0 * 1000000.0)
+puts(1.0 / 3.0)
+puts(3.0)
+puts(0.0000001)
+puts(0.0 * (0.0 - 1.0))
+puts(1.0e308 * 10.0)
+puts(9007199254740993.0)
+2.5e-30

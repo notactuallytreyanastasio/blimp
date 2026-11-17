@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 
 // ── Tagged Values ───────────────────────────────────────
@@ -292,13 +293,70 @@ BlimpVal *blimp_rc_reuse(BlimpVal *v) {
     return NULL;
 }
 
+// ── Floats, as the interpreter prints them ──────────────
+
+// The interpreter prints a Float with Zig's `{d}`: the shortest digits
+// that read back as the same double, written out in plain decimal (no
+// exponent, however large or small), "inf", "-inf", "nan", "-0".  printf's
+// %g gives six significant digits and an exponent past 1e6, so
+// 0.30000000000000004 came out as 0.3 and 1e12 as 1e+12.
+//
+// The digits: the smallest precision whose %.*e reads back exactly.  That
+// is the correctly rounded p-digit decimal, which is the one Zig's
+// shortest-digit search lands on too.  Then the point is placed by hand.
+static void format_float(char *out, size_t cap, double v) {
+    if (isnan(v)) { snprintf(out, cap, "nan"); return; }
+    if (isinf(v)) { snprintf(out, cap, v < 0 ? "-inf" : "inf"); return; }
+    if (v == 0) { snprintf(out, cap, signbit(v) ? "-0" : "0"); return; }
+    char e[40];
+    for (int p = 1; p <= 17; p++) {
+        snprintf(e, sizeof e, "%.*e", p - 1, v);
+        if (strtod(e, NULL) == v) break;
+    }
+    // e is [-]d[.ddd]e[+-]xx
+    char digits[24];
+    int nd = 0;
+    const char *c = e;
+    int neg = 0;
+    if (*c == '-') { neg = 1; c++; }
+    for (; *c && *c != 'e'; c++) if (*c != '.') digits[nd++] = *c;
+    int exp10 = atoi(c + 1);
+    while (nd > 1 && digits[nd - 1] == '0') nd--;
+    size_t n = 0;
+#define PUT(ch) do { if (n + 1 < cap) out[n++] = (ch); } while (0)
+    if (neg) PUT('-');
+    if (exp10 < 0) {
+        PUT('0'); PUT('.');
+        for (int i = 0; i < -exp10 - 1; i++) PUT('0');
+        for (int i = 0; i < nd; i++) PUT(digits[i]);
+    } else if (exp10 + 1 >= nd) {
+        for (int i = 0; i < nd; i++) PUT(digits[i]);
+        for (int i = 0; i < exp10 + 1 - nd; i++) PUT('0');
+    } else {
+        for (int i = 0; i <= exp10; i++) PUT(digits[i]);
+        PUT('.');
+        for (int i = exp10 + 1; i < nd; i++) PUT(digits[i]);
+    }
+#undef PUT
+    out[n] = 0;
+}
+
+// The longest is 326 bytes: 5e-324 and 2.2250738585072014e-308.
+#define FLOAT_BUF 400
+
+static void put_float(FILE *f, double v) {
+    char buf[FLOAT_BUF];
+    format_float(buf, sizeof buf, v);
+    fputs(buf, f);
+}
+
 // ── Tagged value printing ───────────────────────────────
 
 void blimp_print_val(BlimpVal *v) {
     if (!v) { printf("nil\n"); return; }
     switch (v->tag) {
         case VAL_INT: printf("%lld\n", v->integer); break;
-        case VAL_FLOAT: printf("%g\n", v->float_val); break;
+        case VAL_FLOAT: put_float(stdout, v->float_val); putchar('\n'); break;
         case VAL_STRING: printf("\"%s\"\n", v->string); break;
         case VAL_ATOM:
             if (atom_text(v->atom_id)) printf(":%s\n", atom_text(v->atom_id));
@@ -315,7 +373,7 @@ void blimp_print_val(BlimpVal *v) {
                 // Inline print without newline
                 switch (v->list.items[i]->tag) {
                     case VAL_INT: printf("%lld", v->list.items[i]->integer); break;
-                    case VAL_FLOAT: printf("%g", v->list.items[i]->float_val); break;
+                    case VAL_FLOAT: put_float(stdout, v->list.items[i]->float_val); break;
                     case VAL_STRING: printf("\"%s\"", v->list.items[i]->string); break;
                     case VAL_BOOL: printf("%s", v->list.items[i]->bool_val ? "true" : "false"); break;
                     case VAL_NIL: printf("nil"); break;
@@ -332,7 +390,7 @@ void blimp_print_val(BlimpVal *v) {
                 BlimpVal *mv = v->map.vals[i];
                 switch (mv->tag) {
                     case VAL_INT: printf("%lld", mv->integer); break;
-                    case VAL_FLOAT: printf("%g", mv->float_val); break;
+                    case VAL_FLOAT: put_float(stdout, mv->float_val); break;
                     case VAL_STRING: printf("\"%s\"", mv->string); break;
                     case VAL_ATOM:
                         if (atom_text(mv->atom_id)) printf(":%s", atom_text(mv->atom_id));
@@ -361,7 +419,8 @@ void blimp_print_int(long long val) {
 }
 
 void blimp_print_float(double val) {
-    printf("%g\n", val);
+    put_float(stdout, val);
+    putchar('\n');
 }
 
 void blimp_print_bool(long long val) {
@@ -562,7 +621,7 @@ static void format_val(FILE *out, BlimpVal *v) {
     if (!v) { fputs("nil", out); return; }
     switch (v->tag) {
         case VAL_INT: fprintf(out, "%lld", v->integer); break;
-        case VAL_FLOAT: fprintf(out, "%g", v->float_val); break;
+        case VAL_FLOAT: put_float(out, v->float_val); break;
         case VAL_STRING: fprintf(out, "\"%s\"", v->string); break;
         case VAL_ATOM: {
             const char *name = atom_text(v->atom_id);
