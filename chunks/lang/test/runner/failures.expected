@@ -19,6 +19,21 @@ FFFAssertion failed: values not equal
 FFFAssertion failed: values not equal
   left:  7
   right: 10
+FFAssertion failed: values not equal
+  left:  1
+  right: 2
+FAssertion failed: values not equal
+  left:  3
+  right: 4
+FAssertion failed: values not equal
+  left:  1
+  right: 2
+FFAssertion failed: values not equal
+  left:  5
+  right: 6
+FAssertion failed: values not equal
+  left:  1
+  right: 2
 FF
 
 
@@ -61,6 +76,8 @@ FF
       Hint: Variables in scope:
           Maker = :Maker
           SpawnTests = :SpawnTests
+          Swallower = :Swallower
+          HandledTests = :HandledTests
 
   FAIL SpawnTests > an assertion still says what it compared
     assertion failed: expected 5, got 4
@@ -106,5 +123,76 @@ FF
             on :increment do ... end
           end
 
-8 failed, 0 passed, 8 total
+  FAIL HandledTests > caught assertion, then a type error
+    -- TYPE MISMATCH ---------------------------------
+    
+      I can't do this operation because the types don't match.
+    
+    81|     y = 1 + "a"
+                 ^
+    
+      Hint: Both sides of an operator need to be compatible types.
+    
+          Int + Int       => Int
+          Float + Float   => Float
+          String + String => String (use ++ for lists)
+          Int + Float     => Float (auto-promoted)
+
+  FAIL HandledTests > caught type error, then a failed assertion
+    assertion failed: expected 4, got 3
+
+  FAIL HandledTests > caught assertion, then a bubble
+    -- UNCAUGHT BUBBLE -------------------------------
+    
+      A bubble reached the top of the test: :after_assertion
+    
+    99|     bubble :after_assertion
+             ^
+    
+      Hint: Handle it with `try ... catch` or `orelse`.
+
+  FAIL HandledTests > caught bubble, then a type error
+    -- TYPE MISMATCH ---------------------------------
+    
+      I can't do this operation because the types don't match.
+    
+    109|     y = 1 + "a"
+                 ^
+    
+      Hint: Both sides of an operator need to be compatible types.
+    
+          Int + Int       => Int
+          Float + Float   => Float
+          String + String => String (use ++ for lists)
+          Int + Float     => Float (auto-promoted)
+
+  FAIL HandledTests > caught bubble, then a failed assertion
+    assertion failed: expected 6, got 5
+
+  FAIL HandledTests > an async handler's failed assertion, then a type error
+    -- TYPE MISMATCH ---------------------------------
+    
+      I can't do this operation because the types don't match.
+    
+    126|     y = 1 + "a"
+                 ^
+    
+      Hint: Both sides of an operator need to be compatible types.
+    
+          Int + Int       => Int
+          Float + Float   => Float
+          String + String => String (use ++ for lists)
+          Int + Float     => Float (auto-promoted)
+
+  FAIL HandledTests > a guard that fails, then a bubble
+    -- UNCAUGHT BUBBLE -------------------------------
+    
+      A bubble reached the top of the test: :after_guard
+    
+    134|     bubble :after_guard
+             ^
+    
+      Hint: Handle it with `try ... catch` or `orelse`.
+
+15 failed, 0 passed, 15 total
 

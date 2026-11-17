@@ -121,10 +121,13 @@ pub const Evaluator = struct {
             var reply_val: ?*const Value = null;
             for (handler.body) |*stmt| {
                 if (stmt.kind == .reply_stmt) {
-                    reply_val = self.eval(stmt.kind.reply_stmt.value) catch null;
+                    reply_val = self.eval(stmt.kind.reply_stmt.value) catch blk: {
+                        self.dropHandledError();
+                        break :blk null;
+                    };
                     break;
                 }
-                _ = self.eval(stmt) catch {};
+                _ = self.eval(stmt) catch self.dropHandledError();
             }
 
             self.actor_ctx = prev_ctx;
@@ -342,8 +345,17 @@ pub const Evaluator = struct {
     /// `locate` keeps the first located error it sees, so a stale one would
     /// win over the real one.
     fn clearTestFailure(self: *Evaluator) void {
-        self.last_error = null;
+        self.dropHandledError();
         self.bubble_reason = null;
+    }
+
+    /// An error something handled -- a `try` that caught it, an `orelse`, a
+    /// guard that failed, a mailbox handler whose failure is swallowed -- is
+    /// over, and so is its report. Every report slot goes, the assertion
+    /// detail too: left in place, the next failure that builds no report of
+    /// its own (a bubble, a `1 + "a"`) is described with the handled one's.
+    fn dropHandledError(self: *Evaluator) void {
+        self.last_error = null;
         self.bubble_line = 0;
         self.bubble_col = 0;
         builtins_mod.last_assertion_detail_len = 0;
@@ -365,10 +377,18 @@ pub const Evaluator = struct {
     }
 
     /// Why a test stopped, as the line under its FAIL. An assertion builtin
-    /// leaves its expected/actual; anything else is the same located error
-    /// a plain run prints at the top level. Before this, every failure of
-    /// any kind read "assertion failed", and a test that spawned an actor
-    /// nobody defined looked like one whose assertion was wrong.
+    /// leaves its expected/actual. Anything else is the evaluator's own
+    /// report, `last_error`, printed with formatPlain: a `----` rule and no
+    /// colour, where a plain run's top level prints the coloured `──` form.
+    /// It is not always what a plain run would say about the same line.
+    /// The static checker does not look inside test bodies, so `1 + "a"`
+    /// in a test reaches the evaluator and reads TYPE MISMATCH here, while
+    /// at top level `blimp FILE` and `--test` stop in the checker first with
+    /// "Type error at line 1, col 5: arithmetic on incompatible types: Int
+    /// and String" (`blimp test DIR` ignores the checker's result).
+    /// Before this, every failure of any kind read "assertion failed", and
+    /// a test that spawned an actor nobody defined looked like one whose
+    /// assertion was wrong.
     fn describeTestFailure(self: *Evaluator, err: EvalError, assertion_label: []const u8) []const u8 {
         const alloc = std.heap.page_allocator;
         if (err == error.TypeError and builtins_mod.last_assertion_detail_len > 0) {
@@ -992,8 +1012,7 @@ pub const Evaluator = struct {
                 // now, so its details go with it: a stale one left here is
                 // what the top level would report instead of whatever
                 // actually stopped the program later.
-                self.bubble_line = 0;
-                self.last_error = null;
+                self.dropHandledError();
                 self.env.pushScope();
                 if (tc.catch_var) |var_name| {
                     // Bind the error reason if we have one
@@ -2541,8 +2560,7 @@ pub const Evaluator = struct {
         const try_val = self.eval(oe.try_expr) catch |err| {
             if (err == error.Bubble) {
                 // Bubble caught by orelse - execute fallback
-                self.bubble_line = 0;
-                self.last_error = null;
+                self.dropHandledError();
                 return self.eval(oe.fallback);
             }
             return err;
@@ -2580,7 +2598,10 @@ pub const Evaluator = struct {
                     if (subject.* != .boolean or subject.boolean != (branch.mode == .is_true)) continue;
                     if (!branch.scoped) {
                         if (branch.guard) |guard_node| {
-                            const guard_val = self.eval(guard_node) catch continue;
+                            const guard_val = self.eval(guard_node) catch {
+                                self.dropHandledError();
+                                continue;
+                            };
                             if (!guard_val.truthy()) continue;
                         }
                         return self.evalBodyTail(branch.body, slot);
@@ -2600,6 +2621,7 @@ pub const Evaluator = struct {
                     // Check optional when guard
                     if (branch.guard) |guard_node| {
                         const guard_val = self.eval(guard_node) catch {
+                            self.dropHandledError();
                             self.env.popScope();
                             continue; // guard eval failed, skip branch
                         };
@@ -2638,6 +2660,7 @@ pub const Evaluator = struct {
     fn branchBody(self: *Evaluator, branch: *const ast.Node.Branch, slot: *ArgSlot) EvalError!?TailResult {
         if (branch.guard) |guard_node| {
             const guard_val = self.eval(guard_node) catch {
+                self.dropHandledError();
                 self.env.popScope();
                 return null;
             };
