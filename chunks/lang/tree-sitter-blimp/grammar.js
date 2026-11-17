@@ -8,6 +8,19 @@ module.exports = grammar({
 
   word: ($) => $.identifier,
 
+  // Token.keyword in src/token.zig: words the lexer never hands the parser
+  // as a name. Without this, tree-sitter lexes a keyword as an identifier
+  // wherever the keyword itself cannot go, so `t <- :m orelse bubble` was an
+  // orelse of an identifier `bubble`, where parser.zig refuses the line.
+  reserved: {
+    global: (_) => [
+      "actor", "do", "end", "state", "on", "become", "reply", "when",
+      "bubbles", "bubble", "def", "fn", "situation", "case", "orelse",
+      "spawn", "self", "try", "catch", "for", "in", "test", "and", "or",
+      "property", "given", "true", "false", "nil",
+    ],
+  },
+
   // Newline-sensitive tokens, from src/scanner.c. Each is given only when
   // no newline comes before it, as in parser.zig; see the scanner's header.
   externals: ($) => [
