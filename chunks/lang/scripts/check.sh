@@ -64,6 +64,21 @@ runner_reports_failure() {
     return 0
 }
 
+# Every failure in a test body used to read "assertion failed", whatever it
+# was: a spawn of an actor nobody defined looked like a wrong assertion. The
+# runner prints the located error now; this compares it, colours and the
+# timing line removed, against what the fixture expects.
+runner_names_the_failure() {
+    local out esc
+    esc=$(printf '\033')
+    if out=$("$BLIMP" test/runner/failures.blimp --test 2>&1); then
+        echo "test/runner/failures.blimp --test exited 0; every test in it fails"
+        return 1
+    fi
+    printf '%s\n' "$out" | sed "s/${esc}\[[0-9;]*m//g" | grep -v '^Finished in' |
+        diff -u test/runner/failures.expected -
+}
+
 # Was a segfault (0xaaaaaaaaaaaaaaaa in evalMessageSend); it prints 1 now.
 regression_spawn_in_send_arg() {
     local out
@@ -116,6 +131,7 @@ suite "blimp test test" "$BLIMP" test test
 suite "blimp test lib" "$BLIMP" test lib
 suite "examples --test" examples_with_tests
 suite "runner reports failure" runner_reports_failure
+suite "runner names the failure" runner_names_the_failure
 suite "regression_spawn_in_send_arg" regression_spawn_in_send_arg
 suite "node web/test" env BLIMP_WASM="$PWD/zig-out/web/blimp.wasm" node --test web/test/
 suite "python scripts" sh -c 'cd scripts && python3 -B -m unittest trace_receipt_test.py'

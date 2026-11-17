@@ -229,14 +229,18 @@ pub const Evaluator = struct {
                     }
                 }
 
-                // Run test body
-                var test_passed = true;
+                // Run test body. Cleared after the state defaults: one that
+                // fails is still skipped, and its error must not stand in
+                // for the body's.
+                self.clearTestFailure();
+                var why: ?[]const u8 = null;
                 for (test_def.body) |*stmt| {
-                    _ = self.eval(stmt) catch {
-                        test_passed = false;
+                    _ = self.eval(stmt) catch |err| {
+                        why = self.describeTestFailure(err, "assertion failed");
                         break;
                     };
                 }
+                const test_passed = why == null;
 
                 self.env.popScope();
                 self.actor_ctx = null;
@@ -251,7 +255,7 @@ pub const Evaluator = struct {
                         failure_details[failure_count] = .{
                             .actor_name = def.name,
                             .test_name = test_name,
-                            .error_msg = "assertion failed",
+                            .error_msg = why.?,
                         };
                         failure_count += 1;
                     }
@@ -273,6 +277,7 @@ pub const Evaluator = struct {
                 var prop_passed = true;
                 var run: u32 = 0;
                 const num_runs: u32 = 100;
+                var prop_why: ?[]const u8 = null;
                 while (run < num_runs) : (run += 1) {
                     self.env.pushScope();
                     // Evaluate state defaults
@@ -287,14 +292,19 @@ pub const Evaluator = struct {
                     }
 
                     // Run property body (given + assertions)
+                    self.clearTestFailure();
                     for (prop.body) |*stmt| {
-                        _ = self.eval(stmt) catch {
-                            prop_passed = false;
+                        _ = self.eval(stmt) catch |err| {
+                            prop_why = self.describeTestFailure(err, "property falsified");
                             break;
                         };
                     }
                     self.env.popScope();
-                    if (!prop_passed) break;
+                    self.actor_ctx = null;
+                    if (prop_why != null) {
+                        prop_passed = false;
+                        break;
+                    }
                 }
 
                 if (prop_passed) {
@@ -307,7 +317,7 @@ pub const Evaluator = struct {
                         failure_details[failure_count] = .{
                             .actor_name = def.name,
                             .test_name = prop_name,
-                            .error_msg = "property falsified",
+                            .error_msg = prop_why.?,
                         };
                         failure_count += 1;
                     }
@@ -338,6 +348,41 @@ pub const Evaluator = struct {
         }
 
         return failed == 0;
+    }
+
+    /// Nothing from the previous test may be reported as this one's failure.
+    /// `locate` keeps the first located error it sees, so a stale one would
+    /// win over the real one.
+    fn clearTestFailure(self: *Evaluator) void {
+        self.last_error = null;
+        self.bubble_reason = null;
+        self.bubble_line = 0;
+        self.bubble_col = 0;
+        builtins_mod.last_assertion_detail_len = 0;
+    }
+
+    /// Why a test stopped, as the line under its FAIL. An assertion builtin
+    /// leaves its expected/actual; anything else is the same located error
+    /// a plain run prints at the top level. Before this, every failure of
+    /// any kind read "assertion failed", and a test that spawned an actor
+    /// nobody defined looked like one whose assertion was wrong.
+    fn describeTestFailure(self: *Evaluator, err: EvalError, assertion_label: []const u8) []const u8 {
+        const alloc = std.heap.page_allocator;
+        if (err == error.TypeError and builtins_mod.last_assertion_detail_len > 0) {
+            const detail = builtins_mod.last_assertion_detail[0..builtins_mod.last_assertion_detail_len];
+            return std.fmt.allocPrint(alloc, "{s}: {s}", .{ assertion_label, detail }) catch assertion_label;
+        }
+        var report = self.last_error;
+        if (report == null and err == error.Bubble) {
+            report = errors.uncaughtBubbleIn("test", self.bubble_reason, self.source, self.bubble_line, self.bubble_col);
+        }
+        const blimp_err = report orelse
+            return std.fmt.allocPrint(alloc, "{s}, with no error report recorded for it", .{@errorName(err)}) catch @errorName(err);
+        var aw = std.Io.Writer.Allocating.init(alloc);
+        blimp_err.formatPlain(&aw.writer);
+        const text = std.mem.trim(u8, aw.written(), "\n");
+        // Indented to sit under the FAIL line like the one-line messages.
+        return std.mem.replaceOwned(u8, alloc, text, "\n", "\n    ") catch text;
     }
 
     const FailureDetail = struct {

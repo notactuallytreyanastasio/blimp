@@ -26,11 +26,17 @@ pub fn lineAt(source: []const u8, line: u32) []const u8 {
 /// `bubble` is how Temper-translated code raises, and one that reaches the top
 /// used to print `Runtime error: error.Bubble` -- no reason, no line.
 pub fn uncaughtBubble(reason: ?*const Value, source: []const u8, line: u32, col: u32) BlimpError {
-    var text: []const u8 = "A bubble reached the top of the program.";
+    return uncaughtBubbleIn("program", reason, source, line, col);
+}
+
+/// The same, for a bubble that stopped something smaller than the program:
+/// a test body says "the top of the test", which is where it stopped.
+pub fn uncaughtBubbleIn(where: []const u8, reason: ?*const Value, source: []const u8, line: u32, col: u32) BlimpError {
+    const alloc = std.heap.page_allocator;
+    var text: []const u8 = std.fmt.allocPrint(alloc, "A bubble reached the top of the {s}.", .{where}) catch "A bubble reached the top.";
     if (reason) |r| {
         var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
-        const alloc = std.heap.page_allocator;
-        buf.appendSlice(alloc, "A bubble reached the top of the program: ") catch {};
+        buf.print(alloc, "A bubble reached the top of the {s}: ", .{where}) catch {};
         var r_buf: [512]u8 = undefined;
         var r_w = std.Io.Writer.fixed(&r_buf);
         r.format(&r_w);

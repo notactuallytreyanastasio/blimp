@@ -1,0 +1,54 @@
+# Every test here fails on purpose; scripts/check.sh runs it with --test and
+# compares what the runner says against failures.expected. Each FAIL must
+# name why its test stopped. Until this file, all of them said
+# "assertion failed", including the ones that spawned an actor nobody defined.
+# Not named *_test.blimp, so `blimp test test` does not pick it up.
+
+actor Maker do
+  on :make do
+    l = spawn Lexer
+    reply l
+  end
+  on :boom do
+    bubble :kaboom
+  end
+end
+
+actor SpawnTests do
+  test "spawns an actor nobody defined" do
+    l = spawn Lexer
+    assert_eq(1, 1)
+  end
+
+  test "a handler spawns an actor nobody defined" do
+    m = spawn Maker
+    l = m <- :make
+    assert_eq(1, 1)
+  end
+
+  test "an undefined variable is named" do
+    assert_eq(missing, 1)
+  end
+
+  test "an assertion still says what it compared" do
+    assert_eq(2 + 2, 5)
+  end
+
+  # After three located failures: with the previous test's error left in
+  # place, this one reported `missing` from two tests up.
+  test "a bubble says its reason, not an earlier test's error" do
+    m = spawn Maker
+    m <- :boom
+  end
+
+  property "a property that spawns an actor nobody defined" do
+    given n: gen_integer(0, 9)
+    p = spawn Parser
+  end
+
+  property "a property that is false" do
+    # One value, so the expected output does not depend on the generator.
+    given n: gen_integer(7, 7)
+    assert_eq(n, 10)
+  end
+end

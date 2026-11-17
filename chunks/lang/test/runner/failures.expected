@@ -1,0 +1,81 @@
+FFFAssertion failed: values not equal
+  left:  4
+  right: 5
+FFFAssertion failed: values not equal
+  left:  7
+  right: 10
+F
+
+
+  FAIL SpawnTests > spawns an actor nobody defined
+    -- TEMPLATE NOT FOUND ----------------------------
+    
+      No actor template called `Lexer` is defined.
+    
+    19|     l = spawn Lexer
+                 ^
+    
+      Hint: Define an actor first:
+          actor Counter do
+            state count: Int :: 0
+            on :increment do ... end
+          end
+
+  FAIL SpawnTests > a handler spawns an actor nobody defined
+    -- TEMPLATE NOT FOUND ----------------------------
+    
+      No actor template called `Lexer` is defined.
+    
+    9|     l = spawn Lexer
+                 ^
+    
+      Hint: Define an actor first:
+          actor Counter do
+            state count: Int :: 0
+            on :increment do ... end
+          end
+
+  FAIL SpawnTests > an undefined variable is named
+    -- UNDEFINED VARIABLE ----------------------------
+    
+      I can't find a variable called `missing`.
+    
+    30|     assert_eq(missing, 1)
+                       ^
+    
+      Hint: Variables in scope:
+          Maker = :Maker
+          SpawnTests = :SpawnTests
+
+  FAIL SpawnTests > an assertion still says what it compared
+    assertion failed: expected 5, got 4
+
+  FAIL SpawnTests > a bubble says its reason, not an earlier test's error
+    -- UNCAUGHT BUBBLE -------------------------------
+    
+      A bubble reached the top of the test: :kaboom
+    
+    13|     bubble :kaboom
+             ^
+    
+      Hint: Handle it with `try ... catch` or `orelse`.
+
+  FAIL SpawnTests > a property that spawns an actor nobody defined
+    -- TEMPLATE NOT FOUND ----------------------------
+    
+      No actor template called `Parser` is defined.
+    
+    46|     p = spawn Parser
+                 ^
+    
+      Hint: Define an actor first:
+          actor Counter do
+            state count: Int :: 0
+            on :increment do ... end
+          end
+
+  FAIL SpawnTests > a property that is false
+    property falsified: expected 10, got 7
+
+7 failed, 0 passed, 7 total
+
