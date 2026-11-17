@@ -52,7 +52,7 @@ Spawn with state overrides
 
 actor Main do
   on :run do
-    c = spawn Counter(count: 10)
+    c = spawn Counter, count: 10
     reply c
   end
 end
@@ -76,3 +76,70 @@ end
               (integer)))))
       (reply_statement
         (identifier)))))
+
+================
+Spawn with parentheses
+================
+
+c = spawn(Counter)
+d = spawn(Shop.Checkout, total: 0)
+
+---
+
+(source_file
+  (assignment
+    (identifier)
+    (spawn_expression
+      (spawn_target
+        (upper_identifier))))
+  (assignment
+    (identifier)
+    (spawn_expression
+      (spawn_target
+        (upper_identifier)
+        (upper_identifier))
+      (key_value_list
+        (key_value_pair
+          (identifier)
+          (integer))))))
+
+================
+Spawn overrides inside call arguments take every pair
+================
+
+f(spawn Counter, count: 1, step: 2)
+
+---
+
+(source_file
+  (function_call
+    (identifier)
+    (spawn_expression
+      (spawn_target
+        (upper_identifier))
+      (key_value_list
+        (key_value_pair
+          (identifier)
+          (integer))
+        (key_value_pair
+          (identifier)
+          (integer))))))
+
+================
+Spawn with call-style overrides is not Blimp
+================
+
+c = spawn Counter(count: 10)
+
+---
+
+(source_file
+  (assignment
+    (identifier)
+    (spawn_expression
+      (spawn_target
+        (upper_identifier))))
+  (parenthesized_expression
+    (identifier)
+    (ERROR
+      (integer))))

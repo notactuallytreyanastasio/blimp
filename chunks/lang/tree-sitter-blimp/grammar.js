@@ -9,7 +9,6 @@ module.exports = grammar({
   word: ($) => $.identifier,
 
   conflicts: ($) => [
-    [$.spawn_expression],
     // A statement after a branch body may be the body's next statement or
     // the next branch's pattern; only a later `->` tells. parser.zig decides
     // the same way (looksLikeBranch parses ahead to the `->`), so let GLR
@@ -265,11 +264,14 @@ module.exports = grammar({
         $.parenthesized_expression,
       ),
 
-    // spawn Counter or spawn Shop.Checkout or spawn Counter(count: 10)
+    // The four forms parseSpawnExpr reads: spawn Counter,
+    // spawn Counter, count: 10, spawn(Counter) and spawn(Counter, count: 10).
+    // `spawn Counter(count: 10)` is not one of them: parser.zig reads the
+    // `(` as the start of the next expression and fails on the `:`.
     spawn_expression: ($) =>
       choice(
-        prec(12, seq("spawn", $.spawn_target, "(", $.key_value_list, ")")),
-        prec(12, seq("spawn", $.spawn_target)),
+        prec.right(12, seq("spawn", $.spawn_target, optional(seq(",", $.key_value_list)))),
+        seq("spawn", "(", $.spawn_target, optional(seq(",", $.key_value_list)), ")"),
       ),
 
     // Spawn target greedily consumes dot notation: Shop.Checkout
@@ -337,9 +339,13 @@ module.exports = grammar({
     // Key-value pairs (used by state, become, map)
     // ============================================================
 
-    key_value_list: ($) => commaSep1($.key_value_pair),
+    // Greedy, as parseKeyValueList is: it takes pairs while the next token
+    // is an identifier, so in `[spawn A, k: 1, x]` the `x` is not a list
+    // element but a pair missing its colon.
+    key_value_list: ($) => prec.right(commaSep1($.key_value_pair)),
 
-    key_value_pair: ($) => seq($.identifier, ":", $._expression),
+    // The value is a whole expression (parseExpression), orelse included.
+    key_value_pair: ($) => prec.right(seq($.identifier, ":", $._expression)),
 
     // ============================================================
     // Terminals
