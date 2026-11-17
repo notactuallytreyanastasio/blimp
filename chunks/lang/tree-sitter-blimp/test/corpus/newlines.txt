@@ -1,0 +1,210 @@
+================================================================================
+A line that starts with minus is a new statement
+================================================================================
+
+x = 5
+-x
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (integer))
+  (unary_expression
+    (identifier)))
+
+================================================================================
+Minus on the same line is subtraction, even without a space after it
+================================================================================
+
+x -1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (binary_expression
+    (identifier)
+    (integer)))
+
+================================================================================
+A line that starts with minus after a case is a new statement
+================================================================================
+
+def g() do
+  case 1 do _ -> 10 end
+  -1
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (def_statement
+    (identifier)
+    (parameter_list)
+    (case_expression
+      (integer)
+      (case_branch
+        (hole)
+        (integer)))
+    (unary_expression
+      (integer))))
+
+================================================================================
+Minus after a case on the same line is subtraction
+================================================================================
+
+r = case 1 do _ -> 10 end - 1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment
+    (identifier)
+    (binary_expression
+      (case_expression
+        (integer)
+        (case_branch
+          (hole)
+          (integer)))
+      (integer))))
+
+================================================================================
+A comment before the newline does not join the lines
+================================================================================
+
+x # note
+-1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (identifier)
+  (comment)
+  (unary_expression
+    (integer)))
+
+================================================================================
+A line that starts with a parenthesis is not a call
+================================================================================
+
+f
+(1)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (identifier)
+  (parenthesized_expression
+    (integer)))
+
+================================================================================
+A parenthesis on the same line is a call, space or not
+================================================================================
+
+print (1)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_call
+    (identifier)
+    (integer)))
+
+================================================================================
+Send arguments must start on the send's line
+================================================================================
+
+p <- :m
+(1)
+p <- :m(1)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (message_send
+    (identifier)
+    (atom))
+  (parenthesized_expression
+    (integer))
+  (message_send
+    (identifier)
+    (atom)
+    (integer)))
+
+================================================================================
+A line that starts with a pipe is an error
+================================================================================
+
+x
+|> print(_)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (binary_expression
+    (identifier)
+    (ERROR)
+    (function_call
+      (identifier)
+      (hole))))
+
+================================================================================
+Bubble takes its reason from the same line only
+================================================================================
+
+actor A do
+  on :go(why: Atom) do
+    bubble why
+  end
+  on :stop do
+    bubble
+    :later
+  end
+  on :quit do bubble end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (parameter_list
+        (handler_param
+          (identifier)
+          (type_name
+            (upper_identifier))))
+      (bubble_statement
+        (identifier)))
+    (message_handler
+      (atom)
+      (bubble_statement)
+      (atom))
+    (message_handler
+      (atom)
+      (bubble_statement))))
+
+================================================================================
+Reply with its value on the next line is an error
+================================================================================
+
+actor A do
+  on :go do
+    reply
+    1
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (actor_definition
+    (actor_name
+      (upper_identifier))
+    (message_handler
+      (atom)
+      (ERROR)
+      (integer))))

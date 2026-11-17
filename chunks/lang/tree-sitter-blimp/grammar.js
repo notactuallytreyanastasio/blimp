@@ -8,6 +8,16 @@ module.exports = grammar({
 
   word: ($) => $.identifier,
 
+  // Newline-sensitive tokens, from src/scanner.c. Each is given only when
+  // no newline comes before it, as in parser.zig; see the scanner's header.
+  externals: ($) => [
+    $._binary_minus,
+    $._call_paren,
+    $._pipe_arrow,
+    $._same_line,
+    $._error_sentinel,
+  ],
+
   conflicts: ($) => [
     // A statement after a branch body may be the body's next statement or
     // the next branch's pattern; only a later `->` tells. parser.zig decides
@@ -143,14 +153,14 @@ module.exports = grammar({
 
     become_statement: ($) => seq("become", $.key_value_list),
 
-    reply_statement: ($) => seq("reply", $._expression),
+    // parseReplyStmt reads the value from the same line or fails.
+    reply_statement: ($) => seq("reply", $._same_line, $._expression),
 
+    // bubble, or bubble with a reason on the same line. parseBubbleStmt takes
+    // any expression as the reason, unless a newline, `end` or the end of
+    // the file comes first.
     bubble_statement: ($) =>
-      prec.right(0, choice(
-        seq("bubble", $.atom),          // bubble :reason (atom only)
-        seq("bubble", $.string),        // bubble "reason message"
-        "bubble",                       // bubble (no reason)
-      )),
+      prec.right(0, seq("bubble", optional(seq($._same_line, $._expression)))),
 
     assignment: ($) => seq($.identifier, "=", $._expression),
 
@@ -181,7 +191,7 @@ module.exports = grammar({
       prec.right(0, seq($._expression, "orelse", $._expression)),
 
     pipe_expression: ($) =>
-      prec.left(0, seq($._expression, "|>", $._expression)),
+      prec.left(0, seq($._expression, alias($._pipe_arrow, "|>"), $._expression)),
 
     // ...list, fn  (map)
     spread_map: ($) =>
@@ -197,7 +207,7 @@ module.exports = grammar({
           $._expression,
           token(prec(10, "<-")),
           $.atom,
-          "(",
+          alias($._call_paren, "("),
           commaSep($._expression),
           ")",
         )),
@@ -218,7 +228,7 @@ module.exports = grammar({
         prec.left(1, seq($._expression, "||", $._expression)),
         prec.left(2, seq($._expression, "&&", $._expression)),
         prec.left(3, seq($._expression, choice("==", "!=", "<", ">", "<=", ">="), $._expression)),
-        prec.left(4, seq($._expression, choice("+", "-"), $._expression)),
+        prec.left(4, seq($._expression, choice("+", alias($._binary_minus, "-")), $._expression)),
         prec.left(5, seq($._expression, choice("*", "/"), $._expression)),
       ),
 
@@ -235,7 +245,7 @@ module.exports = grammar({
     dot_access: ($) => prec.left(7, seq($._postfix_expression, ".", $.identifier)),
 
     function_call: ($) =>
-      prec(7, seq($.identifier, "(", commaSep($._expression), ")")),
+      prec(7, seq($.identifier, alias($._call_paren, "("), commaSep($._expression), ")")),
 
     // ============================================================
     // Primary expressions
